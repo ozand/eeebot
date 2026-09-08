@@ -2233,6 +2233,7 @@ def _self_dedup_reject_ts_by_demand_id(
     state_dir: Path,
     *,
     ledger_rows: list[dict[str, Any]] | None = None,
+    now: datetime | None = None,
 ) -> dict[str, list[datetime]]:
     """Timestamps of demand-linked no-op outcomes per demand id.
 
@@ -2270,7 +2271,7 @@ def _self_dedup_reject_ts_by_demand_id(
                 continue
             if not demand_id:
                 continue
-            ts = _parse_ts(row.get("ts")) or datetime.now(timezone.utc)
+            ts = _parse_ts(row.get("ts")) or (now or datetime.now(timezone.utc))
             out.setdefault(demand_id, []).append(ts)
         for demand_id, timestamps in result_noops.items():
             out.setdefault(demand_id, []).extend(timestamps)
@@ -2349,7 +2350,7 @@ def _filter_exhausted(
     """
     try:
         now = now or datetime.now(timezone.utc)
-        rows = ledger_rows if ledger_rows is not None else _load_ledger_rows(state_dir)
+        rows = ledger_rows if ledger_rows is not None else _load_ledger_rows(state_dir, now=now)
         ledger_status = window_status(rows)
         if ledger_status == "unavailable":
             # #1175 rule (3): a blind ledger is not evidence; keep the persisted
@@ -2358,7 +2359,7 @@ def _filter_exhausted(
             return items
         data = _load_exhausted(state_dir)
         entries: dict[str, Any] = data["entries"]
-        rejects = _self_dedup_reject_ts_by_demand_id(state_dir, ledger_rows=rows)
+        rejects = _self_dedup_reject_ts_by_demand_id(state_dir, ledger_rows=rows, now=now)
         success_ts = _latest_success_ts(state_dir, ledger_rows=rows)
         release = _runtime_release_id()
         now_iso = now.isoformat().replace("+00:00", "Z")

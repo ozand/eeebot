@@ -1828,14 +1828,26 @@ def _parse_ts(value: Any) -> datetime | None:
         return None
 
 
-def _dedup_exhausted(state_dir: Path, demand_id: str) -> bool:
+def _dedup_exhausted(
+    state_dir: Path,
+    demand_id: str,
+    *,
+    now: datetime | None = None,
+) -> bool:
     """Return whether this assigned demand has recent self-dedup exhaustion."""
     if not demand_id:
         return False
     try:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=_dedup_exhaustion_days())
+        ref = now or datetime.now(timezone.utc)
+        cutoff = ref - timedelta(days=_dedup_exhaustion_days())
         count = 0
-        for row in reversed(_load_ledger_rows(state_dir, days=max(_LEDGER_HORIZON_DAYS, _dedup_exhaustion_days()))):
+        for row in reversed(
+            _load_ledger_rows(
+                state_dir,
+                days=max(_LEDGER_HORIZON_DAYS, _dedup_exhaustion_days()),
+                now=ref,
+            )
+        ):
             if row.get("phase") != "proposer_reject":
                 continue
             if row.get("reason") != "self_dedup" or str(row.get("demand_id") or "").strip() != demand_id:

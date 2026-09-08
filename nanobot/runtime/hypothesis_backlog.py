@@ -275,19 +275,27 @@ def _write_json(path: Path, data: Any) -> None:
                 pass
 
 
-def _ledger_window(state_dir: Path, *, days: int = IN_FLIGHT_TIMEOUT_DAYS):
+def _ledger_window(
+    state_dir: Path,
+    *,
+    days: int = IN_FLIGHT_TIMEOUT_DAYS,
+    now: datetime | None = None,
+):
     """The last ``days`` of ledger rows across the live file and its rotated
     archives (``state_access.ledger_window``, #1175). A ``proposed`` row older
     than :data:`IN_FLIGHT_TIMEOUT_DAYS` is abandoned by definition, so this
-    window is the whole horizon the in-flight rule can care about."""
+    window is the whole horizon the in-flight rule can care about. Callers
+    that already have a reference instant pass it through so archive selection
+    and age comparisons use one clock."""
     from nanobot.runtime.state_access import ledger_window
 
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    ref = now or datetime.now(timezone.utc)
+    since = ref - timedelta(days=days)
     return ledger_window(Path(state_dir), since_ts=since.isoformat().replace("+00:00", "Z"))
 
 
-def _load_ledger_rows(state_dir: Path) -> list[dict[str, Any]]:
-    return list(_ledger_window(state_dir).rows)
+def _load_ledger_rows(state_dir: Path, *, now: datetime | None = None) -> list[dict[str, Any]]:
+    return list(_ledger_window(state_dir, now=now).rows)
 
 
 def _parse_ts(value: Any) -> datetime | None:
@@ -985,7 +993,7 @@ def has_in_flight_experiment(
         else:
             from nanobot.runtime.state_access import evidence_status
 
-            window = _ledger_window(state_dir)
+            window = _ledger_window(state_dir, now=now)
             rows, ledger_status = list(window.rows), evidence_status(window)
         if ledger_status != "complete":
             # #1175: a serving row that rotated out of view, or a ledger that
