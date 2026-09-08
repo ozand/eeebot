@@ -15,7 +15,6 @@ from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
-from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ExecToolConfig
@@ -126,6 +125,7 @@ class SubagentManager:
         # Optional: names to exclude from the loop skills summary (Part E).
         excluded_skill_names: "list[str] | None" = None,
         telemetry_component: str = "",
+        web_tools_enabled: bool = False,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -163,6 +163,8 @@ class SubagentManager:
         # #939 Part E: excluded skill names for the loop summary
         self._excluded_skill_names: list[str] = list(excluded_skill_names or [])
         self._telemetry_component = str(telemetry_component or "").strip()
+        self.web_tools_enabled = bool(web_tools_enabled)
+        self.executor_tool_names = self.declared_tool_names()
 
     async def spawn(
         self,
@@ -271,9 +273,15 @@ class SubagentManager:
                 restrict_to_workspace=self.restrict_to_workspace,
                 path_append=self.exec_config.path_append,
             ))
-            tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
-            tools.register(WebFetchTool(proxy=self.web_proxy))
+            if self.web_tools_enabled:
+                from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 
+                tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
+                tools.register(WebFetchTool(proxy=self.web_proxy))
+
+            assert tuple(tools.tool_names) == self.registered_tool_names(), (
+                "registered tool set must match the configured declaration"
+            )
             system_prompt = self._build_subagent_prompt()
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
@@ -659,6 +667,19 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         # that broke five tests in tests/test_loop_breaker.py, which read
         # telemetry with `glob("*.json")` over this directory and started
         # picking up the sidecar instead. Never add a second `.json` here.
+
+    EXECUTOR_TOOL_NAMES = ("read_file", "write_file", "edit_file", "list_dir", "exec")
+
+    @classmethod
+    def declared_tool_names(cls) -> tuple[str, ...]:
+        """Names declared in the loop executor prompt and registered by it."""
+        return cls.EXECUTOR_TOOL_NAMES
+
+    def registered_tool_names(self) -> tuple[str, ...]:
+        """Names registered for this manager's configured execution role."""
+        if self.web_tools_enabled:
+            return self.EXECUTOR_TOOL_NAMES + ("web_search", "web_fetch")
+        return self.EXECUTOR_TOOL_NAMES
 
     def _build_subagent_prompt(self) -> str:
         """Build the system prompt for the subagent.

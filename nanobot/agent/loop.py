@@ -96,6 +96,7 @@ class AgentLoop:
             model=self.model,
             web_search_config=self.web_search_config,
             web_proxy=web_proxy,
+            web_tools_enabled=True,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
             max_iterations=self.max_iterations,
