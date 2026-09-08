@@ -50,3 +50,35 @@ def test_workspace_skill_locations_are_relative_and_builtin_locations_absolute(t
     summary = SkillsLoader(workspace, builtin_skills_dir=builtins).build_skills_summary()
     assert "<location>skills/workspace-skill/SKILL.md</location>" in summary
     assert str(builtins / "builtin-skill" / "SKILL.md") in summary
+
+
+def test_skill_order_is_stable_regardless_of_directory_order(tmp_path: Path, monkeypatch):
+    """#1421: the enumeration order reaches the skills catalogue verbatim.
+
+    Nothing downstream re-sorts, so a filesystem that hands back a different
+    directory order changes the prompt prefix byte-for-byte for reasons that
+    have nothing to do with any skill's content. Reversing iterdir is the
+    only way to exercise this — on NTFS and ext4 the raw order is usually
+    already sorted, so a test that merely creates directories out of order
+    passes with or without the fix.
+    """
+    workspace_skills = tmp_path / "skills"
+    builtins = tmp_path / "builtins"
+    for name in ("alpha", "mike", "zulu"):
+        _skill(workspace_skills, name)
+    for name in ("bravo", "november"):
+        _skill(builtins, name)
+
+    real_iterdir = Path.iterdir
+
+    def reversed_iterdir(self):
+        return reversed(sorted(real_iterdir(self)))
+
+    monkeypatch.setattr(Path, "iterdir", reversed_iterdir)
+
+    loader = SkillsLoader(tmp_path, builtin_skills_dir=builtins)
+    names = [s["name"] for s in loader.list_skills(filter_unavailable=False)]
+
+    # Workspace skills keep their priority over builtins; within each source
+    # the order is alphabetical rather than whatever the directory returned.
+    assert names == ["alpha", "mike", "zulu", "bravo", "november"], names
