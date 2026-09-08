@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any
 
 _DEFAULT_THRESHOLD = 10
+_FAMILY_THRESHOLD = 6
+_FAMILY_PREFIXES = frozenset({"defect", "reflection", "priority"})
 _DEFAULT_TTL_DAYS = 14
 _EPSILON = 1e-6
 _PHASES = frozenset({"proposed", "outcome"})
@@ -45,6 +47,18 @@ def _ttl_days() -> int:
         return max(1, int(os.environ.get("SELFEVO_GOAL_GAP_FUTILITY_TTL_DAYS", "14")))
     except (TypeError, ValueError):
         return _DEFAULT_TTL_DAYS
+
+
+def _threshold_for(gap_id: str) -> int:
+    """Use the measured N=6 extension for the three non-goal families.
+
+    Goal-gap records retain #996's existing configurable threshold. The family
+    threshold is deliberately selected by the stable demand-id prefix, not by
+    an outcome label, so ``skipped-duplicate`` remains untouched everywhere.
+    """
+    if _lane(gap_id) in _FAMILY_PREFIXES:
+        return _FAMILY_THRESHOLD
+    return _threshold()
 
 def _parse_ts(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
@@ -129,14 +143,35 @@ def surface_hits(surface: list[str], paths: list[Any]) -> bool:
 def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: datetime) -> int:
     """Terminal cycles after ``after`` whose proposal serves ``gap_id``.
 
-    A demand attempt is capacity spent to a terminal outcome, not only an
-    integration. Suppression remains correct and unchanged; counting it prevents
-    repeated guarded attempts from laundering themselves into ``attempt_count=0``.
-    Sets keep duplicate ledger rows from double-counting, while a proposal with
-    no terminal outcome remains pending and does not count.
+    For non-goal families (defect, reflection, priority), demand futility measures
+    consecutive non-success terminal cycles since the most recent success: a
+    ``success`` outcome resets the run counter to 0. This isolates chronically
+    unproductive loopers without prematurely retiring productive items that
+    intermittently succeed.
+
+    For goal-gap records, counting remains cumulative capacity spent to a
+    terminal outcome, paired with metric-improvement checks.
     """
-    proposed: set[str] = set()
-    terminal: set[str] = set()
+    lane = _lane(gap_id)
+    if lane not in _FAMILY_PREFIXES:
+        proposed: set[str] = set()
+        terminal: set[str] = set()
+        for row in rows:
+            cycle = str(row.get("cycle_id") or "").strip()
+            if not cycle:
+                continue
+            ts = _parse_ts(row.get("ts") or row.get("timestamp"))
+            if ts is None or ts <= after:
+                continue
+            if row.get("phase") == "proposed" and str(row.get("demand_id") or "") == gap_id:
+                proposed.add(cycle)
+            elif row.get("phase") == "outcome" and row.get("outcome"):
+                terminal.add(cycle)
+        return len(proposed & terminal)
+
+    proposed_cycles: set[str] = set()
+    terminal_outcomes: dict[str, str] = {}
+    terminal_ts: dict[str, datetime] = {}
     for row in rows:
         cycle = str(row.get("cycle_id") or "").strip()
         if not cycle:
@@ -145,10 +180,24 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
         if ts is None or ts <= after:
             continue
         if row.get("phase") == "proposed" and str(row.get("demand_id") or "") == gap_id:
-            proposed.add(cycle)
+            proposed_cycles.add(cycle)
+            if cycle not in terminal_ts and ts is not None:
+                terminal_ts[cycle] = ts
         elif row.get("phase") == "outcome" and row.get("outcome"):
-            terminal.add(cycle)
-    return len(proposed & terminal)
+            terminal_outcomes[cycle] = str(row.get("outcome"))
+            if ts is not None:
+                terminal_ts[cycle] = ts
+
+    matched = [c for c in proposed_cycles if c in terminal_outcomes]
+    matched.sort(key=lambda c: terminal_ts.get(c) or datetime.min.replace(tzinfo=timezone.utc))
+
+    run = 0
+    for c in matched:
+        if terminal_outcomes[c] == "success":
+            run = 0
+        else:
+            run += 1
+    return run
 
 def _surface_attempts(rows: list[dict[str, Any]], surface: list[str], after: datetime) -> list[dict[str, str]]:
     """Integrated cycles after ``after`` whose ``files_changed`` hit ``surface``,
@@ -196,6 +245,7 @@ def _emit(state_dir: Path, record: dict[str, Any], futile: bool) -> None:
             "gap_id": record.get("gap_id", ""),
             "metric": record.get("metric", ""),
             "attempt_count": record.get("attempt_count", 0),
+            "attempt_threshold": record.get("attempt_threshold"),
             "attempt_unit": record.get("attempt_unit", ATTEMPT_UNIT_ID),
             "metric_delta": record.get("metric_delta"),
             "futile": futile,
@@ -207,7 +257,7 @@ def _fresh(gap_id: str, gap: dict[str, Any], now: datetime) -> dict[str, Any]:
     return {
         "gap_id": gap_id, "metric": str(gap.get("metric") or ""), "first_seen_ts": _iso(now),
         "first_metric": gap.get("current"), "current_metric": gap.get("current"), "metric_delta": 0.0,
-        "attempt_count": 0, "futile": False, "stale": False,
+        "attempt_count": 0, "attempt_unit": None, "futile": False, "stale": False,
         "futility_status": "measured", "last_evaluated_ts": _iso(now),
     }
 
@@ -258,10 +308,11 @@ def _update(
         counted = max(int(record.get("attempt_count") or 0), counted)
     record["attempt_count"] = counted
     record["attempt_unit"] = ATTEMPT_UNIT_SURFACE if surface else ATTEMPT_UNIT_ID
+    record["attempt_threshold"] = _threshold_for(gap_id)
     record["surface"] = surface
     record["attempt_sources"] = attempts[-_MAX_ATTEMPT_SOURCES:]
     now_futile = (
-        record["attempt_count"] >= _threshold()
+        record["attempt_count"] >= _threshold_for(gap_id)
         and not _improved(str(gap.get("direction") or ""), record.get("first_metric"), gap.get("current"))
     )
     was_futile = bool(record.get("futile")) and until is not None and now < until

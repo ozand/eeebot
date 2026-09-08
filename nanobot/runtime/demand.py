@@ -2820,6 +2820,15 @@ def collect_demand(
                 seen_ids.add(item["id"])
                 items.append(item)
 
+        try:
+            from nanobot.runtime import goal_gap_futility
+
+            futile_ids = goal_gap_futility.futile_gap_ids(state_dir, items, ledger_rows=ledger_rows)
+            if futile_ids:
+                items = [item for item in items if item.get("id") not in futile_ids]
+        except Exception:
+            pass
+
         # #773: ledger-chain done-truth — fold (proposed(demand_id) →
         # same-cycle success) pairs into the completed sidecar, then drop
         # completed ids from ALL demand kinds BEFORE the exhausted filter:
