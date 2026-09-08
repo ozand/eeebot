@@ -466,6 +466,13 @@ def test_demand_attempt_count_success_resets_run_and_corpus_shapes(tmp_path):
        A success outcome resets the run to 0, so it never prematurely retires.
     2. Chronic looper item: has a run of >= 6 consecutive non-success terminal cycles
        since its last success (e.g. 9-long non-success run), retiring at attempt 6.
+
+    Freezing behavior on active suppression:
+    Once an item is marked futile (e.g. at attempt 6), _update takes the early-return path
+    while now < futile_until and deliberately freezes attempt_count at the threshold that
+    triggered it (attempt_count == 6). It stops scanning the ledger for an item that is already
+    retired. The persisted attempt_count intentionally remains 6 even as further attempts occur,
+    distinguished by futile: True and futile_until being set.
     """
     state = tmp_path / "state"
     now = datetime.now(timezone.utc)
@@ -546,11 +553,14 @@ def test_demand_attempt_count_success_resets_run_and_corpus_shapes(tmp_path):
             assert rec2["futile"] is True
             assert "futile_until" in rec2
 
-    # After full 9 non-success cycles, attempt_count is 9 and item remains futile
-    futile_ids = futility.futile_gap_ids(state, [item2], ledger_rows=rows2)
-    assert looper_id in futile_ids
-    rec2 = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))[looper_id]
-    assert rec2["attempt_count"] == 9
-    assert rec2["futile"] is True
+    # After full 9 non-success cycles, attempt_count intentionally stays frozen at 6
+    # because suppression is active (now < futile_until), taking the early-return path.
+    # Assert the freeze explicitly over two more evaluations to pin this intentional behavior.
+    for _ in range(2):
+        futile_ids = futility.futile_gap_ids(state, [item2], ledger_rows=rows2)
+        assert looper_id in futile_ids
+        rec2 = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))[looper_id]
+        assert rec2["attempt_count"] == 6
+        assert rec2["futile"] is True
 
 
