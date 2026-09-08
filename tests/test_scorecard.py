@@ -289,6 +289,8 @@ class TestLoopSection:
         assert loop["fallback_rejects_by_reason"] == {"futile_surface": 2, "self_dedup": 1}
         assert loop["fallback_distinct_target_paths"] == 1
         assert loop["fallback_cycles"] == 0
+        assert "fallback_rejects" not in scorecard._TARGETS
+        assert "fallback_distinct_target_paths" not in scorecard._TARGETS
 
     def test_fallback_rejections_and_terminal_cycles_are_additive(self, tmp_path):
         state_dir = tmp_path / "state"
