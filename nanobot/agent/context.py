@@ -78,16 +78,17 @@ class ContextBuilder:
         excluded_skill_names: list[str] | None = None,
         loop_profile: bool = False,
         strict: bool | None = None,
+        degrade_on_overflow: bool = False,
     ) -> str:
         """Build the system prompt from identity, bootstrap files, skills, and memory.
 
         Prompt ordering is identity, bootstrap, active skills, skills
         catalogue, then memory. Under the cap (#1300):
 
-        * ``strict`` (default for the loop profile): only bootstrap ``## ``
+        * ``strict`` (default for the loop profile): only bootstrap ``## ```
           sections carrying :data:`DROPPABLE_MARKER` may be dropped, whole,
-          largest first. If the rest still does not fit, raise
-          :class:`SystemPromptOverflowError` — never choose survivors by position.
+          largest first. If the rest still does not fit, the prompt degrades
+          uniformly and visibly — never choose survivors by position.
         * non-strict (interactive sessions): the pre-#1300 behaviour, bootstrap
           trimmed first at complete-line boundaries, loss logged.
 
@@ -128,7 +129,9 @@ Skills with available="false" need dependencies installed first - you can try in
 
         memory = self.memory.get_memory_context(loop=loop_profile)
         sections.append(("memory", f"# Memory\n\n{memory}" if memory else ""))
-        return self._fit_system_prompt(sections, strict=strict)
+        return self._fit_system_prompt(
+            sections, strict=strict, degrade_on_overflow=degrade_on_overflow,
+        )
 
     SECTION_SEPARATOR = "\n\n---\n\n"
 
@@ -275,15 +278,46 @@ Skills with available="false" need dependencies installed first - you can try in
         units = self._split_bootstrap_sections(sections[index][1])
         return sum(len(text) for _, text in units if self.DROPPABLE_MARKER in text)
 
-    def _fit_system_prompt(self, sections: list[tuple[str, str]], strict: bool = False) -> str:
+    @staticmethod
+    def _entry_names_only(sections: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """Keep each assembled entry's identifier while dropping its body."""
+        return [(name, f"# {name}") for name, content in sections if content]
+
+    def _uniform_trim(
+        self,
+        sections: list[tuple[str, str]],
+        cap: int,
+    ) -> tuple[list[tuple[str, str]], int]:
+        """Trim each non-empty entry independently to one shared budget.
+
+        The budget is computed from the cap after accounting for separators.
+        No survivor is selected by position and the assembled prompt is never
+        sliced as one string. A section is an atomic entry: its contents may
+        be shortened, but it cannot be split into separately-selected pieces.
+        """
+        entries = [(name, content) for name, content in sections if content]
+        if not entries:
+            return [], 0
+        separator_chars = len(self.SECTION_SEPARATOR) * max(0, len(entries) - 1)
+        budget = max(0, (cap - separator_chars) // len(entries))
+        trimmed = [(name, content[:budget]) for name, content in entries]
+        shortfall = max(0, len(self._join_sections(sections)) - cap)
+        return trimmed, shortfall
+
+    def _fit_system_prompt(
+        self,
+        sections: list[tuple[str, str]],
+        strict: bool = False,
+        degrade_on_overflow: bool = False,
+    ) -> str:
         """Fit sections under the cap and record the outcome in :attr:`last_fit`.
 
         Strict (#1300): the only content the cap may remove is a bootstrap
         section the operator marked :data:`DROPPABLE_MARKER`, removed whole,
         largest first. Position never decides. If critical content still does
-        not fit, :class:`SystemPromptOverflowError` is raised — an under-specified
-        prompt is a failed build, not a quieter one. The decision recorded
-        here: the cap never drops a critical section.
+        not fit, the prompt uses the uniform degradation ladder: trim every
+        entry to the same budget, then fall back to names only. The decision
+        recorded here: the cap never drops a critical section by position.
 
         Non-strict (interactive sessions): the pre-#1300 behaviour — bootstrap
         is trimmed first at complete-line boundaries (#1191), then the later
@@ -300,6 +334,18 @@ Skills with available="false" need dependencies installed first - you can try in
         fit: dict[str, Any] = {"cap": cap, "strict": strict, "dropped": []}
         joined = self._record_fit(fit, section_names, sections)
         if len(joined) <= cap:
+            occupancy = len(joined) / cap if cap else 1.0
+            fit.update(
+                rung="full",
+                shortfall=0,
+                starved=[],
+                occupancy_alert=occupancy >= 0.92,
+            )
+            if occupancy >= 0.92:
+                logger.warning(
+                    "System prompt occupancy alert: rung=full occupancy={:.1%} cap={} chars={}",
+                    occupancy, cap, len(joined),
+                )
             fit["droppable_reserve_chars"] = self._droppable_reserve_chars(sections)
             self.last_fit = fit
             return joined
@@ -310,6 +356,45 @@ Skills with available="false" need dependencies installed first - you can try in
             droppable_reserve_chars = self._droppable_reserve_chars(sections)
             fit.update(dropped=dropped, droppable_reserve_chars=droppable_reserve_chars)
             self.last_fit = fit
+            if len(prompt) > cap and degrade_on_overflow:
+                shortfall = len(prompt) - cap
+                degraded, _ = self._uniform_trim(sections, cap)
+                uniform_prompt = self._record_fit(fit, section_names, degraded)
+                if len(uniform_prompt) <= cap and all(content for _, content in degraded):
+                    starved = [name for name, content in sections if len(content) > len(dict(degraded).get(name, ""))]
+                    fit.update(
+                        rung="uniform_trim",
+                        shortfall=shortfall,
+                        starved=starved,
+                        occupancy_alert=False,
+                        dropped=dropped,
+                        droppable_reserve_chars=0,
+                    )
+                    self.last_fit = fit
+                    logger.warning(
+                        "System prompt cap degradation: rung=uniform_trim starved=%s shortfall=%d cap=%d",
+                        ",".join(starved) or "none", shortfall, cap,
+                    )
+                    return uniform_prompt
+
+                names_only = self._entry_names_only(sections)
+                names_prompt = self._record_fit(fit, section_names, names_only)
+                if len(names_prompt) <= cap:
+                    starved = [name for name, content in sections if content]
+                    fit.update(
+                        rung="names_only",
+                        shortfall=shortfall,
+                        starved=starved,
+                        occupancy_alert=False,
+                        dropped=dropped,
+                        droppable_reserve_chars=0,
+                    )
+                    self.last_fit = fit
+                    logger.warning(
+                        "System prompt cap degradation: rung=names_only starved=%s shortfall=%d cap=%d",
+                        ",".join(starved) or "none", shortfall, cap,
+                    )
+                    return names_prompt
             if len(prompt) > cap:
                 raise SystemPromptOverflowError(
                     over_by=len(prompt) - cap, cap=cap,
@@ -348,6 +433,10 @@ Skills with available="false" need dependencies installed first - you can try in
             logger.warning("System prompt cap dropped content: {}", details)
         prompt = self._record_fit(fit, section_names, sections)
         fit.update(
+            rung="uniform_trim" if dropped_chars else "full",
+            shortfall=0,
+            starved=list(dropped_chars),
+            occupancy_alert=(len(prompt) / cap >= 0.92 if cap else True),
             dropped=[{"section": n, "chars": c, "how": "line-trim"} for n, c in dropped_chars.items()],
             droppable_reserve_chars=self._droppable_reserve_chars(sections),
         )

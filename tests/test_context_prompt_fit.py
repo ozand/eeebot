@@ -71,7 +71,7 @@ def test_strict_drops_only_declared_sections_largest_first_and_records_them(tmp_
 
 
 def test_strict_refuses_when_critical_sections_do_not_fit(tmp_path, monkeypatch):
-    """The decision recorded for #1300: the cap never drops a critical section."""
+    """Direct strict callers retain the old refusal contract."""
     monkeypatch.setattr(ContextBuilder, "MAX_SYSTEM_PROMPT_CHARS", 4_000)
     bootstrap = _section("Working knowledge", 40) + _section("Optional", 4, droppable=True) + _section("Standard test runner", 40)
     builder = _builder(tmp_path, bootstrap)
@@ -87,7 +87,7 @@ def test_strict_refuses_when_critical_sections_do_not_fit(tmp_path, monkeypatch)
 
 
 def test_strict_never_trims_lines_inside_a_section(tmp_path, monkeypatch):
-    """Position-based line trimming is the defect; strict mode must not fall back to it."""
+    """Position-based line trimming is the defect; direct strict mode must not fall back to it."""
     monkeypatch.setattr(ContextBuilder, "MAX_SYSTEM_PROMPT_CHARS", 3_000)
     builder = _builder(tmp_path, _section("Working knowledge", 80))
     with pytest.raises(SystemPromptOverflowError):
@@ -176,9 +176,10 @@ def test_subagent_prompt_is_strict_and_exposes_the_fit(tmp_path, monkeypatch):
     mgr.workspace = tmp_path
     mgr._excluded_skill_names = []
     mgr.system_context = "# Immutable operator charter\n\ncharter"
-    with pytest.raises(SystemPromptOverflowError):
-        mgr._build_subagent_prompt()
+    prompt = mgr._build_subagent_prompt()
+    assert len(prompt) <= 3_000
     assert isinstance(mgr.last_prompt_fit, dict) and mgr.last_prompt_fit["strict"] is True
+    assert mgr.last_prompt_fit["rung"] == "uniform_trim"
 
     monkeypatch.setenv(ContextBuilder.SYSTEM_PROMPT_CAP_ENV, "60000")
     prompt = mgr._build_subagent_prompt()
