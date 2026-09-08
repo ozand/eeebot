@@ -336,6 +336,54 @@ def _mark_missing_records(records: dict[str, dict[str, Any]], gap_ids: set[str],
         record.setdefault("stale_at", _iso(now))
 
 
+def _load_scorecard_snapshot(state_dir: Path) -> dict[str, Any] | None:
+    """Read the latest scorecard for absent-gap verdict invalidation.
+
+    ``None`` is an unavailable read, never evidence that a gap was fixed.
+    """
+    try:
+        path = Path(state_dir) / "scorecard" / "latest.json"
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _fixed_gap_evidence(snapshot: dict[str, Any] | None, record: dict[str, Any]) -> bool:
+    """True only when complete scorecard/feed evidence proves ``record`` fixed."""
+    if not isinstance(snapshot, dict) or snapshot.get("gaps_status") != "complete":
+        return False
+    metric = str(record.get("metric") or "")
+    if metric == "stale_feeds":
+        feeds = snapshot.get("feeds")
+        if not isinstance(feeds, dict) or feeds.get("stale") != 0 or feeds.get("stale_names"):
+            return False
+        details = feeds.get("feeds")
+        return isinstance(details, dict) and bool(details) and all(
+            isinstance(item, dict) and item.get("status") == "fresh" and item.get("stale") is False
+            for item in details.values()
+        )
+    # Other metrics need an explicit current value and no unavailable evidence;
+    # absent ``gaps`` alone is not enough to call them fixed.
+    return False
+
+
+def _void_fixed_futility(records: dict[str, dict[str, Any]], snapshot: dict[str, Any] | None) -> set[str]:
+    voided: set[str] = set()
+    for gap_id, record in records.items():
+        if not isinstance(record, dict) or not record.get("futile"):
+            continue
+        if _fixed_gap_evidence(snapshot, record):
+            record["futile"] = False
+            record.pop("futile_until", None)
+            record["futility_status"] = "voided_fixed"
+            record["voided_at"] = _iso(datetime.now(timezone.utc))
+            voided.add(str(gap_id))
+    return voided
+
+
 def futile_gap_ids(
     state_dir: Path,
     gaps: list[dict[str, Any]],
@@ -348,6 +396,8 @@ def futile_gap_ids(
 
         records = _load(state_dir)
         now = datetime.now(timezone.utc)
+        snapshot = _load_scorecard_snapshot(Path(state_dir))
+        _void_fixed_futility(records, snapshot)
         if ledger_rows is not None:
             ledger_status = str(getattr(ledger_rows, "status", "complete") or "complete")
             if ledger_status == "unavailable":
@@ -380,11 +430,12 @@ def futile_gap_ids(
         return set()
 
 def futile_surfaces(state_dir: Path, now: datetime | None = None) -> list[dict[str, Any]]:
-    """Lever surfaces of the gaps currently suppressed (#1184): what demand and
-    the proposer must stop aiming at. Records with an id-count unit have no
-    surface and never appear here. Fail-open to ``[]``."""
+    """Active suppression surfaces only; fixed/voided records are diagnostic."""
     try:
         now = now or datetime.now(timezone.utc)
+        records = _load(state_dir)
+        _void_fixed_futility(records, _load_scorecard_snapshot(Path(state_dir)))
+        _save(state_dir, records)
         out: list[dict[str, Any]] = []
         for record in _load(state_dir).values():
             if not isinstance(record, dict):
@@ -410,8 +461,11 @@ def futile_surface_for(state_dir: Path, path: Any, now: datetime | None = None) 
 def futility_snapshot(state_dir: Path) -> dict[str, Any]:
     try:
         records = _load(state_dir)
+        _void_fixed_futility(records, _load_scorecard_snapshot(Path(state_dir)))
+        _save(state_dir, records)
         return {
             "futile_gap_ids": sorted(key for key, value in records.items() if value.get("futile")),
+            "voided_gap_ids": sorted(key for key, value in records.items() if value.get("futility_status") == "voided_fixed"),
             "total_tracked": len(records),
             "stale_gap_ids": sorted(
                 key for key, value in records.items() if isinstance(value, dict) and value.get("stale")
@@ -423,6 +477,6 @@ def futility_snapshot(state_dir: Path) -> dict[str, Any]:
         }
     except Exception:
         return {
-            "futile_gap_ids": [], "total_tracked": 0,
+            "futile_gap_ids": [], "voided_gap_ids": [], "total_tracked": 0,
             "stale_gap_ids": [], "measured_gap_ids": [],
         }

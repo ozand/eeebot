@@ -20,6 +20,63 @@ def _row(state, gap_id, cycle, ts):
         fh.write(json.dumps({"phase": "outcome", "cycle_id": cycle, "outcome": "success", "integrated": True, "ts": ts}) + "\n")
 
 
+def _write_scorecard(state: Path, payload: dict) -> None:
+    path = state / "scorecard" / "latest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _fresh_feeds_scorecard() -> dict:
+    feeds = {
+        name: {"status": "fresh", "stale": False}
+        for name in ("heldout", "host_metrics", "llm_calls", "usage", "validator_harness_parent")
+    }
+    return {"gaps_status": "complete", "gaps": [], "feeds": {"stale": 0, "stale_names": [], "feeds": feeds}}
+
+
+def test_fixed_stale_feeds_voids_active_futility_and_snapshot_excludes_it(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    record = {
+        "gap_id": "goal-gap-a820ca0c8bb3", "metric": "stale_feeds", "attempt_count": 10,
+        "attempt_unit": "lever_surface", "window_status": "complete", "futile": True,
+        "futile_until": (datetime.now(timezone.utc) + timedelta(days=5)).isoformat(),
+        "futility_status": "measured", "last_evaluated_ts": datetime.now(timezone.utc).isoformat(),
+        "surface": ["host_metrics", "stale_feed"],
+    }
+    path = state / "demand" / "futility.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({record["gap_id"]: record}), encoding="utf-8")
+    _write_scorecard(state, _fresh_feeds_scorecard())
+
+    assert futility.futile_surfaces(state) == []
+    snapshot = futility.futility_snapshot(state)
+    assert snapshot["futile_gap_ids"] == []
+    assert snapshot["voided_gap_ids"] == ["goal-gap-a820ca0c8bb3"]
+    persisted = json.loads(path.read_text())[record["gap_id"]]
+    assert persisted["futile"] is False
+    assert persisted["futility_status"] == "voided_fixed"
+
+
+def test_unavailable_scorecard_keeps_futility_active(tmp_path):
+    state = tmp_path / "state"
+    record = {
+        "gap_id": "goal-gap-a820ca0c8bb3", "metric": "stale_feeds", "attempt_count": 10,
+        "attempt_unit": "lever_surface", "window_status": "complete", "futile": True,
+        "futile_until": (datetime.now(timezone.utc) + timedelta(days=5)).isoformat(),
+        "futility_status": "measured", "last_evaluated_ts": datetime.now(timezone.utc).isoformat(),
+        "surface": ["host_metrics", "stale_feed"],
+    }
+    path = state / "demand" / "futility.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({record["gap_id"]: record}), encoding="utf-8")
+    scorecard = state / "scorecard" / "latest.json"
+    scorecard.parent.mkdir(parents=True)
+    scorecard.write_text("{not json", encoding="utf-8")
+
+    assert len(futility.futile_surfaces(state)) == 1
+    assert futility.futility_snapshot(state)["futile_gap_ids"] == ["goal-gap-a820ca0c8bb3"]
+
+
 def test_futile_gap_suppresses_flat_metric_and_records_fields(tmp_path, monkeypatch):
     monkeypatch.setenv("SELFEVO_GOAL_GAP_FUTILITY_THRESHOLD", "3")
     state = tmp_path / "state"
@@ -195,7 +252,7 @@ def test_no_llm_and_snapshot(tmp_path):
     source = Path("nanobot/runtime/goal_gap_futility.py").read_text()
     assert not any(token in source for token in ("openai", "litellm", "LLMProvider"))
     assert futility.futility_snapshot(tmp_path / "state") == {
-        "futile_gap_ids": [], "total_tracked": 0,
+        "futile_gap_ids": [], "voided_gap_ids": [], "total_tracked": 0,
         "stale_gap_ids": [], "measured_gap_ids": [],
     }
 
