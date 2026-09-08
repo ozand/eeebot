@@ -302,6 +302,16 @@ class TestLoopSection:
         assert loop["fallback_successes"] == 1
         assert loop["fallback_success_rate"] == 1.0
 
+    def test_fallback_visibility_is_unavailable_when_ledger_cannot_be_read(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (state_dir / "ledger").write_text("not a directory", encoding="utf-8")
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        loop = snap["loop"]
+        assert loop["fallback_rejects"] == "unavailable"
+        assert loop["fallback_rejects_by_reason"] == "unavailable"
+        assert loop["fallback_distinct_target_paths"] == "unavailable"
+
 
 class TestConfirmedIntegrationSplit:
     """#814: confirmed_integrations vs unconfirmed_integrations join

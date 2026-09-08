@@ -578,7 +578,10 @@ def _reader_status(
 
 
 def _loop_section(
-    rows: list[dict[str, Any]], confirmed_cycle_ids: set[str] | None = None
+    rows: list[dict[str, Any]],
+    confirmed_cycle_ids: set[str] | None = None,
+    *,
+    ledger_status: str = "complete",
 ) -> dict[str, Any]:
     confirmed_cycle_ids = confirmed_cycle_ids or set()
     integrations = 0
@@ -722,6 +725,7 @@ def _loop_section(
     # count published 75 of 602 where the definition gives 53, and let the
     # rate exceed 1.0 in a window of only self_dedup rejects).
     wasted_attempts = duplicate_failure_skips + failed_outcomes + proposer_rejects
+    fallback_visibility = ledger_status != "unavailable"
     return {
         # Value-bearing integrations ONLY (#800) — the fitness numerator
         # consumed by the _TARGETS gap analysis. Archival churn is reported
@@ -781,9 +785,9 @@ def _loop_section(
         # #1435: pre-request fallback rejections are not terminal cycles. Read
         # their existing proposer_reject rows without changing their schema or
         # redefining fallback_cycles; a missing target path is not fabricated.
-        "fallback_rejects": fallback_rejects,
-        "fallback_rejects_by_reason": fallback_rejects_by_reason,
-        "fallback_distinct_target_paths": len(fallback_target_paths),
+        "fallback_rejects": fallback_rejects if fallback_visibility else "unavailable",
+        "fallback_rejects_by_reason": fallback_rejects_by_reason if fallback_visibility else "unavailable",
+        "fallback_distinct_target_paths": len(fallback_target_paths) if fallback_visibility else "unavailable",
     }
 
 
@@ -1646,7 +1650,11 @@ def compute_scorecard(
             pass
 
         rows, ledger_window = _ledger_rows(state_dir, now)
-        loop = _loop_section(rows, _confirmed_cycle_ids(state_dir))
+        loop = _loop_section(
+            rows,
+            _confirmed_cycle_ids(state_dir),
+            ledger_status=ledger_window.status,
+        )
         feeds_section = _feeds_section(state_dir, now)
         snapshot: dict[str, Any] = {
             "schema_version": SCORECARD_SCHEMA,
