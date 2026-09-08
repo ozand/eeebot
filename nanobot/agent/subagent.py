@@ -15,6 +15,7 @@ from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
+from nanobot.agent.tools.toolsets import EXECUTOR_TOOL_NAMES as EXECUTOR_TOOLSET
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ExecToolConfig
@@ -164,7 +165,6 @@ class SubagentManager:
         self._excluded_skill_names: list[str] = list(excluded_skill_names or [])
         self._telemetry_component = str(telemetry_component or "").strip()
         self.web_tools_enabled = bool(web_tools_enabled)
-        self.executor_tool_names = self.declared_tool_names()
 
     async def spawn(
         self,
@@ -668,7 +668,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         # telemetry with `glob("*.json")` over this directory and started
         # picking up the sidecar instead. Never add a second `.json` here.
 
-    EXECUTOR_TOOL_NAMES = ("read_file", "write_file", "edit_file", "list_dir", "exec")
+    EXECUTOR_TOOL_NAMES = EXECUTOR_TOOLSET
 
     @classmethod
     def declared_tool_names(cls) -> tuple[str, ...]:

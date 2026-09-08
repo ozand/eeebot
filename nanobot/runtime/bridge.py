@@ -50,6 +50,7 @@ from nanobot.runtime.promoted_overlay import install_promoted_overlay
 install_promoted_overlay()
 
 from nanobot.runtime import llm_proposer, demand  # noqa: E402
+from nanobot.agent.tools.toolsets import EXECUTOR_TOOL_NAMES  # noqa: E402
 from nanobot.runtime.cycle_ledger import (  # noqa: E402
     VALID_OUTCOMES,
     append_event,
@@ -1607,7 +1608,7 @@ def build_task(req: dict, goal_text: str, report_source: str,
                selfevo_repo_root: 'Path | None' = None,
                max_iterations: int = 15,
                charter_in_system: bool = False,
-               declared_tool_names: tuple[str, ...] = ("read_file", "write_file", "edit_file", "list_dir", "exec")) -> str:
+               declared_tool_names: tuple[str, ...] = EXECUTOR_TOOL_NAMES) -> str:
     """Build a concrete task prompt for the subagent from the request payload.
 
     Args:
@@ -1858,7 +1859,6 @@ def build_task(req: dict, goal_text: str, report_source: str,
         '  "findings": ["<observation1>", "<observation2>"]',
         '}',
         '',
-        'Use your tools: read_file, write_file, edit_file, list_dir, exec.',
         'Use your tools: ' + ', '.join(declared_tool_names) + '.',
         f'You have up to {max_iterations} tool iterations. Use them deliberately.',
     ]
