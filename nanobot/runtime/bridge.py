@@ -34,9 +34,9 @@ except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
 from nanobot.agent.context import SystemPromptOverflowError
 from nanobot.agent.subagent import SubagentManager
 from nanobot.bus.queue import MessageBus
-from nanobot.cli.commands import _make_provider
 from nanobot.config.loader import load_config, set_config_path
 from nanobot.observability.llm_telemetry import set_call_context
+from nanobot.providers.factory import _make_provider
 
 # #875: install the root-verified runtime-slice overlay BEFORE any
 # nanobot.runtime.* module is imported below — a root-promoted module must
