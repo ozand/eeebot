@@ -143,14 +143,35 @@ def surface_hits(surface: list[str], paths: list[Any]) -> bool:
 def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: datetime) -> int:
     """Terminal cycles after ``after`` whose proposal serves ``gap_id``.
 
-    A demand attempt is capacity spent to a terminal outcome, not only an
-    integration. Suppression remains correct and unchanged; counting it prevents
-    repeated guarded attempts from laundering themselves into ``attempt_count=0``.
-    Sets keep duplicate ledger rows from double-counting, while a proposal with
-    no terminal outcome remains pending and does not count.
+    For non-goal families (defect, reflection, priority), demand futility measures
+    consecutive non-success terminal cycles since the most recent success: a
+    ``success`` outcome resets the run counter to 0. This isolates chronically
+    unproductive loopers without prematurely retiring productive items that
+    intermittently succeed.
+
+    For goal-gap records, counting remains cumulative capacity spent to a
+    terminal outcome, paired with metric-improvement checks.
     """
-    proposed: set[str] = set()
-    terminal: set[str] = set()
+    lane = _lane(gap_id)
+    if lane not in _FAMILY_PREFIXES:
+        proposed: set[str] = set()
+        terminal: set[str] = set()
+        for row in rows:
+            cycle = str(row.get("cycle_id") or "").strip()
+            if not cycle:
+                continue
+            ts = _parse_ts(row.get("ts") or row.get("timestamp"))
+            if ts is None or ts <= after:
+                continue
+            if row.get("phase") == "proposed" and str(row.get("demand_id") or "") == gap_id:
+                proposed.add(cycle)
+            elif row.get("phase") == "outcome" and row.get("outcome"):
+                terminal.add(cycle)
+        return len(proposed & terminal)
+
+    proposed_cycles: set[str] = set()
+    terminal_outcomes: dict[str, str] = {}
+    terminal_ts: dict[str, datetime] = {}
     for row in rows:
         cycle = str(row.get("cycle_id") or "").strip()
         if not cycle:
@@ -159,10 +180,24 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
         if ts is None or ts <= after:
             continue
         if row.get("phase") == "proposed" and str(row.get("demand_id") or "") == gap_id:
-            proposed.add(cycle)
+            proposed_cycles.add(cycle)
+            if cycle not in terminal_ts and ts is not None:
+                terminal_ts[cycle] = ts
         elif row.get("phase") == "outcome" and row.get("outcome"):
-            terminal.add(cycle)
-    return len(proposed & terminal)
+            terminal_outcomes[cycle] = str(row.get("outcome"))
+            if ts is not None:
+                terminal_ts[cycle] = ts
+
+    matched = [c for c in proposed_cycles if c in terminal_outcomes]
+    matched.sort(key=lambda c: terminal_ts.get(c) or datetime.min.replace(tzinfo=timezone.utc))
+
+    run = 0
+    for c in matched:
+        if terminal_outcomes[c] == "success":
+            run = 0
+        else:
+            run += 1
+    return run
 
 def _surface_attempts(rows: list[dict[str, Any]], surface: list[str], after: datetime) -> list[dict[str, str]]:
     """Integrated cycles after ``after`` whose ``files_changed`` hit ``surface``,

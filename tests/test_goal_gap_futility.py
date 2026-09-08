@@ -456,3 +456,101 @@ def test_family_threshold_defect_reflection_priority(tmp_path):
         assert rec["futile"] is True
         assert "futile_until" in rec
 
+
+def test_demand_attempt_count_success_resets_run_and_corpus_shapes(tmp_path):
+    """#1394 review: non-goal families count consecutive non-success cycles since last success.
+
+    Corpus shapes verified:
+    1. Intermittent productive item (like defect-752870387ede): succeeds at attempt 1,
+       followed by partial/failed cycles below threshold (or separated by successes).
+       A success outcome resets the run to 0, so it never prematurely retires.
+    2. Chronic looper item: has a run of >= 6 consecutive non-success terminal cycles
+       since its last success (e.g. 9-long non-success run), retiring at attempt 6.
+    """
+    state = tmp_path / "state"
+    now = datetime.now(timezone.utc)
+
+    # Shape 1: productive item with intermittent success
+    productive_id = "defect-752870387ede"
+    item1 = {"id": productive_id, "kind": "defect", "summary": "intermittent productive defect"}
+    futility.futile_gap_ids(state, [item1])
+
+    rows1 = []
+    # Cycle 0: success -> run resets to 0
+    c0 = "c-prod-0"
+    ts0 = (now + timedelta(seconds=1)).isoformat()
+    rows1.append({"phase": "proposed", "cycle_id": c0, "demand_id": productive_id, "ts": ts0})
+    rows1.append({"phase": "outcome", "cycle_id": c0, "outcome": "success", "ts": ts0})
+
+    # Cycles 1..4: 4 partial/failed attempts after success -> run reaches 4 (< 6)
+    for i in range(1, 5):
+        c = f"c-prod-{i}"
+        ts = (now + timedelta(seconds=i + 1)).isoformat()
+        rows1.append({"phase": "proposed", "cycle_id": c, "demand_id": productive_id, "ts": ts})
+        rows1.append({"phase": "outcome", "cycle_id": c, "outcome": "partial", "ts": ts})
+
+    futile_ids = futility.futile_gap_ids(state, [item1], ledger_rows=rows1)
+    assert productive_id not in futile_ids
+    rec1 = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))[productive_id]
+    assert rec1["attempt_count"] == 4
+    assert rec1["futile"] is False
+
+    # Cycle 5: another success -> resets run back to 0!
+    c5 = "c-prod-5"
+    ts5 = (now + timedelta(seconds=10)).isoformat()
+    rows1.append({"phase": "proposed", "cycle_id": c5, "demand_id": productive_id, "ts": ts5})
+    rows1.append({"phase": "outcome", "cycle_id": c5, "outcome": "success", "ts": ts5})
+
+    futile_ids = futility.futile_gap_ids(state, [item1], ledger_rows=rows1)
+    assert productive_id not in futile_ids
+    rec1 = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))[productive_id]
+    assert rec1["attempt_count"] == 0
+    assert rec1["futile"] is False
+
+    # Shape 2: chronic looper with a 9-long non-success run retiring at 6
+    looper_id = "reflection-a62c486e7a1f"
+    item2 = {"id": looper_id, "kind": "reflection", "summary": "chronic looper"}
+    futility.futile_gap_ids(state, [item2])
+
+    rows2 = []
+    # Seed an initial success
+    c_init = "c-loop-init"
+    ts_init = (now + timedelta(seconds=1)).isoformat()
+    rows2.append({"phase": "proposed", "cycle_id": c_init, "demand_id": looper_id, "ts": ts_init})
+    rows2.append({"phase": "outcome", "cycle_id": c_init, "outcome": "success", "ts": ts_init})
+
+    # Now 9 consecutive non-success terminal cycles (e.g. skipped-duplicate, failed, partial)
+    outcomes = [
+        "failed", "partial", "skipped-duplicate", "skipped-duplicate", "skipped-duplicate",
+        "skipped-duplicate", "skipped-duplicate", "skipped-duplicate", "skipped-duplicate"
+    ]
+    for i, out in enumerate(outcomes):
+        c = f"c-loop-{i}"
+        ts = (now + timedelta(seconds=i + 5)).isoformat()
+        rows2.append({"phase": "proposed", "cycle_id": c, "demand_id": looper_id, "ts": ts})
+        rows2.append({"phase": "outcome", "cycle_id": c, "outcome": out, "ts": ts})
+
+        if i == 4:
+            # At i=4 (5 non-success attempts since success) -> not futile yet
+            futile_ids = futility.futile_gap_ids(state, [item2], ledger_rows=rows2)
+            assert looper_id not in futile_ids
+            rec2 = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))[looper_id]
+            assert rec2["attempt_count"] == 5
+            assert rec2["futile"] is False
+        elif i == 5:
+            # At i=5 (6th consecutive non-success attempt) -> reaches N=6 -> marks futile!
+            futile_ids = futility.futile_gap_ids(state, [item2], ledger_rows=rows2)
+            assert looper_id in futile_ids
+            rec2 = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))[looper_id]
+            assert rec2["attempt_count"] == 6
+            assert rec2["futile"] is True
+            assert "futile_until" in rec2
+
+    # After full 9 non-success cycles, attempt_count is 9 and item remains futile
+    futile_ids = futility.futile_gap_ids(state, [item2], ledger_rows=rows2)
+    assert looper_id in futile_ids
+    rec2 = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))[looper_id]
+    assert rec2["attempt_count"] == 9
+    assert rec2["futile"] is True
+
+
