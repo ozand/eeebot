@@ -1983,7 +1983,7 @@ def _repair_unused_items(
         if selfevo_repo is None:
             return items if limit is None else items[:limit]
         from nanobot.runtime import skill_fitness
-        last_reads = skill_fitness.last_confirmed_skill_reads(state_dir)
+        last_reads = skill_fitness.last_confirmed_skill_reads(state_dir, selfevo_repo)
         skills_root = Path(selfevo_repo) / "skills"
         if skills_root.is_dir():
             skill_files = [
