@@ -581,6 +581,11 @@ def _classify_mutation_surface(
     as a whole regardless of tier (the gate checks ``violations`` before it ever
     consults ``tier``).
     """
+    diagnostic = policy_mismatch_diagnostic()
+    if diagnostic:
+        return [], [diagnostic], 'script'
+    if allowed_exact_paths != MUTATION_POLICY.commit_exact_paths or allowed_path_prefixes != MUTATION_POLICY.commit_path_prefixes:
+        return [], ['mutation policy mismatch: gate arguments disagree with authoritative policy'], 'script'
     slice_paths = runtime_slice_paths()
     blocked: 'list[str]' = []
     violations: 'list[str]' = []

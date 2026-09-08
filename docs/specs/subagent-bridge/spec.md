@@ -179,10 +179,18 @@ these paths.
 **Stale text corrected (#1313):** an earlier revision of this paragraph also
 allowed the instance-root `AGENTS.md`. That changed with #1193 (closed
 2026-09-02): `AGENTS.md` is operator-owned, not a loop-mutable target.
-`nanobot/runtime/gate.py` `_ALLOWED_EXACT_PATHS` and
-`nanobot/runtime/llm_proposer.py` `_ALLOWED_EXACT_PATHS` are both
-`frozenset()` — a proposal or diff whose only file is `AGENTS.md` is rejected
-with `reason: operator_owned_path`. See "Prompt budget and reserve (#1313)"
+`nanobot/runtime/mutation_policy.py:MUTATION_POLICY` is the authoritative
+read-versus-commit policy. Its read paths include `AGENTS.md` because the loop
+must consume those instructions; its commit prefixes remain
+`surfaces/`, `scripts/`, `memory/`, `lessons/`, `docs/`, `tests/`, and `skills/`,
+with no exact-path allowance. `nanobot/agent/context.py` and both proposer
+prompt renderings read the policy for their declarations; `nanobot/runtime/gate.py`
+consults it before classifying a diff. Thus a policy/rendering mismatch fails
+closed with a diagnostic, while a proposal or diff whose only file is
+`AGENTS.md` is rejected with `reason: operator_owned_path`. The policy module
+is not in `_RUNTIME_DENY_ALWAYS_FILES`: it is a declarative, off-surface
+projection of the already protected gate contract, not an additional gate or
+trust decision. See "Prompt budget and reserve (#1313)"
 below for the mechanism that replaced "the loop edits `AGENTS.md`": the
 operator marks sections droppable and, separately, removes them.
 
