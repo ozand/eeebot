@@ -578,7 +578,10 @@ def _reader_status(
 
 
 def _loop_section(
-    rows: list[dict[str, Any]], confirmed_cycle_ids: set[str] | None = None
+    rows: list[dict[str, Any]],
+    confirmed_cycle_ids: set[str] | None = None,
+    *,
+    ledger_status: str = "complete",
 ) -> dict[str, Any]:
     confirmed_cycle_ids = confirmed_cycle_ids or set()
     integrations = 0
@@ -622,6 +625,9 @@ def _loop_section(
     # invariant), so counting outcome rows here is exact, not an estimate.
     fallback_cycles = 0
     fallback_successes = 0
+    fallback_rejects = 0
+    fallback_rejects_by_reason: dict[str, int] = {}
+    fallback_target_paths: set[str] = set()
     proposals = 0
     proposer_rejects = 0
     self_dedup_rejects = 0
@@ -662,6 +668,14 @@ def _loop_section(
             proposer_rejects += 1
             if str(row.get("reason") or "").strip() == "self_dedup":
                 self_dedup_rejects += 1
+            cycle_id = str(row.get("cycle_id") or "").strip()
+            if cycle_id.startswith("fallback-"):
+                fallback_rejects += 1
+                reason = str(row.get("reason") or "unknown").strip() or "unknown"
+                fallback_rejects_by_reason[reason] = fallback_rejects_by_reason.get(reason, 0) + 1
+                target_path = str(row.get("target_path") or "").strip()
+                if target_path:
+                    fallback_target_paths.add(target_path)
         elif phase == "outcome":
             outcome_rows += 1
             outcome = str(row.get("outcome") or "").strip().lower()
@@ -711,6 +725,7 @@ def _loop_section(
     # count published 75 of 602 where the definition gives 53, and let the
     # rate exceed 1.0 in a window of only self_dedup rejects).
     wasted_attempts = duplicate_failure_skips + failed_outcomes + proposer_rejects
+    fallback_visibility = ledger_status != "unavailable"
     return {
         # Value-bearing integrations ONLY (#800) — the fitness numerator
         # consumed by the _TARGETS gap analysis. Archival churn is reported
@@ -767,6 +782,12 @@ def _loop_section(
         "fallback_successes": fallback_successes,
         "fallback_share": _ratio(fallback_cycles, cycleish),
         "fallback_success_rate": _ratio(fallback_successes, fallback_cycles),
+        # #1435: pre-request fallback rejections are not terminal cycles. Read
+        # their existing proposer_reject rows without changing their schema or
+        # redefining fallback_cycles; a missing target path is not fabricated.
+        "fallback_rejects": fallback_rejects if fallback_visibility else "unavailable",
+        "fallback_rejects_by_reason": fallback_rejects_by_reason if fallback_visibility else "unavailable",
+        "fallback_distinct_target_paths": len(fallback_target_paths) if fallback_visibility else "unavailable",
     }
 
 
@@ -1629,7 +1650,11 @@ def compute_scorecard(
             pass
 
         rows, ledger_window = _ledger_rows(state_dir, now)
-        loop = _loop_section(rows, _confirmed_cycle_ids(state_dir))
+        loop = _loop_section(
+            rows,
+            _confirmed_cycle_ids(state_dir),
+            ledger_status=ledger_window.status,
+        )
         feeds_section = _feeds_section(state_dir, now)
         snapshot: dict[str, Any] = {
             "schema_version": SCORECARD_SCHEMA,

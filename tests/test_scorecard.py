@@ -272,6 +272,47 @@ class TestLoopSection:
         assert loop["fallback_successes"] == 0
         assert loop["fallback_share"] == 0.0
         assert loop["fallback_success_rate"] is None
+        assert loop["fallback_rejects"] == 0
+        assert loop["fallback_rejects_by_reason"] == {}
+        assert loop["fallback_distinct_target_paths"] == 0
+
+    def test_fallback_rejections_are_counted_by_reason_and_target(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_ledger(state_dir, [
+            {"phase": "proposer_reject", "cycle_id": "fallback-a", "reason": "futile_surface", "target_path": "scripts/purge_stale_feeds.py", "ts": _iso(3)},
+            {"phase": "proposer_reject", "cycle_id": "fallback-b", "reason": "futile_surface", "target_path": "scripts/purge_stale_feeds.py", "ts": _iso(2)},
+            {"phase": "proposer_reject", "cycle_id": "fallback-c", "reason": "self_dedup", "target_path": "scripts/purge_stale_feeds.py", "ts": _iso(1)},
+            {"phase": "proposer_reject", "cycle_id": "ordinary-d", "reason": "self_dedup", "target_path": "scripts/other.py", "ts": _iso(1)},
+        ])
+        loop = scorecard.compute_scorecard(state_dir, None, force=True)["loop"]
+        assert loop["fallback_rejects"] == 3
+        assert loop["fallback_rejects_by_reason"] == {"futile_surface": 2, "self_dedup": 1}
+        assert loop["fallback_distinct_target_paths"] == 1
+        assert loop["fallback_cycles"] == 0
+        assert "fallback_rejects" not in scorecard._TARGETS
+        assert "fallback_distinct_target_paths" not in scorecard._TARGETS
+
+    def test_fallback_rejections_and_terminal_cycles_are_additive(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_ledger(state_dir, [
+            {"phase": "proposer_reject", "cycle_id": "fallback-r", "reason": "self_dedup", "target_path": "scripts/x.py", "ts": _iso(3)},
+            {"phase": "outcome", "cycle_id": "fallback-o", "lane": "fallback", "outcome": "success", "ts": _iso(2)},
+        ])
+        loop = scorecard.compute_scorecard(state_dir, None, force=True)["loop"]
+        assert loop["fallback_rejects"] == 1
+        assert loop["fallback_cycles"] == 1
+        assert loop["fallback_successes"] == 1
+        assert loop["fallback_success_rate"] == 1.0
+
+    def test_fallback_visibility_is_unavailable_when_ledger_cannot_be_read(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (state_dir / "ledger").write_text("not a directory", encoding="utf-8")
+        snap = scorecard.compute_scorecard(state_dir, None, force=True)
+        loop = snap["loop"]
+        assert loop["fallback_rejects"] == "unavailable"
+        assert loop["fallback_rejects_by_reason"] == "unavailable"
+        assert loop["fallback_distinct_target_paths"] == "unavailable"
 
 
 class TestConfirmedIntegrationSplit:
