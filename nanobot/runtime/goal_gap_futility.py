@@ -331,7 +331,8 @@ def _mark_missing_records(records: dict[str, dict[str, Any]], gap_ids: set[str],
         if gap_id in gap_ids or not isinstance(record, dict):
             continue
         record["stale"] = True
-        record["futility_status"] = "not_evaluated"
+        if record.get("futility_status") != "voided_fixed":
+            record["futility_status"] = "not_evaluated"
         record.setdefault("last_evaluated_ts", record.get("first_seen_ts"))
         record.setdefault("stale_at", _iso(now))
 

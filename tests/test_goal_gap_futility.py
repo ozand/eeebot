@@ -57,6 +57,33 @@ def test_fixed_stale_feeds_voids_active_futility_and_snapshot_excludes_it(tmp_pa
     assert persisted["futility_status"] == "voided_fixed"
 
 
+def test_voided_fixed_status_survives_absent_gap_sweep(tmp_path):
+    state = tmp_path / "state"
+    gap_id = "goal-gap-a820ca0c8bb3"
+    record = {
+        "gap_id": gap_id, "metric": "stale_feeds", "attempt_count": 10,
+        "attempt_unit": "lever_surface", "window_status": "complete", "futile": True,
+        "futile_until": (datetime.now(timezone.utc) + timedelta(days=5)).isoformat(),
+        "futility_status": "measured", "last_evaluated_ts": datetime.now(timezone.utc).isoformat(),
+        "surface": ["host_metrics", "stale_feed"],
+    }
+    path = state / "demand" / "futility.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({gap_id: record}), encoding="utf-8")
+    _write_scorecard(state, _fresh_feeds_scorecard())
+
+    # First pass voids the active verdict; the next pass has no current gaps
+    # and must not relabel deliberate voiding as never evaluated.
+    assert futility.futile_surfaces(state) == []
+    assert futility.futile_gap_ids(state, []) == set()
+    persisted = json.loads(path.read_text(encoding="utf-8"))[gap_id]
+    assert persisted["futile"] is False
+    assert persisted["futility_status"] == "voided_fixed"
+    snapshot = futility.futility_snapshot(state)
+    assert snapshot["voided_gap_ids"] == [gap_id]
+    assert snapshot["futile_gap_ids"] == []
+
+
 def test_unavailable_scorecard_keeps_futility_active(tmp_path):
     state = tmp_path / "state"
     record = {
