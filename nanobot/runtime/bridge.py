@@ -1606,7 +1606,8 @@ def build_task(req: dict, goal_text: str, report_source: str,
                repair_context: 'str | None' = None,
                selfevo_repo_root: 'Path | None' = None,
                max_iterations: int = 15,
-               charter_in_system: bool = False) -> str:
+               charter_in_system: bool = False,
+               declared_tool_names: tuple[str, ...] = ("read_file", "write_file", "edit_file", "list_dir", "exec")) -> str:
     """Build a concrete task prompt for the subagent from the request payload.
 
     Args:
@@ -1858,6 +1859,7 @@ def build_task(req: dict, goal_text: str, report_source: str,
         '}',
         '',
         'Use your tools: read_file, write_file, edit_file, list_dir, exec.',
+        'Use your tools: ' + ', '.join(declared_tool_names) + '.',
         f'You have up to {max_iterations} tool iterations. Use them deliberately.',
     ]
 
@@ -2503,6 +2505,7 @@ async def _main_impl_body():
             selfevo_repo_root=_selfevo_repo_check,
             max_iterations=resolved_iterations,
             charter_in_system=bool(_charter),
+            declared_tool_names=SubagentManager.declared_tool_names(),
         )
 
         # Extract backlog title for MEMORY.md safety-net update after execution
@@ -3118,6 +3121,7 @@ async def _main_impl_body():
                         req, goal_text, report_source,
                         state_dir=STATE_DIR,
                         repair_context=_smoke_output,
+                        declared_tool_names=_SM2.declared_tool_names(),
                     )
                     # Spawn repair subagent
                     from nanobot.agent.subagent import SubagentManager as _SM2

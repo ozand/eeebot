@@ -13,6 +13,9 @@ def test_executor_declared_and_registered_tool_names_match():
     assert "web_search" not in manager.registered_tool_names()
     assert "web_fetch" not in manager.registered_tool_names()
 
+    from nanobot.runtime import bridge
+    assert "Use your tools: " + ", ".join(SubagentManager.declared_tool_names()) + "." in bridge.build_task({}, "goal", "")
+
 
 def test_interactive_subagent_role_keeps_web_tools_available():
     from nanobot.agent.subagent import SubagentManager
