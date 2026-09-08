@@ -7,7 +7,7 @@ tags: [agents, tooling, harness]
 status: active
 created: 2026-09-07
 updated: 2026-09-07
-occurrences: 4
+occurrences: 5
 error_signatures:
   - "Arguments truncated to save context window"
   - "Operation aborted"
@@ -85,6 +85,27 @@ that write may be has moved the failure, not removed it.
 What actually works: build the file in several small appends rather than one large write, or
 keep the analysis to short steps whose output feeds the next. Either way the rule is the same
 — no single tool call carries a large payload.
+
+## It is the tool call, not any particular tool
+
+Five occurrences across three different tools now: a shell command, a `write`, and on
+2026-09-08 an `edit`:
+
+```
+edit ...
+Validation failed for tool "edit":
+  - path: must have required properties path, edits
+Received arguments: { "_truncated": "Arguments truncated to save context window." }
+```
+
+Same signature every time — the arguments are replaced wholesale, the tool rejects the call
+for missing required properties, and the agent retries at the same size until it aborts. The
+cap is on the serialized arguments of any single tool call and has nothing to do with which
+tool is being called or which model is calling it.
+
+That matters for briefs: naming one tool ("do not pass a long script as a shell argument")
+leaves the agent free to hit the same wall through `write` or `edit`, and both have now
+happened. The rule has to be stated about the call, not the tool.
 
 ## The mitigation that actually works
 
