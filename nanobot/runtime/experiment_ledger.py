@@ -20,31 +20,54 @@ def ledger_path(state_dir: Path) -> Path:
 
 
 def empty_ledger() -> dict[str, Any]:
-    return {"status": "empty", "columns": list(COLUMNS), "rows": []}
+    return {"status": "empty", "columns": list(COLUMNS), "rows": [], "truncated": False}
 
 
 def read_experiment_ledger(state_dir: Path) -> dict[str, Any]:
-    """Read rows with explicit missing/empty/unavailable states; never raises."""
+    """Read rows with explicit missing/empty/present/unavailable states; never raises.
+
+    ``truncated`` is a separate flag, not a status: hitting the row cap on an
+    append-only ledger is expected with age and must not blank the rows that
+    were read. A cap that turns its own artifact unreadable is a silent
+    off-switch, not a bound (#1183, #1178, #1166).
+    """
     path = ledger_path(state_dir)
     if not path.is_file():
-        return {"status": "missing", "columns": list(COLUMNS), "rows": []}
+        return {"status": "missing", "columns": list(COLUMNS), "rows": [], "truncated": False}
+    expected = frozenset(COLUMNS)
     try:
         rows: list[dict[str, Any]] = []
+        truncated = False
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 if not line.strip():
                     continue
                 if len(line.encode("utf-8")) > _MAX_ROW_BYTES:
-                    return {"status": "unavailable", "columns": list(COLUMNS), "rows": []}
+                    return {
+                        "status": "unavailable", "columns": list(COLUMNS),
+                        "rows": [], "truncated": False,
+                    }
                 item = json.loads(line)
-                if not isinstance(item, dict) or tuple(item.keys()) != COLUMNS:
-                    return {"status": "unavailable", "columns": list(COLUMNS), "rows": []}
+                # Key ORDER is a serialization detail, not a schema violation:
+                # compare the key set so a valid row written by another encoder
+                # is not misreported as an unreadable ledger.
+                if not isinstance(item, dict) or frozenset(item.keys()) != expected:
+                    return {
+                        "status": "unavailable", "columns": list(COLUMNS),
+                        "rows": [], "truncated": False,
+                    }
+                if len(rows) >= _MAX_ROWS:
+                    truncated = True
+                    break
                 rows.append(item)
-                if len(rows) > _MAX_ROWS:
-                    return {"status": "unavailable", "columns": list(COLUMNS), "rows": []}
-        return {"status": "empty" if not rows else "present", "columns": list(COLUMNS), "rows": rows}
+        return {
+            "status": "empty" if not rows else "present",
+            "columns": list(COLUMNS),
+            "rows": rows,
+            "truncated": truncated,
+        }
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-        return {"status": "unavailable", "columns": list(COLUMNS), "rows": []}
+        return {"status": "unavailable", "columns": list(COLUMNS), "rows": [], "truncated": False}
 
 
 def append_experiment_result(
