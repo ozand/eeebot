@@ -14,6 +14,7 @@ from nanobot.utils.helpers import current_time_str, estimate_prompt_tokens
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 from nanobot.utils.helpers import build_assistant_message, detect_image_mime
+from nanobot.runtime.mutation_policy import MUTATION_POLICY
 
 
 class SystemPromptOverflowError(RuntimeError):
@@ -45,9 +46,10 @@ class SystemPromptOverflowError(RuntimeError):
 class ContextBuilder:
     """Builds the context (system prompt + messages) for the agent."""
 
-    # Only the tracked, product-defined bootstrap contract is loaded. Optional
-    # host-only files were never present in the product workspace.
-    BOOTSTRAP_FILES = ["AGENTS.md"]
+    # Read bootstrap files from the authoritative read policy. This list is
+    # intentionally separate from the commit surfaces: AGENTS.md is readable,
+    # but operator-owned and never commit-permitted.
+    BOOTSTRAP_FILES = list(MUTATION_POLICY.read_paths)
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
     MAX_SYSTEM_PROMPT_CHARS = 24000
     #: Operator override of the cap (positive int). The cap is legitimate;

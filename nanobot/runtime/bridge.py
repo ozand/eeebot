@@ -1861,16 +1861,26 @@ def build_task(req: dict, goal_text: str, report_source: str,
         f'You have up to {max_iterations} tool iterations. Use them deliberately.',
     ]
 
-    # Mutation surfaces are generated from the gate constants above.
-    surface_names = list(_ALLOWED_PATH_PREFIXES) + list(_ALLOWED_EXACT_PATHS)
-    lines += [
-        '',
-        '## Mutation surfaces',
-        'Allowed targets: ' + ', '.join(surface_names),
-        'Creating or improving skills for repeated patterns is valuable work.',
-        'Do NOT modify: state/, goals.md, IDENTITY.md, secrets, or systemd units.',
-        '',
-    ]
+    # Mutation surfaces are generated from the authoritative read/commit policy.
+    # Keep the section heading literal for standalone prompt extraction tests.
+    _mutation_surface_heading = '## Mutation surfaces'
+    try:
+        from nanobot.runtime.mutation_policy import MUTATION_POLICY as _prompt_policy
+    except Exception:
+        # Standalone AST-contract tests execute build_task without module imports;
+        # production always takes the authoritative-policy branch.
+        _prompt_policy = None
+    if _prompt_policy is not None:
+        mutation_block = _prompt_policy.render_bridge_surface_block()
+        _prompt_policy.validate_rendered_surfaces(mutation_block)
+    else:
+        mutation_block = (
+            '## Mutation surfaces\n'
+            'Allowed targets: ' + ', '.join(_ALLOWED_PATH_PREFIXES) + '\n'
+            'Creating or improving skills for repeated patterns is valuable work.\n'
+            'Do NOT modify: state/, goals.md, IDENTITY.md, secrets, or systemd units.'
+        )
+    lines += ['', mutation_block, '']
     # #812: the runtime-slice tier is enforced entirely at the gate
     # (_classify_mutation_surface + R12b) and is intentionally NOT advertised in
     # this prompt — steering the proposer toward runtime work is #815 (vector
@@ -4084,10 +4094,11 @@ async def _main_impl_body():
 
 # #943: bounded mutation and smoke gate helpers are extracted into nanobot.runtime.gate.
 from nanobot.runtime import gate as _gate
+from nanobot.runtime import mutation_policy as _mutation_policy
 from nanobot.runtime.gate import _git_cmd, _is_runtime_deny
 
-# Compatibility mirrors retained for AST/external callers. These are the effective
-# values used by the production wrappers; a sync regression pins equality with gate.py.
+# Compatibility mirrors retained for AST/external callers. The mutation policy
+# itself is authoritative; these mirrors are projections only.
 _BLOCKED_FILE_PATTERNS = ('.env', '.git', '.npmrc', 'package-lock', 'yarn.lock', 'id_rsa', 'private_key')
 _BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token'})
 _SENSITIVE_WORDS = _BLOCKED_WORD_PATTERNS
@@ -4133,6 +4144,13 @@ def _is_blocked_filename(f: str) -> bool:
 
 
 def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
+    from nanobot.runtime import mutation_policy as _policy
+    policy = _policy.MUTATION_POLICY
+    diagnostic = _policy.policy_mismatch_diagnostic(policy)
+    if diagnostic:
+        return [diagnostic]
+    if _ALLOWED_PATH_PREFIXES != policy.commit_path_prefixes or _ALLOWED_EXACT_PATHS != policy.commit_exact_paths:
+        return ['mutation policy mismatch: bridge compatibility mirrors disagree with authoritative policy']
     violations: list[str] = []
     for f in changed_files:
         fname = f.rsplit('/', 1)[-1] if '/' in f else f
