@@ -4754,6 +4754,10 @@ def _recent_failure_match(
             return None
 
         proposal_intent = derive_intent(dup_check_title, target_path)
+        if proposal_intent is None:
+            _record_guard_key_event(
+                state_dir, "recent_failure", "miss", dup_check_title, target_path or "",
+            )
 
         now = _time_fail.time()
         cutoff = now - (hours * 3600.0)
@@ -4853,6 +4857,22 @@ def _recent_failure_match(
         return None
     except Exception:
         return None
+
+
+def _record_guard_key_event(
+    state_dir: 'Path', guard: str, outcome: str, key: str, against: str = '',
+) -> None:
+    """Persist mutable-key diagnostics without changing guard decisions."""
+    try:
+        append_event(state_dir, {
+            'phase': 'guard_key_match',
+            'guard': guard,
+            'outcome': outcome,
+            'key': str(key or '')[:200],
+            'against': str(against or '')[:200],
+        })
+    except Exception:
+        pass
 
 
 def _extract_meaningful_insight(artifact_data: dict | None) -> str | None:
