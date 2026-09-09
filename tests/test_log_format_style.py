@@ -10,6 +10,22 @@ Modules on stdlib ``logging`` are correct with ``%s`` and raise
 ``TypeError: not all arguments converted during string formatting`` if given
 ``{}``. A check that flagged ``%s`` everywhere would "fix" working code --
 matching the pattern is not the same as diagnosing the defect.
+
+Known blind spots of this regex scanner, stated so nobody reads a pass as a
+proof (reviewed on #1441):
+
+* ``import loguru`` followed by ``loguru.logger.warning(...)``, or an aliased
+  ``from loguru import logger as log`` -- the module is not detected at all.
+* a ``logger.warning("... %s")`` written inside a comment or a docstring is
+  flagged although nothing is logged. A false positive here is loud, which is
+  the safe direction.
+* a module that imports loguru and then shadows ``logger`` locally with a
+  stdlib logger has its stdlib calls judged by the loguru rule.
+
+None of these forms exist in ``nanobot`` today (verified: 21 loguru modules,
+zero offenders). The durable shape for this rule is an AST lint check that
+resolves the import form and skips comments and docstrings; this test is a
+regression guard for the defect actually found, not a general linter.
 """
 from __future__ import annotations
 
