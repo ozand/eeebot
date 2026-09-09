@@ -131,6 +131,7 @@ Skills with available="false" need dependencies installed first - you can try in
         sections.append(("memory", f"# Memory\n\n{memory}" if memory else ""))
         return self._fit_system_prompt(
             sections, strict=strict, degrade_on_overflow=degrade_on_overflow,
+            memory_fit=self.memory.last_index_fit,
         )
 
     SECTION_SEPARATOR = "\n\n---\n\n"
@@ -359,6 +360,7 @@ Skills with available="false" need dependencies installed first - you can try in
         sections: list[tuple[str, str]],
         strict: bool = False,
         degrade_on_overflow: bool = False,
+        memory_fit: dict[str, Any] | None = None,
     ) -> str:
         """Fit sections under the cap and record the outcome in :attr:`last_fit`.
 
@@ -382,6 +384,14 @@ Skills with available="false" need dependencies installed first - you can try in
         # max(0, non_empty_sections - 1) == chars.
         section_names = [name for name, _ in sections]
         fit: dict[str, Any] = {"cap": cap, "strict": strict, "dropped": []}
+        if memory_fit:
+            fit["memory_index"] = {
+                key: memory_fit[key]
+                for key in (
+                    "source_chars", "resident_chars", "remainder_source_chars",
+                    "remainder_kept_chars", "dropped_entries", "dropped_chars",
+                ) if key in memory_fit
+            }
         joined = self._record_fit(fit, section_names, sections)
         if len(joined) <= cap:
             occupancy = len(joined) / cap if cap else 1.0

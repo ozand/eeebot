@@ -22,16 +22,23 @@ def test_interactive_context_keeps_legacy_memory(tmp_path: Path):
     assert "FULL LEGACY BODY" in prompt
 
 
-def test_loop_memory_context_reads_tail_and_shows_freshly_added_fact(tmp_path: Path):
-    """Issue #1041 Part 1: when index.md exceeds max_chars, newest facts at the tail are visible."""
+def test_loop_memory_context_keeps_resident_rules_and_drops_whole_entries(tmp_path: Path):
+    """#1443: small caps cannot remove the rules block or split an entry."""
     from nanobot.agent.memory import MemoryStore
 
     mem_dir = tmp_path / "memory"
     mem_dir.mkdir()
     index_file = mem_dir / "index.md"
 
-    # Fill index.md with older facts totaling > 4000 chars
-    lines = [f"- [Old Fact {i}](facts/old_{i}.md) — Older context fact {i}" for i in range(100)]
+    lines = [
+        "# Memory index", "", "## Facts (memory/facts/)", "",
+        "* [Identity](facts/identity.md)",
+        "* [Write target: workspace](facts/write-target.md)",
+        "* [DO NOT touch](facts/do-not-touch.md)",
+        "* [Rules](facts/rules.md)",
+        "* [Key paths on host](facts/key-paths.md)",
+    ]
+    lines.extend(f"- [Old Fact {i}](facts/old_{i}.md) — Older context fact {i}" for i in range(100))
     lines.append("- [Brand New Fact](facts/fresh.md) — Crucial latest discovered fact")
     content = "\n".join(lines) + "\n"
     index_file.write_text(content, encoding="utf-8")
@@ -40,8 +47,14 @@ def test_loop_memory_context_reads_tail_and_shows_freshly_added_fact(tmp_path: P
     store = MemoryStore(tmp_path)
     ctx = store.get_memory_context(loop=True, max_chars=4000)
 
-    # Tail should be included, so the fresh fact is visible
+    assert "[Identity]" in ctx
+    assert "[Write target: workspace]" in ctx
+    assert "[DO NOT touch]" in ctx
+    assert "[Rules]" in ctx
+    assert "[Key paths on host]" in ctx
     assert "Crucial latest discovered fact" in ctx
     assert "Brand New Fact" in ctx
-    # Old head facts should be truncated out
     assert "Old Fact 0" not in ctx
+    assert "[trimmed" not in ctx
+    assert store.last_index_fit["dropped_entries"] > 0
+    assert store.last_index_fit["resident_chars"] <= len(ctx)

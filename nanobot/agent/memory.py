@@ -82,6 +82,7 @@ class MemoryStore:
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.memory_dir / "HISTORY.md"
         self._consecutive_failures = 0
+        self.last_index_fit: dict[str, Any] | None = None
 
     def read_long_term(self) -> str:
         if self.memory_file.exists():
@@ -103,50 +104,59 @@ class MemoryStore:
         long_term = self.read_long_term()
         return f"## Long-term Memory\n{long_term}" if long_term else ""
 
-    @staticmethod
-    def _format_loop_index(text: str, *, max_chars: int) -> str:
-        """Keep the rules block resident and trim only complete index entries.
+    def _format_loop_index(self, text: str, *, max_chars: int) -> str:
+        """Keep policy entries resident and trim only complete index entries.
 
-        The first ``## Facts`` block is policy, not expendable catalogue data:
-        it remains structurally separate from the bounded entry list. Entries
-        are whole lines, so no byte/character slice can expose a mid-token
-        fragment. The returned diagnostic line is consumed by prompt-fit
-        telemetry without making the rules themselves droppable.
+        The resident block is made from the index preamble, the ``Facts``
+        heading, and the five operational entries that define identity,
+        write-target, prohibitions, rules, and host paths. The remainder is
+        selected as whole lines from newest to oldest, then restored to source
+        order. No character slice can cut a token or remove the resident block.
         """
         lines = text.splitlines(keepends=True)
-        if not lines:
-            return ""
+        resident_labels = (
+            "[Identity]", "[Write target:", "[DO NOT touch]", "[Rules]", "[Key paths",
+        )
         resident: list[str] = []
-        entries: list[str] = []
-        in_resident = True
+        remainder: list[str] = []
+        facts_heading_seen = False
         for line in lines:
-            if in_resident and line.startswith("## ") and resident:
-                if line.startswith("## Facts"):
-                    resident.append(line)
-                else:
-                    in_resident = False
-                    entries.append(line)
+            stripped = line.strip()
+            if not facts_heading_seen:
+                resident.append(line)
+                if stripped.startswith("## Facts"):
+                    facts_heading_seen = True
                 continue
-            if in_resident:
+            if any(label in line for label in resident_labels):
                 resident.append(line)
             else:
-                entries.append(line)
+                remainder.append(line)
 
         resident_text = "".join(resident)
-        if len(resident_text) > max_chars:
-            return resident_text
-        remaining = max(0, max_chars - len(resident_text))
-        kept: list[str] = []
+        available = max(0, max_chars - len(resident_text))
+        kept_reversed: list[str] = []
         used = 0
         dropped = 0
-        for entry in entries:
-            if used + len(entry) > remaining:
+        dropped_chars = 0
+        for entry in reversed(remainder):
+            if used + len(entry) <= available:
+                kept_reversed.append(entry)
+                used += len(entry)
+            else:
                 dropped += 1
-                continue
-            kept.append(entry)
-            used += len(entry)
-        suffix = f"\n[Memory index: dropped {dropped} complete entries]\n" if dropped else ""
-        return resident_text + "".join(kept) + suffix
+                dropped_chars += len(entry)
+        kept = "".join(reversed(kept_reversed))
+        self.last_index_fit = {
+            "source_chars": len(text),
+            "resident_chars": len(resident_text),
+            "remainder_source_chars": len(text) - len(resident_text),
+            "remainder_kept_chars": used,
+            "kept_chars": len(resident_text) + used,
+            "dropped_entries": dropped,
+            "dropped_chars": dropped_chars,
+            "max_chars": max_chars,
+        }
+        return resident_text + kept
 
     @staticmethod
     def _format_messages(messages: list[dict]) -> str:
