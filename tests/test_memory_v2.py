@@ -47,6 +47,7 @@ def test_loop_memory_context_keeps_resident_rules_and_drops_whole_entries(tmp_pa
     store = MemoryStore(tmp_path)
     ctx = store.get_memory_context(loop=True, max_chars=4000)
 
+    assert MemoryStore.LOOP_MEMORY_DATA_TAG in ctx
     assert "[Identity]" in ctx
     assert "[Write target: workspace]" in ctx
     assert "[DO NOT touch]" in ctx
@@ -57,6 +58,7 @@ def test_loop_memory_context_keeps_resident_rules_and_drops_whole_entries(tmp_pa
     assert "Old Fact 0" not in ctx
     assert "[trimmed" not in ctx
     assert store.last_index_fit["dropped_entries"] > 0
+    assert all(len(line) <= store.MAX_INDEX_ENTRY_CHARS for line in ctx.splitlines() if line.startswith("- ") or line.startswith("* "))
     assert store.last_index_fit["resident_chars"] <= len(ctx)
 
 
@@ -134,3 +136,4 @@ def test_intact_index_reports_every_resident_label_matched(tmp_path: Path):
     store.get_memory_context(loop=True, max_chars=4000)
     assert store.last_index_fit["resident_matched"] == 5
     assert store.last_index_fit["resident_missing"] == []
+    assert MemoryStore.LOOP_MEMORY_DATA_TAG in store.get_memory_context(loop=True, max_chars=4000)
