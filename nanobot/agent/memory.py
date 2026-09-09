@@ -99,9 +99,54 @@ class MemoryStore:
         if loop:
             index = self.memory_dir / "index.md"
             text = index.read_text(encoding="utf-8") if index.is_file() else ""
-            return f"## Long-term Memory\n{text[-max_chars:]}" if text else ""
+            return self._format_loop_index(text, max_chars=max_chars) if text else ""
         long_term = self.read_long_term()
         return f"## Long-term Memory\n{long_term}" if long_term else ""
+
+    @staticmethod
+    def _format_loop_index(text: str, *, max_chars: int) -> str:
+        """Keep the rules block resident and trim only complete index entries.
+
+        The first ``## Facts`` block is policy, not expendable catalogue data:
+        it remains structurally separate from the bounded entry list. Entries
+        are whole lines, so no byte/character slice can expose a mid-token
+        fragment. The returned diagnostic line is consumed by prompt-fit
+        telemetry without making the rules themselves droppable.
+        """
+        lines = text.splitlines(keepends=True)
+        if not lines:
+            return ""
+        resident: list[str] = []
+        entries: list[str] = []
+        in_resident = True
+        for line in lines:
+            if in_resident and line.startswith("## ") and resident:
+                if line.startswith("## Facts"):
+                    resident.append(line)
+                else:
+                    in_resident = False
+                    entries.append(line)
+                continue
+            if in_resident:
+                resident.append(line)
+            else:
+                entries.append(line)
+
+        resident_text = "".join(resident)
+        if len(resident_text) > max_chars:
+            return resident_text
+        remaining = max(0, max_chars - len(resident_text))
+        kept: list[str] = []
+        used = 0
+        dropped = 0
+        for entry in entries:
+            if used + len(entry) > remaining:
+                dropped += 1
+                continue
+            kept.append(entry)
+            used += len(entry)
+        suffix = f"\n[Memory index: dropped {dropped} complete entries]\n" if dropped else ""
+        return resident_text + "".join(kept) + suffix
 
     @staticmethod
     def _format_messages(messages: list[dict]) -> str:
