@@ -2733,6 +2733,9 @@ async def _main_impl_body():
             continue
 
         else:
+            _record_guard_key_event(
+                STATE_DIR, 'existence_index', 'miss', _dup_check_title or '', _target_path or '',
+            )
             # #720 piece 4: neither pre-spawn suppression fired — the dedup
             # heuristic's own "proceeded" decision, so #705 can measure the
             # heuristic's false-positive rate (matched vs. proceeded counts).
