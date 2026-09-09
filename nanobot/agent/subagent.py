@@ -386,7 +386,7 @@ class SubagentManager:
                         )
                     except Exception as _compact_exc:
                         logger.warning(
-                            "context_compaction: subagent loop compaction failed open: %s",
+                            "context_compaction: subagent loop compaction failed open: {}",
                             _compact_exc,
                         )
 
