@@ -58,3 +58,24 @@ def test_loop_memory_context_keeps_resident_rules_and_drops_whole_entries(tmp_pa
     assert "[trimmed" not in ctx
     assert store.last_index_fit["dropped_entries"] > 0
     assert store.last_index_fit["resident_chars"] <= len(ctx)
+
+
+def test_context_fit_records_memory_index_drop_details(tmp_path: Path):
+    mem_dir = tmp_path / "memory"
+    mem_dir.mkdir()
+    index = [
+        "# Memory index", "", "## Facts (memory/facts/)", "",
+        "* [Identity](facts/identity.md)", "* [Write target: workspace](facts/write-target.md)",
+        "* [DO NOT touch](facts/do-not-touch.md)", "* [Rules](facts/rules.md)",
+        "* [Key paths on host](facts/key-paths.md)",
+    ] + [f"- [Filler {i}](facts/filler_{i}.md) — {'x' * 40}" for i in range(100)]
+    (mem_dir / "index.md").write_text("\n".join(index) + "\n", encoding="utf-8")
+    builder = ContextBuilder(tmp_path)
+    builder.skills.get_always_skills = lambda: []
+    builder.skills.load_skills_for_context = lambda names: ""
+    builder.skills.build_skills_summary = lambda excluded_names=None: ""
+    prompt = builder.build_system_prompt(loop_profile=True)
+    fit = builder.last_fit
+    assert "[Identity]" in prompt and "[Rules]" in prompt
+    assert fit["memory_index"]["dropped_entries"] > 0
+    assert fit["memory_index"]["resident_chars"] > 0
