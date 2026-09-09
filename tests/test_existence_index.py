@@ -612,6 +612,32 @@ class TestRelatedScripts:
 
         assert ei.related_scripts(state_dir, repo, "") == []
 
+    def test_ranking_and_gate_lookups_are_distinguishable(self, tmp_path):
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        _write_script(repo, "scripts/track_memory.py", "track memory usage over time.")
+
+        ei.related_scripts(state_dir, repo, "track memory usage")
+        ei.find_duplicate_script(state_dir, repo, "track memory usage")
+
+        rows = _read_ledger(state_dir)
+        lookups = [r["lookup"] for r in rows if r.get("phase") == "guard_key_match"]
+        assert "related_scripts" in lookups
+        assert "find_duplicate_script" in lookups
+
+    def test_rows_returned_without_duplicate_suspect_are_not_plain_hit(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        _write_script(repo, "scripts/track_memory.py", "track memory usage over time.")
+        monkeypatch.setattr(ei, "_content_words", lambda *_texts: set())
+
+        assert ei.find_duplicate_script(state_dir, repo, "track memory usage") is None
+        rows = [r for r in _read_ledger(state_dir) if r.get("phase") == "guard_key_match"]
+        assert rows[-1]["lookup"] == "find_duplicate_script"
+        assert rows[-1]["outcome"] == "rows_returned"
+        assert rows[-1]["legacy_outcome"] == "hit"
+        assert rows[-1]["outcome"] != "hit"
+
 
 # ─── kill switch / fail-open ─────────────────────────────────────────────────
 
@@ -1000,10 +1026,11 @@ class TestBridgeExistenceIndexIntegration:
 
         rows = _read_ledger(state_dir)
         phases = [r["phase"] for r in rows]
-        assert phases.count("guard_key_match") == 2
         guard_rows = [row for row in rows if row["phase"] == "guard_key_match"]
         existence_rows = [row for row in guard_rows if row["guard"] == "existence_index"]
-        assert existence_rows and existence_rows[-1]["outcome"] == "hit"
+        assert existence_rows and existence_rows[-1]["lookup"] == "find_duplicate_script"
+        assert existence_rows[-1]["outcome"] == "duplicate_identified"
+        assert existence_rows[-1]["legacy_outcome"] == "hit"
         dedup_row = next(row for row in rows if row["phase"] == "dedup")
         outcome_row = next(row for row in rows if row["phase"] == "outcome")
         assert dedup_row["decision"] == "skipped_duplicate"

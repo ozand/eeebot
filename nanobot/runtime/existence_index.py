@@ -757,20 +757,34 @@ def _content_words(*texts: str) -> set[str]:
 
 
 def _record_guard_key_event(
-    state_dir: Path, guard: str, outcome: str, key: str, against: str = "",
+    state_dir: Path,
+    guard: str,
+    outcome: str,
+    key: str,
+    against: str = "",
+    *,
+    lookup: str = "unspecified",
+    legacy_outcome: str | None = None,
 ) -> None:
     try:
         from nanobot.runtime.cycle_ledger import append_event
         append_event(state_dir, {
             "phase": "guard_key_match", "guard": guard, "outcome": outcome,
             "key": str(key or "")[:200], "against": str(against or "")[:200],
+            "lookup": str(lookup or "unspecified"),
+            **({"legacy_outcome": legacy_outcome} if legacy_outcome else {}),
         })
     except Exception:
         pass
 
 
 def find_similar(
-    state_dir: Path, title: str, target_path: str | None = None, limit: int = 5,
+    state_dir: Path,
+    title: str,
+    target_path: str | None = None,
+    limit: int = 5,
+    *,
+    lookup: str = "unspecified",
 ) -> list[dict]:
     """Return up to ``limit`` existing documents that look related to
     ``title``/``target_path``, best match first.
@@ -841,7 +855,10 @@ def find_similar(
     try:
         con = _open_db(state_dir)
     except Exception:
-        _record_guard_key_event(state_dir, "existence_index", "unavailable", title, target_path or "")
+        _record_guard_key_event(
+            state_dir, "existence_index", "unavailable", title, target_path or "",
+            lookup=lookup,
+        )
         return []
 
     results: list[dict] = []
@@ -884,15 +901,25 @@ def find_similar(
                 "duplicate_suspect": duplicate_suspect,
             })
     except Exception:
-        _record_guard_key_event(state_dir, "existence_index", "unavailable", title, target_path or "")
+        _record_guard_key_event(
+            state_dir, "existence_index", "unavailable", title, target_path or "",
+            lookup=lookup,
+        )
         return []
     finally:
         try:
             con.close()
         except Exception:
             pass
+    rows_returned = bool(results)
+    duplicate_identified = any(row.get("duplicate_suspect") for row in results)
+    outcome = "duplicate_identified" if duplicate_identified else (
+        "rows_returned" if rows_returned else "miss"
+    )
     _record_guard_key_event(
-        state_dir, "existence_index", "hit" if results else "miss", title, target_path or "",
+        state_dir, "existence_index", outcome, title, target_path or "",
+        lookup=lookup,
+        legacy_outcome="hit" if rows_returned else "miss",
     )
     return results
 
@@ -911,6 +938,7 @@ def related_scripts(state_dir: Path, selfevo_repo: Path, query: str, limit: int 
         reindex(Path(state_dir), Path(selfevo_repo))
         hits = find_similar(
             Path(state_dir), query, target_path=None, limit=max(1, limit * 2),
+            lookup="related_scripts",
         )
         out: list[str] = []
         seen: set[str] = set()
@@ -958,7 +986,10 @@ def find_duplicate_script(
         return None
     try:
         reindex(Path(state_dir), Path(selfevo_repo))
-        hits = find_similar(Path(state_dir), title, target_path=target_path, limit=5)
+        hits = find_similar(
+            Path(state_dir), title, target_path=target_path, limit=5,
+            lookup="find_duplicate_script",
+        )
         for hit in hits:
             if hit.get("duplicate_suspect"):
                 return hit.get("path")
