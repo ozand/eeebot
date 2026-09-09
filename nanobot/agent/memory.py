@@ -97,10 +97,36 @@ class MemoryStore:
             f.write(entry.rstrip() + "\n\n")
 
     def get_memory_context(self, *, loop: bool = False, max_chars: int = 4000) -> str:
+        """Assemble the memory section, recording WHY it is empty when it is.
+
+        ``memory/index.md`` is instance-owned: the loop can rewrite it, delete
+        it, or leave it undecodable. None of those may raise out of prompt
+        construction — an unreadable input is a value, not an exception
+        (ADR-002 / #1173) — and none of them may leave :attr:`last_index_fit`
+        holding the PREVIOUS build's accounting, which would report one
+        cycle's numbers as another's (#1447).
+        """
         if loop:
             index = self.memory_dir / "index.md"
-            text = index.read_text(encoding="utf-8") if index.is_file() else ""
-            return self._format_loop_index(text, max_chars=max_chars) if text else ""
+            if not index.is_file():
+                self.last_index_fit = {"status": "missing", "max_chars": max_chars}
+                return ""
+            try:
+                text = index.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                # An instance that writes one bad byte into its own index must
+                # not thereby fail its own cycle.
+                logger.warning("memory index unreadable, memory section empty: {}", exc)
+                self.last_index_fit = {
+                    "status": "unavailable",
+                    "reason": type(exc).__name__,
+                    "max_chars": max_chars,
+                }
+                return ""
+            if not text:
+                self.last_index_fit = {"status": "empty", "source_chars": 0, "max_chars": max_chars}
+                return ""
+            return self._format_loop_index(text, max_chars=max_chars)
         long_term = self.read_long_term()
         return f"## Long-term Memory\n{long_term}" if long_term else ""
 
@@ -158,6 +184,7 @@ class MemoryStore:
                 dropped_chars += len(entry)
         kept = "".join(reversed(kept_reversed))
         self.last_index_fit = {
+            "status": "present",
             "source_chars": len(text),
             "resident_chars": len(resident_text),
             "remainder_source_chars": len(text) - len(resident_text),

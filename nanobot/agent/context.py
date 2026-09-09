@@ -384,14 +384,14 @@ Skills with available="false" need dependencies installed first - you can try in
         # max(0, non_empty_sections - 1) == chars.
         section_names = [name for name, _ in sections]
         fit: dict[str, Any] = {"cap": cap, "strict": strict, "dropped": []}
-        if memory_fit:
-            fit["memory_index"] = {
-                key: memory_fit[key]
-                for key in (
-                    "source_chars", "resident_chars", "remainder_source_chars",
-                    "remainder_kept_chars", "dropped_entries", "dropped_chars",
-                ) if key in memory_fit
-            }
+        # #1447: copy the whole record rather than an allowlist of keys. The
+        # allowlist silently dropped `resident_matched` / `resident_missing`
+        # the moment #1443 added them, so the signal that a rule entry stopped
+        # matching never reached a caller at all — a guard whose report is
+        # filtered out on the way to the reader is not a guard.
+        # A ``None`` here means the builder recorded nothing, which is
+        # distinct from a recorded ``status`` of missing/empty/unavailable.
+        fit["memory_index"] = dict(memory_fit) if isinstance(memory_fit, dict) else None
         joined = self._record_fit(fit, section_names, sections)
         if len(joined) <= cap:
             occupancy = len(joined) / cap if cap else 1.0

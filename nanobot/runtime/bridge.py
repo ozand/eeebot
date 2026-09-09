@@ -2971,6 +2971,16 @@ async def _main_impl_body():
                     # absent. ``None`` only if the builder recorded nothing
                     # (never a fabricated empty dict).
                     'sections': _prompt_fit.get('sections'),
+                    # #1447: the memory-index accounting ALONGSIDE the
+                    # aggregate above, never instead of it. `resident_missing`
+                    # names the rule entries whose labels stopped matching in
+                    # the instance-owned index; a signal that lives only in
+                    # the builder's memory cannot be queried afterwards, which
+                    # reads exactly like a signal that never fired. `status`
+                    # separates missing / empty / unavailable / present, so an
+                    # absent memory section is never mistaken for a failed
+                    # read. ``None`` only when the builder recorded nothing.
+                    'memory_index': _prompt_fit.get('memory_index'),
                     'dropped': list(_prompt_fit.get('dropped') or []),
                     # #1313: how many chars of declared-droppable AGENTS.md
                     # sections are still standing — the fuse length the
