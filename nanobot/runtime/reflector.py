@@ -647,15 +647,40 @@ def mark_reflection_consumed(
     candidates += list(reversed(_archives(state_dir)))[:_ARCHIVE_READ_FILES]
     for p in candidates:
         if p.is_file() and _mark_in_file(p, recommendation_detail, demand_id, cycle_id, summary):
+            _record_consumption_event(
+                state_dir, "hit", recommendation_detail, demand_id, cycle_id, summary,
+            )
             return True
     # The caller may have no recommendation to consume, or its identity key
     # may have drifted. Preserve the False return, but journal the sought key
     # so the two cases are queryable rather than indistinguishable (#1448).
+    _record_consumption_event(
+        state_dir, "miss", recommendation_detail, demand_id, cycle_id, summary,
+    )
+    return False
+
+
+def _record_consumption_event(
+    state_dir: Path | str,
+    outcome: str,
+    recommendation_detail: str,
+    demand_id: str,
+    cycle_id: str,
+    summary: str,
+) -> None:
+    """Journal a consumption key hit or miss for post-hoc key-drift diagnosis.
+
+    Both outcomes are recorded, not only the miss. A miss count with no
+    sibling hit count cannot separate "no recommendation drifted" from "this
+    journalling never ran" — zero rows would read as health in either case
+    (#1188, #1448). Fail-open: consumption must never break on its own
+    bookkeeping.
+    """
     try:
         from nanobot.runtime.cycle_ledger import append_event
         append_event(Path(state_dir), {
             "phase": "reflection_consumption",
-            "outcome": "miss",
+            "outcome": outcome,
             "recommendation_detail": str(recommendation_detail or "")[:200],
             "demand_id": str(demand_id or "")[:120],
             "cycle_id": str(cycle_id or "")[:120],
@@ -663,7 +688,6 @@ def mark_reflection_consumed(
         })
     except Exception:
         pass
-    return False
 
 
 def _mark_in_file(p: Path, recommendation_detail: str, demand_id: str, cycle_id: str, summary: str) -> bool:
