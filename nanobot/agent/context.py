@@ -283,24 +283,74 @@ Skills with available="false" need dependencies installed first - you can try in
         """Keep each assembled entry's identifier while dropping its body."""
         return [(name, f"# {name}") for name, content in sections if content]
 
+    TRIM_NOTE = "\n\n[trimmed {n} chars]"
+
+    @staticmethod
+    def _fair_budgets(lengths: list[int], available: int) -> list[int]:
+        """Split ``available`` across entries by equal share, water-filling.
+
+        An entry shorter than its share keeps all of its content, and what it
+        does not use is redistributed to the entries still over budget. A flat
+        ``available // n`` would gut a long entry to hand unusable slack to a
+        short one.
+
+        The allocation is keyed on LENGTH, never on order: permuting the input
+        permutes the output identically. That is what "no survivor chosen by
+        position" means here — a shorter entry is never cut so a longer one can
+        survive whole, and where the input arrives in the list decides nothing.
+        """
+        budgets = [0] * len(lengths)
+        pending = list(range(len(lengths)))
+        remaining = max(0, available)
+        while pending:
+            share = remaining // len(pending)
+            if share <= 0:
+                break
+            settled = [i for i in pending if lengths[i] <= share]
+            if not settled:
+                # Everyone left is over the share: they all take it, equally.
+                for i in pending:
+                    budgets[i] = share
+                break
+            for i in settled:
+                budgets[i] = lengths[i]
+                remaining -= lengths[i]
+                pending.remove(i)
+        return budgets
+
     def _uniform_trim(
         self,
         sections: list[tuple[str, str]],
         cap: int,
     ) -> tuple[list[tuple[str, str]], int]:
-        """Trim each non-empty entry independently to one shared budget.
+        """Trim each non-empty entry to its share of one shared budget.
 
-        The budget is computed from the cap after accounting for separators.
         No survivor is selected by position and the assembled prompt is never
         sliced as one string. A section is an atomic entry: its contents may
         be shortened, but it cannot be split into separately-selected pieces.
+
+        A trimmed entry carries :data:`TRIM_NOTE` inside its own budget, so the
+        loss is visible in the artifact the model reads and not only in the log
+        line we emit. Degradation nobody can see reads exactly like degradation
+        that never happened.
         """
         entries = [(name, content) for name, content in sections if content]
         if not entries:
             return [], 0
         separator_chars = len(self.SECTION_SEPARATOR) * max(0, len(entries) - 1)
-        budget = max(0, (cap - separator_chars) // len(entries))
-        trimmed = [(name, content[:budget]) for name, content in entries]
+        budgets = self._fair_budgets(
+            [len(content) for _, content in entries], max(0, cap - separator_chars)
+        )
+        trimmed: list[tuple[str, str]] = []
+        for (name, content), budget in zip(entries, budgets):
+            if len(content) <= budget:
+                trimmed.append((name, content))
+                continue
+            note = self.TRIM_NOTE.format(n=len(content) - budget)
+            kept = max(0, budget - len(note))
+            # If the note itself does not fit the budget, the body is already
+            # down to noise: keep the truncated body rather than only a note.
+            trimmed.append((name, content[:kept] + note if kept else content[:budget]))
         shortfall = max(0, len(self._join_sections(sections)) - cap)
         return trimmed, shortfall
 
@@ -372,7 +422,8 @@ Skills with available="false" need dependencies installed first - you can try in
                     )
                     self.last_fit = fit
                     logger.warning(
-                        "System prompt cap degradation: rung=uniform_trim starved=%s shortfall=%d cap=%d",
+                        "System prompt cap degradation: rung=uniform_trim "
+                        "starved={} shortfall={} cap={}",
                         ",".join(starved) or "none", shortfall, cap,
                     )
                     return uniform_prompt
@@ -391,7 +442,8 @@ Skills with available="false" need dependencies installed first - you can try in
                     )
                     self.last_fit = fit
                     logger.warning(
-                        "System prompt cap degradation: rung=names_only starved=%s shortfall=%d cap=%d",
+                        "System prompt cap degradation: rung=names_only "
+                        "starved={} shortfall={} cap={}",
                         ",".join(starved) or "none", shortfall, cap,
                     )
                     return names_prompt
@@ -433,7 +485,11 @@ Skills with available="false" need dependencies installed first - you can try in
             logger.warning("System prompt cap dropped content: {}", details)
         prompt = self._record_fit(fit, section_names, sections)
         fit.update(
-            rung="uniform_trim" if dropped_chars else "full",
+            # NOT `uniform_trim`: this branch line-trims and then drops whole
+            # sections in iteration order. Labelling a positional mechanism
+            # with the ladder's name would make `prompt_fit_rung` count two
+            # different behaviours as one.
+            rung="line_trim" if dropped_chars else "full",
             shortfall=0,
             starved=list(dropped_chars),
             occupancy_alert=(len(prompt) / cap >= 0.92 if cap else True),
