@@ -112,11 +112,20 @@ class MemoryStore:
         write-target, prohibitions, rules, and host paths. The remainder is
         selected as whole lines from newest to oldest, then restored to source
         order. No character slice can cut a token or remove the resident block.
+
+        The labels are matched against index text the INSTANCE owns and can
+        rename. A rename would silently return that rule to the droppable
+        remainder — the failure this function exists to prevent. So the match
+        count is recorded in ``last_index_fit`` as ``resident_matched`` and
+        ``resident_missing``: a guard keyed on something that moves must at
+        least say when it stopped matching, or it reads exactly like a guard
+        that is working.
         """
         lines = text.splitlines(keepends=True)
-        resident_labels = (
+        resident_labels: tuple[str, ...] = (
             "[Identity]", "[Write target:", "[DO NOT touch]", "[Rules]", "[Key paths",
         )
+        matched_labels: set[str] = set()
         resident: list[str] = []
         remainder: list[str] = []
         facts_heading_seen = False
@@ -127,7 +136,9 @@ class MemoryStore:
                 if stripped.startswith("## Facts"):
                     facts_heading_seen = True
                 continue
-            if any(label in line for label in resident_labels):
+            hit = [label for label in resident_labels if label in line]
+            if hit:
+                matched_labels.update(hit)
                 resident.append(line)
             else:
                 remainder.append(line)
@@ -155,7 +166,19 @@ class MemoryStore:
             "dropped_entries": dropped,
             "dropped_chars": dropped_chars,
             "max_chars": max_chars,
+            # #1443: a resident label that stopped matching means the instance
+            # renamed that entry and the rule is droppable again. Reported, not
+            # asserted — the reader must never fail the cycle over index text.
+            "resident_matched": len(matched_labels),
+            "resident_expected": len(resident_labels),
+            "resident_missing": sorted(set(resident_labels) - matched_labels),
         }
+        if matched_labels != set(resident_labels):
+            logger.warning(
+                "memory index: {} of {} resident rule entries matched; missing={}",
+                len(matched_labels), len(resident_labels),
+                ",".join(sorted(set(resident_labels) - matched_labels)) or "none",
+            )
         return resident_text + kept
 
     @staticmethod

@@ -79,3 +79,58 @@ def test_context_fit_records_memory_index_drop_details(tmp_path: Path):
     assert "[Identity]" in prompt and "[Rules]" in prompt
     assert fit["memory_index"]["dropped_entries"] > 0
     assert fit["memory_index"]["resident_chars"] > 0
+
+
+def test_renamed_rule_entry_is_reported_not_silently_droppable(tmp_path: Path):
+    """#1443: the instance owns memory/ and can rename its own facts.
+
+    The resident block is matched on index label text, so a rename returns
+    that rule to the droppable remainder -- the exact failure this policy
+    exists to prevent. That must be visible: a guard keyed on something that
+    moves reads identically to a working guard once it stops matching.
+    """
+    from nanobot.agent.memory import MemoryStore
+
+    mem_dir = tmp_path / "memory"
+    mem_dir.mkdir()
+    lines = [
+        "# Memory index", "", "## Facts (memory/facts/)", "",
+        "* [Identity](facts/identity.md)",
+        "* [Write target: workspace](facts/write-target.md)",
+        # renamed by the instance -- no longer matches "[DO NOT touch]"
+        "* [Do not modify these paths](facts/do-not-touch.md)",
+        "* [Rules](facts/rules.md)",
+        "* [Key paths on host](facts/key-paths.md)",
+    ]
+    lines.extend(f"- [Old Fact {i}](facts/old_{i}.md) — filler {i}" for i in range(100))
+    (mem_dir / "index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    store = MemoryStore(tmp_path)
+    store.get_memory_context(loop=True, max_chars=4000)
+    fit = store.last_index_fit
+
+    assert fit["resident_matched"] == 4
+    assert fit["resident_expected"] == 5
+    assert fit["resident_missing"] == ["[DO NOT touch]"]
+
+
+def test_intact_index_reports_every_resident_label_matched(tmp_path: Path):
+    """The counter must be non-vacuous: a healthy index reports 5 of 5."""
+    from nanobot.agent.memory import MemoryStore
+
+    mem_dir = tmp_path / "memory"
+    mem_dir.mkdir()
+    lines = [
+        "# Memory index", "", "## Facts (memory/facts/)", "",
+        "* [Identity](facts/identity.md)",
+        "* [Write target: workspace](facts/write-target.md)",
+        "* [DO NOT touch](facts/do-not-touch.md)",
+        "* [Rules](facts/rules.md)",
+        "* [Key paths on host](facts/key-paths.md)",
+    ]
+    (mem_dir / "index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    store = MemoryStore(tmp_path)
+    store.get_memory_context(loop=True, max_chars=4000)
+    assert store.last_index_fit["resident_matched"] == 5
+    assert store.last_index_fit["resident_missing"] == []
