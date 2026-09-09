@@ -704,6 +704,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
             prompt = builder.build_system_prompt(
                 excluded_skill_names=self._excluded_skill_names or None,
                 loop_profile=True,
+                degrade_on_overflow=True,
             )
         finally:
             self.last_prompt_fit = builder.last_fit

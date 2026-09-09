@@ -71,7 +71,7 @@ def test_strict_drops_only_declared_sections_largest_first_and_records_them(tmp_
 
 
 def test_strict_refuses_when_critical_sections_do_not_fit(tmp_path, monkeypatch):
-    """The decision recorded for #1300: the cap never drops a critical section."""
+    """Direct strict callers retain the old refusal contract."""
     monkeypatch.setattr(ContextBuilder, "MAX_SYSTEM_PROMPT_CHARS", 4_000)
     bootstrap = _section("Working knowledge", 40) + _section("Optional", 4, droppable=True) + _section("Standard test runner", 40)
     builder = _builder(tmp_path, bootstrap)
@@ -87,7 +87,7 @@ def test_strict_refuses_when_critical_sections_do_not_fit(tmp_path, monkeypatch)
 
 
 def test_strict_never_trims_lines_inside_a_section(tmp_path, monkeypatch):
-    """Position-based line trimming is the defect; strict mode must not fall back to it."""
+    """Position-based line trimming is the defect; direct strict mode must not fall back to it."""
     monkeypatch.setattr(ContextBuilder, "MAX_SYSTEM_PROMPT_CHARS", 3_000)
     builder = _builder(tmp_path, _section("Working knowledge", 80))
     with pytest.raises(SystemPromptOverflowError):
@@ -176,11 +176,63 @@ def test_subagent_prompt_is_strict_and_exposes_the_fit(tmp_path, monkeypatch):
     mgr.workspace = tmp_path
     mgr._excluded_skill_names = []
     mgr.system_context = "# Immutable operator charter\n\ncharter"
-    with pytest.raises(SystemPromptOverflowError):
-        mgr._build_subagent_prompt()
+    prompt = mgr._build_subagent_prompt()
     assert isinstance(mgr.last_prompt_fit, dict) and mgr.last_prompt_fit["strict"] is True
+    assert mgr.last_prompt_fit["rung"] == "uniform_trim"
+    # #1379: the operator charter is appended AFTER the fit and is deliberately
+    # outside the cap, so the capped portion is what the ladder bounds — not
+    # the returned string. Asserting the whole string would be asserting the
+    # charter away.
+    charter_tail = ContextBuilder.SECTION_SEPARATOR + mgr.system_context
+    assert prompt.endswith(charter_tail)
+    assert len(prompt) - len(charter_tail) <= 3_000
+    assert mgr.last_prompt_fit["chars"] <= 3_000
 
     monkeypatch.setenv(ContextBuilder.SYSTEM_PROMPT_CAP_ENV, "60000")
     prompt = mgr._build_subagent_prompt()
     assert prompt.endswith("# Immutable operator charter\n\ncharter") and "## Working knowledge" in prompt
     assert mgr.last_prompt_fit["dropped"] == []
+
+
+def test_fair_budgets_are_keyed_on_length_not_position():
+    """Permuting the entries must permute the budgets identically.
+
+    This is the property that separates the ladder from positional
+    truncation: where an entry sits in the list decides nothing. A tail-slice
+    implementation would pass a "does it fit" assertion but fail this one.
+    """
+    lengths = [10, 4_000, 40, 4_000]
+    budgets = ContextBuilder._fair_budgets(lengths, 2_000)
+    reversed_budgets = ContextBuilder._fair_budgets(lengths[::-1], 2_000)
+    assert budgets == reversed_budgets[::-1]
+    # The two short entries fit outright; the two long ones share what is left
+    # and receive the SAME budget as each other, not a prefix-first split.
+    assert budgets[0] == 10 and budgets[2] == 40
+    assert budgets[1] == budgets[3]
+    assert sum(budgets) <= 2_000
+
+
+def test_uniform_trim_gives_over_budget_entries_the_same_allowance(tmp_path):
+    """Two entries of very different length get the same budget when both overflow."""
+    builder = _builder(tmp_path, "")
+    sections = [("short", "s" * 5_000), ("long", "l" * 50_000)]
+    trimmed, shortfall = builder._uniform_trim(sections, 6_000)
+    kept = dict(trimmed)
+    assert len(kept["short"]) == len(kept["long"]), (
+        "a 10x length difference must not buy a larger allowance"
+    )
+    assert shortfall > 0
+    assert builder.TRIM_NOTE.split("{")[0].strip() in kept["long"], (
+        "the loss must be visible in the artifact the model reads"
+    )
+
+
+def test_trimmed_entry_reports_the_characters_it_lost(tmp_path):
+    builder = _builder(tmp_path, "")
+    sections = [("only", "x" * 10_000)]
+    trimmed, _ = builder._uniform_trim(sections, 1_000)
+    body = dict(trimmed)["only"]
+    assert len(body) <= 1_000
+    lost = 10_000 - (1_000 - len(builder.TRIM_NOTE.format(n=0)))
+    assert "[trimmed" in body and "chars]" in body
+    assert str(lost)[:2] in body, "the note names how much went, not just that something did"

@@ -239,6 +239,7 @@ def record_cycle_outcome(
     verdict_reason: str | None = None,
     executor_llm_error: bool = False,
     lane: str | None = None,
+    prompt_fit_rung: str | None = None,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
 
@@ -294,6 +295,8 @@ def record_cycle_outcome(
         # written without ``lane`` (every pre-#1411 call site) is byte-
         # identical to before.
         row["lane"] = str(lane)
+    if prompt_fit_rung:
+        row["prompt_fit_rung"] = str(prompt_fit_rung)[:40]
     if files_changed is not None:
         try:
             from nanobot.runtime.demand import classify_change_tier

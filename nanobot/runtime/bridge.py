@@ -2959,9 +2959,13 @@ async def _main_impl_body():
             # here; a critical one that does not fit raises above instead.
             _prompt_fit = getattr(mgr, 'last_prompt_fit', None)
             if isinstance(_prompt_fit, dict):
+                _prompt_fit_rung = _prompt_fit.get('rung')
                 append_event(STATE_DIR, {
                     'phase': 'system_prompt', 'cycle_id': _cycle_id,
                     'chars': _prompt_fit.get('chars'), 'cap': _prompt_fit.get('cap'),
+                    'rung': _prompt_fit.get('rung'),
+                    'shortfall': _prompt_fit.get('shortfall', 0),
+                    'occupancy_alert': bool(_prompt_fit.get('occupancy_alert', False)),
                     # #1379: the per-section breakdown on EVERY row, not only
                     # at overflow — a legitimately empty section is 0, not
                     # absent. ``None`` only if the builder recorded nothing
@@ -3735,6 +3739,7 @@ async def _main_impl_body():
             'subagent_task_id': locals().get('_subagent_task_id', None),
             'executor_llm_error': locals().get('_executor_llm_error_text', ''),
             'system_prompt_overflow': locals().get('_system_prompt_overflow_text', ''),
+            'prompt_fit_rung': locals().get('_prompt_fit_rung'),
             'origin_main_observed': locals().get('_origin_main_observed', locals().get('main_sha_before', ''))
         }
 
@@ -3836,6 +3841,7 @@ async def _main_impl_body():
     _subagent_task_id = _res.get('subagent_task_id')
     _executor_llm_error_text = str(_res.get('executor_llm_error') or '')
     _system_prompt_overflow_text = str(_res.get('system_prompt_overflow') or '')
+    _prompt_fit_rung = None
     commits_pushed = cycle_commit_count if _integrated else 0
     import subprocess as _sp
 
@@ -3959,6 +3965,7 @@ async def _main_impl_body():
         # dead executor is countable from this row alone.
         executor_llm_error=bool(_executor_llm_error_text),
         lane=req.get('lane') or None,
+        prompt_fit_rung=_res.get('prompt_fit_rung'),
     )
     # #721: post-cycle tag at the terminal HEAD, same outcome value as the
     # ledger row above. Integrated -> main_sha_after (shared checkout stayed on

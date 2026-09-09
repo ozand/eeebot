@@ -78,16 +78,17 @@ class ContextBuilder:
         excluded_skill_names: list[str] | None = None,
         loop_profile: bool = False,
         strict: bool | None = None,
+        degrade_on_overflow: bool = False,
     ) -> str:
         """Build the system prompt from identity, bootstrap files, skills, and memory.
 
         Prompt ordering is identity, bootstrap, active skills, skills
         catalogue, then memory. Under the cap (#1300):
 
-        * ``strict`` (default for the loop profile): only bootstrap ``## ``
+        * ``strict`` (default for the loop profile): only bootstrap ``## ```
           sections carrying :data:`DROPPABLE_MARKER` may be dropped, whole,
-          largest first. If the rest still does not fit, raise
-          :class:`SystemPromptOverflowError` — never choose survivors by position.
+          largest first. If the rest still does not fit, the prompt degrades
+          uniformly and visibly — never choose survivors by position.
         * non-strict (interactive sessions): the pre-#1300 behaviour, bootstrap
           trimmed first at complete-line boundaries, loss logged.
 
@@ -128,7 +129,9 @@ Skills with available="false" need dependencies installed first - you can try in
 
         memory = self.memory.get_memory_context(loop=loop_profile)
         sections.append(("memory", f"# Memory\n\n{memory}" if memory else ""))
-        return self._fit_system_prompt(sections, strict=strict)
+        return self._fit_system_prompt(
+            sections, strict=strict, degrade_on_overflow=degrade_on_overflow,
+        )
 
     SECTION_SEPARATOR = "\n\n---\n\n"
 
@@ -275,15 +278,96 @@ Skills with available="false" need dependencies installed first - you can try in
         units = self._split_bootstrap_sections(sections[index][1])
         return sum(len(text) for _, text in units if self.DROPPABLE_MARKER in text)
 
-    def _fit_system_prompt(self, sections: list[tuple[str, str]], strict: bool = False) -> str:
+    @staticmethod
+    def _entry_names_only(sections: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """Keep each assembled entry's identifier while dropping its body."""
+        return [(name, f"# {name}") for name, content in sections if content]
+
+    TRIM_NOTE = "\n\n[trimmed {n} chars]"
+
+    @staticmethod
+    def _fair_budgets(lengths: list[int], available: int) -> list[int]:
+        """Split ``available`` across entries by equal share, water-filling.
+
+        An entry shorter than its share keeps all of its content, and what it
+        does not use is redistributed to the entries still over budget. A flat
+        ``available // n`` would gut a long entry to hand unusable slack to a
+        short one.
+
+        The allocation is keyed on LENGTH, never on order: permuting the input
+        permutes the output identically. That is what "no survivor chosen by
+        position" means here — a shorter entry is never cut so a longer one can
+        survive whole, and where the input arrives in the list decides nothing.
+        """
+        budgets = [0] * len(lengths)
+        pending = list(range(len(lengths)))
+        remaining = max(0, available)
+        while pending:
+            share = remaining // len(pending)
+            if share <= 0:
+                break
+            settled = [i for i in pending if lengths[i] <= share]
+            if not settled:
+                # Everyone left is over the share: they all take it, equally.
+                for i in pending:
+                    budgets[i] = share
+                break
+            for i in settled:
+                budgets[i] = lengths[i]
+                remaining -= lengths[i]
+                pending.remove(i)
+        return budgets
+
+    def _uniform_trim(
+        self,
+        sections: list[tuple[str, str]],
+        cap: int,
+    ) -> tuple[list[tuple[str, str]], int]:
+        """Trim each non-empty entry to its share of one shared budget.
+
+        No survivor is selected by position and the assembled prompt is never
+        sliced as one string. A section is an atomic entry: its contents may
+        be shortened, but it cannot be split into separately-selected pieces.
+
+        A trimmed entry carries :data:`TRIM_NOTE` inside its own budget, so the
+        loss is visible in the artifact the model reads and not only in the log
+        line we emit. Degradation nobody can see reads exactly like degradation
+        that never happened.
+        """
+        entries = [(name, content) for name, content in sections if content]
+        if not entries:
+            return [], 0
+        separator_chars = len(self.SECTION_SEPARATOR) * max(0, len(entries) - 1)
+        budgets = self._fair_budgets(
+            [len(content) for _, content in entries], max(0, cap - separator_chars)
+        )
+        trimmed: list[tuple[str, str]] = []
+        for (name, content), budget in zip(entries, budgets):
+            if len(content) <= budget:
+                trimmed.append((name, content))
+                continue
+            note = self.TRIM_NOTE.format(n=len(content) - budget)
+            kept = max(0, budget - len(note))
+            # If the note itself does not fit the budget, the body is already
+            # down to noise: keep the truncated body rather than only a note.
+            trimmed.append((name, content[:kept] + note if kept else content[:budget]))
+        shortfall = max(0, len(self._join_sections(sections)) - cap)
+        return trimmed, shortfall
+
+    def _fit_system_prompt(
+        self,
+        sections: list[tuple[str, str]],
+        strict: bool = False,
+        degrade_on_overflow: bool = False,
+    ) -> str:
         """Fit sections under the cap and record the outcome in :attr:`last_fit`.
 
         Strict (#1300): the only content the cap may remove is a bootstrap
         section the operator marked :data:`DROPPABLE_MARKER`, removed whole,
         largest first. Position never decides. If critical content still does
-        not fit, :class:`SystemPromptOverflowError` is raised — an under-specified
-        prompt is a failed build, not a quieter one. The decision recorded
-        here: the cap never drops a critical section.
+        not fit, the prompt uses the uniform degradation ladder: trim every
+        entry to the same budget, then fall back to names only. The decision
+        recorded here: the cap never drops a critical section by position.
 
         Non-strict (interactive sessions): the pre-#1300 behaviour — bootstrap
         is trimmed first at complete-line boundaries (#1191), then the later
@@ -300,6 +384,18 @@ Skills with available="false" need dependencies installed first - you can try in
         fit: dict[str, Any] = {"cap": cap, "strict": strict, "dropped": []}
         joined = self._record_fit(fit, section_names, sections)
         if len(joined) <= cap:
+            occupancy = len(joined) / cap if cap else 1.0
+            fit.update(
+                rung="full",
+                shortfall=0,
+                starved=[],
+                occupancy_alert=occupancy >= 0.92,
+            )
+            if occupancy >= 0.92:
+                logger.warning(
+                    "System prompt occupancy alert: rung=full occupancy={:.1%} cap={} chars={}",
+                    occupancy, cap, len(joined),
+                )
             fit["droppable_reserve_chars"] = self._droppable_reserve_chars(sections)
             self.last_fit = fit
             return joined
@@ -310,6 +406,47 @@ Skills with available="false" need dependencies installed first - you can try in
             droppable_reserve_chars = self._droppable_reserve_chars(sections)
             fit.update(dropped=dropped, droppable_reserve_chars=droppable_reserve_chars)
             self.last_fit = fit
+            if len(prompt) > cap and degrade_on_overflow:
+                shortfall = len(prompt) - cap
+                degraded, _ = self._uniform_trim(sections, cap)
+                uniform_prompt = self._record_fit(fit, section_names, degraded)
+                if len(uniform_prompt) <= cap and all(content for _, content in degraded):
+                    starved = [name for name, content in sections if len(content) > len(dict(degraded).get(name, ""))]
+                    fit.update(
+                        rung="uniform_trim",
+                        shortfall=shortfall,
+                        starved=starved,
+                        occupancy_alert=False,
+                        dropped=dropped,
+                        droppable_reserve_chars=0,
+                    )
+                    self.last_fit = fit
+                    logger.warning(
+                        "System prompt cap degradation: rung=uniform_trim "
+                        "starved={} shortfall={} cap={}",
+                        ",".join(starved) or "none", shortfall, cap,
+                    )
+                    return uniform_prompt
+
+                names_only = self._entry_names_only(sections)
+                names_prompt = self._record_fit(fit, section_names, names_only)
+                if len(names_prompt) <= cap:
+                    starved = [name for name, content in sections if content]
+                    fit.update(
+                        rung="names_only",
+                        shortfall=shortfall,
+                        starved=starved,
+                        occupancy_alert=False,
+                        dropped=dropped,
+                        droppable_reserve_chars=0,
+                    )
+                    self.last_fit = fit
+                    logger.warning(
+                        "System prompt cap degradation: rung=names_only "
+                        "starved={} shortfall={} cap={}",
+                        ",".join(starved) or "none", shortfall, cap,
+                    )
+                    return names_prompt
             if len(prompt) > cap:
                 raise SystemPromptOverflowError(
                     over_by=len(prompt) - cap, cap=cap,
@@ -348,6 +485,14 @@ Skills with available="false" need dependencies installed first - you can try in
             logger.warning("System prompt cap dropped content: {}", details)
         prompt = self._record_fit(fit, section_names, sections)
         fit.update(
+            # NOT `uniform_trim`: this branch line-trims and then drops whole
+            # sections in iteration order. Labelling a positional mechanism
+            # with the ladder's name would make `prompt_fit_rung` count two
+            # different behaviours as one.
+            rung="line_trim" if dropped_chars else "full",
+            shortfall=0,
+            starved=list(dropped_chars),
+            occupancy_alert=(len(prompt) / cap >= 0.92 if cap else True),
             dropped=[{"section": n, "chars": c, "how": "line-trim"} for n, c in dropped_chars.items()],
             droppable_reserve_chars=self._droppable_reserve_chars(sections),
         )
