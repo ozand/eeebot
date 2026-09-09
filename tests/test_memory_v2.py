@@ -62,6 +62,29 @@ def test_loop_memory_context_keeps_resident_rules_and_drops_whole_entries(tmp_pa
     assert store.last_index_fit["resident_chars"] <= len(ctx)
 
 
+def test_overlong_index_entry_is_word_bounded_and_reports_loss(tmp_path: Path):
+    from nanobot.agent.memory import MemoryStore
+
+    mem_dir = tmp_path / "memory"
+    mem_dir.mkdir()
+    description = "descriptive " * 200
+    index_file = mem_dir / "index.md"
+    index_file.write_text(
+        "\n".join([
+            "# Memory index", "", "## Facts (memory/facts/)", "",
+            f"* [Identity](facts/identity.md) — {description}",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    store = MemoryStore(tmp_path)
+    ctx = store.get_memory_context(loop=True, max_chars=4000)
+    identity_line = next(line for line in ctx.splitlines() if line.startswith("* [Identity]"))
+    assert len(identity_line) <= store.MAX_INDEX_ENTRY_CHARS
+    assert "[trimmed " in identity_line
+    assert "descriptiv" in identity_line
+
+
 def test_context_fit_records_memory_index_drop_details(tmp_path: Path):
     mem_dir = tmp_path / "memory"
     mem_dir.mkdir()
