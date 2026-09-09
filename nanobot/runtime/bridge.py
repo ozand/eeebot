@@ -3626,6 +3626,8 @@ async def _main_impl_body():
                     repo_root=_selfevo_repo,
                     backlog_title=backlog_title,
                     what_was_done=f'bridge subagent committed {commits_pushed} commit(s): {", ".join(files_changed[:3])}',
+                    state_dir=STATE_DIR,
+                    cycle_id=_cycle_id,
                 )
                 if marked:
                     # #678 F6: defense-in-depth — this commit already ran with zero
@@ -5229,6 +5231,8 @@ def _try_mark_backlog_done(
     repo_root: Path,
     backlog_title: str,
     what_was_done: str,
+    state_dir: Path | None = None,
+    cycle_id: str = "",
 ) -> bool:
     """Safety-net: if subagent forgot to mark its task [Done] in MEMORY.md, do it now.
 
@@ -5263,6 +5267,8 @@ def _try_mark_backlog_done(
     in_active = _re.search(rf'###\s+Priority\s+\d+:\s+{title_escaped}', text, _re.IGNORECASE)
 
     if not in_active:
+        if state_dir is not None:
+            _record_backlog_done_miss(state_dir, backlog_title, cycle_id, "active_title_not_found")
         return False  # title not found anywhere active
 
     # If not yet marked Done, mark it first
@@ -5282,6 +5288,8 @@ def _try_mark_backlog_done(
         what_was_done=what_was_done,
     )
     if updated == text:
+        if state_dir is not None:
+            _record_backlog_done_miss(state_dir, backlog_title, cycle_id, "completion_block_not_updated")
         return False
 
     try:
@@ -5297,10 +5305,37 @@ def _try_mark_backlog_done(
         capture_output=True, text=True,
     )
     committed = result.returncode == 0
+    if state_dir is not None:
+        _record_backlog_done_event(
+            state_dir, backlog_title, cycle_id,
+            "hit_updated" if committed else "hit_update_uncommitted",
+        )
     # #1219: the auto-seed of MEMORY.md priorities from state/research/feed.json
     # that used to follow here is gone with its writer-less input (see
     # _move_priority_to_completed's neighbour comment above).
     return committed
+
+
+def _record_backlog_done_event(
+    state_dir: Path, backlog_title: str, cycle_id: str, outcome: str,
+) -> None:
+    """Journal a completion-key hit or miss for post-hoc key-drift diagnosis."""
+    try:
+        from nanobot.runtime.cycle_ledger import append_event
+        append_event(state_dir, {
+            "phase": "backlog_done_guard",
+            "outcome": outcome,
+            "backlog_title": str(backlog_title or "")[:200],
+            "cycle_id": str(cycle_id or ""),
+        })
+    except Exception:
+        pass
+
+
+def _record_backlog_done_miss(
+    state_dir: Path, backlog_title: str, cycle_id: str, reason: str,
+) -> None:
+    _record_backlog_done_event(state_dir, backlog_title, cycle_id, "miss:" + reason)
 
 
 def _write_bridge_completed_result(
