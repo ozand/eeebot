@@ -20,6 +20,16 @@ from pathlib import Path
 from nanobot.runtime import reflector
 
 
+def _guard_rows(state_dir: Path, guard: str) -> list[dict]:
+    path = state_dir / "ledger" / "cycles.jsonl"
+    if not path.is_file():
+        return []
+    return [
+        row for row in (json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+        if row.get("phase") == "guard_key_match" and row.get("guard") == guard
+    ]
+
+
 def _ledger_rows(state_dir: Path, phase: str) -> list[dict]:
     path = state_dir / "ledger" / "cycles.jsonl"
     if not path.is_file():
@@ -163,6 +173,30 @@ def test_backlog_done_guard_records_a_hit_so_misses_have_a_denominator(tmp_path:
     assert rows[-1]["outcome"].startswith("hit"), (
         "without a hit row, zero misses cannot be told from zero runs"
     )
+
+
+def test_recent_failure_key_miss_is_recorded_without_changing_result(tmp_path: Path):
+    from nanobot.runtime import bridge
+    state = tmp_path / "state"
+    state.mkdir()
+    # No target path means structured intent cannot be derived; the legacy
+    # no-match return remains None, while the sought title is journaled.
+    assert bridge._recent_failure_match("reworded task", state, entries=[]) is None
+    rows = _guard_rows(state, "recent_failure")
+    assert rows and rows[-1]["outcome"] == "miss"
+    assert rows[-1]["key"] == "reworded task"
+
+
+def test_existence_index_miss_and_unavailable_are_distinct(tmp_path: Path, monkeypatch):
+    from nanobot.runtime import existence_index
+    state = tmp_path / "state"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert existence_index.find_similar(state, "novel title", limit=5) == []
+    assert _guard_rows(state, "existence_index")[-1]["outcome"] == "miss"
+    monkeypatch.setattr(existence_index, "_open_db", lambda *_: (_ for _ in ()).throw(OSError("unavailable")))
+    assert existence_index.find_similar(state, "broken index", limit=5) == []
+    assert _guard_rows(state, "existence_index")[-1]["outcome"] == "unavailable"
 
 
 def test_backlog_done_guard_without_state_dir_is_unchanged(tmp_path: Path):

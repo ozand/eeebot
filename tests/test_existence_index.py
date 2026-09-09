@@ -1000,10 +1000,15 @@ class TestBridgeExistenceIndexIntegration:
 
         rows = _read_ledger(state_dir)
         phases = [r["phase"] for r in rows]
-        assert phases == ["started", "dedup", "outcome"]
-        assert rows[1]["decision"] == "skipped_duplicate"
-        assert rows[1]["matched_against"] == "existence-index:scripts/track_memory.py"
-        assert rows[2]["outcome"] == "skipped-duplicate"
+        assert phases.count("guard_key_match") == 2
+        guard_rows = [row for row in rows if row["phase"] == "guard_key_match"]
+        existence_rows = [row for row in guard_rows if row["guard"] == "existence_index"]
+        assert existence_rows and existence_rows[-1]["outcome"] == "hit"
+        dedup_row = next(row for row in rows if row["phase"] == "dedup")
+        outcome_row = next(row for row in rows if row["phase"] == "outcome")
+        assert dedup_row["decision"] == "skipped_duplicate"
+        assert dedup_row["matched_against"] == "existence-index:scripts/track_memory.py"
+        assert outcome_row["outcome"] == "skipped-duplicate"
 
     def test_kill_switch_lets_semantic_duplicate_through_to_normal_path(self, tmp_path, monkeypatch):
         """With the gate disabled, the existence-index branch must not fire —

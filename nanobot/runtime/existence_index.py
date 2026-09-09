@@ -756,6 +756,19 @@ def _content_words(*texts: str) -> set[str]:
     return words
 
 
+def _record_guard_key_event(
+    state_dir: Path, guard: str, outcome: str, key: str, against: str = "",
+) -> None:
+    try:
+        from nanobot.runtime.cycle_ledger import append_event
+        append_event(state_dir, {
+            "phase": "guard_key_match", "guard": guard, "outcome": outcome,
+            "key": str(key or "")[:200], "against": str(against or "")[:200],
+        })
+    except Exception:
+        pass
+
+
 def find_similar(
     state_dir: Path, title: str, target_path: str | None = None, limit: int = 5,
 ) -> list[dict]:
@@ -828,6 +841,7 @@ def find_similar(
     try:
         con = _open_db(state_dir)
     except Exception:
+        _record_guard_key_event(state_dir, "existence_index", "unavailable", title, target_path or "")
         return []
 
     results: list[dict] = []
@@ -870,12 +884,16 @@ def find_similar(
                 "duplicate_suspect": duplicate_suspect,
             })
     except Exception:
+        _record_guard_key_event(state_dir, "existence_index", "unavailable", title, target_path or "")
         return []
     finally:
         try:
             con.close()
         except Exception:
             pass
+    _record_guard_key_event(
+        state_dir, "existence_index", "hit" if results else "miss", title, target_path or "",
+    )
     return results
 
 

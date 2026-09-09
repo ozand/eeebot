@@ -541,6 +541,20 @@ def _existing_priority_labels(goal_text: str) -> set[str]:
     return labels
 
 
+def _record_guard_key_event(
+    state_dir: Path, outcome: str, key: str, against: str = "",
+) -> None:
+    """Persist goal-label matching outcome without changing admission policy."""
+    try:
+        append_event(state_dir, {
+            "phase": "guard_key_match", "guard": "priority_labels",
+            "outcome": outcome, "key": str(key or "")[:200],
+            "against": str(against or "")[:200],
+        })
+    except Exception:
+        pass
+
+
 def _evidence_cited(evidence_ref: str, evidence: dict[str, str]) -> bool:
     """True iff ``evidence_ref`` names a presented evidence line: an id
     (``E2``, case-insensitive) or a verbatim quote (≥
@@ -776,6 +790,9 @@ def maybe_goal_review(
             candidates = sorted(candidates, key=_direction_rank)
 
         existing_labels = _existing_priority_labels(merged_text)
+        _record_guard_key_event(
+            state_dir, "baseline", "priority_labels", str(len(existing_labels)),
+        )
         accepted: list[dict[str, str]] = []
         rejected: list[dict[str, str]] = []
 
@@ -793,6 +810,7 @@ def maybe_goal_review(
             if normalized is None:
                 _reject(candidate, reason)
                 continue
+            _record_guard_key_event(state_dir, "hit", str(candidate.get("label") or ""), "priority_labels")
             if _normalize_label(normalized["label"]) in {
                 _normalize_label(a["label"]) for a in accepted
             }:
