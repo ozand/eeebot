@@ -648,6 +648,21 @@ def mark_reflection_consumed(
     for p in candidates:
         if p.is_file() and _mark_in_file(p, recommendation_detail, demand_id, cycle_id, summary):
             return True
+    # The caller may have no recommendation to consume, or its identity key
+    # may have drifted. Preserve the False return, but journal the sought key
+    # so the two cases are queryable rather than indistinguishable (#1448).
+    try:
+        from nanobot.runtime.cycle_ledger import append_event
+        append_event(Path(state_dir), {
+            "phase": "reflection_consumption",
+            "outcome": "miss",
+            "recommendation_detail": str(recommendation_detail or "")[:200],
+            "demand_id": str(demand_id or "")[:120],
+            "cycle_id": str(cycle_id or "")[:120],
+            "summary": str(summary or "")[:200],
+        })
+    except Exception:
+        pass
     return False
 
 
