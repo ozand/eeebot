@@ -348,8 +348,12 @@ def run_strategist(state_root: Path, repo_root: Path, llm: Callable[[list[dict[s
             # Class B reader (#1173): advice generated from a mostly empty
             # archive view is worse than none. No LLM call, no writes; the
             # watermark stays so the next run retries against fresh inputs.
+            # #1444 preserves the current refusal policy: unavailable counts
+            # exactly like empty; only the recorded cause is now distinct.
+            status = inputs["inputs_status"]
             decision.update({"prompt_chars": 0, "reason": REASON_INPUTS_UNAVAILABLE,
-                             "empty_inputs": strategist_inputs.empty_inputs(inputs["inputs_status"])})
+                             "empty_inputs": strategist_inputs.empty_inputs(status),
+                             "unavailable_inputs": strategist_inputs.unavailable_inputs(status)})
             _record_decision(state_root, decision)
             return decision
         system, user = build_strategist_prompt(inputs, old)

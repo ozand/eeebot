@@ -1,9 +1,9 @@
 """Bounded, provenance-carrying archive inputs for the strategist role (#1182).
 
-Every reader returns a value AND a status ("complete" | "partial" | "empty") so
+Every reader returns a value AND a status ("complete" | "partial" | "empty" | "unavailable") so
 :func:`nanobot.runtime.strategist.run_strategist` can refuse the LLM call when
 the archive view is mostly empty instead of advising from nothing. Readers never
-raise; failures degrade to "empty" with a note. Stdlib only.
+raise; failed reads are ``unavailable`` and genuine emptiness is ``empty``. Stdlib only.
 
 Ledger access goes through ``state_access.ledger_window`` (#1174): the live
 ``cycles.jsonl`` plus the rotated ``cycles-YYYY-MM-DD.jsonl.gz`` archives inside
@@ -67,6 +67,37 @@ def load_json(path: Path, default: Any = None, max_bytes: int = _MAX_JSON_BYTES)
     except Exception:
         return default
 
+
+def _json_read_status(path: Path, max_bytes: int = _MAX_JSON_BYTES) -> tuple[Any, str]:
+    """Read JSON while preserving missing, empty, and failed-read states."""
+    try:
+        if not path.exists():
+            return None, "missing"
+        if not path.is_file() or path.stat().st_size > max_bytes:
+            return None, "unavailable"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value, "empty" if value in (None, {}, [], "") else "complete"
+    except Exception:
+        return None, "unavailable"
+
+
+def _yaml_read_status(path: Path) -> tuple[Any, str]:
+    """Read a bounded YAML corpus with missing/failed-read provenance."""
+    try:
+        if not path.exists():
+            return None, "missing"
+        if not path.is_file() or path.stat().st_size > _HISTORY_MAX_FILE_BYTES:
+            return None, "unavailable"
+        import yaml
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if isinstance(value, dict):
+            value = value.get("lessons") or value.get("errors") or []
+        if not isinstance(value, list):
+            return None, "unavailable"
+        return value, "empty" if not value else "complete"
+    except Exception:
+        return None, "unavailable"
+
 def _read_lines(path: Path) -> list[str] | None:
     """All lines of a text or ``.gz`` file; ``None`` when unreadable/corrupt."""
     opener = gzip.open if path.name.endswith(".gz") else open
@@ -100,7 +131,19 @@ def charter_input(state_root: Path) -> tuple[str, dict[str, Any]]:
         text = str(legacy.get("text") or "") if isinstance(legacy, dict) else ""
         source = "goal_text.json" if text else "none"
     text = text[:_MAX_TEXT]
-    return text, {"chars": len(text), "source": source, "status": "complete" if text else "empty"}
+    # Missing is a genuine empty only when the source is readable and blank;
+    # failed reads remain unavailable. The refusal decision is intentionally
+    # unchanged in should_refuse() (#1444).
+    if text:
+        status = "complete"
+    elif source == "none":
+        release_path = Path(_release_root_from_env()) / "goals.md"
+        legacy_path = Path(state_root) / "goals" / "goal_text.json"
+        attempted = release_path.exists() or legacy_path.exists()
+        status = "unavailable" if attempted else "empty"
+    else:
+        status = "empty"
+    return text, {"chars": len(text), "source": source, "status": status}
 
 def _history_rows(path: Path) -> list[dict[str, Any]]:
     """Newest :data:`_HISTORY_TAIL_ROWS` rows of ``path`` inside the 7-day window."""
@@ -150,17 +193,21 @@ def history_series(rows: list[dict[str, Any]], samples: int = _HISTORY_SAMPLES) 
 
 def scorecard_input(state_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     root = Path(state_root)
-    latest = load_json(root / "scorecard" / "latest.json", {})
-    if not isinstance(latest, dict) or not latest:
+    latest_path = root / "scorecard" / "latest.json"
+    latest, latest_status = _json_read_status(latest_path)
+    if latest_status == "missing":
         legacy = load_json(root / "scorecard.json", {})
         latest = legacy if isinstance(legacy, dict) else {}
+        latest_status = "complete" if latest else "empty"
+    elif latest_status == "unavailable":
+        latest = {}
     history = _history_rows(root / "scorecard" / "history.jsonl")
     if not history:
         archives = sorted((root / "scorecard" / "archive").glob("*.jsonl.gz"))
         if archives:
             history = _history_rows(archives[-1])
     trend = history_series(history)
-    status = "empty" if not latest else ("complete" if history else "partial")
+    status = "unavailable" if latest_status == "unavailable" else ("empty" if not latest else ("complete" if history else "partial"))
     meta = {"latest_keys": len(latest), "history_rows": len(history), "history_samples": len(trend["samples"]), "status": status}
     return {"latest": latest, "history_7d": trend}, meta
 
@@ -234,8 +281,8 @@ def tree_digest(state_root: Path, rows: list[dict[str, Any]] | None = None) -> t
     """Node count, best-path depth, fitness summary over the fields
     ``evolution_tree.record_node`` actually populates, and the outcome mix of
     the nodes' cycles joined from ledger ``outcome`` rows."""
-    tree = load_json(Path(state_root) / "evolution" / "tree.json", {})
-    tree = tree if isinstance(tree, dict) else {}
+    tree_value, tree_status = _json_read_status(Path(state_root) / "evolution" / "tree.json")
+    tree = tree_value if isinstance(tree_value, dict) else {}
     nodes_raw = tree.get("nodes")
     node_map: dict[str, dict[str, Any]] = {}
     if isinstance(nodes_raw, dict):
@@ -267,7 +314,7 @@ def tree_digest(state_root: Path, rows: list[dict[str, Any]] | None = None) -> t
     digest = {"node_count": len(node_map), "current_best_path": best_path, "fitness_summary": summary, "outcome_mix": outcome_mix,
               "switches": len(tree.get("switches") or []), "ts_span": [stamps[0], stamps[-1]] if stamps else None}
     fitness_values = sum(len(v) for v in fitness.values())
-    status = "empty" if not node_map else ("complete" if fitness_values else "partial")
+    status = "unavailable" if tree_status == "unavailable" else ("empty" if not node_map else ("complete" if fitness_values else "partial"))
     return digest, {"nodes": len(node_map), "fitness_values": fitness_values, "status": status}
 
 def _clip(value: Any) -> str:
@@ -292,7 +339,11 @@ def insights_input(repo_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     cards: list[dict[str, str]] = []
     legacy: list[str] = []
     filler_skipped = 0
-    for entry in sorted(bounded_load_yaml(root / "lessons" / "lessons.yaml"), key=lambda e: str(e.get("first_seen") or e.get("date") or ""), reverse=True):
+    lessons_value, lessons_status = _yaml_read_status(root / "lessons" / "lessons.yaml")
+    errors_value, errors_status = _yaml_read_status(root / "lessons" / "errors.yaml")
+    lessons_entries = lessons_value if isinstance(lessons_value, list) else []
+    errors_entries = errors_value if isinstance(errors_value, list) else []
+    for entry in sorted(lessons_entries, key=lambda e: str(e.get("first_seen") or e.get("date") or ""), reverse=True):
         if "problem" in entry or "solution" in entry:
             if not solution_is_meaningful(entry.get("problem"), entry.get("solution")):
                 filler_skipped += 1
@@ -304,21 +355,34 @@ def insights_input(repo_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             if text not in legacy and len(legacy) < _INSIGHTS_LEGACY:
                 legacy.append(text)
     errors = [{"title": _clip(e.get("title")), "root_cause": _clip(e.get("root_cause")), "prevention": _clip(e.get("prevention"))}
-              for e in bounded_load_yaml(root / "lessons" / "errors.yaml")[-_INSIGHTS_ERRORS:]]
+              for e in errors_entries[-_INSIGHTS_ERRORS:]]
     indexes: dict[str, str] = {}
+    index_unavailable = False
     for rel in ("memory/index.md", "docs/index.md"):
+        path = root / rel
         try:
-            indexes[rel] = (root / rel).read_text(encoding="utf-8")[:_INDEX_CHARS]
+            if path.exists():
+                indexes[rel] = path.read_text(encoding="utf-8")[:_INDEX_CHARS]
+            else:
+                indexes[rel] = ""
         except Exception:
+            index_unavailable = True
             indexes[rel] = ""
+    unavailable = lessons_status == "unavailable" or errors_status == "unavailable" or index_unavailable
     data = {"cards": cards, "legacy_insights": legacy, "errors": errors, "indexes": indexes}
     meta = {"cards": len(cards), "filler_skipped": filler_skipped, "legacy": len(legacy), "errors": len(errors),
-            "status": "complete" if cards or legacy else "empty"}
+            "status": "unavailable" if unavailable else ("complete" if cards or legacy else "empty")}
     return data, meta
 
 def empty_inputs(inputs_status: dict[str, Any]) -> list[str]:
-    """Names in :data:`INPUT_NAMES` whose status is ``empty``."""
+    """Names in :data:`INPUT_NAMES` whose status is genuinely ``empty``."""
     return [name for name in INPUT_NAMES if (inputs_status.get(name) or {}).get("status") == "empty"]
 
+def unavailable_inputs(inputs_status: dict[str, Any]) -> list[str]:
+    """Names whose attempted input read was unavailable."""
+    return [name for name in INPUT_NAMES if (inputs_status.get(name) or {}).get("status") == "unavailable"]
+
 def should_refuse(inputs_status: dict[str, Any]) -> bool:
-    return len(empty_inputs(inputs_status)) > _MAX_EMPTY_INPUTS
+    # Preserve the existing refusal decision exactly while #1444 records the
+    # operator question separately: unavailable counts like empty for now.
+    return len(empty_inputs(inputs_status) + unavailable_inputs(inputs_status)) > _MAX_EMPTY_INPUTS

@@ -313,6 +313,40 @@ def test_refuses_the_llm_call_when_two_inputs_are_empty(roots, monkeypatch, caps
     assert json.loads(capsys.readouterr().out)["reason"] == "inputs_unavailable"
 
 
+def test_failed_scorecard_read_is_unavailable_but_empty_scorecard_is_empty(roots):
+    state_root, repo_root, _ = roots
+    scorecard_dir = state_root / "scorecard"
+    scorecard_dir.mkdir()
+    (scorecard_dir / "latest.json").write_text("{bad", encoding="utf-8")
+    _, unavailable_meta = strategist_inputs.scorecard_input(state_root)
+    assert unavailable_meta["status"] == "unavailable"
+    (scorecard_dir / "latest.json").write_text("{}", encoding="utf-8")
+    _, empty_meta = strategist_inputs.scorecard_input(state_root)
+    assert empty_meta["status"] == "empty"
+    assert unavailable_meta["status"] != empty_meta["status"]
+
+
+def test_failed_lessons_read_is_unavailable_but_empty_corpus_is_empty(roots):
+    _, repo_root, _ = roots
+    lessons = repo_root / "lessons"
+    lessons.mkdir()
+    (lessons / "lessons.yaml").write_text("- [", encoding="utf-8")
+    _, unavailable_meta = strategist_inputs.insights_input(repo_root)
+    assert unavailable_meta["status"] == "unavailable"
+    (lessons / "lessons.yaml").write_text("[]", encoding="utf-8")
+    _, empty_meta = strategist_inputs.insights_input(repo_root)
+    assert empty_meta["status"] == "empty"
+
+
+def test_should_refuse_verdict_is_unchanged_for_empty_and_unavailable():
+    from itertools import product
+    names = strategist_inputs.INPUT_NAMES
+    for states in product(("empty", "unavailable", "complete"), repeat=len(names)):
+        status = {name: {"status": value} for name, value in zip(names, states)}
+        expected = sum(value in {"empty", "unavailable"} for value in states) > strategist_inputs._MAX_EMPTY_INPUTS
+        assert strategist_inputs.should_refuse(status) is expected
+
+
 def test_one_empty_input_is_tolerated(roots):
     state_root, repo_root, release_root = roots
     _healthy(state_root, repo_root, release_root)
@@ -321,6 +355,21 @@ def test_one_empty_input_is_tolerated(roots):
     result = run_strategist(state_root, repo_root, llm=llm)
     assert llm.call_count == 1 and result["success"] is True
     assert result["inputs_status"]["insights"]["status"] == "empty"
+    assert result.get("unavailable_inputs", []) == []
+
+
+def test_refusal_records_empty_and_unavailable_inputs(roots):
+    state_root, repo_root, _ = roots
+    (state_root / "scorecard").mkdir()
+    (state_root / "scorecard" / "latest.json").write_text("{bad", encoding="utf-8")
+    _write_ledger(state_root, [])
+    result = run_strategist(state_root, repo_root, llm=MagicMock())
+    assert result["reason"] == "inputs_unavailable"
+    assert "scorecard" in result["unavailable_inputs"]
+    assert "goals" in result["empty_inputs"]
+    row = json.loads((state_root / "strategist" / "decisions.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert "scorecard" in row["unavailable_inputs"]
+    assert "goals" in row["empty_inputs"]
 
 
 def test_prompt_stays_within_cap_and_records_halved_sections(roots):
