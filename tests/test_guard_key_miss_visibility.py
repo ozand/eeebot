@@ -129,6 +129,23 @@ def _memory_repo(tmp_path: Path, backlog_title: str) -> Path:
     return repo
 
 
+def test_proposer_sourced_request_skips_backlog_done_guard(tmp_path: Path):
+    from nanobot.runtime import bridge
+
+    state = tmp_path / "state"
+    state.mkdir()
+    repo = _memory_repo(tmp_path, "Add the widget")
+    assert bridge._is_proposer_request({"source_artifact": "llm_proposer"}) is True
+    assert bridge._is_proposer_request({"source_artifact": "improvements/llm-proposed-cycle.json"}) is True
+
+    # The integration call-site uses this predicate to avoid a guaranteed
+    # active_title_not_found miss for proposer tasks that were never backlog items.
+    assert bridge._is_proposer_request({"source_artifact": "operator/backlog.json"}) is False
+    # The caller must not invoke `_try_mark_backlog_done` for this provenance;
+    # calling the helper directly would correctly test a real operator-key miss.
+    assert _ledger_rows(state, "backlog_done_guard") == []
+
+
 def test_backlog_done_guard_records_a_miss_when_the_title_drifted(tmp_path: Path):
     """The instance reworded its own backlog heading; the completion key misses."""
     from nanobot.runtime import bridge
