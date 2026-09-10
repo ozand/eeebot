@@ -77,6 +77,17 @@ def test_deploy_script_fail_closed_and_ghost_cleanup() -> None:
     # #1259: CRITICALs go through `die` (same text, returns 1 so the ERR trap fires)
     assert 'die "$ghost_unit is still active after purge"' in content
 
+    # #1461: cp preserves an existing destination inode's ownership and mode.
+    # The repair must be scoped to exactly the service/timer files this sync writes
+    # and must fail the deploy if either assertion cannot be applied.
+    assert 'for unit_source in "$RELEASE_DIR"/host/eeepc/systemd/*.service "$RELEASE_DIR"/host/eeepc/systemd/*.timer; do' in content
+    assert 'unit_name="$(basename "$unit_source")"' in content
+    assert 'sudo chown root:root "/etc/systemd/system/$unit_name"' in content
+    assert 'sudo chmod 0644 "/etc/systemd/system/$unit_name"' in content
+    assert 'sudo systemctl daemon-reload' in content
+    assert content.index('sudo chown root:root "/etc/systemd/system/$unit_name"') < content.index('sudo systemctl daemon-reload', content.index('syncing systemd units + reloading'))
+    assert '/etc/systemd/system/*' not in content[content.index('syncing systemd units + reloading'):content.index('sync_timer()')]
+
     # #1236: a long-running dashboard must restart after current activation,
     # while rollback restores it before restarting the bridge.
     assert 'DASHBOARD_UNIT=eeebot-dashboard.service' in content
