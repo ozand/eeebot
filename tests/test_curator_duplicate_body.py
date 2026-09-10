@@ -193,6 +193,23 @@ def test_duplicate_claim_with_no_path_at_all_is_unimportant(tmp_path):
     assert "no cited artifact" in reason
 
 
+def test_provenance_path_is_not_used_as_verified_duplicate_path(tmp_path):
+    """The unverified field cannot satisfy the strong duplicate verifier."""
+    workspace = _workspace(tmp_path, [AGENTS_FACT])
+    entry = _candidates()["REFL-5b349fbfddd0-0"]
+
+    decision, reason, target = verify_duplicate_claim(
+        workspace,
+        {"action": "duplicate", "lesson_id": "L1", "provenance_path": AGENTS_FACT,
+         "reason": "candidate only"},
+        entry,
+    )
+
+    assert decision == "unimportant"
+    assert target == ""
+    assert "no cited artifact" in reason
+
+
 @pytest.mark.parametrize("path", [
     "../../../etc/passwd.md",
     "memory/../../escape.md",
@@ -361,6 +378,47 @@ def test_no_duplicate_row_is_written_without_a_resolvable_target(tmp_path):
     assert by_id["REFL-5b349fbfddd0-0"]["target_file"] == AGENTS_FACT
     assert by_id["ERR-2026-06-14-001"]["decision"] == "unimportant"
     assert by_id["ERR-2026-06-15-004"]["decision"] == "unimportant"
+
+
+def test_unimportant_provenance_is_optional_and_keeps_target_empty(tmp_path):
+    """Capture an already-surfaced path without upgrading it to a verification."""
+    entry = {"id": "L1", "problem": "same guidance"}
+    workspace = tmp_path
+    _seed_journal(workspace, {"L1": entry})
+    state = tmp_path / "state"
+
+    def llm(messages, model):
+        return json.dumps([
+            {"action": "unimportant", "lesson_id": "L1",
+             "provenance_path": AGENTS_FACT, "reason": "candidate only"},
+        ])
+
+    result = run_curation(workspace, state, llm=llm)
+    assert result["ok"]
+    row = _decisions(state)[0]
+    assert row["decision"] == "unimportant"
+    assert row["target_file"] == ""
+    assert row["provenance_path"] == AGENTS_FACT
+
+
+def test_unimportant_without_provenance_omits_field(tmp_path):
+    """An absent hint is omitted, not serialized as an empty ambiguous value."""
+    entry = {"id": "L1", "problem": "same guidance"}
+    workspace = tmp_path
+    _seed_journal(workspace, {"L1": entry})
+    state = tmp_path / "state"
+
+    def llm(messages, model):
+        return json.dumps([
+            {"action": "unimportant", "lesson_id": "L1", "reason": "not enough evidence"},
+        ])
+
+    result = run_curation(workspace, state, llm=llm)
+    assert result["ok"]
+    row = _decisions(state)[0]
+    assert row["decision"] == "unimportant"
+    assert row["target_file"] == ""
+    assert "provenance_path" not in row
 
 
 def test_existing_decision_rows_are_not_rewritten(tmp_path):
