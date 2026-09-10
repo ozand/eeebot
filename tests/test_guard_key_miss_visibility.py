@@ -225,3 +225,26 @@ def test_backlog_done_guard_without_state_dir_is_unchanged(tmp_path: Path):
         repo_root=repo, backlog_title="Add a widget", what_was_done="did it",
     )
     assert result is False
+
+
+def test_call_site_actually_gates_on_provenance():
+    """#1460: pin the WIRING, not only the predicate.
+
+    `test_proposer_sourced_request_skips_backlog_done_guard` exercises
+    `_is_proposer_request` in isolation. That passes whether or not the call
+    site consults it, so on its own it would go green with the guard still
+    firing on every proposer task — the exact state this issue reports.
+
+    The integration call lives deep inside the bridge cycle and cannot be
+    reached without a full spawn, so the wiring is pinned at source level,
+    the same way `tests/test_deploy_integrity.py` pins shell invariants.
+    """
+    from pathlib import Path as _Path
+
+    source = (_Path(__file__).resolve().parents[1] / "nanobot" / "runtime" / "bridge.py").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    assert "if _integrated and backlog_title and not _is_proposer_request(req):" in source, (
+        "the completion guard must be gated on provenance at the call site; "
+        "testing the predicate alone would pass with the guard still firing"
+    )
