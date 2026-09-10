@@ -168,6 +168,23 @@ class TestSpawnBoundaryTamperDetection:
         assert integrity[0]["files"] == ["demand/completed.json"]
 
 
+    def test_blocked_filename_takes_precedence_over_sidecar_tamper(self, tmp_path, monkeypatch):
+        """Potential secret disclosure remains the durable reason when both fire."""
+        base = tmp_path
+        state_dir = _setup(base, monkeypatch)
+        monkeypatch.setattr(bridge, "SubagentManager", _TamperingFakeSubagentManager)
+        _init_selfevo_repo(base)
+        _seed_completed_sidecar(state_dir)
+        _seed_bridge_request(state_dir, "req-both", "cycle-both")
+        monkeypatch.setattr(bridge, "_blocked_pattern_violations", ["secrets/token.txt"], raising=False)
+
+        assert asyncio.run(bridge._main_impl()) == 0
+        rows = _read_ledger(state_dir)
+        outcomes = [r for r in rows if r["phase"] == "outcome"]
+        assert outcomes[-1]["outcome"] == "failed"
+        assert outcomes[-1]["reason"] == "blocked_file_present"
+
+
 class TestFitnessSidecarHashes:
     def test_missing_files_hash_as_absent(self, tmp_path):
         hashes = bridge._fitness_sidecar_hashes(tmp_path)
