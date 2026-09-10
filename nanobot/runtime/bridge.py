@@ -2735,6 +2735,7 @@ async def _main_impl_body():
         else:
             _record_guard_key_event(
                 STATE_DIR, 'existence_index', 'miss', _dup_check_title or '', _target_path or '',
+                lookup='bridge_dedup_gate', legacy_outcome='miss',
             )
             # #720 piece 4: neither pre-spawn suppression fired — the dedup
             # heuristic's own "proceeded" decision, so #705 can measure the
@@ -4864,6 +4865,7 @@ def _recent_failure_match(
 
 def _record_guard_key_event(
     state_dir: 'Path', guard: str, outcome: str, key: str, against: str = '',
+    *, lookup: str = 'unspecified', legacy_outcome: str | None = None,
 ) -> None:
     """Persist mutable-key diagnostics without changing guard decisions."""
     try:
@@ -4873,6 +4875,8 @@ def _record_guard_key_event(
             'outcome': outcome,
             'key': str(key or '')[:200],
             'against': str(against or '')[:200],
+            'lookup': str(lookup or 'unspecified'),
+            **({'legacy_outcome': legacy_outcome} if legacy_outcome else {}),
         })
     except Exception:
         pass

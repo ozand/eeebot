@@ -204,6 +204,22 @@ def test_recent_failure_key_miss_is_recorded_without_changing_result(tmp_path: P
     assert rows[-1]["key"] == "reworded task"
 
 
+def test_bridge_existence_index_miss_is_groupable_without_changing_return_value(tmp_path: Path):
+    from nanobot.runtime import bridge
+
+    state = tmp_path / "state"
+    state.mkdir()
+    result = bridge._record_guard_key_event(
+        state, "existence_index", "miss", "novel task", "scripts/new.py",
+        lookup="bridge_dedup_gate", legacy_outcome="miss",
+    )
+    assert result is None
+    rows = _guard_rows(state, "existence_index")
+    assert rows[-1]["lookup"] == "bridge_dedup_gate"
+    assert rows[-1]["outcome"] == "miss"
+    assert rows[-1]["legacy_outcome"] == "miss"
+
+
 def test_existence_index_miss_and_unavailable_are_distinct(tmp_path: Path, monkeypatch):
     from nanobot.runtime import existence_index
     state = tmp_path / "state"
@@ -214,6 +230,18 @@ def test_existence_index_miss_and_unavailable_are_distinct(tmp_path: Path, monke
     monkeypatch.setattr(existence_index, "_open_db", lambda *_: (_ for _ in ()).throw(OSError("unavailable")))
     assert existence_index.find_similar(state, "broken index", limit=5) == []
     assert _guard_rows(state, "existence_index")[-1]["outcome"] == "unavailable"
+
+
+def test_existence_index_emitters_have_lookup_and_legacy_mapping():
+    from pathlib import Path as _Path
+
+    bridge_source = (_Path(__file__).resolve().parents[1] / "nanobot" / "runtime" / "bridge.py").read_text(encoding="utf-8")
+    assert "lookup='bridge_dedup_gate', legacy_outcome='miss'" in bridge_source
+
+    from nanobot.runtime import existence_index
+    source = _Path(existence_index.__file__).read_text(encoding="utf-8")
+    assert 'lookup=lookup' in source
+    assert 'legacy_outcome="hit" if rows_returned else "miss"' in source
 
 
 def test_backlog_done_guard_without_state_dir_is_unchanged(tmp_path: Path):
