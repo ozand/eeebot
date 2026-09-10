@@ -47,6 +47,7 @@ def test_loop_memory_context_keeps_resident_rules_and_drops_whole_entries(tmp_pa
     store = MemoryStore(tmp_path)
     ctx = store.get_memory_context(loop=True, max_chars=4000)
 
+    assert MemoryStore.LOOP_MEMORY_DATA_TAG in ctx
     assert "[Identity]" in ctx
     assert "[Write target: workspace]" in ctx
     assert "[DO NOT touch]" in ctx
@@ -57,7 +58,31 @@ def test_loop_memory_context_keeps_resident_rules_and_drops_whole_entries(tmp_pa
     assert "Old Fact 0" not in ctx
     assert "[trimmed" not in ctx
     assert store.last_index_fit["dropped_entries"] > 0
+    assert all(len(line) <= store.MAX_INDEX_ENTRY_CHARS for line in ctx.splitlines() if line.startswith("- ") or line.startswith("* "))
     assert store.last_index_fit["resident_chars"] <= len(ctx)
+
+
+def test_overlong_index_entry_is_word_bounded_and_reports_loss(tmp_path: Path):
+    from nanobot.agent.memory import MemoryStore
+
+    mem_dir = tmp_path / "memory"
+    mem_dir.mkdir()
+    description = "descriptive " * 200
+    index_file = mem_dir / "index.md"
+    index_file.write_text(
+        "\n".join([
+            "# Memory index", "", "## Facts (memory/facts/)", "",
+            f"* [Identity](facts/identity.md) — {description}",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    store = MemoryStore(tmp_path)
+    ctx = store.get_memory_context(loop=True, max_chars=4000)
+    identity_line = next(line for line in ctx.splitlines() if line.startswith("* [Identity]"))
+    assert len(identity_line) <= store.MAX_INDEX_ENTRY_CHARS
+    assert "[trimmed " in identity_line
+    assert "descriptiv" in identity_line
 
 
 def test_context_fit_records_memory_index_drop_details(tmp_path: Path):
@@ -134,3 +159,4 @@ def test_intact_index_reports_every_resident_label_matched(tmp_path: Path):
     store.get_memory_context(loop=True, max_chars=4000)
     assert store.last_index_fit["resident_matched"] == 5
     assert store.last_index_fit["resident_missing"] == []
+    assert MemoryStore.LOOP_MEMORY_DATA_TAG in store.get_memory_context(loop=True, max_chars=4000)
