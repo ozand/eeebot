@@ -129,6 +129,23 @@ def _memory_repo(tmp_path: Path, backlog_title: str) -> Path:
     return repo
 
 
+def test_proposer_sourced_request_skips_backlog_done_guard(tmp_path: Path):
+    from nanobot.runtime import bridge
+
+    state = tmp_path / "state"
+    state.mkdir()
+    repo = _memory_repo(tmp_path, "Add the widget")
+    assert bridge._is_proposer_request({"source_artifact": "llm_proposer"}) is True
+    assert bridge._is_proposer_request({"source_artifact": "improvements/llm-proposed-cycle.json"}) is True
+
+    # The integration call-site uses this predicate to avoid a guaranteed
+    # active_title_not_found miss for proposer tasks that were never backlog items.
+    assert bridge._is_proposer_request({"source_artifact": "operator/backlog.json"}) is False
+    # The caller must not invoke `_try_mark_backlog_done` for this provenance;
+    # calling the helper directly would correctly test a real operator-key miss.
+    assert _ledger_rows(state, "backlog_done_guard") == []
+
+
 def test_backlog_done_guard_records_a_miss_when_the_title_drifted(tmp_path: Path):
     """The instance reworded its own backlog heading; the completion key misses."""
     from nanobot.runtime import bridge
@@ -208,3 +225,26 @@ def test_backlog_done_guard_without_state_dir_is_unchanged(tmp_path: Path):
         repo_root=repo, backlog_title="Add a widget", what_was_done="did it",
     )
     assert result is False
+
+
+def test_call_site_actually_gates_on_provenance():
+    """#1460: pin the WIRING, not only the predicate.
+
+    `test_proposer_sourced_request_skips_backlog_done_guard` exercises
+    `_is_proposer_request` in isolation. That passes whether or not the call
+    site consults it, so on its own it would go green with the guard still
+    firing on every proposer task — the exact state this issue reports.
+
+    The integration call lives deep inside the bridge cycle and cannot be
+    reached without a full spawn, so the wiring is pinned at source level,
+    the same way `tests/test_deploy_integrity.py` pins shell invariants.
+    """
+    from pathlib import Path as _Path
+
+    source = (_Path(__file__).resolve().parents[1] / "nanobot" / "runtime" / "bridge.py").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    assert "if _integrated and backlog_title and not _is_proposer_request(req):" in source, (
+        "the completion guard must be gated on provenance at the call site; "
+        "testing the predicate alone would pass with the guard still firing"
+    )

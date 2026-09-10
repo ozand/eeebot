@@ -3634,7 +3634,7 @@ async def _main_impl_body():
             except Exception:
                 pass
 
-            if _integrated and backlog_title:
+            if _integrated and backlog_title and not _is_proposer_request(req):
                 marked = _try_mark_backlog_done(
                     repo_root=_selfevo_repo,
                     backlog_title=backlog_title,
@@ -5257,6 +5257,12 @@ def _move_priority_to_completed(
         text_updated = text_without_block.rstrip() + f'\n\n## Completed\n{compact_entry}'
 
     return text_updated
+
+
+def _is_proposer_request(req: dict[str, Any]) -> bool:
+    """Return whether this request came from the LLM proposer, not the operator backlog."""
+    source = str(req.get("source_artifact") or "").replace("\\", "/")
+    return source == "llm_proposer" or Path(source).name.startswith("llm-proposed-")
 
 
 def _try_mark_backlog_done(
