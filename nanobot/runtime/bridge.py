@@ -3288,6 +3288,10 @@ async def _main_impl_body():
                         'files': _integrity_changed,
                     },
                 )
+                # #1456: detection is an integration gate, not merely an
+                # observability warning. The changed paths are names only;
+                # payloads never enter the durable reason.
+                _rollback_reason = 'fitness_sidecar_tamper'
 
             # ── #846: out-of-band origin/main push detection ─────────────────────
             # Positive-only, fail-open (see _detect_out_of_band_main). The loop is
@@ -3315,7 +3319,16 @@ async def _main_impl_body():
 
             # ── Gate decision: integrate to main ONLY on green (R12-R15) ─────────
             if cycle_commit_count > 0:
-                if _blocked_pattern_violations:
+                if _integrity_changed:
+                    _rollback_reason = 'fitness_sidecar_tamper'
+                    print(
+                        f'integrity: refusing integration after fitness sidecar mismatch: '
+                        f'{", ".join(_integrity_changed)} (#1456)'
+                    )
+                    record_gate_decision(
+                        STATE_DIR, _cycle_id, False, _rollback_reason, _integrity_changed,
+                    )
+                elif _blocked_pattern_violations:
                     # #678 F3: a secret-shaped/blocked filename anywhere in the
                     # cycle's commits is a hard block, regardless of smoke result.
                     _rollback_reason = 'blocked_file_present'

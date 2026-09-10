@@ -123,12 +123,33 @@ class TestSpawnBoundaryTamperDetection:
         assert integrity[0]["files"] == ["demand/completed.json"]
         assert integrity[0]["cycle_id"] == "cycle-tamper"
 
+        outcome_rows = [r for r in rows if r["phase"] == "outcome"]
+        assert outcome_rows[-1]["outcome"] == "failed"
+        assert outcome_rows[-1]["reason"] == "fitness_sidecar_tamper"
+        assert not (base / "target_workspace" / ".nanobot" / "subagents" / "latest.json").exists()
+
         # The incident is surfaced in the cycle's own key_learnings.
         result_path = state_dir / "subagents" / "results" / "result-req-tamper.json"
         payload = json.loads(result_path.read_text(encoding="utf-8"))
         learnings = "\n".join(payload["key_learnings"])
         assert "INTEGRITY WARNING" in learnings
         assert "demand/completed.json" in learnings
+        assert "operator-confirmed" not in learnings
+        assert "confirmed" not in learnings
+
+    def test_legitimate_bridge_owned_write_after_spawn_does_not_block(self, tmp_path, monkeypatch):
+        """The bridge's post-window collect_skill_reads write is legitimate."""
+        base = tmp_path
+        state_dir = _setup(base, monkeypatch)
+        monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
+        _init_selfevo_repo(base)
+        _seed_completed_sidecar(state_dir)
+        _seed_bridge_request(state_dir, "req-clean-write", "cycle-clean-write")
+
+        assert asyncio.run(bridge._main_impl()) == 0
+        rows = _read_ledger(state_dir)
+        assert [r for r in rows if r["phase"] == "integrity"] == []
+        assert [r for r in rows if r["phase"] == "outcome"][-1]["outcome"] == "success"
 
     def test_sidecar_created_during_spawn_counts_as_change(self, tmp_path, monkeypatch):
         """Missing-file sentinel: a sidecar that did not exist pre-spawn but
