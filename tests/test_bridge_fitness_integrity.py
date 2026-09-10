@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -123,12 +124,33 @@ class TestSpawnBoundaryTamperDetection:
         assert integrity[0]["files"] == ["demand/completed.json"]
         assert integrity[0]["cycle_id"] == "cycle-tamper"
 
+        outcome_rows = [r for r in rows if r["phase"] == "outcome"]
+        assert outcome_rows[-1]["outcome"] == "failed"
+        assert outcome_rows[-1]["reason"] == "fitness_sidecar_tamper"
+        assert not (base / "target_workspace" / ".nanobot" / "subagents" / "latest.json").exists()
+
         # The incident is surfaced in the cycle's own key_learnings.
         result_path = state_dir / "subagents" / "results" / "result-req-tamper.json"
         payload = json.loads(result_path.read_text(encoding="utf-8"))
         learnings = "\n".join(payload["key_learnings"])
         assert "INTEGRITY WARNING" in learnings
         assert "demand/completed.json" in learnings
+        assert "operator-confirmed" not in learnings
+        assert "confirmed" not in learnings
+
+    def test_legitimate_bridge_owned_write_after_spawn_does_not_block(self, tmp_path, monkeypatch):
+        """The bridge's post-window collect_skill_reads write is legitimate."""
+        base = tmp_path
+        state_dir = _setup(base, monkeypatch)
+        monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
+        _init_selfevo_repo(base)
+        _seed_completed_sidecar(state_dir)
+        _seed_bridge_request(state_dir, "req-clean-write", "cycle-clean-write")
+
+        assert asyncio.run(bridge._main_impl()) == 0
+        rows = _read_ledger(state_dir)
+        assert [r for r in rows if r["phase"] == "integrity"] == []
+        assert [r for r in rows if r["phase"] == "outcome"][-1]["outcome"] == "success"
 
     def test_sidecar_created_during_spawn_counts_as_change(self, tmp_path, monkeypatch):
         """Missing-file sentinel: a sidecar that did not exist pre-spawn but
@@ -145,6 +167,42 @@ class TestSpawnBoundaryTamperDetection:
         integrity = [r for r in _read_ledger(state_dir) if r["phase"] == "integrity"]
         assert len(integrity) == 1
         assert integrity[0]["files"] == ["demand/completed.json"]
+
+
+    def test_blocked_filename_takes_precedence_over_sidecar_tamper(self):
+        """Pin the gate order for the state where both conditions are true.
+
+        Both values are locals inside ``_main_impl_body``, so a module-level
+        monkeypatch cannot construct that combined state. The gate is deep in
+        the full-cycle path; pin its source-level precedence instead, and
+        explicitly prove this assertion is non-vacuous by testing a swapped
+        copy of the gate.
+        """
+        source = (Path(__file__).resolve().parents[1] / "nanobot" / "runtime" / "bridge.py").read_text(
+            encoding="utf-8", errors="replace"
+        )
+
+        def assert_block_precedence(text):
+            gate_start = text.index("if cycle_commit_count > 0:")
+            mutation_gate = text.index("elif _mutation_violations:", gate_start)
+            gate = text[gate_start:mutation_gate]
+            assert gate.index("if _blocked_pattern_violations:") < gate.index(
+                "elif _integrity_changed:"
+            ), "blocked-file disclosure must take precedence over sidecar tamper"
+
+        assert_block_precedence(source)
+
+        gate_start = source.index("if cycle_commit_count > 0:")
+        mutation_gate = source.index("elif _mutation_violations:", gate_start)
+        gate = source[gate_start:mutation_gate]
+        swapped_gate = (
+            gate.replace("if _blocked_pattern_violations:", "if __blocked_pattern_violations__:", 1)
+            .replace("elif _integrity_changed:", "if _blocked_pattern_violations:", 1)
+            .replace("if __blocked_pattern_violations__:", "elif _integrity_changed:", 1)
+        )
+        swapped_source = source[:gate_start] + swapped_gate + source[mutation_gate:]
+        with pytest.raises(AssertionError):
+            assert_block_precedence(swapped_source)
 
 
 class TestFitnessSidecarHashes:
