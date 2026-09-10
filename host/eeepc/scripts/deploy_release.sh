@@ -328,6 +328,15 @@ fi
 if [ "$VERIFY_ONLY" -eq 0 ]; then
   echo "[remote] syncing systemd units + reloading"
   sudo cp "$RELEASE_DIR/host/eeepc/systemd/"*.service "$RELEASE_DIR/host/eeepc/systemd/"*.timer /etc/systemd/system/
+  # cp preserves the destination inode's owner and mode.  Assert the complete
+  # deploy-owned unit set after copying so an existing non-root-owned unit is
+  # repaired on this deploy rather than remaining writable by its old owner.
+  for unit_source in "$RELEASE_DIR"/host/eeepc/systemd/*.service "$RELEASE_DIR"/host/eeepc/systemd/*.timer; do
+    [ -f "$unit_source" ] || continue
+    unit_name="$(basename "$unit_source")"
+    sudo chown root:root "/etc/systemd/system/$unit_name"
+    sudo chmod 0644 "/etc/systemd/system/$unit_name"
+  done
   sudo systemctl daemon-reload
 fi
 
