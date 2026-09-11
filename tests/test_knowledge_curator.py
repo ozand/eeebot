@@ -308,6 +308,19 @@ def test_staging_failure_leaves_watermark_unmoved(tmp_path):
     assert not (state / "curator" / "watermark.json").exists()
 
 
+def test_lessons_after_reports_source_and_cursor_states(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert lessons_after(empty, "missing", return_status=True) == ([], "source_empty")
+
+    _journal(tmp_path, ["L1", "L2"])
+    entries = list(lessons_after(tmp_path, "", return_status=True)[0])
+    assert len(entries) == 2
+    newest = entries[-1]["id"]
+    assert lessons_after(tmp_path, newest, return_status=True)[1] == "cursor_found"
+    assert lessons_after(tmp_path, "orphaned-cursor", return_status=True) == ([], "cursor_orphaned")
+
+
 def test_archived_lessons_are_in_watermark_stream(tmp_path):
     _journal(tmp_path, ["L2"])
     archive = tmp_path / "lessons/archive"
