@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from tests.test_eeebot_dashboard_truth import DASHBOARD, _render_ready, _write_jsonl
