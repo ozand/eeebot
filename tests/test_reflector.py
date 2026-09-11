@@ -27,6 +27,51 @@ def _answer(cycle: str = "c1") -> str:
     return json.dumps({"cycle_id": cycle, "summary": "good", "findings": [{"kind": "good_practice", "detail": "bounded"}], "recommendations": [{"kind": "approach_hint", "detail": "reuse helper", "evidence": cycle}], "followed_previous": []})
 
 
+def test_ledger_rows_reads_gzip_archive(tmp_path: Path):
+    archive = tmp_path / "ledger" / "cycles-2026-08-26.jsonl.gz"
+    archive.parent.mkdir(parents=True)
+    with gzip.open(archive, "wt", encoding="utf-8") as fh:
+        for i in range(5):
+            fh.write(json.dumps({"phase": "outcome", "cycle_id": f"gz-{i}", "outcome": "success"}) + "\n")
+    rows = reflector._ledger_rows(tmp_path)
+    assert [row["cycle_id"] for row in rows] == [f"gz-{i}" for i in range(5)]
+
+
+def test_missing_watermark_does_not_advance_or_persist(tmp_path: Path):
+    _write(tmp_path / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "new-0", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "new-1", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+    ])
+    (tmp_path / "reflector").mkdir(parents=True)
+    (tmp_path / "reflector/watermark.json").write_text(json.dumps({"last_processed": "lost"}))
+    result = reflector.run_reflector(tmp_path, llm=lambda *_: "bad")
+    assert result["status"] == "cursor_orphaned"
+    assert json.loads((tmp_path / "reflector/watermark.json").read_text())["last_processed"] == "lost"
+    row = json.loads((tmp_path / "reflector/reflections.jsonl").read_text().splitlines()[-1])
+    assert row["status"] == "cursor_orphaned"
+
+
+def test_archive_cursor_reanchors_and_records_coverage(tmp_path: Path):
+    _write(tmp_path / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "new-0", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "new-1", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+    ])
+    archive = tmp_path / "ledger/cycles-2026-08-25.jsonl.gz"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(archive, "wt", encoding="utf-8") as fh:
+        fh.write(json.dumps({"phase": "outcome", "cycle_id": "lost", "outcome": "success"}) + "\n")
+    (tmp_path / "reflector").mkdir(parents=True)
+    (tmp_path / "reflector/watermark.json").write_text(json.dumps({"last_processed": "lost"}))
+    result = reflector.run_reflector(tmp_path, llm=lambda *_: _answer("new-0"))
+    assert result.get("reanchor", {}).get("lost_cursor") == "lost"
+    assert result.get("reanchor", {}).get("cursor_archive") == "cycles-2026-08-25.jsonl.gz"
+    assert json.loads((tmp_path / "reflector/watermark.json").read_text())["last_processed"] == "new-1"
+    rows = [json.loads(line) for line in (tmp_path / "reflector/reanchors.jsonl").read_text().splitlines()]
+    reanchors = [row for row in rows if row.get("status") == "cursor_aged_out"]
+    assert reanchors[-1]["lost_cursor"] == "lost"
+    assert reanchors[-1]["cursor_archive"] == "cycles-2026-08-25.jsonl.gz"
+
+
 def test_reflector_journal_watermark_and_prior_tail(tmp_path: Path):
     _seed(tmp_path)
     seen = []
