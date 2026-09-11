@@ -658,6 +658,29 @@ class TestKillSwitchAndFailOpen:
         )
         assert matched is None
 
+    def test_missing_document_content_evidence_is_unavailable_not_duplicate(self, tmp_path):
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        _write_script(repo, "scripts/track_memory.py", "track memory usage over time.")
+        ei.reindex(state_dir, repo)
+        con = sqlite3.connect(str(ei._index_path(state_dir)))
+        try:
+            row = con.execute(
+                "SELECT hash FROM documents WHERE kind='script' AND path='scripts/track_memory.py'"
+            ).fetchone()
+            assert row is not None
+            con.execute("DELETE FROM content WHERE hash = ?", (row[0],))
+            con.commit()
+        finally:
+            con.close()
+
+        hits = ei.find_similar(state_dir, "monitor RAM and memory usage", limit=5, lookup="find_duplicate_script")
+        assert hits == []
+        rows = _read_ledger(state_dir)
+        event = [r for r in rows if r.get("phase") == "guard_key_match"][-1]
+        assert event["outcome"] == "unavailable"
+        assert event.get("legacy_outcome") is None
+
     def test_enabled_by_default(self, tmp_path, monkeypatch):
         monkeypatch.delenv(ei.ENABLED_ENV, raising=False)
         assert ei.existence_index_enabled() is True

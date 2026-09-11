@@ -868,6 +868,30 @@ def find_similar(
             "FROM docs_fts WHERE docs_fts MATCH ? ORDER BY bm25(docs_fts) LIMIT ?",
             (match_query, max(1, limit)),
         ).fetchall()
+        # FTS rows are only an index view.  Never treat a dangling FTS row as
+        # proof that an artifact exists: verify its active document and
+        # content-addressed payload before classifying any hit.  A missing
+        # companion row is unavailable evidence, not a duplicate (#1474).
+        for kind, path, text, _score in rows:
+            document = con.execute(
+                "SELECT hash, active FROM documents WHERE kind = ? AND path = ?",
+                (kind, path),
+            ).fetchone()
+            if document is None or int(document[1] or 0) != 1:
+                _record_guard_key_event(
+                    state_dir, "existence_index", "unavailable", title, target_path or "",
+                    lookup=lookup,
+                )
+                return []
+            content = con.execute(
+                "SELECT text FROM content WHERE hash = ?", (document[0],)
+            ).fetchone()
+            if content is None or content[0] != text:
+                _record_guard_key_event(
+                    state_dir, "existence_index", "unavailable", title, target_path or "",
+                    lookup=lookup,
+                )
+                return []
         for kind, path, text, score in rows:
             duplicate_suspect = False
             hit_is_test = (path or "").startswith("tests/") or "/tests/" in (path or "")

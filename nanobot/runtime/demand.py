@@ -1789,35 +1789,130 @@ def _load_retirement_cooldown(state_dir: Path) -> dict[str, Any]:
     return data
 
 
-def mark_skill_retired(state_dir: Path, rel: str, now: datetime) -> None:
-    """Record a skill path in the retirement cooldown sidecar (#958).
+_RETIREMENT_UNVERIFIED = "unverified"
+_RETIREMENT_VERIFIED_ABSENT = "verified_absent"
+_RETIREMENT_UNAVAILABLE = "unavailable"
 
-    Called by the demand collector when it emits a retirement item, so
-    subsequent passes know this path was retired and can warn on re-creation.
-    Fail-open: any write error is silently swallowed.
-    """
+
+def _retirement_artifact_state(selfevo_repo: Path | None, rel: str) -> str:
+    """Classify the expected retired artifact without treating missing data as proof."""
+    if selfevo_repo is None:
+        return _RETIREMENT_UNAVAILABLE
+    try:
+        repo = Path(selfevo_repo)
+        if not repo.is_dir():
+            return _RETIREMENT_UNAVAILABLE
+        return "present" if (repo / rel).is_file() else "absent"
+    except Exception:
+        return _RETIREMENT_UNAVAILABLE
+
+
+def _retirement_record(raw: Any) -> dict[str, Any]:
+    """Normalize legacy timestamp markers as unverified, never completed."""
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str) and raw.strip():
+        return {
+            "requested_at": raw,
+            "status": _RETIREMENT_UNVERIFIED,
+            "verification": "legacy_timestamp_only",
+        }
+    return {"status": _RETIREMENT_UNVERIFIED, "verification": "missing_marker_data"}
+
+
+def _verify_retirement_markers(
+    state_dir: Path, selfevo_repo: Path | None, now: datetime,
+) -> None:
+    """Refresh marker status from the actual workspace, fail-closed on uncertainty."""
     try:
         data = _load_retirement_cooldown(state_dir)
-        data["paths"][rel] = now.isoformat().replace("+00:00", "Z")
+        changed = False
+        for rel, raw in list(data.get("paths", {}).items()):
+            record = _retirement_record(raw)
+            artifact = _retirement_artifact_state(selfevo_repo, str(rel))
+            status = (
+                _RETIREMENT_VERIFIED_ABSENT if artifact == "absent"
+                else _RETIREMENT_UNAVAILABLE if artifact == _RETIREMENT_UNAVAILABLE
+                else _RETIREMENT_UNVERIFIED
+            )
+            if record.get("status") != status:
+                record["status"] = status
+                changed = True
+            record["verification"] = {
+                "present": "artifact_present",
+                "absent": "artifact_absent",
+                _RETIREMENT_UNAVAILABLE: "artifact_state_unavailable",
+            }.get(artifact, "artifact_state_unavailable")
+            if status == _RETIREMENT_VERIFIED_ABSENT:
+                verified_at = record.get("verified_at")
+                if not isinstance(verified_at, str) or not verified_at.strip():
+                    record["verified_at"] = now.isoformat().replace("+00:00", "Z")
+                    changed = True
+            else:
+                if "verified_at" in record:
+                    record.pop("verified_at", None)
+                    changed = True
+            if record != raw:
+                data["paths"][rel] = record
+                changed = True
+        if changed:
+            _write_json(_retirement_cooldown_path(state_dir), data)
+    except Exception:
+        pass
+
+
+def mark_skill_retired(
+    state_dir: Path,
+    rel: str,
+    now: datetime,
+    selfevo_repo: Path | None = None,
+) -> None:
+    """Record a retirement request, completed only after artifact verification."""
+    try:
+        data = _load_retirement_cooldown(state_dir)
+        artifact = _retirement_artifact_state(selfevo_repo, rel)
+        status = (
+            _RETIREMENT_VERIFIED_ABSENT if artifact == "absent"
+            else _RETIREMENT_UNAVAILABLE if artifact == _RETIREMENT_UNAVAILABLE
+            else _RETIREMENT_UNVERIFIED
+        )
+        record: dict[str, Any] = {
+            "requested_at": now.isoformat().replace("+00:00", "Z"),
+            "status": status,
+            "verification": {
+                "present": "artifact_present",
+                "absent": "artifact_absent",
+                _RETIREMENT_UNAVAILABLE: "artifact_state_unavailable",
+            }.get(artifact, "artifact_state_unavailable"),
+        }
+        if status == _RETIREMENT_VERIFIED_ABSENT:
+            record["verified_at"] = record["requested_at"]
+        data["paths"][rel] = record
         _write_json(_retirement_cooldown_path(state_dir), data)
     except Exception:
         pass
 
 
-def retired_skill_paths_in_cooldown(state_dir: Path, now: datetime) -> dict[str, str]:
-    """Return skill paths retired within _SKILL_RETIRE_COOLDOWN_DAYS (path -> retired_at).
-
-    Used by the proposer context to warn about re-creation of recently-retired paths.
-    Fail-open to empty dict.
-    """
+def retired_skill_paths_in_cooldown(
+    state_dir: Path,
+    now: datetime,
+    selfevo_repo: Path | None = None,
+) -> dict[str, str]:
+    """Return only verified-absent paths within the anti-flap cooldown."""
     try:
+        _verify_retirement_markers(state_dir, selfevo_repo, now)
         data = _load_retirement_cooldown(state_dir)
         cutoff = now - timedelta(days=_SKILL_RETIRE_COOLDOWN_DAYS)
         active: dict[str, str] = {}
-        for path, ts_raw in data.get("paths", {}).items():
-            ts = _parse_ts(ts_raw)
+        for path, raw in data.get("paths", {}).items():
+            record = _retirement_record(raw)
+            if record.get("status") != _RETIREMENT_VERIFIED_ABSENT:
+                continue
+            if _retirement_artifact_state(selfevo_repo, str(path)) != "absent":
+                continue
+            ts = _parse_ts(record.get("verified_at") or record.get("requested_at"))
             if ts is not None and ts >= cutoff:
-                active[path] = ts_raw
+                active[str(path)] = str(record.get("verified_at") or record.get("requested_at"))
         return active
     except Exception:
         return {}
@@ -2025,7 +2120,7 @@ def _repair_unused_items(
                                 affected_path=rel,
                             )
                         )
-                        mark_skill_retired(state_dir, rel, now)
+                        mark_skill_retired(state_dir, rel, now, selfevo_repo)
                     else:
                         summary = f"repair: exercise never-read skill {rel} — wire or improve it, do not build a new one-shot"
                         items.append(_make_item("defect", summary, f"harness-confirmed skill path={rel}; repair-unused demand" , affected_path=rel))

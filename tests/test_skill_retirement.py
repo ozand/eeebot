@@ -183,8 +183,73 @@ def test_all_three_conditions_required(tmp_path: Path, monkeypatch):
 # ─── cooldown sidecar ────────────────────────────────────────────────────────
 
 
-def test_retirement_writes_cooldown_sidecar(tmp_path: Path, monkeypatch):
-    """A retired skill path appears in the cooldown sidecar."""
+def test_retirement_marker_with_file_present_keeps_retirement_demand_eligible(tmp_path: Path, monkeypatch):
+    repo = _repo(tmp_path)
+    now = _now()
+    state = tmp_path / "state"
+    rel = "skills/idle-skill/SKILL.md"
+    demand.mark_skill_retired(state, rel, now, repo)
+    for summary_base in (
+        f"repair: exercise never-read skill {rel}",
+        f"repair: re-wire idle skill {rel}",
+    ):
+        _seed_completed(state, demand.item_id("defect", summary_base[:demand._MAX_SUMMARY_CHARS]))
+    monkeypatch.setattr("nanobot.runtime.usage_evidence._git_creation_iso", lambda *_: (now - timedelta(days=10)).isoformat())
+
+    items = demand._repair_unused_items(state, repo, now)
+    assert any(rel in item.get("affected_path", "") and "retire skill" in item.get("summary", "") for item in items)
+
+
+def test_retirement_marker_with_file_present_is_unverified_and_not_in_cooldown(tmp_path: Path, monkeypatch):
+    repo = _repo(tmp_path)
+    now = _now()
+    state = tmp_path / "state"
+    rel = "skills/idle-skill/SKILL.md"
+    demand.mark_skill_retired(state, rel, now, repo)
+
+    raw = json.loads((state / "demand" / "skill_retirement_cooldown.json").read_text())
+    assert raw["paths"][rel]["status"] == demand._RETIREMENT_UNVERIFIED
+    assert demand.retired_skill_paths_in_cooldown(state, now, repo) == {}
+
+
+def test_retirement_marker_with_file_absent_is_verified_and_in_cooldown(tmp_path: Path):
+    repo = _repo(tmp_path)
+    now = _now()
+    state = tmp_path / "state"
+    rel = "skills/idle-skill/SKILL.md"
+    (repo / rel).unlink()
+    demand.mark_skill_retired(state, rel, now, repo)
+
+    raw = json.loads((state / "demand" / "skill_retirement_cooldown.json").read_text())
+    assert raw["paths"][rel]["status"] == demand._RETIREMENT_VERIFIED_ABSENT
+    assert rel in demand.retired_skill_paths_in_cooldown(state, now, repo)
+
+
+def test_missing_repository_is_explicitly_unavailable(tmp_path: Path):
+    state = tmp_path / "state"
+    now = _now()
+    rel = "skills/idle-skill/SKILL.md"
+    demand.mark_skill_retired(state, rel, now)
+
+    raw = json.loads((state / "demand" / "skill_retirement_cooldown.json").read_text())
+    assert raw["paths"][rel]["status"] == demand._RETIREMENT_UNAVAILABLE
+    assert demand.retired_skill_paths_in_cooldown(state, now) == {}
+
+
+def test_legacy_marker_is_reverified_before_cooldown(tmp_path: Path):
+    repo = _repo(tmp_path)
+    now = _now()
+    state = tmp_path / "state"
+    rel = "skills/idle-skill/SKILL.md"
+    path = state / "demand" / "skill_retirement_cooldown.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"schema_version": "skill-retirement-cooldown-v1", "paths": {rel: now.isoformat().replace("+00:00", "Z")}}))
+
+    assert demand.retired_skill_paths_in_cooldown(state, now, repo) == {}
+
+
+def test_retirement_writes_unverified_marker_for_present_skill(tmp_path: Path, monkeypatch):
+    """A demand marker does not become cooldown proof while the file remains."""
     repo = _repo(tmp_path)
     now = _now()
     state = tmp_path / "state"
@@ -200,8 +265,9 @@ def test_retirement_writes_cooldown_sidecar(tmp_path: Path, monkeypatch):
 
     demand._repair_unused_items(state, repo, now)
 
-    cooldown = demand.retired_skill_paths_in_cooldown(state, now)
-    assert rel in cooldown, "Retired skill path must appear in cooldown sidecar"
+    raw = json.loads((state / "demand" / "skill_retirement_cooldown.json").read_text())
+    assert raw["paths"][rel]["status"] == demand._RETIREMENT_UNVERIFIED
+    assert demand.retired_skill_paths_in_cooldown(state, now, repo) == {}
 
 
 def test_cooldown_expires_after_m_days(tmp_path: Path):
@@ -209,9 +275,9 @@ def test_cooldown_expires_after_m_days(tmp_path: Path):
     state = tmp_path / "state"
     now = _now()
     old_ts = now - timedelta(days=demand._SKILL_RETIRE_COOLDOWN_DAYS + 1)
-    demand.mark_skill_retired(state, "skills/old-skill/SKILL.md", old_ts)
+    demand.mark_skill_retired(state, "skills/old-skill/SKILL.md", old_ts, tmp_path / "repo")
 
-    cooldown = demand.retired_skill_paths_in_cooldown(state, now)
+    cooldown = demand.retired_skill_paths_in_cooldown(state, now, tmp_path / "repo")
     assert "skills/old-skill/SKILL.md" not in cooldown
 
 

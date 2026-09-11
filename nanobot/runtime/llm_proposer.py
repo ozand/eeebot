@@ -1639,7 +1639,7 @@ def build_context(
             guardrail_parts += ["", "## CAPTURED pattern hint (steering only)", captured_hint]
         # #958: warn about re-creation of recently-retired skill paths.
         try:
-            _cooldown_paths = demand.retired_skill_paths_in_cooldown(state_dir, now)
+            _cooldown_paths = demand.retired_skill_paths_in_cooldown(state_dir, now, selfevo_repo)
             if _cooldown_paths:
                 _warn_lines = [
                     f"- {p} (retired {ts[:10]})" for p, ts in sorted(_cooldown_paths.items())
