@@ -331,7 +331,8 @@ def test_lessons_after_reports_source_and_cursor_states(tmp_path):
     entries = list(lessons_after(tmp_path, "", return_status=True)[0])
     assert len(entries) == 2
     newest = entries[-1]["id"]
-    assert lessons_after(tmp_path, newest, return_status=True)[1] == "cursor_found"
+    assert lessons_after(tmp_path, newest, return_status=True)[1] == "cursor_at_end"
+    assert lessons_after(tmp_path, "L1", return_status=True)[1] == "cursor_found"
     assert lessons_after(tmp_path, "orphaned-cursor", return_status=True) == ([], "cursor_orphaned")
 
 

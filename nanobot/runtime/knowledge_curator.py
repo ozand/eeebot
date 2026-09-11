@@ -302,6 +302,8 @@ def lessons_after(
         result.append(entry)
         if len(result) >= max(1, limit):
             break
+    if status == "cursor_found" and not result:
+        status = "cursor_at_end"
     if return_status:
         return result, status
     return result
