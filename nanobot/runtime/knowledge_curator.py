@@ -272,9 +272,20 @@ def lessons_after(
     *,
     limit: int = MAX_LESSONS_DEFAULT,
     state_dir: Path | None = None,
-) -> list[dict[str, Any]]:
+    return_status: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], str]:
     entries = list(iter_lessons(workspace, state_dir=state_dir))
     entries.sort(key=_entry_sort_key)
+
+    keys = {_entry_key(entry) for entry in entries if _entry_key(entry)}
+    if not entries:
+        status = "source_empty"
+    elif not watermark:
+        status = "cursor_unset"
+    elif watermark not in keys:
+        status = "cursor_orphaned"
+    else:
+        status = "cursor_found"
 
     found = not bool(watermark)
     result: list[dict[str, Any]] = []
@@ -291,6 +302,10 @@ def lessons_after(
         result.append(entry)
         if len(result) >= max(1, limit):
             break
+    if status == "cursor_found" and not result:
+        status = "cursor_at_end"
+    if return_status:
+        return result, status
     return result
 
 
@@ -1981,9 +1996,12 @@ def run_curation(
     wm_path = state_dir / "curator" / "watermark.json"
     old = _safe_json(wm_path, {})
     watermark = str(old.get("last_processed") or old.get("last_processed_id") or "") if isinstance(old, dict) else ""
-    entries = lessons_after(workspace, watermark, limit=max_lessons, state_dir=state_dir)
+    entries, cursor_status = lessons_after(
+        workspace, watermark, limit=max_lessons, state_dir=state_dir, return_status=True,
+    )
     if not entries:
-        curation_stage = {"status": "empty", "processed": 0, "writes": 0, "staged": []}
+        empty_status = "empty" if cursor_status == "source_empty" else cursor_status
+        curation_stage = {"status": empty_status, "processed": 0, "writes": 0, "staged": []}
         result = {"ok": True, "processed": 0, "writes": 0, "staged": [], "stages": {
             "reflector_mint": reflector_stage,
             "curation": curation_stage,

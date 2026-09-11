@@ -205,12 +205,13 @@ def test_partial_batch_watermark_leaves_deferred_suffix_for_next_run(
         for i in range(40)
     ]
 
-    def fake_lessons_after(_workspace, watermark, *, limit, state_dir):
+    def fake_lessons_after(_workspace, watermark, *, limit, state_dir, return_status=False):
         start = next(
             (i + 1 for i, item in enumerate(lessons) if item["id"] == watermark),
             0,
         )
-        return lessons[start : start + limit]
+        entries = lessons[start : start + limit]
+        return (entries, "cursor_found" if entries else "cursor_at_end") if return_status else entries
 
     seen_batches: list[list[str]] = []
 
@@ -254,6 +255,20 @@ def test_partial_batch_watermark_leaves_deferred_suffix_for_next_run(
     assert json.loads(
         (state / "curator" / "watermark.json").read_text(encoding="utf-8")
     )["last_processed_id"] == lessons[-1]["id"]
+
+
+def test_orphaned_cursor_status_reaches_curation_report_without_llm(tmp_path):
+    _journal(tmp_path, ["L1", "L2"])
+    state = tmp_path / "state"
+    state.joinpath("curator").mkdir(parents=True)
+    (state / "curator/watermark.json").write_text(json.dumps({"last_processed_id": "missing"}))
+    called = []
+    result = run_curation(tmp_path, state, llm=lambda *args: called.append(args))
+    assert result["ok"] is True
+    assert result["stages"]["curation"] == {
+        "status": "cursor_orphaned", "processed": 0, "writes": 0, "staged": [],
+    }
+    assert called == []
 
 
 def test_watermark_skips_prior_and_failure_does_not_advance(tmp_path):
@@ -306,6 +321,20 @@ def test_staging_failure_leaves_watermark_unmoved(tmp_path):
     ]))
     assert not result["ok"]
     assert not (state / "curator" / "watermark.json").exists()
+
+
+def test_lessons_after_reports_source_and_cursor_states(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert lessons_after(empty, "missing", return_status=True) == ([], "source_empty")
+
+    _journal(tmp_path, ["L1", "L2"])
+    entries = list(lessons_after(tmp_path, "", return_status=True)[0])
+    assert len(entries) == 2
+    newest = entries[-1]["id"]
+    assert lessons_after(tmp_path, newest, return_status=True)[1] == "cursor_at_end"
+    assert lessons_after(tmp_path, "L1", return_status=True)[1] == "cursor_found"
+    assert lessons_after(tmp_path, "orphaned-cursor", return_status=True) == ([], "cursor_orphaned")
 
 
 def test_archived_lessons_are_in_watermark_stream(tmp_path):
