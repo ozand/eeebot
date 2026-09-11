@@ -1876,8 +1876,13 @@ def mark_skill_retired(
             else _RETIREMENT_UNAVAILABLE if artifact == _RETIREMENT_UNAVAILABLE
             else _RETIREMENT_UNVERIFIED
         )
+        requested_at = now.isoformat().replace("+00:00", "Z")
+        previous = data.get("paths", {}).get(rel)
+        previous_record = _retirement_record(previous)
+        if isinstance(previous_record.get("requested_at"), str) and previous_record.get("requested_at", "").strip():
+            requested_at = previous_record["requested_at"]
         record: dict[str, Any] = {
-            "requested_at": now.isoformat().replace("+00:00", "Z"),
+            "requested_at": requested_at,
             "status": status,
             "verification": {
                 "present": "artifact_present",

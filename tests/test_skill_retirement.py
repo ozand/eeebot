@@ -183,6 +183,23 @@ def test_all_three_conditions_required(tmp_path: Path, monkeypatch):
 # ─── cooldown sidecar ────────────────────────────────────────────────────────
 
 
+def test_first_retirement_request_time_is_preserved_across_retries(tmp_path: Path):
+    repo = _repo(tmp_path)
+    state = tmp_path / "state"
+    rel = "skills/idle-skill/SKILL.md"
+    first = datetime(2026, 9, 11, 5, 0, tzinfo=timezone.utc)
+    second = datetime(2026, 9, 11, 16, 54, tzinfo=timezone.utc)
+
+    demand.mark_skill_retired(state, rel, first, repo)
+    first_record = json.loads((state / "demand" / "skill_retirement_cooldown.json").read_text())["paths"][rel]
+    assert first_record["requested_at"] == "2026-09-11T05:00:00Z"
+
+    demand.mark_skill_retired(state, rel, second, repo)
+    second_record = json.loads((state / "demand" / "skill_retirement_cooldown.json").read_text())["paths"][rel]
+    assert second_record["requested_at"] == "2026-09-11T05:00:00Z"
+    assert second_record["requested_at"] != second.isoformat().replace("+00:00", "Z")
+
+
 def test_retirement_marker_with_file_present_keeps_retirement_demand_eligible(tmp_path: Path, monkeypatch):
     repo = _repo(tmp_path)
     now = _now()
@@ -236,6 +253,22 @@ def test_missing_repository_is_explicitly_unavailable(tmp_path: Path):
     assert demand.retired_skill_paths_in_cooldown(state, now) == {}
 
 
+def test_legacy_marker_preserves_known_origin_without_fabricating_first_request(tmp_path: Path):
+    repo = _repo(tmp_path)
+    state = tmp_path / "state"
+    rel = "skills/idle-skill/SKILL.md"
+    path = state / "demand" / "skill_retirement_cooldown.json"
+    path.parent.mkdir(parents=True)
+    legacy = "2026-09-01T00:00:00Z"
+    path.write_text(json.dumps({"schema_version": "skill-retirement-cooldown-v1", "paths": {rel: legacy}}))
+
+    demand.mark_skill_retired(state, rel, datetime(2026, 9, 11, tzinfo=timezone.utc), repo)
+    record = json.loads(path.read_text())["paths"][rel]
+    assert record["requested_at"] == legacy
+    assert record["requested_at"] != "2026-09-11T00:00:00Z"
+    assert record["verification"] == "artifact_present"
+
+
 def test_legacy_marker_is_reverified_before_cooldown(tmp_path: Path):
     repo = _repo(tmp_path)
     now = _now()
@@ -246,6 +279,24 @@ def test_legacy_marker_is_reverified_before_cooldown(tmp_path: Path):
     path.write_text(json.dumps({"schema_version": "skill-retirement-cooldown-v1", "paths": {rel: now.isoformat().replace("+00:00", "Z")}}))
 
     assert demand.retired_skill_paths_in_cooldown(state, now, repo) == {}
+
+
+def test_legacy_missing_origin_stays_unknown_when_marked_again(tmp_path: Path):
+    repo = _repo(tmp_path)
+    state = tmp_path / "state"
+    rel = "skills/idle-skill/SKILL.md"
+    path = state / "demand" / "skill_retirement_cooldown.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "schema_version": "skill-retirement-cooldown-v1",
+        "paths": {rel: {"status": "unverified", "verification": "legacy_timestamp_only"}},
+    }))
+
+    now = datetime(2026, 9, 11, tzinfo=timezone.utc)
+    demand.mark_skill_retired(state, rel, now, repo)
+    record = json.loads(path.read_text())["paths"][rel]
+    assert record["requested_at"] == "2026-09-11T00:00:00Z"
+    assert "first_requested_at" not in record
 
 
 def test_retirement_writes_unverified_marker_for_present_skill(tmp_path: Path, monkeypatch):
