@@ -1996,14 +1996,9 @@ def run_curation(
     wm_path = state_dir / "curator" / "watermark.json"
     old = _safe_json(wm_path, {})
     watermark = str(old.get("last_processed") or old.get("last_processed_id") or "") if isinstance(old, dict) else ""
-    lesson_reader = lessons_after
-    if "return_status" in inspect.signature(lesson_reader).parameters:
-        entries, cursor_status = lesson_reader(
-            workspace, watermark, limit=max_lessons, state_dir=state_dir, return_status=True,
-        )
-    else:
-        entries = lesson_reader(workspace, watermark, limit=max_lessons, state_dir=state_dir)
-        cursor_status = "source_empty" if not entries else "cursor_found"
+    entries, cursor_status = lessons_after(
+        workspace, watermark, limit=max_lessons, state_dir=state_dir, return_status=True,
+    )
     if not entries:
         empty_status = "empty" if cursor_status == "source_empty" else cursor_status
         curation_stage = {"status": empty_status, "processed": 0, "writes": 0, "staged": []}

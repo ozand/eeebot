@@ -205,12 +205,13 @@ def test_partial_batch_watermark_leaves_deferred_suffix_for_next_run(
         for i in range(40)
     ]
 
-    def fake_lessons_after(_workspace, watermark, *, limit, state_dir):
+    def fake_lessons_after(_workspace, watermark, *, limit, state_dir, return_status=False):
         start = next(
             (i + 1 for i, item in enumerate(lessons) if item["id"] == watermark),
             0,
         )
-        return lessons[start : start + limit]
+        entries = lessons[start : start + limit]
+        return (entries, "cursor_found" if entries else "cursor_at_end") if return_status else entries
 
     seen_batches: list[list[str]] = []
 
