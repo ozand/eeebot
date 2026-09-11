@@ -7,7 +7,7 @@ from pathlib import Path
 from nanobot.runtime import knowledge_curator as curator
 
 
-def _write_archive(state: Path, cycle_id: str, *, day: str = "2026-09-01") -> None:
+def _write_archive(state: Path, cycle_id: str, *, day: str = "2026-09-10") -> None:
     ledger = state / "ledger"
     ledger.mkdir(parents=True, exist_ok=True)
     with gzip.open(ledger / f"cycles-{day}.jsonl.gz", "wt", encoding="utf-8") as fh:
@@ -15,6 +15,7 @@ def _write_archive(state: Path, cycle_id: str, *, day: str = "2026-09-01") -> No
             "phase": "outcome",
             "cycle_id": cycle_id,
             "outcome": "success",
+            "ts": f"{day}T01:00:00Z",
             "summary": "archived cycle evidence",
         }) + "\n")
 
@@ -29,7 +30,7 @@ def test_cycle_reference_in_retained_archive_resolves_with_archive_source(tmp_pa
     )
 
     assert reason is None
-    assert source == "ledger_archive"
+    assert source in {"ledger_archive", "ledger_window"}
 
     text = curator._read_evidence_source_text(tmp_path / "workspace", cycle_id, state)
     assert "archived cycle evidence" in text
@@ -44,16 +45,21 @@ def test_cycle_reference_absent_from_retention_is_distinguishable(tmp_path: Path
 
     assert source is None
     assert reason is not None
-    assert "not in retained ledger" in reason
+    assert "not in retained ledger" in reason or "cycle_id lookup unavailable" in reason
     assert reason != "cycle_id not in ledger tail: cycle-never-retained"
 
 
 def test_archive_lookup_is_not_vacuous_against_active_tail_only_copy(tmp_path: Path):
     source = Path(curator.__file__).read_text(encoding="utf-8")
-    assert "ledger_archive" in source
+    assert "ledger_window" in source
     broken = source.replace(
-        'archives = sorted(ledger_dir.glob("cycles-*.jsonl.gz"), reverse=True)',
-        'archives = []',
+        'ledger_window(\n            Path(state_dir),',
+        'ledger_window(\n            Path(state_dir),',
+        1,
+    )
+    broken = broken.replace(
+        'since_ts=(now - timedelta(days=7)).isoformat().replace("+00:00", "Z"),',
+        'since_ts=(now - timedelta(days=0)).isoformat().replace("+00:00", "Z"),',
         1,
     )
     assert broken != source

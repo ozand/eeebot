@@ -41,7 +41,7 @@ import os
 import re
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Iterable
 
@@ -60,6 +60,7 @@ from nanobot.runtime.lesson_v2 import (
     validate_lesson_for_mint,
 )
 from nanobot.runtime.model_registry import resolve_model
+from nanobot.runtime.state_access import ledger_window
 
 MAX_WRITES_DEFAULT = 3
 MAX_LESSONS_DEFAULT = 40
@@ -476,51 +477,38 @@ def _evidence_refs(evidence: Any) -> list[str]:
 
 
 def _read_ledger_cycle_text(state_dir: Path, cycle_id: str) -> tuple[str | None, str | None]:
-    """Resolve a cycle from the active tail or retained gzip archives.
+    """Resolve a cited cycle through the bounded central ledger reader.
 
-    The active tail remains the cheap path. If it misses, walk retained
-    ``cycles-*.jsonl.gz`` archives newest-first and stop at the first match.
-    This is bounded by physical ledger retention and preserves a distinguishable
-    ``ledger_archive`` source instead of treating a rotated row as absent.
+    We request the recent bounded horizon rather than opening archives here.
+    ``ledger_window`` selects only the active file and date-relevant archives,
+    enforces its byte cap, and returns coverage/status metadata. An archive hit
+    is distinguishable from an active-tail hit; a complete window with no hit is
+    distinguishable from an unavailable/partial window.
     """
-    ledger_dir = Path(state_dir) / "ledger"
     try:
-        active = ledger_dir / "cycles.jsonl"
-        if active.is_file():
-            for line in _bounded_tail_lines(active, _LEDGER_TAIL_LINES):
-                try:
-                    row = json.loads(line)
-                except Exception:
-                    continue
-                if isinstance(row, dict) and str(row.get("cycle_id") or "") == cycle_id:
-                    parts = [
-                        str(row.get(field) or "")
-                        for field in ("result", "summary", "hypothesis", "approach", "reusable_insight", "generalized_insight")
-                        if row.get(field)
-                    ]
-                    return (" ".join(parts) or f"cycle_id={cycle_id}")[:_MAX_EVIDENCE_SOURCE_BYTES], "ledger_tail"
-        archives = sorted(ledger_dir.glob("cycles-*.jsonl.gz"), reverse=True)
-        for archive in archives:
-            try:
-                with gzip.open(archive, "rt", encoding="utf-8", errors="replace") as fh:
-                    for line in fh:
-                        try:
-                            row = json.loads(line)
-                        except Exception:
-                            continue
-                        if not isinstance(row, dict) or str(row.get("cycle_id") or "") != cycle_id:
-                            continue
-                        parts = [
-                            str(row.get(field) or "")
-                            for field in ("result", "summary", "hypothesis", "approach", "reusable_insight", "generalized_insight")
-                            if row.get(field)
-                        ]
-                        return (" ".join(parts) or f"cycle_id={cycle_id}")[:_MAX_EVIDENCE_SOURCE_BYTES], "ledger_archive"
-            except (OSError, EOFError, gzip.BadGzipFile):
+        now = datetime.now(timezone.utc)
+        window = ledger_window(
+            Path(state_dir),
+            since_ts=(now - timedelta(days=7)).isoformat().replace("+00:00", "Z"),
+            phases=frozenset({"outcome", "started", "proposed", "gate"}),
+            max_bytes=512 * 1024,
+            now=now,
+        )
+        for row in window.rows:
+            if str(row.get("cycle_id") or "") != cycle_id:
                 continue
+            parts = [
+                str(row.get(field) or "")
+                for field in ("result", "summary", "hypothesis", "approach", "reusable_insight", "generalized_insight")
+                if row.get(field)
+            ]
+            source = "ledger_archive" if window.covered_from and row.get("ts", "") < window.covered_to else "ledger_window"
+            return (" ".join(parts) or f"cycle_id={cycle_id}")[:_MAX_EVIDENCE_SOURCE_BYTES], source
+        if window.status == "complete":
+            return None, "ledger_window_complete_no_match"
+        return None, f"ledger_window_{window.status}"
     except Exception:
-        return None, None
-    return None, None
+        return None, "ledger_window_unavailable"
 
 
 def _read_action_index_cycle_text(state_dir: Path, cycle_id: str) -> str | None:
@@ -583,7 +571,9 @@ def _resolve_evidence_ref(
             return None, ledger_source
         if _read_action_index_cycle_text(state_dir, ref) is not None:
             return None, "action_index"
-        return f"cycle_id not in retained ledger (beyond retention or never existed): {ref[:60]}", None
+        if ledger_source == "ledger_window_complete_no_match":
+            return f"cycle_id not in retained ledger (beyond retention or never existed): {ref[:60]}", None
+        return f"cycle_id lookup unavailable ({ledger_source}): {ref[:60]}", None
     normalized = ref.replace("\\", "/").strip()
     path = Path(normalized)
     if (
