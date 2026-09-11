@@ -205,7 +205,7 @@ def test_partial_batch_watermark_leaves_deferred_suffix_for_next_run(
         for i in range(40)
     ]
 
-    def fake_lessons_after(_workspace, watermark, *, limit, state_dir, return_status=False):
+    def fake_lessons_after(_workspace, watermark, *, limit, state_dir, return_status=False, watermark_timestamp=""):
         start = next(
             (i + 1 for i, item in enumerate(lessons) if item["id"] == watermark),
             0,
@@ -321,6 +321,108 @@ def test_staging_failure_leaves_watermark_unmoved(tmp_path):
     ]))
     assert not result["ok"]
     assert not (state / "curator" / "watermark.json").exists()
+
+
+def _reflection_archive(state: Path, date: str, cycle_id: str, timestamp: str, *, recommendations=None) -> str:
+    archive = state / "reflector" / "archive"
+    archive.mkdir(parents=True, exist_ok=True)
+    name = f"reflections-{date}.jsonl.gz"
+    row = {
+        "cycle_id": cycle_id,
+        "timestamp": timestamp,
+        "recommendations": recommendations if recommendations is not None else [{"detail": "recommendation"}],
+    }
+    with gzip.open(archive / name, "wt", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+    return name
+
+
+def test_lessons_after_aged_out_cursor_reanchors_after_timestamp(tmp_path):
+    state = tmp_path / "state"
+    _reflection_archive(state, "2026-09-01", "cycle-cursor-1234", "2026-09-01T00:00:00Z")
+    _reflection_archive(state, "2026-09-06", "cycle-newer-1234", "2026-09-06T00:00:00Z")
+    _reflection_archive(state, "2026-09-09", "cycle-newest-1234", "2026-09-09T00:00:00Z")
+    (state / "reflector" / "reflections.jsonl").touch()
+    watermark = "REFL--cursor-1234-0"
+    entries, status = lessons_after(
+        tmp_path, watermark, state_dir=state, return_status=True,
+        watermark_timestamp="2030-01-01T00:00:00Z",
+    )
+    assert status == "cursor_aged_out"
+    assert [item["id"] for item in entries] == ["REFL-e-newer-1234-0", "REFL--newest-1234-0"]
+
+
+def test_lessons_after_aged_out_includes_undatable_entries(tmp_path):
+    state = tmp_path / "state"
+    _reflection_archive(state, "2026-09-01", "cycle-cursor-1234", "2026-09-01T00:00:00Z")
+    _reflection_archive(state, "2026-09-06", "cycle-newer-1234", "2026-09-06T00:00:00Z", recommendations=[{"detail": "datable"}, {"detail": "undatable"}])
+    _reflection_archive(state, "2026-09-09", "cycle-newest-1234", "2026-09-09T00:00:00Z")
+    (state / "reflector" / "reflections.jsonl").touch()
+    (tmp_path / "lessons").mkdir(parents=True)
+    (tmp_path / "lessons" / "lessons.yaml").write_text("- id: undatable\n  title: no timestamp\n", encoding="utf-8")
+    # The undatable entry must not influence the archive-hit verdict.
+    entries, status = lessons_after(tmp_path, "REFL--cursor-1234-0", state_dir=state, return_status=True)
+    assert status == "cursor_aged_out"
+    assert any(not item.get("timestamp") for item in entries)
+
+
+def test_lessons_after_missing_archive_hit_stays_orphaned_even_with_old_timestamp(tmp_path):
+    state = tmp_path / "state"
+    _reflection_archive(state, "2026-09-01", "cycle-other-1234", "2026-09-01T00:00:00Z")
+    _reflection_archive(state, "2026-09-06", "cycle-newer-1234", "2026-09-06T00:00:00Z")
+    _reflection_archive(state, "2026-09-09", "cycle-newest-1234", "2026-09-09T00:00:00Z")
+    (state / "reflector" / "reflections.jsonl").touch()
+    entries, status = lessons_after(
+        tmp_path, "REFL-missing-1234-0", state_dir=state, return_status=True,
+        watermark_timestamp="2020-01-01T00:00:00Z",
+    )
+    assert entries == []
+    assert status == "cursor_orphaned"
+
+
+def test_lessons_after_normalizes_bare_date_boundary(tmp_path):
+    state = tmp_path / "state"
+    _reflection_archive(state, "2026-04-01", "cycle-cursor-1234", "2026-04-01")
+    _reflection_archive(state, "2026-04-06", "cycle-newer-1234", "2026-04-20")
+    _reflection_archive(state, "2026-04-09", "cycle-newest-1234", "2026-04-20T00:00:01Z")
+    (state / "reflector" / "reflections.jsonl").touch()
+    entries, status = lessons_after(
+        tmp_path, "REFL--cursor-1234-0", state_dir=state, return_status=True,
+        watermark_timestamp="2030-01-01T00:00:00Z",
+    )
+    assert status == "cursor_aged_out"
+    assert [item["id"] for item in entries] == ["REFL-e-newer-1234-0", "REFL--newest-1234-0"]
+
+
+def test_run_curation_records_aged_out_reanchor(tmp_path):
+    state = tmp_path / "state"
+    _reflection_archive(state, "2026-09-01", "cycle-cursor-1234", "2026-09-01T00:00:00Z")
+    _reflection_archive(state, "2026-09-06", "cycle-newer-1234", "2026-09-06T00:00:00Z")
+    _reflection_archive(state, "2026-09-09", "cycle-newest-1234", "2026-09-09T00:00:00Z")
+    (state / "reflector" / "reflections.jsonl").touch()
+    (state / "curator").mkdir(parents=True)
+    (state / "curator" / "watermark.json").write_text(json.dumps({
+        "last_processed_id": "REFL--cursor-1234-0",
+        "timestamp": "2030-01-01T00:00:00Z",
+    }))
+
+    result = run_curation(tmp_path, state, llm=_llm([]), max_lessons=3)
+    assert result["stages"]["curation"]["status"] == "ok"
+    records = [json.loads(line) for line in (state / "curator" / "reanchors.jsonl").read_text().splitlines()]
+    assert records[-1]["lost_cursor"] == "REFL--cursor-1234-0"
+    assert records[-1]["entries_covered"] == 2
+    assert records[-1]["entries_undatable"] == 0
+    assert records[-1]["last_processed"] == "REFL--newest-1234-0"
+
+
+def test_lessons_after_unexplained_orphan_remains_closed(tmp_path):
+    _journal(tmp_path, ["L0", "L1", "L2"])
+    entries, status = lessons_after(
+        tmp_path, "lost", return_status=True,
+        watermark_timestamp="2026-09-10T00:00:00Z",
+    )
+    assert entries == []
+    assert status == "cursor_orphaned"
 
 
 def test_lessons_after_reports_source_and_cursor_states(tmp_path):
