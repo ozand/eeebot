@@ -257,13 +257,62 @@ def iter_lessons(workspace: Path, state_dir: Path | None = None) -> Iterable[dic
 
 
 
+def _parse_entry_timestamp(value: Any) -> datetime | None:
+    """Parse ISO timestamps and bare dates as UTC start-of-day."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _entry_timestamp(entry: dict[str, Any]) -> datetime | None:
+    return _parse_entry_timestamp(entry.get("timestamp") or entry.get("date"))
+
+
 def _entry_sort_key(entry: dict[str, Any]) -> str:
-    """Return a sort key for chronological ordering across lesson sources (#1041)."""
-    ts = str(entry.get("timestamp") or "").strip()
-    dt = str(entry.get("date") or "").strip()
-    key = ts or dt
+    """Return a normalized chronological key across lesson sources (#1041)."""
+    parsed = _entry_timestamp(entry)
     entry_id = _entry_id(entry)
-    return f"{key} {entry_id}" if key else f"9999-99-99 {entry_id}"
+    return f"{parsed.isoformat()} {entry_id}" if parsed else f"9999-99-99T99:99:99+00:00 {entry_id}"
+
+
+def _find_cursor_archive(state_dir: Path | None, watermark: str) -> str | None:
+    """Find a missing cursor key in any retained reflector archive."""
+    if state_dir is None or not watermark:
+        return None
+    archive_dir = Path(state_dir) / "reflector" / "archive"
+    try:
+        archives = sorted(archive_dir.glob("reflections-*.jsonl.gz"))
+    except OSError:
+        return None
+    for archive in archives:
+        try:
+            with gzip.open(archive, "rt", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    cycle_id = str(row.get("cycle_id") or "") if isinstance(row, dict) else ""
+                    recommendations = row.get("recommendations") if isinstance(row, dict) else None
+                    if not cycle_id or not isinstance(recommendations, list):
+                        continue
+                    for index, recommendation in enumerate(recommendations):
+                        if isinstance(recommendation, dict) and str(recommendation.get("status") or "").lower() == "consumed":
+                            continue
+                        if f"REFL-{cycle_id[-12:]}-{index}" == watermark:
+                            return archive.name
+                    if not recommendations and f"REFL-{cycle_id[-12:]}" == watermark:
+                        return archive.name
+        except OSError:
+            continue
+    return None
 
 
 def lessons_after(
@@ -273,6 +322,7 @@ def lessons_after(
     limit: int = MAX_LESSONS_DEFAULT,
     state_dir: Path | None = None,
     return_status: bool = False,
+    watermark_timestamp: str = "",
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], str]:
     entries = list(iter_lessons(workspace, state_dir=state_dir))
     entries.sort(key=_entry_sort_key)
@@ -287,7 +337,17 @@ def lessons_after(
     else:
         status = "cursor_found"
 
-    found = not bool(watermark)
+    recover_aged_out = False
+    cursor_archive = _find_cursor_archive(state_dir, watermark)
+    cursor_timestamp = _parse_entry_timestamp(watermark_timestamp)
+    if status == "cursor_orphaned" and cursor_archive:
+        recover_aged_out = True
+        status = "cursor_aged_out"
+    # An orphan is recoverable only when the cursor key is found in an
+    # out-of-view archive. The watermark timestamp is processing time, not the
+    # source entry timestamp, so it is never evidence for re-anchoring.
+
+    found = not bool(watermark) or recover_aged_out
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
     for entry in entries:
@@ -295,6 +355,9 @@ def lessons_after(
         if key and key == watermark:
             found = True
             continue
+        # An aged-out cursor is proven by the archive hit, not by unrelated
+        # processing timestamps. All entries in the retained reader view are
+        # handed to curation; undatable entries are included and counted.
         if not found or (key and key in seen):
             continue
         if key:
@@ -1996,12 +2059,32 @@ def run_curation(
     wm_path = state_dir / "curator" / "watermark.json"
     old = _safe_json(wm_path, {})
     watermark = str(old.get("last_processed") or old.get("last_processed_id") or "") if isinstance(old, dict) else ""
+    watermark_timestamp = str(old.get("timestamp") or "") if isinstance(old, dict) else ""
     entries, cursor_status = lessons_after(
-        workspace, watermark, limit=max_lessons, state_dir=state_dir, return_status=True,
+        workspace,
+        watermark,
+        limit=max_lessons,
+        state_dir=state_dir,
+        return_status=True,
+        watermark_timestamp=watermark_timestamp,
     )
+    reanchor: dict[str, Any] | None = None
+    if cursor_status == "cursor_aged_out":
+        reanchor = {
+            "timestamp": _now(),
+            "lost_cursor": watermark,
+            "last_processed": _entry_key(entries[-1]) if entries else "",
+            "entries_covered": len(entries),
+            "entries_undatable": sum(_entry_timestamp(entry) is None for entry in entries),
+            "cursor_timestamp": watermark_timestamp,
+            "cursor_archive": _find_cursor_archive(state_dir, watermark),
+        }
     if not entries:
         empty_status = "empty" if cursor_status == "source_empty" else cursor_status
-        curation_stage = {"status": empty_status, "processed": 0, "writes": 0, "staged": []}
+        curation_stage = {
+            "status": empty_status, "processed": 0, "writes": 0, "staged": [],
+            **({"reanchor": reanchor} if reanchor else {}),
+        }
         result = {"ok": True, "processed": 0, "writes": 0, "staged": [], "stages": {
             "reflector_mint": reflector_stage,
             "curation": curation_stage,
@@ -2108,7 +2191,20 @@ def run_curation(
                         if wanted:
                             last = wanted
                         break
-        _atomic_json(wm_path, {"last_processed": last, "last_processed_id": last, "timestamp": _now()})
+        watermark_update = {
+            "last_processed": last,
+            "last_processed_id": last,
+            "timestamp": _now(),
+        }
+        last_entry = next((entry for entry in reversed(entries) if _entry_key(entry) == last), None)
+        if last_entry is not None:
+            entry_timestamp = _entry_timestamp(last_entry)
+            if entry_timestamp is not None:
+                watermark_update["last_processed_entry_timestamp"] = entry_timestamp.isoformat().replace("+00:00", "Z")
+        _atomic_json(wm_path, watermark_update)
+        if reanchor:
+            reanchor["last_processed"] = last
+            _append_jsonl(state_dir / "curator" / "reanchors.jsonl", reanchor)
         staged_paths = [e["path"] for e in staged]
         unsupported = sum(1 for e in staged if e.get("overlap_flag"))
         curation_stage = {
@@ -2116,6 +2212,7 @@ def run_curation(
             "processed": len(entries),
             "writes": writes,
             "staged": staged_paths,
+            **({"reanchor": reanchor} if reanchor else {}),
             **input_fit,
         }
         result_dict: dict[str, Any] = {

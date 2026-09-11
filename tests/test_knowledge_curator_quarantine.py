@@ -27,7 +27,7 @@ def _lesson(i: int, size: int) -> dict:
 def _wire(monkeypatch, lessons: list[dict]):
     """A watermark-honouring lessons_after over an in-memory stream, and an LLM
     that acknowledges every item it is shown and records what it saw."""
-    def fake_lessons_after(_workspace, watermark, *, limit, state_dir, return_status=False):
+    def fake_lessons_after(_workspace, watermark, *, limit, state_dir, return_status=False, watermark_timestamp=""):
         start = 0
         if watermark:
             start = next((i + 1 for i, item in enumerate(lessons) if curator._entry_key(item) == watermark), 0)
