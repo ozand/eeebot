@@ -24,6 +24,7 @@ def test_init_skill_creates_expected_files(tmp_path: Path) -> None:
 
     assert skill_dir == tmp_path / "demo-skill"
     assert (skill_dir / "SKILL.md").exists()
+    assert "description: Trigger: [State the concrete task or context that should route to this skill.]" in (skill_dir / "SKILL.md").read_text(encoding="utf-8")
     assert (skill_dir / "scripts" / "example.py").exists()
     assert (skill_dir / "references" / "api_reference.md").exists()
     assert (skill_dir / "assets" / "example_asset.txt").exists()
