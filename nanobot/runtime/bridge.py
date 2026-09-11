@@ -2986,6 +2986,7 @@ async def _main_impl_body():
                     # read. ``None`` only when the builder recorded nothing.
                     'memory_index': _prompt_fit.get('memory_index'),
                     'dropped': list(_prompt_fit.get('dropped') or []),
+                    'trimmed': list(_prompt_fit.get('trimmed') or []),
                     # #1313: how many chars of declared-droppable AGENTS.md
                     # sections are still standing — the fuse length the
                     # operator would otherwise have to compute by hand.
@@ -3729,6 +3730,7 @@ async def _main_impl_body():
                 # tile reads a row with ``chars`` as a built prompt, and this one
                 # was refused. The breakdown reconciles to ``cap + over_by``.
                 'dropped': list(exc.dropped),
+                'trimmed': [],
                 # #1313: 0 on the real strict-overflow path (every
                 # declared-droppable section is already gone by the time the
                 # cap gives up) — recorded explicitly, not omitted.
