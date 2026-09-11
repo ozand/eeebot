@@ -41,7 +41,7 @@ import os
 import re
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Iterable
 
@@ -60,6 +60,7 @@ from nanobot.runtime.lesson_v2 import (
     validate_lesson_for_mint,
 )
 from nanobot.runtime.model_registry import resolve_model
+from nanobot.runtime.state_access import ledger_window
 
 MAX_WRITES_DEFAULT = 3
 MAX_LESSONS_DEFAULT = 40
@@ -475,6 +476,41 @@ def _evidence_refs(evidence: Any) -> list[str]:
     return []
 
 
+def _read_ledger_cycle_text(state_dir: Path, cycle_id: str) -> tuple[str | None, str | None]:
+    """Resolve a cited cycle through the bounded central ledger reader.
+
+    We request the recent bounded horizon rather than opening archives here.
+    ``ledger_window`` selects only the active file and date-relevant archives,
+    enforces its byte cap, and returns coverage/status metadata. An archive hit
+    is distinguishable from an active-tail hit; a complete window with no hit is
+    distinguishable from an unavailable/partial window.
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        window = ledger_window(
+            Path(state_dir),
+            since_ts=(now - timedelta(days=7)).isoformat().replace("+00:00", "Z"),
+            phases=frozenset({"outcome", "started", "proposed", "gate"}),
+            max_bytes=512 * 1024,
+            now=now,
+        )
+        for row in window.rows:
+            if str(row.get("cycle_id") or "") != cycle_id:
+                continue
+            parts = [
+                str(row.get(field) or "")
+                for field in ("result", "summary", "hypothesis", "approach", "reusable_insight", "generalized_insight")
+                if row.get(field)
+            ]
+            source = "ledger_archive" if window.covered_from and row.get("ts", "") < window.covered_to else "ledger_window"
+            return (" ".join(parts) or f"cycle_id={cycle_id}")[:_MAX_EVIDENCE_SOURCE_BYTES], source
+        if window.status == "complete":
+            return None, "ledger_window_complete_no_match"
+        return None, f"ledger_window_{window.status}"
+    except Exception:
+        return None, "ledger_window_unavailable"
+
+
 def _read_action_index_cycle_text(state_dir: Path, cycle_id: str) -> str | None:
     """Resolve a cycle from a bounded set of newest action-index segments.
 
@@ -530,9 +566,14 @@ def _resolve_evidence_ref(
     if _CYCLE_ID_RE.fullmatch(ref):
         if ref in cycle_ids:
             return None, "ledger_tail"
+        ledger_text, ledger_source = _read_ledger_cycle_text(state_dir, ref)
+        if ledger_text is not None:
+            return None, ledger_source
         if _read_action_index_cycle_text(state_dir, ref) is not None:
             return None, "action_index"
-        return f"cycle_id not in ledger tail: {ref[:60]}", None
+        if ledger_source == "ledger_window_complete_no_match":
+            return f"cycle_id not in retained ledger (beyond retention or never existed): {ref[:60]}", None
+        return f"cycle_id lookup unavailable ({ledger_source}): {ref[:60]}", None
     normalized = ref.replace("\\", "/").strip()
     path = Path(normalized)
     if (
@@ -587,28 +628,10 @@ def _read_evidence_source_text(workspace: Path, ref: str, state_dir: Path | None
     if _CYCLE_ID_RE.fullmatch(ref):
         if state_dir is None:
             return ""
-        ledger_path = Path(state_dir) / "ledger" / "cycles.jsonl"
         try:
-            if not ledger_path.is_file():
-                return ""
-            matched: list[str] = []
-            for line in _bounded_tail_lines(ledger_path, _LEDGER_TAIL_LINES):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                    if str(row.get("cycle_id") or "") == ref:
-                        # Collect summary/result fields as source text.
-                        for field in ("result", "summary", "hypothesis", "approach",
-                                      "reusable_insight", "generalized_insight"):
-                            val = str(row.get(field) or "")
-                            if val:
-                                matched.append(val)
-                except Exception:
-                    continue
-            if matched:
-                return " ".join(matched)[:_MAX_EVIDENCE_SOURCE_BYTES]
+            ledger_text, _ledger_source = _read_ledger_cycle_text(Path(state_dir), ref)
+            if ledger_text is not None:
+                return ledger_text
             indexed = _read_action_index_cycle_text(Path(state_dir), ref)
             return indexed or ""
         except Exception:

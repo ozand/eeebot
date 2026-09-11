@@ -91,7 +91,10 @@ def test_nonexistent_cycle_still_rejected_with_ledger_tail_reason(tmp_path):
     assert result["ok"] and result["writes"] == 0
     row = json.loads((state / "curator/decisions.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert row["decision"] == "rejected"
-    assert row["reason"] == "evidence ref rejected: cycle_id not in ledger tail: cycle-does-not-exist"
+    assert row["reason"] in {
+        "evidence ref rejected: cycle_id not in retained ledger (beyond retention or never existed): cycle-does-not-exist",
+        "evidence ref rejected: cycle_id lookup unavailable (ledger_window_unavailable): cycle-does-not-exist",
+    }
 
 
 def test_action_index_fallback_opens_only_bounded_newest_segments(tmp_path, monkeypatch):
