@@ -64,7 +64,7 @@ skill-name/
 
 Every SKILL.md consists of:
 
-- **Frontmatter** (YAML): Contains `name` and `description` fields. These are the only fields that the agent reads to determine when the skill gets used, thus it is very important to be clear and comprehensive in describing what the skill is, and when it should be used.
+- **Frontmatter** (YAML): Contains `name` and `description` fields. These are the only fields used for routing, so make `description` a short `Trigger:` line that says when the skill applies. It is catalogue metadata charged to every prompt, not the skill's documentation.
 - **Body** (Markdown): Instructions and guidance for using the skill. Only loaded AFTER the skill triggers (if at all).
 
 #### Bundled Resources (optional)
@@ -320,13 +320,17 @@ If you used `--examples`, delete any placeholder files that are not needed for t
 
 ##### Frontmatter
 
-Write the YAML frontmatter with `name` and `description`:
+Write the YAML frontmatter with `name` and a short `description`:
 
-- `name`: The skill name
-- `description`: This is the primary triggering mechanism for your skill, and helps the agent understand when to use the skill.
-  - Include both what the Skill does and specific triggers/contexts for when to use it.
-  - Include all "when to use" information here - Not in the body. The body is only loaded after triggering, so "When to Use This Skill" sections in the body are not helpful to the agent.
-  - Example description for a `docx` skill: "Comprehensive document creation, editing, and analysis with support for tracked changes, comments, formatting preservation, and text extraction. Use when the agent needs to work with professional documents (.docx files) for: (1) Creating new documents, (2) Modifying or editing content, (3) Working with tracked changes, (4) Adding comments, or any other document tasks"
+- `name`: The skill name.
+- `description`: Use the `Trigger:` form to state the concrete task or context that should route to this skill. Keep it to one concise sentence: this line is repeated in the skills catalogue on every prompt, so it is routing metadata rather than documentation.
+- Put the procedure, rationale, examples, and edge cases in the SKILL.md body or bundled references; they are loaded only after the skill triggers.
+
+Example:
+
+```yaml
+description: Trigger: Extracting text or tables from a PDF file.
+```
 
 Keep frontmatter minimal. In `nanobot`, `metadata` and `always` are also supported when needed, but avoid adding extra fields unless they are actually required.
 
