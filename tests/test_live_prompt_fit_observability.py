@@ -63,11 +63,19 @@ def test_non_full_rung_is_visible_in_live_dashboard_html(tmp_path: Path, monkeyp
 
 def test_rung_fixture_is_non_vacuous_against_an_isolated_renderer_copy(tmp_path: Path, monkeypatch) -> None:
     source = Path(DASHBOARD.__file__).read_text(encoding="utf-8")
+    live_badge = (
+        '<span class="status-badge" data-status="{prompt_fit_rung_html}">'
+        "rung={prompt_fit_rung_html}</span>"
+    )
+    # A silent no-op replace would make this whole test vacuous the moment the
+    # template drifts -- which is exactly what happened once already.
+    assert source.count(live_badge) == 1, "rung badge template drifted; update this fixture"
     broken = source.replace(
-        '<span class="status-badge {prompt_fit_rung_class}" data-status="{prompt_fit_rung_html}">rung={prompt_fit_rung_html}</span>',
-        '<span class="status-badge {prompt_fit_rung_class}">rung=full</span>',
+        live_badge,
+        '<span class="status-badge">rung=full</span>',
         1,
     )
+    assert broken != source
     broken_path = tmp_path / "broken_dashboard.py"
     broken_path.write_text(broken, encoding="utf-8")
 
@@ -90,3 +98,41 @@ def test_rung_fixture_is_non_vacuous_against_an_isolated_renderer_copy(tmp_path:
     rendered = namespace["_HTML_TEMPLATE"].format_map(context)
     assert "rung=full" in rendered
     assert "rung=uniform_trim" not in rendered
+
+
+def test_legacy_row_without_rung_reports_trims_unavailable_not_zero(tmp_path: Path) -> None:
+    """155 of 282 real system_prompt rows predate #1476 and carry no ``rung``.
+
+    A fabricated "0 trimmed chars" on such a row reads as a measurement of
+    something that was never measured -- the same defect class as #1473/#1474.
+    """
+    _write_jsonl(tmp_path / "ledger" / "cycles.jsonl", [
+        {"phase": "system_prompt", "cycle_id": "c-legacy", "chars": 23814, "cap": 24000},
+    ])
+
+    tile = DASHBOARD.format_prompt_fit_tile(DASHBOARD.scan_prompt_fit_ledger(tmp_path), "fresh")
+
+    assert tile["prompt_fit_rung"] == "unavailable"
+    assert tile["prompt_fit_trimmed_count"] == "unavailable"
+    assert tile["prompt_fit_trimmed_chars"] == "unavailable"
+    assert tile["prompt_fit_trimmed_sections"] == "unavailable"
+    # The drop accounting predates this change and stays as it was.
+    assert tile["prompt_fit_dropped_count"] == "0"
+
+
+def test_row_with_rung_and_no_trims_reports_a_real_zero(tmp_path: Path) -> None:
+    """The counterpart: ``rung`` present means trim accounting ran, so zero is
+    a genuine zero and must not be masked as unavailable."""
+    _write_jsonl(tmp_path / "ledger" / "cycles.jsonl", [
+        {
+            "phase": "system_prompt", "cycle_id": "c-full", "chars": 23814, "cap": 24000,
+            "rung": "full", "dropped": [], "trimmed": [],
+        },
+    ])
+
+    tile = DASHBOARD.format_prompt_fit_tile(DASHBOARD.scan_prompt_fit_ledger(tmp_path), "fresh")
+
+    assert tile["prompt_fit_rung"] == "full"
+    assert tile["prompt_fit_trimmed_count"] == "0"
+    assert tile["prompt_fit_trimmed_chars"] == "0"
+    assert tile["prompt_fit_trimmed_sections"] == "none"

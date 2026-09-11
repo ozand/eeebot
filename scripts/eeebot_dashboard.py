@@ -1606,9 +1606,13 @@ def format_prompt_fit_tile(fit: dict[str, Any], resolved_status: str = "unavaila
             "prompt_fit_dropped_count": "0",
             "prompt_fit_dropped_chars": "0",
             "prompt_fit_rung": str(latest.get("rung") or "unavailable"),
-            "prompt_fit_trimmed_count": "0",
-            "prompt_fit_trimmed_chars": "0",
-            "prompt_fit_trimmed_sections": "none",
+            # #1471: a row with no ``rung`` predates #1476 and never recorded
+            # uniform-trim losses, so 0 would be a fabricated zero. ``rung``
+            # present implies ``trimmed`` present -- #1476 writes it on both
+            # the fit and the strict-overflow path.
+            "prompt_fit_trimmed_count": "0" if latest.get("rung") else "unavailable",
+            "prompt_fit_trimmed_chars": "0" if latest.get("rung") else "unavailable",
+            "prompt_fit_trimmed_sections": "none" if latest.get("rung") else "unavailable",
             "prompt_fit_dropped_sections": "none",
             "prompt_fit_rows_with_drops": f"{fit.get('rows_with_drops', 0)}/{fit.get('rows_considered', 0)} recent system_prompt rows dropped content",
             "prompt_fit_rows_with_trims": f"{fit.get('rows_with_trims', 0)}/{fit.get('rows_considered', 0)} recent system_prompt rows trimmed content",
@@ -1632,9 +1636,11 @@ def format_prompt_fit_tile(fit: dict[str, Any], resolved_status: str = "unavaila
         "prompt_fit_dropped_count": str(latest.get("dropped_count", 0)),
         "prompt_fit_dropped_chars": str(latest.get("dropped_chars", 0)),
         "prompt_fit_dropped_sections": "; ".join(sections) if sections else "none",
-        "prompt_fit_trimmed_count": str(latest.get("trimmed_count", 0)),
-        "prompt_fit_trimmed_chars": str(latest.get("trimmed_chars", 0)),
-        "prompt_fit_trimmed_sections": "; ".join(trimmed_sections) if trimmed_sections else "none",
+        # #1471: see the overflow branch -- no ``rung`` means the row predates
+        # trim accounting, and "0 trimmed" would read as a measurement.
+        "prompt_fit_trimmed_count": str(latest.get("trimmed_count", 0)) if latest.get("rung") else "unavailable",
+        "prompt_fit_trimmed_chars": str(latest.get("trimmed_chars", 0)) if latest.get("rung") else "unavailable",
+        "prompt_fit_trimmed_sections": ("; ".join(trimmed_sections) if trimmed_sections else "none") if latest.get("rung") else "unavailable",
         "prompt_fit_rows_with_drops": f"{rows_with_drops}/{rows_considered} recent system_prompt rows dropped content",
         "prompt_fit_rows_with_trims": f"{fit.get('rows_with_trims', 0)}/{rows_considered} recent system_prompt rows trimmed content",
     }
@@ -3109,7 +3115,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="grid">
             <div class="card">
                 <h2>Prompt Fit <span class="status-badge" {prompt_fit_source_attrs}>{prompt_fit_status}</span>
-                    <span class="status-badge {prompt_fit_rung_class}" data-status="{prompt_fit_rung_html}">rung={prompt_fit_rung_html}</span>
+                    <span class="status-badge" data-status="{prompt_fit_rung_html}">rung={prompt_fit_rung_html}</span>
                 </h2>
                 <div class="metric">
                     <div class="metric-item">
