@@ -256,6 +256,20 @@ def test_partial_batch_watermark_leaves_deferred_suffix_for_next_run(
     )["last_processed_id"] == lessons[-1]["id"]
 
 
+def test_orphaned_cursor_status_reaches_curation_report_without_llm(tmp_path):
+    _journal(tmp_path, ["L1", "L2"])
+    state = tmp_path / "state"
+    state.joinpath("curator").mkdir(parents=True)
+    (state / "curator/watermark.json").write_text(json.dumps({"last_processed_id": "missing"}))
+    called = []
+    result = run_curation(tmp_path, state, llm=lambda *args: called.append(args))
+    assert result["ok"] is True
+    assert result["stages"]["curation"] == {
+        "status": "cursor_orphaned", "processed": 0, "writes": 0, "staged": [],
+    }
+    assert called == []
+
+
 def test_watermark_skips_prior_and_failure_does_not_advance(tmp_path):
     _journal(tmp_path, ["L1", "L2"])
     state = tmp_path / "state"
