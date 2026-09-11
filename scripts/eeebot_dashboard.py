@@ -1341,16 +1341,16 @@ def scan_prompt_fit_ledger(state_dir: Path, limit: int = _MAX_PROMPT_FIT_LEDGER_
 
     path = Path(state_dir) / "ledger" / "cycles.jsonl"
     if not path.is_file():
-        return {"source_status": "missing", "latest": None, "rows_considered": 0, "rows_with_drops": 0}
+        return {"source_status": "missing", "latest": None, "rows_considered": 0, "rows_with_drops": 0, "rows_with_trims": 0}
     try:
         tail: "deque[str]" = deque(maxlen=limit)
         with path.open("r", encoding="utf-8") as fh:
             for line in fh:
                 tail.append(line)
     except PermissionError:
-        return {"source_status": "permission", "latest": None, "rows_considered": 0, "rows_with_drops": 0}
+        return {"source_status": "permission", "latest": None, "rows_considered": 0, "rows_with_drops": 0, "rows_with_trims": 0}
     except OSError:
-        return {"source_status": "unreadable", "latest": None, "rows_considered": 0, "rows_with_drops": 0}
+        return {"source_status": "unreadable", "latest": None, "rows_considered": 0, "rows_with_drops": 0, "rows_with_trims": 0}
 
     system_prompt_rows: list[dict[str, Any]] = []
     any_malformed = False
@@ -1372,7 +1372,7 @@ def scan_prompt_fit_ledger(state_dir: Path, limit: int = _MAX_PROMPT_FIT_LEDGER_
         # zero. If we saw malformed content, say so; otherwise the phase has
         # simply not emitted any rows in the window yet.
         status = "malformed" if any_malformed else "valid-empty"
-        return {"source_status": status, "latest": None, "rows_considered": 0, "rows_with_drops": 0}
+        return {"source_status": status, "latest": None, "rows_considered": 0, "rows_with_drops": 0, "rows_with_trims": 0}
 
     latest = system_prompt_rows[-1]
     overflow = bool(latest.get("overflow"))
@@ -1384,6 +1384,17 @@ def scan_prompt_fit_ledger(state_dir: Path, limit: int = _MAX_PROMPT_FIT_LEDGER_
         1 for row in system_prompt_rows
         if isinstance(row.get("dropped"), list) and len(row["dropped"]) > 0
     )
+    rows_with_trims = sum(
+        1 for row in system_prompt_rows
+        if isinstance(row.get("trimmed"), list) and len(row["trimmed"]) > 0
+    )
+    trimmed = latest.get("trimmed")
+    trimmed_list = [item for item in trimmed if isinstance(item, dict)] if isinstance(trimmed, list) else []
+    trimmed_sections = [
+        str(item.get("section"))
+        for item in trimmed_list
+        if item.get("section")
+    ]
     return {
         "source_status": "valid",
         "latest": {
@@ -1391,17 +1402,22 @@ def scan_prompt_fit_ledger(state_dir: Path, limit: int = _MAX_PROMPT_FIT_LEDGER_
             "cap": latest.get("cap"),
             "overflow": overflow,
             "over_by": latest.get("over_by"),
+            "rung": latest.get("rung"),
             "sections": overflow_sections,
             "dropped_count": len(dropped_list),
             "dropped_chars": sum(
                 int(d.get("chars") or 0) for d in dropped_list if isinstance(d, dict)
             ),
             "dropped_sections": section_names[:_PROMPT_FIT_DROPPED_SECTIONS_CAP],
+            "trimmed_count": len(trimmed_list),
+            "trimmed_chars": sum(int(item.get("chars") or 0) for item in trimmed_list),
+            "trimmed_sections": trimmed_sections[:_PROMPT_FIT_DROPPED_SECTIONS_CAP],
             "cycle_id": latest.get("cycle_id"),
             "ts": latest.get("ts"),
         },
         "rows_considered": len(system_prompt_rows),
         "rows_with_drops": rows_with_drops,
+        "rows_with_trims": rows_with_trims,
     }
 
 
@@ -1574,7 +1590,12 @@ def format_prompt_fit_tile(fit: dict[str, Any], resolved_status: str = "unavaila
             "prompt_fit_dropped_count": "unavailable",
             "prompt_fit_dropped_chars": "unavailable",
             "prompt_fit_dropped_sections": "unavailable",
+            "prompt_fit_rung": "unavailable",
+            "prompt_fit_trimmed_count": "unavailable",
+            "prompt_fit_trimmed_chars": "unavailable",
+            "prompt_fit_trimmed_sections": "unavailable",
             "prompt_fit_rows_with_drops": "unavailable",
+            "prompt_fit_rows_with_trims": "unavailable",
         }
     if latest.get("overflow"):
         sections = latest.get("sections") or {}
@@ -1584,8 +1605,17 @@ def format_prompt_fit_tile(fit: dict[str, Any], resolved_status: str = "unavaila
             "prompt_fit_headroom": f"-{latest.get('over_by')} chars" if latest.get("over_by") is not None else "overflow",
             "prompt_fit_dropped_count": "0",
             "prompt_fit_dropped_chars": "0",
+            "prompt_fit_rung": str(latest.get("rung") or "unavailable"),
+            # #1471: a row with no ``rung`` predates #1476 and never recorded
+            # uniform-trim losses, so 0 would be a fabricated zero. ``rung``
+            # present implies ``trimmed`` present -- #1476 writes it on both
+            # the fit and the strict-overflow path.
+            "prompt_fit_trimmed_count": "0" if latest.get("rung") else "unavailable",
+            "prompt_fit_trimmed_chars": "0" if latest.get("rung") else "unavailable",
+            "prompt_fit_trimmed_sections": "none" if latest.get("rung") else "unavailable",
             "prompt_fit_dropped_sections": "none",
             "prompt_fit_rows_with_drops": f"{fit.get('rows_with_drops', 0)}/{fit.get('rows_considered', 0)} recent system_prompt rows dropped content",
+            "prompt_fit_rows_with_trims": f"{fit.get('rows_with_trims', 0)}/{fit.get('rows_considered', 0)} recent system_prompt rows trimmed content",
             "prompt_fit_overflow_sections": "; ".join(f"{key}={value}" for key, value in sections.items()),
         }
     chars = latest.get("chars")
@@ -1595,16 +1625,24 @@ def format_prompt_fit_tile(fit: dict[str, Any], resolved_status: str = "unavaila
         else "unavailable"
     )
     sections = latest.get("dropped_sections") or []
+    trimmed_sections = latest.get("trimmed_sections") or []
     rows_considered = fit.get("rows_considered", 0)
     rows_with_drops = fit.get("rows_with_drops", 0)
     return {
         "prompt_fit_status": resolved_status,
+        "prompt_fit_rung": str(latest.get("rung") or "unavailable"),
         "prompt_fit_chars": f"{chars}/{cap}" if chars is not None and cap is not None else "unavailable",
         "prompt_fit_headroom": headroom,
         "prompt_fit_dropped_count": str(latest.get("dropped_count", 0)),
         "prompt_fit_dropped_chars": str(latest.get("dropped_chars", 0)),
         "prompt_fit_dropped_sections": "; ".join(sections) if sections else "none",
+        # #1471: see the overflow branch -- no ``rung`` means the row predates
+        # trim accounting, and "0 trimmed" would read as a measurement.
+        "prompt_fit_trimmed_count": str(latest.get("trimmed_count", 0)) if latest.get("rung") else "unavailable",
+        "prompt_fit_trimmed_chars": str(latest.get("trimmed_chars", 0)) if latest.get("rung") else "unavailable",
+        "prompt_fit_trimmed_sections": ("; ".join(trimmed_sections) if trimmed_sections else "none") if latest.get("rung") else "unavailable",
         "prompt_fit_rows_with_drops": f"{rows_with_drops}/{rows_considered} recent system_prompt rows dropped content",
+        "prompt_fit_rows_with_trims": f"{fit.get('rows_with_trims', 0)}/{rows_considered} recent system_prompt rows trimmed content",
     }
 
 
@@ -2584,9 +2622,10 @@ _HTML_ESCAPE_KEYS: list[str] = [
     "reward_distribution_html",
     # Health status is computed below from the dimensions; do not look it up in metrics.
     # Knowledge plane (#1347)
-    "prompt_fit_chars_html", "prompt_fit_headroom_html", "prompt_fit_dropped_count_html",
+    "prompt_fit_rung_html", "prompt_fit_chars_html", "prompt_fit_headroom_html", "prompt_fit_dropped_count_html",
     "prompt_fit_dropped_chars_html", "prompt_fit_dropped_sections_html",
-    "prompt_fit_rows_with_drops_html",
+    "prompt_fit_trimmed_count_html", "prompt_fit_trimmed_chars_html", "prompt_fit_trimmed_sections_html",
+    "prompt_fit_rows_with_drops_html", "prompt_fit_rows_with_trims_html",
     "skills_total_html", "skills_distinct_read_html", "skills_reads_in_window_html",
     "skills_never_read_count_html", "skills_top_html",
     "lessons_corpus_size_html", "lessons_indexed_count_html",
@@ -2642,12 +2681,17 @@ _HTML_KEY_MAP: dict[str, str] = {
     "overall_health_html": "overall_health",
     "health_status_html": "health_status",
     # Knowledge plane (#1347)
+    "prompt_fit_rung_html": "prompt_fit_rung",
     "prompt_fit_chars_html": "prompt_fit_chars",
     "prompt_fit_headroom_html": "prompt_fit_headroom",
     "prompt_fit_dropped_count_html": "prompt_fit_dropped_count",
     "prompt_fit_dropped_chars_html": "prompt_fit_dropped_chars",
     "prompt_fit_dropped_sections_html": "prompt_fit_dropped_sections",
+    "prompt_fit_trimmed_count_html": "prompt_fit_trimmed_count",
+    "prompt_fit_trimmed_chars_html": "prompt_fit_trimmed_chars",
+    "prompt_fit_trimmed_sections_html": "prompt_fit_trimmed_sections",
     "prompt_fit_rows_with_drops_html": "prompt_fit_rows_with_drops",
+    "prompt_fit_rows_with_trims_html": "prompt_fit_rows_with_trims",
     "skills_total_html": "skills_total",
     "skills_distinct_read_html": "skills_distinct_read",
     "skills_reads_in_window_html": "skills_reads_in_window",
@@ -2756,6 +2800,7 @@ def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
     ctx["hypotheses_lifecycle_source_attrs"] = source_attrs(m.get("hypotheses_lifecycle_source"))
     ctx["lessons_index_status_html"] = escape_html_text(m.get("lessons_index_status", "missing"))
     ctx["prompt_fit_status"] = escape_html_text(m.get("prompt_fit_status", "unavailable"))
+    ctx["prompt_fit_rung_html"] = escape_html_text(str(m.get("prompt_fit_rung") or "unavailable"))
     ctx["skills_status"] = escape_html_text(m.get("skills_status", "unavailable"))
     ctx["lessons_status"] = escape_html_text(m.get("lessons_status", "unavailable"))
 
@@ -2804,10 +2849,14 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         }}
         .status-badge[data-status="fresh"],
         .status-badge[data-status="valid"],
+        .status-badge[data-status="full"],
         .status-badge[data-status="nominal"] {{ background: var(--state-nominal); color: var(--state-nominal-fg); }}
         .status-badge[data-status="stale"],
+        .status-badge[data-status="uniform_trim"],
+        .status-badge[data-status="line_trim"],
         .status-badge[data-status="caution"] {{ background: var(--state-caution); color: var(--state-caution-fg); }}
         .status-badge[data-status="malformed"],
+        .status-badge[data-status="names_only"],
         .status-badge[data-status="error"],
         .status-badge[data-status="failed"],
         .status-badge[data-status="critical"] {{ background: var(--state-critical); color: var(--state-critical-fg); }}
@@ -3065,7 +3114,9 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 
         <div class="grid">
             <div class="card">
-                <h2>Prompt Fit <span class="status-badge" {prompt_fit_source_attrs}>{prompt_fit_status}</span></h2>
+                <h2>Prompt Fit <span class="status-badge" {prompt_fit_source_attrs}>{prompt_fit_status}</span>
+                    <span class="status-badge" data-status="{prompt_fit_rung_html}">rung={prompt_fit_rung_html}</span>
+                </h2>
                 <div class="metric">
                     <div class="metric-item">
                         <span class="metric-label">Latest chars/cap:</span>
@@ -3084,8 +3135,16 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                         <div class="metric-value" style="font-size: 12px; font-weight: normal; color: var(--text-muted);">{prompt_fit_dropped_sections_html}</div>
                     </div>
                     <div class="metric-item">
-                        <span class="metric-label">Recent rows with drops:</span>
-                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{prompt_fit_rows_with_drops_html}</div>
+                        <span class="metric-label">Uniform-trimmed sections / chars:</span>
+                        <span class="metric-value" style="color: var(--accent-amber);">{prompt_fit_trimmed_count_html} / {prompt_fit_trimmed_chars_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Uniform-trimmed section names:</span>
+                        <div class="metric-value" style="font-size: 12px; font-weight: normal; color: var(--text-muted);">{prompt_fit_trimmed_sections_html}</div>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Recent rows with drops / trims:</span>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{prompt_fit_rows_with_drops_html} / {prompt_fit_rows_with_trims_html}</div>
                     </div>
                 </div>
             </div>
