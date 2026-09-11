@@ -1520,22 +1520,31 @@ def scan_lessons_corpus(state_dir: Path) -> dict[str, Any]:
         }
     lines = index_text.splitlines()
     list_count = sum(1 for line in lines if line.lstrip().startswith(("- ", "* ")))
+    def _cells(row: str) -> "list[str]":
+        return [cell.strip() for cell in row.strip().strip("|").split("|")]
+
+    def _is_delimiter(row: str) -> bool:
+        if not row.strip().startswith("|"):
+            return False
+        cells = _cells(row)
+        return bool(cells) and all(re.fullmatch(r":?-+:?", cell) for cell in cells)
+
+    # #1487: a Markdown table's data rows are exactly the pipe rows AFTER the
+    # delimiter. Anchoring on the delimiter keeps this independent of the header's
+    # column names -- the previous version keyed on the literal text "| lesson",
+    # so renaming a column would have silently promoted the header to a data row.
+    #
+    # Cells are NOT required to be non-empty: 34 of the 52 rows in the deployed
+    # lessons/index.md have an empty `tags` cell, and skipping them undercounted
+    # the index to 18 -- a plausible wrong number, which is worse than the wrong
+    # zero this issue started from.
     table_rows: list[str] = []
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped.startswith("|"):
-            continue
-        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-        if not cells or not all(cells):
-            continue
-        if all(re.fullmatch(r":?-+:?", cell) for cell in cells):
-            continue
-        previous = lines[index - 1].strip() if index else ""
-        if previous.startswith("|"):
-            previous_cells = [cell.strip() for cell in previous.strip("|").split("|")]
-            if previous_cells and all(re.fullmatch(r":?-+:?", cell) for cell in previous_cells):
-                continue
-        table_rows.append(line)
+    delimiter_at = next((i for i, line in enumerate(lines) if _is_delimiter(line)), None)
+    if delimiter_at is not None:
+        table_rows = [
+            line for line in lines[delimiter_at + 1:]
+            if line.strip().startswith("|") and not _is_delimiter(line)
+        ]
     if table_rows:
         return {
             "source_status": "valid", "corpus_size": corpus_size,

@@ -1603,3 +1603,67 @@ def test_goal_gaps_line_wired_into_dashboard_renders(tmp_path: Path, monkeypatch
     assert "Goal Gaps:" in html_out
     assert "1 futile / 1 measured / 4 stale (stale_feeds)" in html_out
 
+
+
+def test_lessons_index_table_counts_every_data_row_and_not_the_header(tmp_path: Path) -> None:
+    """#1487 regression, three rows deliberately: with a two-row fixture an
+    off-by-one that counts the header and skips the first data row still
+    reports the right total, so it cannot distinguish a correct parser."""
+    lessons_dir = tmp_path / "eeebot-self-evolving" / "lessons"
+    lessons_dir.mkdir(parents=True)
+    (lessons_dir / "one.md").write_text("# one", encoding="utf-8")
+    (lessons_dir / "index.md").write_text(
+        "# Lesson index\n\n"
+        "| lesson | prevents | tags |\n"
+        "|---|---|---|\n"
+        "| [one](one.md) | prevents one | test |\n"
+        "| [two](two.md) | prevents two | ops |\n"
+        "| [three](three.md) | prevents three | ci |\n",
+        encoding="utf-8",
+    )
+
+    result = DASHBOARD.scan_lessons_corpus(tmp_path / "state")
+
+    assert result["indexed_count"] == 3
+    assert result["index_shape"] == "markdown_table"
+
+
+def test_lessons_index_rows_with_empty_cells_are_still_counted(tmp_path: Path) -> None:
+    """34 of the 52 rows in the deployed index have an empty ``tags`` cell.
+    Requiring every cell to be non-empty undercounted it to 18 -- a plausible
+    wrong number, worse than the wrong zero #1487 started from."""
+    lessons_dir = tmp_path / "eeebot-self-evolving" / "lessons"
+    lessons_dir.mkdir(parents=True)
+    (lessons_dir / "one.md").write_text("# one", encoding="utf-8")
+    (lessons_dir / "index.md").write_text(
+        "| lesson | prevents | tags |\n"
+        "|---|---|---|\n"
+        "| [one](one.md) | prevents one | test |\n"
+        "| [two](two.md) | prevents two |  |\n"
+        "| [three](three.md) |  |  |\n",
+        encoding="utf-8",
+    )
+
+    assert DASHBOARD.scan_lessons_corpus(tmp_path / "state")["indexed_count"] == 3
+
+
+def test_lessons_index_header_column_rename_does_not_shift_the_count(tmp_path: Path) -> None:
+    """The count must be anchored on the delimiter row, not on the header's
+    column names -- a text filter on "| lesson" would promote a renamed header
+    into the data rows with nothing reporting it."""
+    lessons_dir = tmp_path / "eeebot-self-evolving" / "lessons"
+    lessons_dir.mkdir(parents=True)
+    (lessons_dir / "one.md").write_text("# one", encoding="utf-8")
+    (lessons_dir / "index.md").write_text(
+        "| card | blocks | labels |\n"
+        "| --- | --- | --- |\n"
+        "| [one](one.md) | blocks one | test |\n"
+        "| [two](two.md) | blocks two | ops |\n"
+        "| [three](three.md) | blocks three | ci |\n",
+        encoding="utf-8",
+    )
+
+    result = DASHBOARD.scan_lessons_corpus(tmp_path / "state")
+
+    assert result["indexed_count"] == 3
+    assert result["index_shape"] == "markdown_table"
