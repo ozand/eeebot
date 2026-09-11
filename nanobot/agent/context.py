@@ -69,6 +69,7 @@ class ContextBuilder:
         #: What the last build kept and dropped: ``{"cap", "chars", "strict",
         #: "sections": {name: chars, one entry per assembled section, 0 when
         #: empty or removed — #1379}, "dropped": [{"section", "chars", "how"}],
+        #: and ``"trimmed": [{"section", "chars", "how"}]`` for uniform degradation.
         #: "droppable_reserve_chars"}``. Callers record it.
         self.last_fit: dict[str, Any] | None = None
 
@@ -383,7 +384,7 @@ Skills with available="false" need dependencies installed first - you can try in
         # tests): sum(sections.values()) + len(SECTION_SEPARATOR) *
         # max(0, non_empty_sections - 1) == chars.
         section_names = [name for name, _ in sections]
-        fit: dict[str, Any] = {"cap": cap, "strict": strict, "dropped": []}
+        fit: dict[str, Any] = {"cap": cap, "strict": strict, "dropped": [], "trimmed": []}
         # #1447: copy the whole record rather than an allowlist of keys. The
         # allowlist silently dropped `resident_matched` / `resident_missing`
         # the moment #1443 added them, so the signal that a rule entry stopped
@@ -421,11 +422,22 @@ Skills with available="false" need dependencies installed first - you can try in
                 degraded, _ = self._uniform_trim(sections, cap)
                 uniform_prompt = self._record_fit(fit, section_names, degraded)
                 if len(uniform_prompt) <= cap and all(content for _, content in degraded):
-                    starved = [name for name, content in sections if len(content) > len(dict(degraded).get(name, ""))]
+                    degraded_by_name = dict(degraded)
+                    trimmed = [
+                        {
+                            "section": name,
+                            "chars": len(content) - len(degraded_by_name.get(name, "")),
+                            "how": "uniform-trim",
+                        }
+                        for name, content in sections
+                        if content and len(content) > len(degraded_by_name.get(name, ""))
+                    ]
+                    starved = [name for name, content in sections if len(content) > len(degraded_by_name.get(name, ""))]
                     fit.update(
                         rung="uniform_trim",
                         shortfall=shortfall,
                         starved=starved,
+                        trimmed=trimmed,
                         occupancy_alert=False,
                         dropped=dropped,
                         droppable_reserve_chars=0,
