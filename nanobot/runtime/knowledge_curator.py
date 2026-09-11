@@ -272,9 +272,20 @@ def lessons_after(
     *,
     limit: int = MAX_LESSONS_DEFAULT,
     state_dir: Path | None = None,
-) -> list[dict[str, Any]]:
+    return_status: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], str]:
     entries = list(iter_lessons(workspace, state_dir=state_dir))
     entries.sort(key=_entry_sort_key)
+
+    keys = {_entry_key(entry) for entry in entries if _entry_key(entry)}
+    if not entries:
+        status = "source_empty"
+    elif not watermark:
+        status = "cursor_unset"
+    elif watermark not in keys:
+        status = "cursor_orphaned"
+    else:
+        status = "cursor_found"
 
     found = not bool(watermark)
     result: list[dict[str, Any]] = []
@@ -291,6 +302,8 @@ def lessons_after(
         result.append(entry)
         if len(result) >= max(1, limit):
             break
+    if return_status:
+        return result, status
     return result
 
 
