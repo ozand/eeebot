@@ -106,6 +106,18 @@ def _ledger_rows(state_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _ledger_archive_for_cursor(state_dir: Path, cycle_id: str) -> str | None:
+    """Return the rotated archive containing *cycle_id*, if any."""
+    directory = Path(state_dir) / "ledger"
+    for path in _files(directory, "cycles-*.jsonl"):
+        if path.suffix != ".gz":
+            continue
+        for row in _iter_jsonl(path, (cycle_id.encode("utf-8"),)):
+            if str(row.get("cycle_id") or "") == cycle_id:
+                return path.name
+    return None
+
+
 def _file_contains(path: Path, needles: set[str]) -> bool:
     """Fast substring prefilter over raw file bytes to avoid full json parse."""
     if not needles:
@@ -250,6 +262,13 @@ def _rotate_journal(state_dir: Path | str) -> Path | None:
             except OSError:
                 pass
     return dest
+
+
+def _append_reanchor(state_dir: Path, row: dict[str, Any]) -> None:
+    path = Path(state_dir) / "reflector" / "reanchors.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
 def _append_journal(state_dir: Path, row: dict[str, Any]) -> None:
@@ -537,10 +556,42 @@ def run_reflector(
     outcomes.sort(key=lambda row: str(row.get("ts") or ""))
     watermark = _load_watermark(state_dir)
     known_watermarks = {str(row.get("cycle_id")) for row in outcomes}
-    if outcomes and watermark and watermark not in known_watermarks:
-        watermark = str(outcomes[-1]["cycle_id"])
-        _save_watermark(state_dir, watermark)
-    candidates = _completed_cycles(rows, watermark)[:max(1, int(max_cycles))]
+    active_rows = _read_jsonl(state_dir / "ledger" / "cycles.jsonl")
+    active_watermarks = {
+        str(row.get("cycle_id")) for row in active_rows
+        if row.get("phase") == "outcome" and row.get("cycle_id")
+    }
+    reanchor: dict[str, Any] | None = None
+    if outcomes and watermark and watermark not in active_watermarks:
+        archive = _ledger_archive_for_cursor(state_dir, watermark)
+        if archive:
+            reanchor = {
+                "timestamp": _now(),
+                "lost_cursor": watermark,
+                "cursor_archive": archive,
+            }
+        else:
+            result = {
+                "candidates": 0,
+                "processed": 0,
+                "skipped_pruned": 0,
+                "errors": 0,
+                "consecutive_errors": 0,
+                "input_truncated": 0,
+                "status": "cursor_orphaned",
+                "lost_cursor": watermark,
+            }
+            _append_journal(state_dir, {
+                "timestamp": _now(),
+                "status": "cursor_orphaned",
+                "lost_cursor": watermark,
+            })
+            return result
+    candidates = _completed_cycles(rows, "" if reanchor else watermark)[:max(1, int(max_cycles))]
+    if reanchor:
+        reanchor["replacement"] = str(candidates[0].get("cycle_id") or "") if candidates else ""
+        reanchor["cycles_covered"] = len(candidates)
+        _append_reanchor(state_dir, {"status": "cursor_aged_out", **reanchor})
     result = {
         "candidates": len(candidates),
         "processed": 0,
@@ -558,6 +609,8 @@ def run_reflector(
     # gzip transcript is now discoverable; only keep the skip terminal when no
     # transcript exists in either archive form.
     result["candidates"] = len(candidates)
+    if reanchor:
+        result["reanchor"] = reanchor
     prompts = _prompt_records(state_dir, candidates, deadline=deadline)
     candidates = [
         row for row in candidates
@@ -600,6 +653,8 @@ def run_reflector(
                 "input_fit": input_fit,
             })
             _save_watermark(state_dir, cycle_id)
+            if reanchor:
+                reanchor = None
             result["processed"] += 1
             consecutive_errs = 0
         except Exception as exc:
