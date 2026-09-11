@@ -891,11 +891,25 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> Any:
     return content
 
 
-def _write_decision(state: Path, lesson_id: str, decision: str, reason: str, target: str = "") -> None:
-    _append_jsonl(state / "curator" / "decisions.jsonl", {
+def _write_decision(
+    state: Path,
+    lesson_id: str,
+    decision: str,
+    reason: str,
+    target: str = "",
+    *,
+    provenance_path: str | None = None,
+) -> None:
+    row = {
         "timestamp": _now(), "lesson_id": lesson_id, "decision": decision,
         "reason": str(reason or "")[:300], "target_file": target,
-    })
+    }
+    # #1466: this is an explicitly unverified hint from an unimportant decision,
+    # not the body-checked duplicate target. Omit it entirely when the model did
+    # not surface a safe candidate path; an empty value would be ambiguous.
+    if provenance_path is not None:
+        row["provenance_path"] = provenance_path
+    _append_jsonl(state / "curator" / "decisions.jsonl", row)
 
 
 def _stage_promotions(
@@ -1084,7 +1098,15 @@ def _collect_stage_items(
             _write_decision(state_dir, lesson_id, verdict, verdict_reason, target)
             continue
         if action in {"unimportant", "rejected"}:
-            _write_decision(state_dir, lesson_id, action, reason)
+            provenance = None
+            if action == "unimportant":
+                # #1466: capture only a path the model already surfaced. Do not
+                # ask it to guess, and keep this separate from verified
+                # duplicate_path/target_file semantics.
+                cited = duplicate_source_path(str(d.get("provenance_path") or ""))
+                if cited is not None:
+                    provenance = str(cited).replace("\\", "/")
+            _write_decision(state_dir, lesson_id, action, reason, provenance_path=provenance)
             continue
         if writes >= max_writes:
             break
