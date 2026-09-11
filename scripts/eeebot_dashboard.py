@@ -1480,11 +1480,13 @@ def scan_skill_fitness(state_dir: Path) -> dict[str, Any]:
 
 
 def scan_lessons_corpus(state_dir: Path) -> dict[str, Any]:
-    """Corpus size (top-level lessons/*.md, excluding README.md -- the same
-    population #1347's own count of 41 measures) and, once lessons/index.md
-    exists (#1343, a separate line), the indexed count from parsing it.
-    Until then this MUST report "missing", not "0" -- a zero would claim an
-    empty-but-present index, which is a different, false, state."""
+    """Read the lesson corpus and generated index with explicit parse status.
+
+    The generated index currently uses a Markdown table, while older fixtures
+    and deployments may use list rows.  The parser records which shape matched;
+    a present but unrecognized index is ``unavailable`` rather than a fabricated
+    zero (#1487).
+    """
     lessons_dir = _selfevo_repo_dir(state_dir) / "lessons"
     if not lessons_dir.is_dir():
         return {
@@ -1516,16 +1518,49 @@ def scan_lessons_corpus(state_dir: Path) -> dict[str, Any]:
             "source_status": "valid", "corpus_size": corpus_size,
             "index_status": "unreadable", "indexed_count": None,
         }
-    # Bounded, format-agnostic count: one Markdown list item ("- " / "* " at
-    # line start) per indexed lesson row. If #1343 lands a different format
-    # this degrades to 0 indexed rather than raising -- never a crash on a
-    # read-only tile.
-    indexed_count = sum(
-        1 for line in index_text.splitlines() if line.lstrip().startswith(("- ", "* "))
-    )
+    lines = index_text.splitlines()
+    list_count = sum(1 for line in lines if line.lstrip().startswith(("- ", "* ")))
+    def _cells(row: str) -> "list[str]":
+        return [cell.strip() for cell in row.strip().strip("|").split("|")]
+
+    def _is_delimiter(row: str) -> bool:
+        if not row.strip().startswith("|"):
+            return False
+        cells = _cells(row)
+        return bool(cells) and all(re.fullmatch(r":?-+:?", cell) for cell in cells)
+
+    # #1487: a Markdown table's data rows are exactly the pipe rows AFTER the
+    # delimiter. Anchoring on the delimiter keeps this independent of the header's
+    # column names -- the previous version keyed on the literal text "| lesson",
+    # so renaming a column would have silently promoted the header to a data row.
+    #
+    # Cells are NOT required to be non-empty: 34 of the 52 rows in the deployed
+    # lessons/index.md have an empty `tags` cell, and skipping them undercounted
+    # the index to 18 -- a plausible wrong number, which is worse than the wrong
+    # zero this issue started from.
+    table_rows: list[str] = []
+    delimiter_at = next((i for i, line in enumerate(lines) if _is_delimiter(line)), None)
+    if delimiter_at is not None:
+        table_rows = [
+            line for line in lines[delimiter_at + 1:]
+            if line.strip().startswith("|") and not _is_delimiter(line)
+        ]
+    if table_rows:
+        return {
+            "source_status": "valid", "corpus_size": corpus_size,
+            "index_status": "valid", "indexed_count": len(table_rows),
+            "index_shape": "markdown_table",
+        }
+    if list_count:
+        return {
+            "source_status": "valid", "corpus_size": corpus_size,
+            "index_status": "valid", "indexed_count": list_count,
+            "index_shape": "markdown_list",
+        }
     return {
         "source_status": "valid", "corpus_size": corpus_size,
-        "index_status": "valid", "indexed_count": indexed_count,
+        "index_status": "unavailable", "indexed_count": None,
+        "index_shape": "unrecognized",
     }
 
 
