@@ -475,6 +475,54 @@ def _evidence_refs(evidence: Any) -> list[str]:
     return []
 
 
+def _read_ledger_cycle_text(state_dir: Path, cycle_id: str) -> tuple[str | None, str | None]:
+    """Resolve a cycle from the active tail or retained gzip archives.
+
+    The active tail remains the cheap path. If it misses, walk retained
+    ``cycles-*.jsonl.gz`` archives newest-first and stop at the first match.
+    This is bounded by physical ledger retention and preserves a distinguishable
+    ``ledger_archive`` source instead of treating a rotated row as absent.
+    """
+    ledger_dir = Path(state_dir) / "ledger"
+    try:
+        active = ledger_dir / "cycles.jsonl"
+        if active.is_file():
+            for line in _bounded_tail_lines(active, _LEDGER_TAIL_LINES):
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(row, dict) and str(row.get("cycle_id") or "") == cycle_id:
+                    parts = [
+                        str(row.get(field) or "")
+                        for field in ("result", "summary", "hypothesis", "approach", "reusable_insight", "generalized_insight")
+                        if row.get(field)
+                    ]
+                    return (" ".join(parts) or f"cycle_id={cycle_id}")[:_MAX_EVIDENCE_SOURCE_BYTES], "ledger_tail"
+        archives = sorted(ledger_dir.glob("cycles-*.jsonl.gz"), reverse=True)
+        for archive in archives:
+            try:
+                with gzip.open(archive, "rt", encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        try:
+                            row = json.loads(line)
+                        except Exception:
+                            continue
+                        if not isinstance(row, dict) or str(row.get("cycle_id") or "") != cycle_id:
+                            continue
+                        parts = [
+                            str(row.get(field) or "")
+                            for field in ("result", "summary", "hypothesis", "approach", "reusable_insight", "generalized_insight")
+                            if row.get(field)
+                        ]
+                        return (" ".join(parts) or f"cycle_id={cycle_id}")[:_MAX_EVIDENCE_SOURCE_BYTES], "ledger_archive"
+            except (OSError, EOFError, gzip.BadGzipFile):
+                continue
+    except Exception:
+        return None, None
+    return None, None
+
+
 def _read_action_index_cycle_text(state_dir: Path, cycle_id: str) -> str | None:
     """Resolve a cycle from a bounded set of newest action-index segments.
 
@@ -530,9 +578,12 @@ def _resolve_evidence_ref(
     if _CYCLE_ID_RE.fullmatch(ref):
         if ref in cycle_ids:
             return None, "ledger_tail"
+        ledger_text, ledger_source = _read_ledger_cycle_text(state_dir, ref)
+        if ledger_text is not None:
+            return None, ledger_source
         if _read_action_index_cycle_text(state_dir, ref) is not None:
             return None, "action_index"
-        return f"cycle_id not in ledger tail: {ref[:60]}", None
+        return f"cycle_id not in retained ledger (beyond retention or never existed): {ref[:60]}", None
     normalized = ref.replace("\\", "/").strip()
     path = Path(normalized)
     if (
@@ -587,28 +638,10 @@ def _read_evidence_source_text(workspace: Path, ref: str, state_dir: Path | None
     if _CYCLE_ID_RE.fullmatch(ref):
         if state_dir is None:
             return ""
-        ledger_path = Path(state_dir) / "ledger" / "cycles.jsonl"
         try:
-            if not ledger_path.is_file():
-                return ""
-            matched: list[str] = []
-            for line in _bounded_tail_lines(ledger_path, _LEDGER_TAIL_LINES):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                    if str(row.get("cycle_id") or "") == ref:
-                        # Collect summary/result fields as source text.
-                        for field in ("result", "summary", "hypothesis", "approach",
-                                      "reusable_insight", "generalized_insight"):
-                            val = str(row.get(field) or "")
-                            if val:
-                                matched.append(val)
-                except Exception:
-                    continue
-            if matched:
-                return " ".join(matched)[:_MAX_EVIDENCE_SOURCE_BYTES]
+            ledger_text, _ledger_source = _read_ledger_cycle_text(Path(state_dir), ref)
+            if ledger_text is not None:
+                return ledger_text
             indexed = _read_action_index_cycle_text(Path(state_dir), ref)
             return indexed or ""
         except Exception:
