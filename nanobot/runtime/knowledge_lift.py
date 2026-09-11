@@ -42,6 +42,8 @@ DEFAULT_CASE_TIMEOUT_S = 30.0
 DEFAULT_TOTAL_TIMEOUT_S = 120.0
 _MAX_HISTORY_ROWS = 500
 _MAX_RUN_SECONDS = 120.0
+_HISTORY_WINDOW_DAYS = 7
+_SUMMARY_REASONS = frozenset({"absent", "empty", "oversize", "malformed", "aged_out", "permission", "unavailable"})
 
 _RESERVED_KEYS = {
     "case_id",
@@ -570,33 +572,100 @@ def execute_knowledge_lift(
     }
 
 
+def _parse_ts(value: Any) -> datetime | None:
+    """Parse an aware ISO-8601 timestamp, or return None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _unavailable_summary(reason: str) -> dict[str, Any]:
+    """Return a summary that cannot be mistaken for measured benefit."""
+    if reason not in _SUMMARY_REASONS:
+        reason = "unavailable"
+    return {
+        "status": "unavailable",
+        "reason": reason,
+        "total_evals": 0,
+        "pass_lift": 0,
+        "token_lift_avg": 0.0,
+        "net_benefit": None,
+        "latest_ts": None,
+    }
+
+
 def read_knowledge_lift_summary(state_dir: Path) -> dict[str, Any]:
-    """Read knowledge lift summary metrics from sidecar (reporting-only)."""
+    """Read knowledge-lift metrics without treating missing data as a win.
+
+    ``complete`` means at least one valid retained row was read.  An absent,
+    empty, malformed, or oversized sidecar is ``unavailable``.  A valid sidecar
+    whose rows all predate the rolling watermark window is ``unavailable`` with
+    ``reason=aged_out``: it is readable, but cannot answer the current question.
+    """
     sidecar_path = Path(state_dir) / SIDECAR_REL
-    rows = _read_eval_rows(sidecar_path)
+    try:
+        if not sidecar_path.exists():
+            return _unavailable_summary("absent")
+        if not sidecar_path.is_file():
+            return _unavailable_summary("unavailable")
+        if sidecar_path.stat().st_size > MAX_FILE_BYTES * 40:
+            return _unavailable_summary("oversize")
+        raw_lines = sidecar_path.read_text(encoding="utf-8").splitlines()
+    except PermissionError:
+        return _unavailable_summary("permission")
+    except (OSError, UnicodeError):
+        return _unavailable_summary("unavailable")
+
+    if not raw_lines or not any(line.strip() for line in raw_lines):
+        return _unavailable_summary("empty")
+
+    rows: list[dict[str, Any]] = []
+    for line in raw_lines:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(row, dict) and _row_well_formed(row):
+            rows.append(row)
+
     if not rows:
-        return {
-            "total_evals": 0,
-            "pass_lift": 0,
-            "token_lift_avg": 0.0,
-            "net_benefit": True,
-            "latest_ts": None,
-        }
+        return _unavailable_summary("malformed")
+    # Match the sidecar's bounded read window: newest valid rows only.
+    rows = rows[-_MAX_HISTORY_ROWS:]
 
-    total = len(rows)
-    pass_lift = sum(int(r.get("delta_pass", 0) or 0) for r in rows)
-    token_diffs = [int(r.get("delta_tokens", 0) or 0) for r in rows]
-    avg_token_diff = round(sum(token_diffs) / total, 1) if total > 0 else 0.0
-    latest_ts = rows[-1].get("ts")
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=_HISTORY_WINDOW_DAYS)
+    parseable_ts: list[datetime] = []
+    retained: list[dict[str, Any]] = []
+    for row in rows:
+        stamp = _parse_ts(row.get("ts"))
+        if stamp is None:
+            continue
+        parseable_ts.append(stamp)
+        if cutoff <= stamp <= now:
+            retained.append(row)
+    if not retained:
+        return _unavailable_summary("aged_out" if parseable_ts else "malformed")
 
-    # Net benefit is negative if lift is strictly negative
-    net_benefit = pass_lift >= 0
+    total = len(retained)
+    pass_lift = sum(int(r.get("delta_pass", 0) or 0) for r in retained)
+    token_diffs = [int(r.get("delta_tokens", 0) or 0) for r in retained]
+    avg_token_diff = round(sum(token_diffs) / total, 1)
+    latest_ts = max(str(r.get("ts") or "") for r in retained)
 
     return {
+        "status": "complete",
+        "reason": None,
         "total_evals": total,
         "pass_lift": pass_lift,
         "token_lift_avg": avg_token_diff,
-        "net_benefit": net_benefit,
+        "net_benefit": pass_lift >= 0,
         "latest_ts": latest_ts,
     }
 
@@ -643,9 +712,27 @@ def run_all(
 
 
 def negative_delta_demand(state_dir: Path, *, limit: int | None = 1) -> list[dict[str, str]]:
-    """Return negative lift findings as defect demand items if knowledge hurts."""
+    """Return negative-lift or unavailable-sidecar demand items.
+
+    An unavailable sidecar is surfaced as a defect rather than treated as a
+    measured non-negative result. This keeps the diagnostic mechanism alive
+    without claiming that knowledge itself caused the defect.
+    """
     summary = read_knowledge_lift_summary(state_dir)
-    if summary.get("total_evals", 0) == 0 or summary.get("net_benefit", True):
+    if summary.get("status") == "unavailable":
+        # An absent sidecar is the expected pre-first-run state, not a defect.
+        # Existing-but-unreadable data is different: it can hide a real negative
+        # result and must remain visible to demand without claiming one.
+        if summary.get("reason") == "absent":
+            return []
+        reason = str(summary.get("reason") or "unavailable")
+        item = {
+            "summary": "Knowledge lift evaluation unavailable",
+            "evidence": f"Knowledge lift A/B evaluation sidecar is unavailable ({reason}); no lift verdict was measured.",
+            "affected_path": SIDECAR_REL,
+        }
+        return [item] if limit is None else [item][:limit]
+    if summary.get("net_benefit") is not False:
         return []
 
     pass_lift = summary.get("pass_lift", 0)
