@@ -295,6 +295,95 @@ def test_scorecard_and_negative_demand(state_dir: Path):
     assert demand_item is not None
 
 
+# ─── #1498: unavailable sidecar must not manufacture a healthy verdict ────────
+
+
+def _summary_row(case_id: str, delta_pass: int = 0, ts: str | None = None) -> dict:
+    return {
+        "schema": knowledge_lift.SCHEMA,
+        "case_id": case_id,
+        "with_pass": delta_pass >= 0,
+        "without_pass": delta_pass <= 0,
+        "with_tokens": 120,
+        "without_tokens": 100,
+        "with_duration_s": 1.0,
+        "without_duration_s": 1.0,
+        "delta_pass": delta_pass,
+        "delta_tokens": 20,
+        "ts": ts or datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def test_knowledge_lift_unavailable_states_never_report_net_benefit_true(tmp_path: Path):
+    """Zero readable rows are not evidence of a non-negative knowledge lift."""
+    absent = knowledge_lift.read_knowledge_lift_summary(tmp_path)
+    assert absent["status"] == "unavailable"
+    assert absent["reason"] == "absent"
+    assert absent["total_evals"] == 0
+    assert absent["net_benefit"] is not True
+
+    sidecar = tmp_path / knowledge_lift.SIDECAR_REL
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text("", encoding="utf-8")
+    empty = knowledge_lift.read_knowledge_lift_summary(tmp_path)
+    assert empty["status"] == "unavailable"
+    assert empty["reason"] == "empty"
+    assert empty["net_benefit"] is not True
+
+    sidecar.write_text("not json\n", encoding="utf-8")
+    malformed = knowledge_lift.read_knowledge_lift_summary(tmp_path)
+    assert malformed["status"] == "unavailable"
+    assert malformed["reason"] == "malformed"
+    assert malformed["net_benefit"] is not True
+
+    sidecar.write_bytes(b"x" * (knowledge_lift.MAX_FILE_BYTES * 40 + 1))
+    oversize = knowledge_lift.read_knowledge_lift_summary(tmp_path)
+    assert oversize["status"] == "unavailable"
+    assert oversize["reason"] == "oversize"
+    assert oversize["net_benefit"] is not True
+
+
+def test_knowledge_lift_present_rows_are_measured_and_uneven(tmp_path: Path):
+    """Uneven valid rows prove the summary is not a vacuous zero-row fixture."""
+    sidecar = tmp_path / knowledge_lift.SIDECAR_REL
+    sidecar.parent.mkdir(parents=True)
+    rows = [_summary_row("one"), _summary_row("two", delta_pass=1), _summary_row("three")]
+    knowledge_lift._atomic_write_eval_rows(sidecar, rows)
+
+    summary = knowledge_lift.read_knowledge_lift_summary(tmp_path)
+    assert summary["status"] == "complete"
+    assert summary["reason"] is None
+    assert summary["total_evals"] == 3
+    assert summary["pass_lift"] == 1
+    assert summary["net_benefit"] is True
+
+
+def test_knowledge_lift_unavailable_surfaces_demand(tmp_path: Path):
+    """An existing but unreadable lift sidecar remains visible to demand."""
+    sidecar = tmp_path / knowledge_lift.SIDECAR_REL
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text("not json\n", encoding="utf-8")
+    summary = knowledge_lift.read_knowledge_lift_summary(tmp_path)
+    assert summary["net_benefit"] is not True
+    items = knowledge_lift.negative_delta_demand(tmp_path)
+    assert len(items) == 1
+    assert "unavailable" in items[0]["summary"]
+    assert "malformed" in items[0]["evidence"]
+
+
+def test_knowledge_lift_fully_aged_rows_are_unavailable(tmp_path: Path):
+    """A valid sidecar whose entire retained window is older than seven days is stale data."""
+    sidecar = tmp_path / knowledge_lift.SIDECAR_REL
+    sidecar.parent.mkdir(parents=True)
+    old = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+    knowledge_lift._atomic_write_eval_rows(sidecar, [_summary_row("old", ts=old)])
+
+    summary = knowledge_lift.read_knowledge_lift_summary(tmp_path)
+    assert summary["status"] == "unavailable"
+    assert summary["reason"] == "aged_out"
+    assert summary["net_benefit"] is not True
+
+
 # ─── #1104: finish_reason, warmup, and max_tokens in knowledge_lift ───────────
 
 

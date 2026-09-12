@@ -1089,10 +1089,12 @@ def _knowledge_lift_section(state_dir: Path | None) -> dict[str, Any]:
     """#1093: Reporting-only summary of knowledge lift evaluations."""
     if state_dir is None:
         return {
+            "status": "unavailable",
+            "reason": "unavailable",
             "total_evals": 0,
             "pass_lift": 0,
             "token_lift_avg": 0.0,
-            "net_benefit": True,
+            "net_benefit": None,
             "latest_ts": None,
         }
     try:
@@ -1101,10 +1103,12 @@ def _knowledge_lift_section(state_dir: Path | None) -> dict[str, Any]:
         return knowledge_lift.read_knowledge_lift_summary(Path(state_dir))
     except Exception:
         return {
+            "status": "unavailable",
+            "reason": "unavailable",
             "total_evals": 0,
             "pass_lift": 0,
             "token_lift_avg": 0.0,
-            "net_benefit": True,
+            "net_benefit": None,
             "latest_ts": None,
         }
 
