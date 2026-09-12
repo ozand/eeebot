@@ -2218,6 +2218,7 @@ def _fold_completed(
         data = _load_completed(state_dir)
         entries: dict[str, Any] = data["entries"]
         demand_by_cycle: dict[str, str] = {}
+        fallback_cycles: set[str] = set()
         # #813: the 'proposed' row's own ``serves`` value, folded alongside
         # ``demand_id`` so the confirmation path (usage_evidence.confirm_serves)
         # can later tell whether a completed entry is an optimization claim
@@ -2235,8 +2236,14 @@ def _fold_completed(
             phase = row.get("phase")
             if phase == "proposed":
                 demand_id = str(row.get("demand_id") or "").strip()
+                lane = str(row.get("lane") or "").strip().lower()
                 if demand_id:
                     demand_by_cycle[cycle_id] = demand_id
+                elif lane == "fallback" or cycle_id.startswith("fallback-"):
+                    # The fallback writer's proposed ledger row predates the
+                    # request's additive ``lane`` field. Its stable cycle-id
+                    # namespace is the durable identity available here.
+                    fallback_cycles.add(cycle_id)
                 serves = str(row.get("serves") or "").strip()
                 if serves:
                     serves_by_cycle[cycle_id] = serves
@@ -2244,6 +2251,27 @@ def _fold_completed(
                 if str(row.get("outcome") or "").strip().lower() == "success":
                     success_by_cycle[cycle_id] = row
         changed = False
+        for cycle_id in fallback_cycles:
+            if cycle_id not in success_by_cycle:
+                continue
+            fallback_key = f"fallback:{cycle_id}"
+            if fallback_key in entries:
+                continue
+            success = success_by_cycle[cycle_id]
+            files = success.get("files_changed")
+            tier = success.get("change_tier")
+            if tier is None:
+                tier = classify_change_tier(files if isinstance(files, list) else [])
+            entries[fallback_key] = {
+                "cycle_id": cycle_id,
+                "ts": str(success.get("ts") or ""),
+                "files_changed": files if isinstance(files, list) else [],
+                "change_tier": tier,
+                "serves": "",
+                "lane": "fallback",
+                "demand_id": None,
+            }
+            changed = True
         for cycle_id, demand_id in demand_by_cycle.items():
             if demand_id in entries:
                 continue  # append-only: never overwrite an existing entry
