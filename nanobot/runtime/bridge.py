@@ -3793,6 +3793,7 @@ async def _main_impl_body():
             'subagent_task_id': locals().get('_subagent_task_id', None),
             'executor_llm_error': locals().get('_executor_llm_error_text', ''),
             'system_prompt_overflow': locals().get('_system_prompt_overflow_text', ''),
+            'run_stop_reason': locals().get('_run_stop_reason', ''),
             'prompt_fit_rung': locals().get('_prompt_fit_rung'),
             'origin_main_observed': locals().get('_origin_main_observed', locals().get('main_sha_before', ''))
         }
@@ -4014,7 +4015,7 @@ async def _main_impl_body():
     _verdict, _verdict_reason = _derive_cycle_verdict(_cycle_outcome, _verdict_reason_hint)
     try:
         from nanobot import crash_record as _run_record
-        if not _run_stop_reason:
+        if not _res.get('run_stop_reason'):
             _run_record.set_run_metadata(
                 classification=("completion" if _cycle_outcome == "success" else "failed"),
                 reason=_rollback_reason or _cycle_outcome,
