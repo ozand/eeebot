@@ -95,6 +95,37 @@ def test_loop_breaker_run_classification_is_preserved(tmp_path):
     assert _run_rows(state)[0]["classification"] == "loop_breaker_abort"
 
 
+def test_systemd_timeout_is_classified_as_unit_timeout(tmp_path):
+    from nanobot import crash_record
+
+    state = tmp_path / "state"
+    crash_record._start_run_marker(state)
+    crash_record.record_exit(
+        state, outcome="failure", exit_status="TIMEOUT", source="systemd",
+        service_result="timeout", exit_code="killed", now=NOW + timedelta(seconds=7),
+    )
+    row = _run_rows(state)[0]
+    assert row["classification"] == "unit_timeout"
+    assert row["source"] == "systemd"
+
+
+def test_run_rotation_archives_previous_day(tmp_path):
+    from nanobot import crash_record
+
+    state = tmp_path / "state"
+    bridge_dir = state / "bridge"
+    bridge_dir.mkdir(parents=True)
+    active = bridge_dir / "runs.jsonl"
+    active.write_text(json.dumps({"phase": "run_end", "duration_s": 11}) + "\\n", encoding="utf-8")
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).timestamp()
+    os.utime(active, (yesterday, yesterday))
+    crash_record._start_run_marker(state)
+    crash_record.record_exit(state, outcome="success", exit_status=0)
+    archives = list(bridge_dir.glob("runs-*.jsonl.gz"))
+    assert len(archives) == 1
+    assert active.exists()
+
+
 def test_systemd_record_for_the_same_invocation_is_merged_not_double_counted(tmp_path):
     from nanobot import crash_record  # module absent on the pre-#1197 tree
 
