@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 _DEFAULT_LEDGER_BYTES = 4 * 2**20  # 4 MiB bounds uncompressed host parsing.
 _DEFAULT_ARTIFACT_FILES = 256  # bounded queue scan for the 2 GB host.
@@ -35,6 +35,29 @@ class Window:
     # Selected source paths are retained for readers whose evidence timestamp
     # is the artifact mtime (for example usage ``touched:result``).
     paths: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True)
+class TextWindow:
+    """Bounded text sources from one live file and its rotated archives."""
+
+    texts: tuple[tuple[Path, str], ...]
+    status: str
+    files_read: int
+    bytes_read: int
+    notes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TextLookup:
+    """Result of a live-first exact lookup across rotated text sources."""
+
+    text: str | None
+    status: str  # live, archive, not_found, partial, unavailable
+    source: Path | None
+    files_read: int
+    bytes_read: int
+    notes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -214,6 +237,116 @@ def ledger_window(
     covered_from = _iso(requested) if status == "complete" else (min(covered) if covered else None)
     covered_to = max(covered_to_values) if covered_to_values else None
     return Window(tuple(rows), status, _iso(requested), covered_from, covered_to, files_read, files_skipped, bytes_read, tuple(dict.fromkeys(notes)))
+
+
+def _read_bounded_text(path: Path, max_bytes: int) -> tuple[str | None, int, str | None]:
+    try:
+        opener = gzip.open if path.name.endswith(".gz") else open
+        with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+            text = handle.read(max_bytes + 1)
+        used = len(text.encode("utf-8", errors="replace"))
+        if used > max_bytes:
+            return None, max_bytes, "cap_bytes"
+        return text, used, None
+    except PermissionError:
+        return None, 0, "permission"
+    except (OSError, EOFError, gzip.BadGzipFile):
+        return None, 0, f"gz_corrupt:{path.name}" if path.name.endswith(".gz") else "io_error"
+
+
+def _rotated_paths(path: Path, archive_glob: str, max_archives: int) -> list[Path]:
+    archive_dir = path.parent / "archive"
+    try:
+        return sorted(
+            (item for item in archive_dir.glob(archive_glob) if item.is_file()),
+            key=lambda item: item.name,
+            reverse=True,
+        )[:max(0, max_archives)]
+    except (OSError, ValueError):
+        return []
+
+
+def read_rotated_texts(
+    path: str | Path,
+    *,
+    archive_glob: str,
+    include_live: bool = True,
+    include_archives: bool = False,
+    max_archives: int = 7,
+    max_bytes: int = 256 * 1024,
+) -> TextWindow:
+    """Read bounded live/rotated text sources; callers choose archive opt-in."""
+    path = Path(path)
+    sources = ([path] if include_live else []) + (
+        _rotated_paths(path, archive_glob, max_archives) if include_archives else []
+    )
+    texts: list[tuple[Path, str]] = []
+    notes: list[str] = []
+    bytes_read = 0
+    for source in sources:
+        if bytes_read >= max(0, max_bytes):
+            notes.append("cap_bytes")
+            break
+        if not source.is_file():
+            if source == path:
+                notes.append("live_missing")
+            continue
+        text, used, error = _read_bounded_text(source, max(0, max_bytes - bytes_read))
+        bytes_read += used
+        if error:
+            notes.append(error if error != "cap_bytes" else f"cap_bytes:{source.name}")
+            continue
+        if text is not None:
+            texts.append((source, text))
+    if not sources:
+        notes.append("dir_missing")
+    status = "partial" if any(note.startswith(("permission", "io_error", "gz_corrupt", "cap_bytes")) for note in notes) else "complete"
+    if not texts and notes and all(note in {"live_missing", "dir_missing"} for note in notes):
+        status = "unavailable"
+    return TextWindow(tuple(texts), status, len(texts), bytes_read, tuple(dict.fromkeys(notes)))
+
+
+def lookup_rotated_text(
+    path: str | Path,
+    *,
+    archive_glob: str,
+    matches: Callable[[str], bool],
+    max_archives: int = 7,
+    max_bytes: int = 256 * 1024,
+) -> TextLookup:
+    """Resolve one exact reference live-first, then newest archives on miss."""
+    path = Path(path)
+    live_window = read_rotated_texts(
+        path, archive_glob=archive_glob, include_live=True,
+        include_archives=False, max_archives=max_archives, max_bytes=max_bytes,
+    )
+    files_read = live_window.files_read
+    bytes_read = live_window.bytes_read
+    notes = list(live_window.notes)
+    for source, text in live_window.texts:
+        if matches(text):
+            return TextLookup(text, "live", source, files_read, bytes_read, tuple(notes))
+    archives = _rotated_paths(path, archive_glob, max_archives)
+    for archive in archives:
+        remaining = max(0, max_bytes - bytes_read)
+        if remaining == 0:
+            notes.append("cap_bytes")
+            break
+        text, used, error = _read_bounded_text(archive, remaining)
+        bytes_read += used
+        if error:
+            notes.append(error if error != "cap_bytes" else f"cap_bytes:{archive.name}")
+            continue
+        files_read += 1
+        if text is not None and matches(text):
+            return TextLookup(text, "archive", archive, files_read, bytes_read, tuple(dict.fromkeys(notes)))
+    if any(note.startswith(("permission", "io_error", "gz_corrupt", "cap_bytes")) for note in notes):
+        status = "partial"
+    elif not live_window.texts and not archives:
+        status = "unavailable"
+    else:
+        status = "not_found"
+    return TextLookup(None, status, None, files_read, bytes_read, tuple(dict.fromkeys(notes)))
 
 
 def evidence_status(window: Window) -> str:

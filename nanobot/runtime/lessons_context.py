@@ -251,15 +251,30 @@ def build_lessons_context(
                 err_card["related"] = _err_related
             result["relevant_error"] = err_card
 
-        from nanobot.runtime.lesson_index import read_index
-        entries = _capped_entries(lessons_dir / "lessons.yaml") + read_index(lessons_dir / "index.md")
-        less = _best_card(entries, task_words, "approach")
+        from nanobot.runtime.lesson_index import find_index_matches, read_index
+        index_path = lessons_dir / "index.md"
+        live_index_entries = read_index(index_path)
+        # Keep the live index as the cheap first path, but consult retained
+        # archives when the requested task does not match any live row. This
+        # avoids making an unrelated live row suppress a cited archived lesson.
+        live_best = _best_card(live_index_entries, task_words, "approach")
+        archive_entries = []
+        if not live_best:
+            archive_entries = find_index_matches(
+                index_path,
+                predicate=lambda entry: bool(
+                    _score_entry(task_words, entry, "approach")[1] >= _MIN_SHARED_WORDS
+                ),
+            )
+        index_entries = live_index_entries + archive_entries
+        less = _best_card(_capped_entries(lessons_dir / "lessons.yaml") + index_entries, task_words, "approach")
         if less:
             less_card: dict[str, Any] = {
                 "id": less.get("id"),
                 "title": _cap(less.get("title"), _TITLE_CAP),
                 "approach": _cap(less.get("approach"), _TEXT_CAP),
                 "reusable_insight": _cap(less.get("reusable_insight"), _TEXT_CAP),
+                **({"source": "lesson_index_archive"} if less in index_entries and less not in live_index_entries else {}),
                 **({"problem": _cap(less.get("problem"), _TEXT_CAP),
                     "solution": _cap(less.get("solution"), _TEXT_CAP)}
                    if less.get("problem") and less.get("solution") else {}),
