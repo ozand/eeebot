@@ -6,6 +6,8 @@ from pathlib import Path
 
 from nanobot.runtime.knowledge_curator import (
     _ACTION_INDEX_SEGMENTS,
+    _yaml_entries,
+    iter_lessons,
     _fact_path,
     _messages,
     clear_staged_manifest,
@@ -40,6 +42,53 @@ def _llm(decisions):
             enriched.append(item)
         return json.dumps(enriched)
     return call
+
+
+def test_yaml_entries_reports_invalid_archive_shape(tmp_path):
+    """#1511: the real orphaned wrapper is unavailable, not a valid empty list."""
+    raw = "lessons:\n  - scripts/validate_markdown_format.py\n- id: LESS-old\n  approach: retained\n"
+    entries, status = _yaml_entries(raw)
+    assert entries == []
+    assert status == "unavailable"
+
+
+def test_valid_lesson_archives_return_entries_without_diagnostics(tmp_path):
+    archive = tmp_path / "lessons" / "archive"
+    archive.mkdir(parents=True)
+    with gzip.open(archive / "lessons-valid.yaml.gz", "wt", encoding="utf-8") as fh:
+        fh.write("lessons:\n- id: LESS-valid\n  approach: retained\n")
+
+    diagnostics: list[dict[str, str]] = []
+    entries = list(iter_lessons(tmp_path, diagnostics=diagnostics))
+    assert [entry["id"] for entry in entries] == ["LESS-valid"]
+    assert diagnostics == []
+
+
+def test_empty_lesson_archives_return_empty_without_diagnostics(tmp_path):
+    archive = tmp_path / "lessons" / "archive"
+    archive.mkdir(parents=True)
+    with gzip.open(archive / "lessons-empty.yaml.gz", "wt", encoding="utf-8") as fh:
+        fh.write("lessons: []\n")
+
+    diagnostics: list[dict[str, str]] = []
+    assert list(iter_lessons(tmp_path, diagnostics=diagnostics)) == []
+    assert diagnostics == []
+
+
+def test_iter_lessons_reports_unparseable_archive_without_stopping(tmp_path):
+    """#1511: one bad archive is visible while valid sources still flow."""
+    archive = tmp_path / "lessons" / "archive"
+    archive.mkdir(parents=True)
+    with gzip.open(archive / "lessons-broken.yaml.gz", "wt", encoding="utf-8") as fh:
+        fh.write("lessons:\n  - scripts/validate_markdown_format.py\n- id: LESS-old\n  approach: retained\n")
+    (tmp_path / "lessons" / "lessons.yaml").write_text(
+        "lessons:\n- id: LESS-live\n  approach: live\n", encoding="utf-8"
+    )
+
+    diagnostics: list[dict[str, str]] = []
+    entries = list(iter_lessons(tmp_path, diagnostics=diagnostics))
+    assert [entry["id"] for entry in entries] == ["LESS-live"]
+    assert diagnostics == [{"path": "lessons-broken.yaml.gz", "status": "unavailable", "reason": "parse"}]
 
 
 def test_tail_expired_cycle_resolves_from_action_index_and_records_source(tmp_path):
