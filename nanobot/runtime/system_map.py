@@ -35,7 +35,6 @@ from pathlib import Path
 
 from nanobot.runtime.schemas import QUALIFYING_ARTIFACT_DIRS
 
-_SCRIPT_DIRS = QUALIFYING_ARTIFACT_DIRS
 _TRIVIAL_TOKENS = frozenset()  # deliberately empty — see module docstring / proposal.md alternatives
 _MIN_TOKEN_LEN = 4
 _JACCARD_THRESHOLD = 0.5
@@ -57,7 +56,7 @@ _HEADING_RE = re.compile(r"^## .+$", re.MULTILINE)
 def _iter_script_files(selfevo_repo: Path) -> list[Path]:
     selfevo_repo = Path(selfevo_repo)
     files: list[Path] = []
-    for dirname in _SCRIPT_DIRS:
+    for dirname in QUALIFYING_ARTIFACT_DIRS:
         d = selfevo_repo / dirname
         if not d.is_dir():
             continue

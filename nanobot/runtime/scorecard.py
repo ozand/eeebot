@@ -714,7 +714,7 @@ def _loop_section(
                     is_confirmable = (
                         cycle_id in goal_linked_cycles
                         and isinstance(files_changed, list)
-                        and any(isinstance(f, str) and any(f.startswith(f"{d}/") for d in _SCRIPT_DIRS) for f in files_changed)
+                        and any(isinstance(f, str) and any(f.startswith(f"{d}/") for d in QUALIFYING_ARTIFACT_DIRS) for f in files_changed)
                     )
                     if is_confirmable:
                         confirmable_integrations += 1
@@ -865,14 +865,13 @@ def _cost_section(state_dir: Path, now: datetime, integrations: int) -> dict[str
 
 # ─── section: quality (V1, instance repo) ───────────────────────────────────
 
-_SCRIPT_DIRS = QUALIFYING_ARTIFACT_DIRS
 
 
 def _own_compile_failures(repo: Path) -> list[str]:
     """Bounded fallback compile scan (same shape as ``demand._compile_defects``
     minus the watermark) used only when demand isn't cleanly importable."""
     failures: list[str] = []
-    for dirname in _SCRIPT_DIRS:
+    for dirname in QUALIFYING_ARTIFACT_DIRS:
         d = repo / dirname
         if not d.is_dir():
             continue
@@ -902,7 +901,7 @@ def _quality_section(state_dir: Path, selfevo_repo: Path | None) -> dict[str, An
         }
     try:
         repo = Path(selfevo_repo)
-        for dirname in _SCRIPT_DIRS:
+        for dirname in QUALIFYING_ARTIFACT_DIRS:
             d = repo / dirname
             if not d.is_dir():
                 continue
