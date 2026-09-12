@@ -1977,6 +1977,11 @@ async def main():
         print('bridge: another run holds the lock (bridge.lock); exiting cleanly')
         return 0
     try:
+        try:
+            from nanobot import crash_record as _run_record
+            _run_record.set_run_metadata({"bridge_enabled": True})
+        except Exception:
+            pass
         return await _main_impl()
     finally:
         try:
@@ -2388,6 +2393,11 @@ async def _main_impl_body():
         # same value. Branch is not known yet (resolved by _setup_cycle_branch
         # below) — the write-ahead row below records it as None.
         _cycle_id = str(req.get('cycle_id') or request_id)
+        try:
+            from nanobot import crash_record as _run_record
+            _run_record.set_run_metadata(cycle_id=_cycle_id, request_id=request_id)
+        except Exception:
+            pass
         # #720 piece 3: write-ahead cycle marker, appended BEFORE any dedup check
         # or subagent spawn — a crashed/timed-out cycle leaves this row with no
         # matching terminal outcome row, a deterministic recovery signal.
@@ -2935,6 +2945,7 @@ async def _main_impl_body():
         # #789: names of fitness sidecars changed during the spawn window (empty =
         # clean). Populated by the pre/post hash compare below.
         _integrity_changed: 'list[str]' = []
+        _run_stop_reason = ''
         # #1300: set when the strict prompt builder refused to build (see the
         # SystemPromptOverflowError clause below); rides into the result's learnings.
         _system_prompt_overflow_text = ''
@@ -3027,6 +3038,16 @@ async def _main_impl_body():
                     await asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True)
                     print("All timed-out subagent tasks cancelled.")
 
+            try:
+                from nanobot import crash_record as _run_record
+                _telem = json.loads((STATE_DIR / 'subagents' / f'{_subagent_task_id}.json').read_text(encoding='utf-8')) if _subagent_task_id else {}
+                _run_stop_reason = str(_telem.get('stop_reason') or '') if isinstance(_telem, dict) else ''
+                if _run_stop_reason == 'identical_call_loop':
+                    _run_record.set_run_metadata(classification='loop_breaker_abort', reason=_run_stop_reason)
+                elif _run_stop_reason == 'wall_clock_deadline':
+                    _run_record.set_run_metadata(classification='wall_clock_abort', reason=_run_stop_reason)
+            except Exception:
+                pass
             # #1280: the handled_ marker is no longer written here unconditionally
             # — see _decide_handled_marker below, after the cycle's commits are
             # counted, so a request whose subagent died on the LLM call is
@@ -3722,6 +3743,7 @@ async def _main_impl_body():
             print(f'bridge: SYSTEM PROMPT OVERFLOW (#1300) — no subagent spawned: {exc}')
             _rollback_reason = 'system_prompt_overflow'
             _system_prompt_overflow_text = str(exc)[:500]
+            _run_stop_reason = 'system_prompt_overflow'
             commits_pushed = 0
             append_event(STATE_DIR, {
                 'phase': 'system_prompt', 'cycle_id': _cycle_id, 'overflow': True,
@@ -3990,6 +4012,15 @@ async def _main_impl_body():
         if _executor_reported_skipped(STATE_DIR, _subagent_task_id):
             _verdict_reason_hint = 'executor_reported_skipped'
     _verdict, _verdict_reason = _derive_cycle_verdict(_cycle_outcome, _verdict_reason_hint)
+    try:
+        from nanobot import crash_record as _run_record
+        if not _run_stop_reason:
+            _run_record.set_run_metadata(
+                classification=("completion" if _cycle_outcome == "success" else "failed"),
+                reason=_rollback_reason or _cycle_outcome,
+            )
+    except Exception:
+        pass
     record_cycle_outcome(
         STATE_DIR, _cycle_id, _cycle_outcome, _rollback_reason, files_changed, cycle_branch,
         verdict=_verdict, verdict_reason=_verdict_reason,

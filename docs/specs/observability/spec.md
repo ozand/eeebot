@@ -49,6 +49,16 @@ remains the explanatory reference (signal map, anti-patterns, walkthroughs).
   a record in `state/reports/`, a field in a durable artifact, or a journal line.
   A change that cannot be observed after the fact from state SHALL NOT ship until
   it has that observability.
+- R8. Every armed bridge invocation SHALL persist one `state/bridge/runs.jsonl`
+  `phase: run_end` record with `run_id`, `started_at`, `finished_at`, and
+  non-negative `duration_s`. The record SHALL carry an explicit run-end
+  classification when known (including `loop_breaker_abort`, `wall_clock_abort`,
+  `unit_timeout`, or `completion`) and SHALL remain separate from cycle outcome
+  rows because a run can end without a cycle.
+- R9. Run records SHALL rotate daily and use the bounded cycle-ledger retention
+  horizon. Readers SHALL use `state_access` and expose `partial`, `unavailable`,
+  and `beyond_retention` conditions rather than converting missing history into
+  a zero-valued duration distribution.
 
 ### Reflector response diagnostics (#1291)
 

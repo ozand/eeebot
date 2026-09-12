@@ -30,6 +30,10 @@ def _rows(state: Path) -> list[dict]:
     return [json.loads(line) for line in (state / "bridge" / "exits.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def _run_rows(state: Path) -> list[dict]:
+    return [json.loads(line) for line in (state / "bridge" / "runs.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def _run(code: str, state: Path, *, marker: str = "1", extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """A fresh interpreter that imports ``nanobot`` the way ``python -m`` would:
     the recorder is armed (or not) purely by the package import."""
@@ -61,6 +65,34 @@ def test_consecutive_failures_count_up_and_a_success_resets(tmp_path):
     rows = _rows(state)
     assert [r["outcome"] for r in rows] == ["failure", "failure", "failure", "success"]
     assert rows[0]["source"] == "process" and rows[0]["error"].startswith("NameError")
+
+
+def test_run_marker_and_exit_materialize_queryable_duration(tmp_path):
+    from nanobot import crash_record
+
+    state = tmp_path / "state"
+    crash_record._start_run_marker(state)
+    marker = json.loads((state / "bridge" / "run.json").read_text(encoding="utf-8"))
+    crash_record.set_run_metadata(cycle_id="cycle-1", classification="completion", reason="success")
+    crash_record.record_exit(state, outcome="success", exit_status=0, now=NOW + timedelta(seconds=42))
+    rows = _run_rows(state)
+    assert len(rows) == 1
+    assert rows[0]["phase"] == "run_end"
+    assert rows[0]["run_id"] == marker["run_id"]
+    assert rows[0]["duration_s"] >= 0
+    assert rows[0]["classification"] == "completion"
+    assert rows[0]["cycle_id"] == "cycle-1"
+    assert not (state / "bridge" / "run.json").exists()
+
+
+def test_loop_breaker_run_classification_is_preserved(tmp_path):
+    from nanobot import crash_record
+
+    state = tmp_path / "state"
+    crash_record._start_run_marker(state)
+    crash_record.set_run_metadata(classification="loop_breaker_abort", cycle_id="cycle-loop")
+    crash_record.record_exit(state, outcome="success", exit_status=0, now=NOW + timedelta(seconds=5))
+    assert _run_rows(state)[0]["classification"] == "loop_breaker_abort"
 
 
 def test_systemd_record_for_the_same_invocation_is_merged_not_double_counted(tmp_path):
@@ -174,6 +206,12 @@ def test_execstoppost_cli_records_success_and_failure(tmp_path, capsys):
     blocker.parent.mkdir()
     blocker.write_text("file", encoding="utf-8")
     assert crash_record.main(["--source", "systemd", "--exit-status", "1", "--service-result", "exit-code", "--state-dir", str(tmp_path / "blocked")]) == 2
+
+
+def test_tracked_run_telemetry_contract_is_documented():
+    spec = (REPO / "docs" / "specs" / "observability" / "spec.md").read_text(encoding="utf-8")
+    assert "state/bridge/runs.jsonl" in spec
+    assert "beyond_retention" in spec
 
 
 def test_tracked_drop_in_carries_the_execstoppost_line_and_says_it_is_inert():
