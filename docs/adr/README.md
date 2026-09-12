@@ -23,3 +23,4 @@ Conventions:
 | [ADR-005](ADR-005-terminal-demand-attempt-count.md) | Count terminal demand cycles as futility attempts | proposed |
 | [ADR-006](ADR-006-preserve-suppression-reasons.md) | Preserve suppression reasons separately in the scorecard | proposed |
 | [ADR-007](ADR-007-deterministic-hypothesis-claim-identity.md) | Deterministic hypothesis claim identity and collision strengthening | proposed |
+| [ADR-008](ADR-008-lesson-corpus-selection-keys.md) | The live lesson corpus is a retrieval surface, and titles and tags are its selection keys | proposed |
