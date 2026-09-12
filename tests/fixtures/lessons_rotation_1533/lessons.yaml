@@ -1,0 +1,2733 @@
+lessons:
+- schema_version: 2
+  id: LESS-REF-16004180ba43-4e57
+  title: Reusable corrective approach
+  problem: 'In turns 6 and 8, `git stash` failed with ''No stash entries found'' and
+    ''error: pathspec ... did not match any file(s) known to git'' because the file
+    had not yet been tracked by git.'
+  solution: Use `git stash push -u <file>` or `--include-untracked` when stashing
+    newly created untracked files to avoid pathspec mismatch errors.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-09-10'
+  last_seen: '2026-09-11'
+  evidence:
+  - cycle-16004180ba43
+  - cycle-f2874ef0bbc1
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-4996026d6b77-28a1
+  title: Reusable corrective approach
+  problem: In turn 9, `git add lessons/inspect_cli_signatures_before_invocation.md
+    lessons/index.md` failed with exit code 1 because `.gitignore` explicitly ignores
+    `lessons/index.md`.
+  solution: Check git tracking status or gitignore status before attempting to stage
+    auxiliary index or catalog files.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-09-09'
+  last_seen: '2026-09-11'
+  evidence:
+  - cycle-4996026d6b77
+  - cycle-0c449e1b6eb9
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-eb258832340c-2d7a
+  title: Reusable corrective approach
+  problem: 'In turn 14, `python3 -m pytest tests/test_verify_and_proof_fast_check.py
+    -v --timeout=60` failed immediately with ''unrecognized arguments: --timeout=60''.'
+  solution: Omit `--timeout` flags when executing `pytest` commands unless `pytest-timeout`
+    is confirmed present in the environment; rely on the runner tool's execution timeout
+    parameter instead.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-09-08'
+  last_seen: '2026-09-10'
+  evidence:
+  - cycle-eb258832340c
+  - cycle-26a751f39f50
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-15fc0ea6f654-8f52
+  title: Reusable corrective approach
+  problem: In cycle-15fc0ea6f654, after loop_breaker was triggered following three
+    identical exec calls testing eeebot import resolution, the model re-executed the
+    identical exec command two additional times.
+  solution: Halt repetitive tool executions immediately upon receiving a loop_breaker
+    safety stop notice and pivot to modifying code or evaluating next steps.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 3
+  first_seen: '2026-09-08'
+  last_seen: '2026-09-11'
+  evidence:
+  - cycle-15fc0ea6f654
+  - cycle-ec80790b288c
+  - cycle-51147d6c3412
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-e0fb8a5e9c55-3d42
+  title: Reusable corrective approach
+  problem: Creating a redundant test file just to validate skill YAML frontmatter
+    was rejected as duplicate because tests/test_skill_frontmatter.py already indexes
+    skill validation.
+  solution: When assigned an idle-skill re-wiring demand under doc-only budget constraints,
+    consume the skill within an active workflow script or test runner, or emit no_valuable_task
+    if the skill is already covered by existing generic harness tests.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-09-06'
+  last_seen: '2026-09-09'
+  evidence:
+  - cycle-e0fb8a5e9c55
+  - cycle-47a821aa6931
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-25fa5a688906-38d0
+  title: Reusable corrective approach
+  problem: Running 'python3 -m pytest tests/ -x -q --tb=short' timed out after 60
+    seconds, whereas 'python3 -m pytest tests/test_check_mutation_surface.py' completed
+    in 1.61s.
+  solution: Target specific test modules or paths rather than executing the entire
+    test suite to avoid 60-second command timeouts on resource-constrained hosts.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-09-05'
+  last_seen: '2026-09-10'
+  evidence:
+  - cycle-25fa5a688906
+  - fallback-ecf90dae8e38
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-f90b4a3f2327-b284
+  title: Reusable corrective approach
+  problem: Agent executed 'python3 -m pytest tests/test_verify_imports.py' followed
+    by 'python3 scripts/verify_imports.py --test', confirming zero self-test failures.
+  solution: When adding new CLI options to utility scripts that include built-in self-tests
+    (--test), run both pytest and the script's native self-test runner to ensure internal
+    verification harnesses remain functional.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-09-03'
+  last_seen: '2026-09-09'
+  evidence:
+  - cycle-f90b4a3f2327
+  - cycle-7ec04b7609a3
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-eb258832340c-c04b
+  title: Reusable corrective approach
+  problem: Integrating `pure-documentation-changes-test-bypass-workflow` into `scripts/verify_and_proof.py`
+    passed dedup and gate validation cleanly after cycles cycle-57f5b639fdd2, cycle-a48e633eae29,
+    and cycle-5c71b19ece15 were rejected as duplicates.
+  solution: Continue addressing unused skill repair demands by integrating skill procedures
+    into existing operational scripts and test suites rather than generating new standalone
+    test files.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 3
+  first_seen: '2026-09-08'
+  last_seen: '2026-09-09'
+  evidence:
+  - cycle-eb258832340c
+  - cycle-762775d921aa
+  - cycle-f59ebb9eb9f2
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-3e6693f0a07b-25b4
+  title: Reusable corrective approach
+  problem: Proposing tests for run_advisory_check in tests/test_workspace_validation_helpers.py
+    directly matched an earlier proposal from cycle-5a19c79a7edb in the existence
+    index.
+  solution: When assigned a reflection demand based on a recent cycle implementation
+    (e.g. cycle-4f71e6cf5f43), verify whether tests were already added in companion
+    cycles; if no unique code improvement remains, emit no_valuable_task instead of
+    re-proposing identical unit test suites.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-09-06'
+  last_seen: '2026-09-07'
+  evidence:
+  - cycle-3e6693f0a07b
+  - cycle-8f26e68017ba
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-de7121e75469-4f04
+  title: Reusable corrective approach
+  problem: Broad test runs timed out after 60s and required lengthy 300s–500s commands
+    that blocked on unrelated legacy skill files.
+  solution: Never run repository-wide pytest suites (`pytest tests/`) on constrained
+    hardware; restrict execution strictly to targeted unit tests matching the modified
+    files.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-09-06'
+  last_seen: '2026-09-07'
+  evidence:
+  - cycle-de7121e75469
+  - cycle-4954e54626ab
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-448fcd73a54d-4c14
+  title: Reusable corrective approach
+  problem: In cycle-448fcd73a54d, an unterminated string literal at line 199 produced
+    recurring execution failures and led to gate failure.
+  solution: Validate file syntax immediately after multi-line edits using `python3
+    -m py_compile <file>` or `ast.parse()` before running complex test suites or submitting
+    for gate review.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-08-30'
+  last_seen: '2026-09-07'
+  evidence:
+  - cycle-448fcd73a54d
+  - cycle-55a1dfd21708
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-0e294b2bf073-416c
+  title: Reusable corrective approach
+  problem: Executed four separate sequential edit_file calls (RqZu8pLZ5, jrGQfczOB,
+    EI4N1f8bf, FgL4uEqtk) on scripts/validate_unused_imports.py.
+  solution: Batch related modifications within the same file into a single edit_file
+    call rather than issuing multiple sequential edits across imports, constants,
+    and function definitions.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 4
+  first_seen: '2026-09-02'
+  last_seen: '2026-09-10'
+  evidence:
+  - cycle-0e294b2bf073
+  - cycle-dc311a0a137e
+  - cycle-bc6f9b85f973
+  - cycle-8e37c86e0abf
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-7c7d36e5d201-5015
+  title: Reusable corrective approach
+  problem: 'Seq 1 failed with ''litellm.NotFoundError: GeminiException - {"detail":"Not
+    Found"}'' for escalated_model ''an/gemini-3.7-flash-high''.'
+  solution: Verify upstream model endpoint routing and model naming configurations
+    for 'an/gemini-3.7-flash-high' to avoid downstream 404 Not Found aborts.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-09-03'
+  last_seen: '2026-09-06'
+  evidence:
+  - cycle-7c7d36e5d201
+  - cycle-5445c37c9d07
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-ddee2f247341-5c01
+  title: Reusable corrective approach
+  problem: 'Transcript recorded finish_reason: ''error'' with ''Error calling LLM:
+    litellm.NotFoundError: GeminiException - {"detail":"Not Found"}'' on sequence
+    1.'
+  solution: Verify upstream model endpoint names and provider mappings in the proxy
+    configuration for escalated model identifiers to prevent 404 NotFound routing
+    failures.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 3
+  first_seen: '2026-09-03'
+  last_seen: '2026-09-06'
+  evidence:
+  - cycle-ddee2f247341
+  - cycle-165653986aa5
+  - cycle-5445c37c9d07
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-e39ffed2e48f-fc53
+  title: Reusable corrective approach
+  problem: 'Bridge sequence 1 terminated with ''litellm.NotFoundError: GeminiException
+    - {"detail":"Not Found"}'' for model ''an/gemini-3.7-flash-high'' before any prompt
+    was processed.'
+  solution: Verify upstream model endpoint configuration for 'an/gemini-3.7-flash-high'
+    and consider falling back to a default active model when an escalated model identifier
+    returns a 404 NotFoundError.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 3
+  first_seen: '2026-09-02'
+  last_seen: '2026-09-06'
+  evidence:
+  - cycle-e39ffed2e48f
+  - cycle-9d85b724b302
+  - cycle-5445c37c9d07
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-f0bd8333acbe-1d2e
+  title: Inspect target file interfaces or git history during task proposal to verify
+    whether proposed features (such as CLI flags) already exist before dispatching
+    implementation cycles.
+  problem: scripts/verify_imports.py already contained lines 10, 1707-1711, and 1730-1737
+    supporting --json, and tests/test_verify_imports.py already tested it across multiple
+    test cases.
+  solution: Inspect target file interfaces or git history during task proposal to
+    verify whether proposed features (such as CLI flags) already exist before dispatching
+    implementation cycles.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-09-02'
+  last_seen: '2026-09-03'
+  evidence:
+  - cycle-f0bd8333acbe
+  - cycle-c6a547c57901
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-f8d2a453853f-daa5
+  title: Verify endpoint configuration and route mapping for 'an/gemini-3.7-flash-high'
+    in the bridge or configure fallback handlers to recover from NotFound/404 provider
+    errors.
+  problem: 'In cycle-f8d2a453853f seq 1, invoking ''an/gemini-3.7-flash-high'' immediately
+    returned ''litellm.NotFoundError: GeminiException - {"detail":"Not Found"}'',
+    causing the cycle to exit as inconclusive.'
+  solution: Verify endpoint configuration and route mapping for 'an/gemini-3.7-flash-high'
+    in the bridge or configure fallback handlers to recover from NotFound/404 provider
+    errors.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-08-31'
+  last_seen: '2026-09-03'
+  evidence:
+  - cycle-f8d2a453853f
+  - cycle-a1cda016fd5e
+  distinct_days: 2
+- schema_version: 2
+  id: LESS-REF-46e5f4c07cd9-d91f
+  title: Apply incremental code edits and test verifications early in the cycle to
+    ensure progress is committed before approaching bounded turn limits.
+  problem: In cycle-46e5f4c07cd9, the cycle terminated with a partial outcome and
+    files_changed=[] after 80 turns.
+  solution: Apply incremental code edits and test verifications early in the cycle
+    to ensure progress is committed before approaching bounded turn limits.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-08-31'
+  last_seen: '2026-09-02'
+  evidence:
+  - cycle-46e5f4c07cd9
+  - cycle-d8d444a3b8d6
+  distinct_days: 2
+  cycle_id: LESS-REF-46e5f4c07cd9-d91f
+  task_id: Apply incremental code edits and test verifications early in the cycle
+    to ensure progress is committed before approaching bounded turn limits.
+  hypothesis: In cycle-46e5f4c07cd9, the cycle terminated with a partial outcome and
+    files_changed=[] after 80 turns.
+  generalized_insight: Apply incremental code edits and test verifications early in
+    the cycle to ensure progress is committed before approaching bounded turn limits.
+  date: '2026-08-31'
+  result: 'Reflected: approach hint applied from cycle analysis.'
+- schema_version: 2
+  id: LESS-REF-1094c6ba84b4-be5c
+  title: When encountering test failures in ancillary test suites during feature verification,
+    use git stashing or baseline checks to verify whether they are pre-existing before
+    attempting out-of-scope fixes.
+  problem: In cycle-1094c6ba84b4, the agent verified that failures in tests/test_lessons_integrity.py
+    were pre-existing on origin/main using git stash and documented the root cause
+    for future cycles.
+  solution: When encountering test failures in ancillary test suites during feature
+    verification, use git stashing or baseline checks to verify whether they are pre-existing
+    before attempting out-of-scope fixes.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-08-31'
+  last_seen: '2026-09-03'
+  evidence:
+  - cycle-1094c6ba84b4
+  - cycle-237df1bc21c5
+  distinct_days: 2
+  cycle_id: LESS-REF-1094c6ba84b4-be5c
+  task_id: When encountering test failures in ancillary test suites during feature
+    verification, use git stashing or baseline checks to verify whether they are pre-existing
+    before attempting out-of-scope fixes.
+  hypothesis: In cycle-1094c6ba84b4, the agent verified that failures in tests/test_lessons_integrity.py
+    were pre-existing on origin/main using git stash and documented the root cause
+    for future cycles.
+  generalized_insight: When encountering test failures in ancillary test suites during
+    feature verification, use git stashing or baseline checks to verify whether they
+    are pre-existing before attempting out-of-scope fixes.
+  date: '2026-08-31'
+  result: 'Reflected: approach hint applied from cycle analysis.'
+- schema_version: 2
+  id: LESS-REF-1767b3d47ede-ffe2
+  title: Use standard POSIX shell exit status captures (`$?`) rather than bash-specific
+    variables like `${PIPESTATUS[0]}` when executing commands in POSIX `/bin/sh` environments.
+  problem: 'In cycle-1767b3d47ede, running `echo "EXIT: ${PIPESTATUS[0]}"` triggered
+    `/bin/sh: 1: Bad substitution` with exit code 2 before switching back to `$?`.'
+  solution: Use standard POSIX shell exit status captures (`$?`) rather than bash-specific
+    variables like `${PIPESTATUS[0]}` when executing commands in POSIX `/bin/sh` environments.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 5
+  first_seen: '2026-08-30'
+  last_seen: '2026-09-11'
+  evidence:
+  - cycle-1767b3d47ede
+  - cycle-a13ef1c84568
+  - cycle-5fda208fb403
+  - cycle-4b4bdcf4bec7
+  - cycle-41f5257cac5b
+  distinct_days: 2
+  cycle_id: LESS-REF-1767b3d47ede-ffe2
+  task_id: Use standard POSIX shell exit status captures (`$?`) rather than bash-specific
+    variables like `${PIPESTATUS[0]}` when executing commands in POSIX `/bin/sh` environments.
+  hypothesis: 'In cycle-1767b3d47ede, running `echo "EXIT: ${PIPESTATUS[0]}"` triggered
+    `/bin/sh: 1: Bad substitution` with exit code 2 before switching back to `$?`.'
+  generalized_insight: Use standard POSIX shell exit status captures (`$?`) rather
+    than bash-specific variables like `${PIPESTATUS[0]}` when executing commands in
+    POSIX `/bin/sh` environments.
+  date: '2026-08-30'
+  result: 'Reflected: approach hint applied from cycle analysis.'
+- schema_version: 2
+  id: LESS-REF-9ff792579a7a-eef8
+  title: When a loop breaker safety stop fires or identical diagnostic output is returned
+    across consecutive turns, immediately cease executing the command and switch to
+    modifying the target source file.
+  problem: In cycle-9ff792579a7a, the agent repeated the identical inline python diagnostic
+    snippet 5 times consecutively, including 2 times after the loop_breaker warning,
+    resulting in a partial outcome with 0 files changed.
+  solution: When a loop breaker safety stop fires or identical diagnostic output is
+    returned across consecutive turns, immediately cease executing the command and
+    switch to modifying the target source file.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 3
+  first_seen: '2026-08-30'
+  last_seen: '2026-09-07'
+  evidence:
+  - cycle-9ff792579a7a
+  - cycle-f425191b91b1
+  - cycle-bf380a02a0f5
+  distinct_days: 2
+  cycle_id: LESS-REF-9ff792579a7a-eef8
+  task_id: When a loop breaker safety stop fires or identical diagnostic output is
+    returned across consecutive turns, immediately cease executing the command and
+    switch to modifying the target source file.
+  hypothesis: In cycle-9ff792579a7a, the agent repeated the identical inline python
+    diagnostic snippet 5 times consecutively, including 2 times after the loop_breaker
+    warning, resulting in a partial outcome with 0 files changed.
+  generalized_insight: When a loop breaker safety stop fires or identical diagnostic
+    output is returned across consecutive turns, immediately cease executing the command
+    and switch to modifying the target source file.
+  date: '2026-08-30'
+  result: 'Reflected: approach hint applied from cycle analysis.'
+- schema_version: 2
+  id: LESS-REF-62ca5a6de51a-530e
+  title: When a loop-breaker safety alert is returned by the tool executor, change
+    the strategy immediately (e.g. read the full file or begin editing) rather than
+    re-submitting the identical tool call.
+  problem: In cycle-62ca5a6de51a, tool call egd6E10DT-lb issued a loop breaker safety
+    stop, but the agent issued the identical grep command twice more (945yLHhfU and
+    vhm5IInZr).
+  solution: When a loop-breaker safety alert is returned by the tool executor, change
+    the strategy immediately (e.g. read the full file or begin editing) rather than
+    re-submitting the identical tool call.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 3
+  first_seen: '2026-08-30'
+  last_seen: '2026-09-07'
+  evidence:
+  - cycle-62ca5a6de51a
+  - cycle-5550d8a20848
+  - cycle-d3b002fd867a
+  distinct_days: 2
+  cycle_id: LESS-REF-62ca5a6de51a-530e
+  task_id: When a loop-breaker safety alert is returned by the tool executor, change
+    the strategy immediately (e.g. read the full file or begin editing) rather than
+    re-submitting the identical tool call.
+  hypothesis: In cycle-62ca5a6de51a, tool call egd6E10DT-lb issued a loop breaker
+    safety stop, but the agent issued the identical grep command twice more (945yLHhfU
+    and vhm5IInZr).
+  generalized_insight: When a loop-breaker safety alert is returned by the tool executor,
+    change the strategy immediately (e.g. read the full file or begin editing) rather
+    than re-submitting the identical tool call.
+  date: '2026-08-30'
+  result: 'Reflected: approach hint applied from cycle analysis.'
+- schema_version: 2
+  id: LESS-REF-e13f1cd0f155
+  title: When repo-wide test suites time out on the constrained eeepc host, fall back
+    to targeted test execution (the paired test module for the changed file, or the
+    script's own --test flag) to validate scoped changes within the cycle budget.
+  problem: In reflection-e13f1cd0f155, a full repo-wide pytest sweep exceeded the
+    available time on the slow i386 host, leaving the scoped change unverified before
+    the cycle budget ran out.
+  solution: When repo-wide test suites time out, validate scoped changes via targeted
+    pytest on the paired test module (e.g. python3 -m pytest tests/test_<changed>.py)
+    or the script's own --test flag, and record the full-suite timeout in concrete_next_action
+    rather than re-running the sweep.
+  tags:
+  - reflector
+  - testing
+  severity: medium
+  seen_count: 1
+  first_seen: '2026-09-04'
+  last_seen: '2026-09-04'
+  evidence:
+  - reflection-e13f1cd0f155
+  date: '2026-09-04'
+  cycle_id: reflection-e13f1cd0f155
+  task_id: Record lesson in lessons.yaml on using targeted test execution when repo-wide
+    test suites time out
+  hypothesis: Codifying the targeted-test fallback in lessons.yaml lets agents validate
+    scoped changes via targeted pytest and script --test flags when full suites time
+    out.
+  result: 'Reflected: approach hint applied from cycle analysis.'
+  generalized_insight: When repo-wide test suites time out on the constrained host,
+    fall back to targeted test execution (paired test module or script --test flag)
+    to validate scoped changes within the cycle budget.
+  related:
+  - LESS-REF-c2ab8feea257-4dc0
+- schema_version: 2
+  id: LESS-REF-c2ab8feea257-4dc0
+  title: Run pytest directly for test suites that rely on standalone test functions
+    and plain assert statements rather than unittest.TestCase classes.
+  problem: In cycle-c2ab8feea257, running python3 -m unittest tests.test_agents_structure
+    collected 0 tests, requiring a subsequent pytest invocation to execute the suite.
+  solution: Run pytest directly for test suites that rely on standalone test functions
+    and plain assert statements rather than unittest.TestCase classes.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-08-30'
+  last_seen: '2026-09-01'
+  evidence:
+  - cycle-c2ab8feea257
+  - cycle-dd8c97b47cb5
+  distinct_days: 2
+  date: '2026-09-01'
+  cycle_id: cycle-c2ab8feea257
+  task_id: Run pytest directly for test suites that rely on standalone test functions
+    and plain assert statements rather than unittest.TestCase classes.
+  hypothesis: In cycle-c2ab8feea257, running python3 -m unittest tests.test_agents_structure
+    collected 0 tests, requiring a subsequent pytest invocation to execute the suite.
+  result: 'Reflected: approach hint applied from cycle analysis.'
+  generalized_insight: Run pytest directly for test suites that rely on standalone
+    test functions and plain assert statements rather than unittest.TestCase classes.
+  related:
+  - LESS-20260905-4a577d44
+- schema_version: 2
+  id: LESS-REF-cc2d7c8ac095-9d60
+  title: Continue chaining git status, git add, git commit, and git log into a single
+    exec call for single-file documentation updates to preserve turn budget.
+  problem: In cycle-cc2d7c8ac095, chaining git status, add, commit, and log in sequence
+    turn 4 cleanly staged and committed AGENTS.md in a single execution step.
+  solution: Continue chaining git status, git add, git commit, and git log into a
+    single exec call for single-file documentation updates to preserve turn budget.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-08-28'
+  last_seen: '2026-08-30'
+  evidence:
+  - cycle-cc2d7c8ac095
+  - cycle-7008272463b0
+  distinct_days: 2
+  date: '2026-08-30'
+  cycle_id: cycle-cc2d7c8ac095
+  task_id: Continue chaining git status, git add, git commit, and git log into a single
+    exec call for single-file documentation updates to preserve turn budget.
+  hypothesis: In cycle-cc2d7c8ac095, chaining git status, add, commit, and log in
+    sequence turn 4 cleanly staged and committed AGENTS.md in a single execution step.
+  result: 'Reflected: approach hint applied from cycle analysis.'
+  generalized_insight: Continue chaining git status, git add, git commit, and git
+    log into a single exec call for single-file documentation updates to preserve
+    turn budget.
+- schema_version: 2
+  id: LESS-REF-6dfc256614f3-ed23
+  title: Execute targeted code modifications and local validation checks early in
+    the turn budget to ensure fixes can be verified and committed before sequence
+    limits are reached.
+  problem: In cycle-6dfc256614f3, the agent reached turn 45 working on scripts/verify_imports.py
+    but produced 0 committed file changes and ended in a partial outcome.
+  solution: Execute targeted code modifications and local validation checks early
+    in the turn budget to ensure fixes can be verified and committed before sequence
+    limits are reached.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 3
+  first_seen: '2026-08-30'
+  last_seen: '2026-08-31'
+  evidence:
+  - cycle-6dfc256614f3
+  - cycle-2d7500437adb
+  - cycle-53726d3e08e5
+  distinct_days: 2
+  date: '2026-08-31'
+  cycle_id: cycle-6dfc256614f3
+  task_id: Execute targeted code modifications and local validation checks early in
+    the turn budget to ensure fixes can be verified and committed before sequence
+    limits are reached.
+  hypothesis: In cycle-6dfc256614f3, the agent reached turn 45 working on scripts/verify_imports.py
+    but produced 0 committed file changes and ended in a partial outcome.
+  result: 'Reflected: approach hint applied from cycle analysis.'
+  generalized_insight: Execute targeted code modifications and local validation checks
+    early in the turn budget to ensure fixes can be verified and committed before
+    sequence limits are reached.
+- schema_version: 2
+  id: LESS-REF-3c711db47ed9-d63a
+  title: When encountering pre-existing test failures outside the target scope during
+    verification, document the exact defect and fix in `concrete_next_action` rather
+    than modifying out-of-scope files.
+  problem: The agent deferred the heading case fix for `lessons/out_of_band_main_detected.md`
+    to keep `files_changed` restricted strictly to `lessons/early_edit_turn_discipline.md`.
+  solution: When encountering pre-existing test failures outside the target scope
+    during verification, document the exact defect and fix in `concrete_next_action`
+    rather than modifying out-of-scope files.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 3
+  first_seen: '2026-08-27'
+  last_seen: '2026-08-30'
+  evidence:
+  - cycle-3c711db47ed9
+  - cycle-ce697d95e26a
+  - cycle-1f05021bd90c
+  distinct_days: 3
+  date: '2026-08-30'
+  cycle_id: cycle-3c711db47ed9
+  task_id: When encountering pre-existing test failures outside the target scope during
+    verification, document the exact defect and fix in `concrete_next_action` rather
+    than modifying out-of-scope files.
+  hypothesis: The agent deferred the heading case fix for `lessons/out_of_band_main_detected.md`
+    to keep `files_changed` restricted strictly to `lessons/early_edit_turn_discipline.md`.
+  result: 'Reflected: approach hint applied from cycle analysis.'
+  generalized_insight: When encountering pre-existing test failures outside the target
+    scope during verification, document the exact defect and fix in `concrete_next_action`
+    rather than modifying out-of-scope files.
+  related:
+  - LESS-20260827-3c711db4
+- schema_version: 2
+  id: LESS-REF-2d11715787ba-b525
+  title: Define a fallback model group for 'un/qwen3.8-27b-gguf' in the LiteLLM/bridge
+    configuration to automatically handle model server crashes or disconnects during
+    cycle execution.
+  problem: In cycle-2d11715787ba, LiteLLM retried 3 times against 'un/qwen3.8-27b-gguf'
+    and failed with 502 Bad Gateway, noting 'No fallback model group found for original
+    model_group=un/qwen3.8-27b-gguf', causing immediate cycle termination.
+  solution: Define a fallback model group for 'un/qwen3.8-27b-gguf' in the LiteLLM/bridge
+    configuration to automatically handle model server crashes or disconnects during
+    cycle execution.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 4
+  first_seen: '2026-08-31'
+  last_seen: '2026-09-01'
+  evidence:
+  - cycle-2d11715787ba
+  - cycle-a61c77687e98
+  - cycle-d2a4a807fd26
+  - cycle-d4900e44279b
+  distinct_days: 2
+  date: '2026-09-01'
+  cycle_id: cycle-2d11715787ba
+  task_id: Define a fallback model group for 'un/qwen3.8-27b-gguf' in the LiteLLM/bridge
+    configuration to automatically handle model server crashes or disconnects during
+    cycle execution.
+  hypothesis: In cycle-2d11715787ba, LiteLLM retried 3 times against 'un/qwen3.8-27b-gguf'
+    and failed with 502 Bad Gateway, noting 'No fallback model group found for original
+    model_group=un/qwen3.8-27b-gguf', causing immediate cycle termination.
+  result: 'Reflected: approach hint applied from cycle analysis.'
+  generalized_insight: Define a fallback model group for 'un/qwen3.8-27b-gguf' in
+    the LiteLLM/bridge configuration to automatically handle model server crashes
+    or disconnects during cycle execution.
+- schema_version: 2
+  id: LESS-REF-4f03664182da-0d35
+  title: Inspect standard library class attributes and return types using a quick
+    one-liner (e.g., python3 -c 'import doctest; help(doctest.DocTestRunner.run)')
+    before writing custom runner glue to avoid repet
+  problem: 'Tool execution after write_file 8v84c3XW6 produced TypeError: ''int''
+    object is not iterable, and the subsequent edit ZviSMouxK failed with AttributeError:
+    ''DocTestRunner'' object has no attribute ''failed''.'
+  solution: Inspect standard library class attributes and return types using a quick
+    one-liner (e.g., python3 -c 'import doctest; help(doctest.DocTestRunner.run)')
+    before writing custom runner glue to avoid repetitive trial-and-error attribute
+    failures.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 1
+  first_seen: '2026-09-02'
+  last_seen: '2026-09-02'
+  evidence:
+  - cycle-4f03664182da
+  date: '2026-09-02'
+  cycle_id: cycle-4f03664182da
+  task_id: Inspect standard library class attributes and return types using a quick
+    one-liner (e.g., python3 -c 'import doctest; help(doctest.DocTestRunner.run)')
+    before writing custom runner glue to avoid repet
+  hypothesis: Added a doctest suite to tests/test_jsonl_stream_filter.py validating
+    docstring examples across functions and module-level CLI contracts. Addressed
+    doctest.DocTestRunner API attribute mismatches through test iterations and verified
+    non-vacuous failure detection prior to committing.
+  result: 'Reflected: approach hint applied from cycle analysis.'
+  generalized_insight: Inspect standard library class attributes and return types
+    using a quick one-liner (e.g., python3 -c 'import doctest; help(doctest.DocTestRunner.run)')
+    before writing custom runner glue to avoid repetitive trial-and-error attribute
+    failures.
+- schema_version: 2
+  id: LESS-REF-16436c7d5b3a-4c67
+  title: Schedule a clean-up proposal to resolve the duplicate function definition
+    of _has_leftover_deprecation_header in scripts/validate_deprecation_status.py.
+  problem: 'Analysis during test writing noted: ''The script has a duplicate definition
+    of _has_leftover_deprecation_header (lines 84-96 and 112-162); the second definition
+    shadows the first.'''
+  solution: Schedule a clean-up proposal to resolve the duplicate function definition
+    of _has_leftover_deprecation_header in scripts/validate_deprecation_status.py.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 1
+  first_seen: '2026-09-02'
+  last_seen: '2026-09-02'
+  evidence:
+  - cycle-16436c7d5b3a
+  date: '2026-09-02'
+  cycle_id: cycle-16436c7d5b3a
+  task_id: Schedule a clean-up proposal to resolve the duplicate function definition
+    of _has_leftover_deprecation_header in scripts/validate_deprecation_status.py.
+  hypothesis: Added 11 comprehensive unit test assertions in tests/test_validate_deprecation_status.py
+    covering docstring line parsing, deprecation marker detection, leftover header
+    detection, and deprecation consistency validation.
+  result: 'Reflected: approach hint applied from cycle analysis.'
+  generalized_insight: Schedule a clean-up proposal to resolve the duplicate function
+    definition of _has_leftover_deprecation_header in scripts/validate_deprecation_status.py.
+- schema_version: 2
+  id: LESS-REF-c871bf9abe41
+  title: When introducing new default-enabled repository introspection features to
+    CLI scripts, verify that existing mock test suites pass flags to disable live
+    VCS scanning or isolate repository context.
+  problem: In cycle-c871bf9abe41, test_prevent_repeat_failures_matching failed because
+    the live git history for scripts/optimize_git_storage.py produced duplicate_feature_commit
+    matches in mock test runs until --no-commit-history was supplied.
+  solution: When introducing new default-enabled repository introspection features
+    to CLI scripts, verify that existing mock test suites pass flags to disable live
+    VCS scanning or isolate repository context.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 1
+  first_seen: '2026-08-29'
+  last_seen: '2026-08-29'
+  evidence:
+  - cycle-c871bf9abe41
+  date: '2026-08-29'
+  cycle_id: cycle-c871bf9abe41
+  task_id: When introducing new default-enabled repository introspection features
+    to CLI scripts, verify that existing mock test suites pass flags to disable live
+    VCS scanning or isolate repository context.
+  hypothesis: When introducing new default-enabled repository introspection features
+    to CLI scripts, verify that existing mock test suites pass flags to disable live
+    VCS scanning or isolate repository context.
+  result: 'Reflected: approach hint applied from cycle analysis.'
+  generalized_insight: Apply the reflected approach hint.
+  related:
+  - LESS-REF-c871bf9abe41-8608
+- schema_version: 2
+  id: LESS-REF-c871bf9abe41-8608
+  renamed_from: LESS-REF-c871bf9abe41
+  title: When executing subprocess calls that change the working directory (cwd=tmp_dir),
+    always pass the absolute path to the target script (e.g., using Path(__file__).resolve().parent
+    / ...) rather than a re
+  problem: In cycle-c871bf9abe41, test_prevent_repeat_failures_commit_history_check
+    failed with '[Errno 2] No such file or directory' on '/tmp/tmpd_dwdn86/scripts/prevent_repeat_failures.py'
+    when invoked with cwd=tmp_repo.
+  solution: When executing subprocess calls that change the working directory (cwd=tmp_dir),
+    always pass the absolute path to the target script (e.g., using Path(__file__).resolve().parent
+    / ...) rather than a relative path.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 1
+  first_seen: '2026-08-29'
+  last_seen: '2026-08-29'
+  evidence:
+  - cycle-c871bf9abe41
+  date: '2026-08-29'
+  cycle_id: cycle-c871bf9abe41
+  task_id: When executing subprocess calls that change the working directory (cwd=tmp_dir),
+    always pass the absolute path to the target script (e.g., using Path(__file__).resolve().parent
+    / ...) rather than a re
+  hypothesis: When executing subprocess calls that change the working directory (cwd=tmp_dir),
+    always pass the absolute path to the target script (e.g., using Path(__file__).resolve().parent
+    / ...) rather than a relative path.
+  result: 'Reflected: approach hint applied from cycle analysis.'
+  generalized_insight: Apply the reflected approach hint.
+  related:
+  - LESS-REF-c871bf9abe41
+- schema_version: 2
+  id: LESS-REF-2782e96c24a8
+  title: 'Integrate the new demand and target path deduplication thresholds from `scripts/prevent_repeat_failures.py`
+    into the preflight proposer check to automatically block duplicate cycle proposals
+    prior to '
+  problem: In cycle-2782e96c24a8, `prevent_repeat_failures.py` was extended to provide
+    `--demand-dedup-threshold` and `--target-dedup-threshold` with non-zero exit codes
+    on repeat targets, enabling early deduplication.
+  solution: Integrate the new demand and target path deduplication thresholds from
+    `scripts/prevent_repeat_failures.py` into the preflight proposer check to automatically
+    block duplicate cycle proposals prior to dispatch.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 1
+  first_seen: '2026-08-29'
+  last_seen: '2026-08-29'
+  evidence:
+  - cycle-2782e96c24a8
+  date: '2026-08-29'
+  cycle_id: cycle-2782e96c24a8
+  task_id: 'Integrate the new demand and target path deduplication thresholds from
+    `scripts/prevent_repeat_failures.py` into the preflight proposer check to automatically
+    block duplicate cycle proposals prior to '
+  hypothesis: Integrate the new demand and target path deduplication thresholds from
+    `scripts/prevent_repeat_failures.py` into the preflight proposer check to automatically
+    block duplicate cycle proposals prior to dispatch.
+  result: 'Reflected: approach hint applied from cycle analysis.'
+  generalized_insight: Apply the reflected approach hint.
+- schema_version: 2
+  id: LESS-REF-5b349fbfddd0
+  title: Register newly added AGENTS.md sections in tests/test_agents_structure.py
+    (e.g. in REQUIRED_SECTIONS) to ensure standing instructions are permanently enforced
+    against accidental removal.
+  problem: In cycle-5b349fbfddd0, the agent added the 'Cycle termination (no trailing
+    placeholder calls)' section and verified existing structure tests, but did not
+    update REQUIRED_SECTIONS in test_agents_structure.py as was done in cycle-fe680468345b
+    and cycle-4241552b3314.
+  solution: Register newly added AGENTS.md sections in tests/test_agents_structure.py
+    (e.g. in REQUIRED_SECTIONS) to ensure standing instructions are permanently enforced
+    against accidental removal.
+  tags:
+  - reflector
+  severity: medium
+  seen_count: 2
+  first_seen: '2026-08-29'
+  last_seen: '2026-08-29'
+  evidence:
+  - cycle-5b349fbfddd0
+  - cycle-fbc4704e0992
+  date: '2026-08-29'
+  cycle_id: cycle-5b349fbfddd0
+  task_id: Register newly added AGENTS.md sections in tests/test_agents_structure.py
+    (e.g. in REQUIRED_SECTIONS) to ensure standing instructions are permanently enforced
+    against accidental removal.
+  hypothesis: Register newly added AGENTS.md sections in tests/test_agents_structure.py
+    (e.g. in REQUIRED_SECTIONS) to ensure standing instructions are permanently enforced
+    against accidental removal.
+  result: 'Reflected: approach hint applied from cycle analysis.'
+  generalized_insight: Apply the reflected approach hint.
+  distinct_days: 1
+- id: LESS-20260828-8b960e22
+  date: '2026-08-28'
+  cycle_id: cycle-8b960e225a96
+  task_id: 'Document rule against inspecting historical state reports when verifying
+    script '
+  hypothesis: Implementing "Document rule against inspecting historical state reports
+    when verifying script capabilities" improves operator value.
+  result: 'Committed 1 commit(s): lessons/avoid_state_report_inspection.md'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - lessons/avoid_state_report_inspection.md
+- id: LESS-20260828-5fcf9a49
+  date: '2026-08-28'
+  cycle_id: cycle-5fcf9a4965b0
+  task_id: Add fast-path redundancy skip skill guide for immediate emission of skipped
+    cycl
+  hypothesis: Implementing "Add fast-path redundancy skip skill guide for immediate
+    emission of skipped cycle outcome" improves operator value.
+  result: 'Committed 1 commit(s): skills/fast_path_redundancy_skip/SKILL.md'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - skills/fast_path_redundancy_skip/SKILL.md
+- id: LESS-20260828-acf736a5
+  date: '2026-08-28'
+  cycle_id: cycle-acf736a5a9ea
+  task_id: Document short-circuit rule for auxiliary git and test scans upon redundancy
+    pro
+  hypothesis: Implementing "Document short-circuit rule for auxiliary git and test
+    scans upon redundancy proof in lessons" improves operator value.
+  result: 'Committed 2 commit(s): lessons/early_edit_turn_discipline.md, memory/repeat_failures.json'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - lessons/early_edit_turn_discipline.md
+  - memory/repeat_failures.json
+- id: LESS-20260828-dedb27c2
+  date: '2026-08-28'
+  cycle_id: cycle-dedb27c2299f
+  task_id: Add immediate skip protocol in AGENTS.md when target task is already complete
+  hypothesis: Implementing "Add immediate skip protocol in AGENTS.md when target task
+    is already complete" improves operator value.
+  result: 'Committed 1 commit(s): AGENTS.md'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - AGENTS.md
+- id: LESS-20260828-7c7719d7
+  date: '2026-08-28'
+  cycle_id: cycle-7c7719d73b41
+  task_id: 'Add bounded file reading and targeted search guidelines in AGENTS.md to
+    prevent '
+  hypothesis: Implementing "Add bounded file reading and targeted search guidelines
+    in AGENTS.md to prevent context bloat" improves operator value.
+  result: 'Committed 1 commit(s): AGENTS.md'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - AGENTS.md
+- id: LESS-20260828-c2f0da09
+  date: '2026-08-28'
+  cycle_id: cycle-c2f0da092deb
+  task_id: Add unit test suite in tests/test_collect_host_metrics.py for host metric
+    collec
+  hypothesis: Implementing "Add unit test suite in tests/test_collect_host_metrics.py
+    for host metric collection and caching" improves operator value.
+  result: 'Committed 1 commit(s): tests/test_collect_host_metrics.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - tests/test_collect_host_metrics.py
+- id: LESS-20260827-044af45f
+  date: '2026-08-27'
+  cycle_id: cycle-044af45f6e55
+  task_id: Extend scripts/validate_test_existence.py with missing test pair reporting
+    and s
+  hypothesis: Implementing "Extend scripts/validate_test_existence.py with missing
+    test pair reporting and structured JSON output" improves operator value.
+  result: 'Committed 1 commit(s): scripts/validate_test_existence.py, tests/test_validate_test_existence.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/validate_test_existence.py
+  - tests/test_validate_test_existence.py
+- id: LESS-20260827-3c711db4
+  date: '2026-08-27'
+  cycle_id: cycle-3c711db47ed9
+  task_id: Document early-turn edit budget discipline and inspection limits in lessons
+  hypothesis: Implementing "Document early-turn edit budget discipline and inspection
+    limits in lessons" improves operator value.
+  result: 'Committed 1 commit(s): lessons/early_edit_turn_discipline.md'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - lessons/early_edit_turn_discipline.md
+  related:
+  - LESS-REF-3c711db47ed9-d63a
+- id: LESS-20260827-bb3aa9d6
+  date: '2026-08-27'
+  cycle_id: cycle-bb3aa9d6e5ec
+  task_id: Add explicit target path staging protocol in AGENTS.md to prevent mutation
+    surfa
+  hypothesis: Implementing "Add explicit target path staging protocol in AGENTS.md
+    to prevent mutation surface violations" improves operator value.
+  result: 'Committed 1 commit(s): AGENTS.md'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - AGENTS.md
+- id: LESS-20260827-2f228fb3
+  date: '2026-08-27'
+  cycle_id: cycle-2f228fb33ea5
+  task_id: Add direct reproduction-to-edit execution protocol in AGENTS.md to prevent
+    cycle
+  hypothesis: Implementing "Add direct reproduction-to-edit execution protocol in
+    AGENTS.md to prevent cycle timeouts" improves operator value.
+  result: 'Committed 1 commit(s): AGENTS.md'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - AGENTS.md
+- id: LESS-20260827-ff456c1b
+  date: '2026-08-27'
+  cycle_id: cycle-ff456c1b71c4
+  task_id: Extend control_plane_summary.py to compute runtime trust ladder levels
+    and propo
+  hypothesis: Implementing "Extend control_plane_summary.py to compute runtime trust
+    ladder levels and proposer quality metrics" improves operator value.
+  result: 'Committed 1 commit(s): scripts/control_plane_summary.py, tests/test_control_plane_summary.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/control_plane_summary.py
+  - tests/test_control_plane_summary.py
+- id: LESS-20260827-cb400fe3
+  date: '2026-08-27'
+  cycle_id: cycle-cb400fe33d8e
+  task_id: Add dedup cycle loop detection and circuit breaker flag to scripts/analyze_repea
+  hypothesis: Implementing "Add dedup cycle loop detection and circuit breaker flag
+    to scripts/analyze_repeat_failures.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/prevent_repeats.json, memory/repeat_failures.json,
+    scripts/analyze_repeat_failures.py, tests/test_analyze_repeat_failures.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/prevent_repeats.json
+  - memory/repeat_failures.json
+  - scripts/analyze_repeat_failures.py
+  - tests/test_analyze_repeat_failures.py
+- id: LESS-20260827-f6b2df5a
+  date: '2026-08-27'
+  cycle_id: cycle-f6b2df5a7c50
+  task_id: Extend check_confirmation_ratio.py with trailing cycle confirmed integration
+    met
+  hypothesis: Implementing "Extend check_confirmation_ratio.py with trailing cycle
+    confirmed integration metrics" improves operator value.
+  result: 'Committed 2 commit(s): memory/confirmation_status.json, scripts/check_confirmation_ratio.py,
+    tests/test_check_confirmation_ratio.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/confirmation_status.json
+  - scripts/check_confirmation_ratio.py
+  - tests/test_check_confirmation_ratio.py
+- id: LESS-20260827-b47428b1
+  date: '2026-08-27'
+  cycle_id: cycle-b47428b1f3e6
+  task_id: Define multi-script refactor and test skill for batch editing and verification
+  hypothesis: Implementing "Define multi-script refactor and test skill for batch
+    editing and verification" improves operator value.
+  result: 'Committed 1 commit(s): skills/multi-script-refactor/SKILL.md, tests/test_multi_script_refactor_skill.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - skills/multi-script-refactor/SKILL.md
+  - tests/test_multi_script_refactor_skill.py
+- id: LESS-20260827-f47c580c
+  date: '2026-08-27'
+  cycle_id: cycle-f47c580c8227
+  task_id: Implement collect_host_metrics script to record host system metrics to
+    feed cach
+  hypothesis: Implementing "Implement collect_host_metrics script to record host system
+    metrics to feed cache" improves operator value.
+  result: 'Committed 2 commit(s): memory/confirmation_status.json, memory/repeat_failures.json,
+    scripts/collect_host_metrics.py, tests/test_collect_host_metrics.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/confirmation_status.json
+  - memory/repeat_failures.json
+  - scripts/collect_host_metrics.py
+  - tests/test_collect_host_metrics.py
+- id: LESS-20260827-5bc7f9ec
+  date: '2026-08-27'
+  cycle_id: cycle-5bc7f9ecdbb4
+  task_id: Integrate sys.path modification check into scripts/run_all_tests.py
+  hypothesis: Implementing "Integrate sys.path modification check into scripts/run_all_tests.py"
+    improves operator value.
+  result: 'Committed 2 commit(s): memory/confirmation_status.json, scripts/run_all_tests.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/confirmation_status.json
+  - scripts/run_all_tests.py
+- id: LESS-20260827-73ef54be
+  date: '2026-08-27'
+  cycle_id: cycle-73ef54be8826
+  task_id: Implement check_stale_feeds in scripts/check_stale_feeds.py
+  hypothesis: Implementing "Implement check_stale_feeds in scripts/check_stale_feeds.py"
+    improves operator value.
+  result: 'Committed 1 commit(s): scripts/check_stale_feeds.py, tests/test_check_stale_feeds.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/check_stale_feeds.py
+  - tests/test_check_stale_feeds.py
+- id: LESS-20260827-20e9962c
+  date: '2026-08-27'
+  cycle_id: cycle-20e9962ce4ac
+  task_id: Extend workspace_validation_helpers.py with CLI entrypoint and unified
+    workspace
+  hypothesis: Implementing "Extend workspace_validation_helpers.py with CLI entrypoint
+    and unified workspace integrity check" improves operator value.
+  result: 'Committed 1 commit(s): scripts/workspace_validation_helpers.py, tests/test_workspace_validation_helpers.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/workspace_validation_helpers.py
+  - tests/test_workspace_validation_helpers.py
+- id: LESS-20260827-80dc08de
+  date: '2026-08-27'
+  cycle_id: cycle-80dc08de8a33
+  task_id: Optimize scripts/verify_imports.py import resolution to avoid harness timeout
+  hypothesis: Implementing "Optimize scripts/verify_imports.py import resolution to
+    avoid harness timeout" improves operator value.
+  result: 'Committed 1 commit(s): scripts/verify_imports.py, tests/test_verify_imports.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/verify_imports.py
+  - tests/test_verify_imports.py
+- id: LESS-20260827-185dfdfe
+  date: '2026-08-27'
+  cycle_id: cycle-185dfdfe475f
+  task_id: Implement summarize_failure_reasons in scripts/summarize_failure_reasons.py
+  hypothesis: Implementing "Implement summarize_failure_reasons in scripts/summarize_failure_reasons.py"
+    improves operator value.
+  result: 'Committed 1 commit(s): scripts/summarize_failure_reasons.py, tests/test_summarize_failure_reasons.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/summarize_failure_reasons.py
+  - tests/test_summarize_failure_reasons.py
+- id: LESS-20260827-37d1214b
+  date: '2026-08-27'
+  cycle_id: cycle-37d1214b8c85
+  task_id: Create batch pattern search skill to consolidate repeated sequential grep
+    invoca
+  hypothesis: Implementing "Create batch pattern search skill to consolidate repeated
+    sequential grep invocations" improves operator value.
+  result: 'Committed 2 commit(s): memory/confirmation_status.json, memory/repeat_failures.json,
+    skills/batch_grep.py, skills/batch_grep/SKILL.md, tests/test_batch_grep.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - memory/confirmation_status.json
+  - memory/repeat_failures.json
+  - skills/batch_grep.py
+  - skills/batch_grep/SKILL.md
+  - tests/test_batch_grep.py
+- id: LESS-20260826-15f1a566
+  date: '2026-08-26'
+  cycle_id: cycle-15f1a566131f
+  task_id: Add rolling window filtering and pattern clustering to scripts/analyze_repeat_fa
+  hypothesis: Implementing "Add rolling window filtering and pattern clustering to
+    scripts/analyze_repeat_failures.py" improves operator value.
+  result: 'Committed 1 commit(s): memory/prevent_repeats.json, memory/repeat_failures.json,
+    scripts/analyze_repeat_failures.py, tests/test_analyze_repeat_failures.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/prevent_repeats.json
+  - memory/repeat_failures.json
+  - scripts/analyze_repeat_failures.py
+  - tests/test_analyze_repeat_failures.py
+- id: LESS-20260826-ff3ff930
+  date: '2026-08-26'
+  cycle_id: cycle-ff3ff9308cf4
+  task_id: Add target threshold evaluation and failure exit code to scripts/check_confirmat
+  hypothesis: Implementing "Add target threshold evaluation and failure exit code
+    to scripts/check_confirmation_ratio.py" improves operator value.
+  result: 'Committed 1 commit(s): memory/confirmation_status.json'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - memory/confirmation_status.json
+- id: LESS-20260826-97cbb425
+  date: '2026-08-26'
+  cycle_id: cycle-97cbb4259546
+  task_id: Add test suite for preflight failure check signature matching and exit
+    codes
+  hypothesis: Implementing "Add test suite for preflight failure check signature matching
+    and exit codes" improves operator value.
+  result: 'Committed 2 commit(s): scripts/preflight_failure_check.py, tests/test_preflight_failure_check.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/preflight_failure_check.py
+  - tests/test_preflight_failure_check.py
+- id: LESS-20260826-ffa5537a
+  date: '2026-08-26'
+  cycle_id: cycle-ffa5537a21ac
+  task_id: Integrate check_repeat_failures into preflight_failure_check runner
+  hypothesis: Implementing "Integrate check_repeat_failures into preflight_failure_check
+    runner" improves operator value.
+  result: 'Committed 1 commit(s): scripts/preflight_failure_check.py, tests/test_preflight_failure_check.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/preflight_failure_check.py
+  - tests/test_preflight_failure_check.py
+- id: LESS-20260826-8672fcfd
+  date: '2026-08-26'
+  cycle_id: cycle-8672fcfd9b00
+  task_id: Add unconfirmed artifact identification and window parameter to scripts/check_co
+  hypothesis: Implementing "Add unconfirmed artifact identification and window parameter
+    to scripts/check_confirmation_ratio.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/confirmation_status.json, scripts/check_confirmation_ratio.py,
+    tests/test_check_confirmation_ratio.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/confirmation_status.json
+  - scripts/check_confirmation_ratio.py
+  - tests/test_check_confirmation_ratio.py
+- id: LESS-20260826-87a1594c
+  date: '2026-08-26'
+  cycle_id: cycle-87a1594c07ab
+  task_id: Add failure classification and detailed error context extraction to scripts/extr
+  hypothesis: Implementing "Add failure classification and detailed error context
+    extraction to scripts/extract_last_failure.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/extract_last_failure.py, tests/test_extract_last_failure.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/extract_last_failure.py
+  - tests/test_extract_last_failure.py
+- id: LESS-20260826-5769ba2f
+  date: '2026-08-26'
+  cycle_id: cycle-5769ba2f9dd3
+  task_id: Add cycle window limit and category breakdown to scripts/summarize_failure_outco
+  hypothesis: Implementing "Add cycle window limit and category breakdown to scripts/summarize_failure_outcomes.py"
+    improves operator value.
+  result: 'Committed 1 commit(s): scripts/summarize_failure_outcomes.py, tests/test_summarize_failure_outcomes.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/summarize_failure_outcomes.py
+  - tests/test_summarize_failure_outcomes.py
+- id: LESS-20260826-c994f23e
+  date: '2026-08-26'
+  cycle_id: cycle-c994f23e05b0
+  task_id: Add time-window filtering and recurring pattern aggregation to scripts/analyze_r
+  hypothesis: Implementing "Add time-window filtering and recurring pattern aggregation
+    to scripts/analyze_repeat_failures.py" improves operator value.
+  result: 'Committed 1 commit(s): memory/prevent_repeats.json, memory/repeat_failures.json,
+    scripts/analyze_repeat_failures.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/prevent_repeats.json
+  - memory/repeat_failures.json
+  - scripts/analyze_repeat_failures.py
+- id: LESS-20260826-177da27a
+  date: '2026-08-26'
+  cycle_id: cycle-177da27aaaa9
+  task_id: Add failure reason pattern matching and structured JSON output to scripts/check_
+  hypothesis: Implementing "Add failure reason pattern matching and structured JSON
+    output to scripts/check_last_cycle_repeat.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/check_last_cycle_repeat.py, tests/test_check_last_cycle_repeat.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/check_last_cycle_repeat.py
+  - tests/test_check_last_cycle_repeat.py
+- id: LESS-20260826-be745246
+  date: '2026-08-26'
+  cycle_id: cycle-be745246e820
+  task_id: Add test execution timing summary and pattern filtering to scripts/run_all_tests
+  hypothesis: Implementing "Add test execution timing summary and pattern filtering
+    to scripts/run_all_tests.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/run_all_tests.py, tests/test_run_all_tests.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/run_all_tests.py
+  - tests/test_run_all_tests.py
+- id: LESS-20260826-dd865bde
+  date: '2026-08-26'
+  cycle_id: cycle-dd865bdec0a9
+  task_id: Add error location tracking and structured summary output to scripts/validate_js
+  hypothesis: Implementing "Add error location tracking and structured summary output
+    to scripts/validate_json_syntax.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/validate_json_syntax.py, tests/test_validate_json_syntax.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/validate_json_syntax.py
+  - tests/test_validate_json_syntax.py
+- id: LESS-20260825-47cdd201
+  date: '2026-08-25'
+  cycle_id: cycle-47cdd2010c92
+  task_id: Add threshold validation and non-zero exit code alerting to scripts/audit_repeat
+  hypothesis: Implementing "Add threshold validation and non-zero exit code alerting
+    to scripts/audit_repeat_failures.py" improves operator value.
+  result: 'Committed 2 commit(s): scripts/audit_repeat_failures.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/audit_repeat_failures.py
+- id: LESS-20260825-40604696
+  date: '2026-08-25'
+  cycle_id: cycle-406046962495
+  task_id: Add outcome filtering and structured JSON reporting to scripts/count_recent_fail
+  hypothesis: Implementing "Add outcome filtering and structured JSON reporting to
+    scripts/count_recent_failures.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/count_recent_failures.py, tests/test_count_recent_failures.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/count_recent_failures.py
+  - tests/test_count_recent_failures.py
+- id: LESS-20260825-649a0480
+  date: '2026-08-25'
+  cycle_id: cycle-649a0480f494
+  task_id: Add test module mapping and non-zero exit code reporting to scripts/validate_tes
+  hypothesis: Implementing "Add test module mapping and non-zero exit code reporting
+    to scripts/validate_test_existence.py" improves operator value.
+  result: 'Committed 2 commit(s): scripts/validate_test_existence.py, tests/test_validate_test_existence.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/validate_test_existence.py
+  - tests/test_validate_test_existence.py
+- id: LESS-20260825-7f531797
+  date: '2026-08-25'
+  cycle_id: cycle-7f531797e3b8
+  task_id: Add target path filtering and structured JSON reporting to scripts/validate_time
+  hypothesis: Implementing "Add target path filtering and structured JSON reporting
+    to scripts/validate_timezone_aware_datetime.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/repeat_failures.json, scripts/validate_timezone_aware_datetime.py,
+    tests/test_validate_timezone_aware_datetime.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/repeat_failures.json
+  - scripts/validate_timezone_aware_datetime.py
+  - tests/test_validate_timezone_aware_datetime.py
+- id: LESS-20260825-adb93b55
+  date: '2026-08-25'
+  cycle_id: cycle-adb93b555836
+  task_id: Add configurable lookback window and recurrence frequency ranking to scripts/ana
+  hypothesis: Implementing "Add configurable lookback window and recurrence frequency
+    ranking to scripts/analyze_repeat_failures.py" improves operator value.
+  result: 'Committed 1 commit(s): memory/repeat_failures.json'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - memory/repeat_failures.json
+- id: LESS-20260825-9e2ef2d1
+  date: '2026-08-25'
+  cycle_id: cycle-9e2ef2d14b19
+  task_id: Add target surface boundary and git diff validation to scripts/validate_cycle_ha
+  hypothesis: Implementing "Add target surface boundary and git diff validation to
+    scripts/validate_cycle_handoff.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/validate_cycle_handoff.py, tests/test_validate_cycle_handoff.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/validate_cycle_handoff.py
+  - tests/test_validate_cycle_handoff.py
+- id: LESS-20260825-bb4f2c81
+  date: '2026-08-25'
+  cycle_id: cycle-bb4f2c8132c5
+  task_id: Add structured JSON output format support to scripts/summarize_failure_outcomes.
+  hypothesis: Implementing "Add structured JSON output format support to scripts/summarize_failure_outcomes.py"
+    improves operator value.
+  result: 'Committed 1 commit(s): scripts/summarize_failure_outcomes.py, tests/test_summarize_failure_outcomes.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/summarize_failure_outcomes.py
+  - tests/test_summarize_failure_outcomes.py
+- id: LESS-20260825-28dd6607
+  date: '2026-08-25'
+  cycle_id: cycle-28dd6607d158
+  task_id: Add JSON output format and specific field extraction flag to scripts/extract_las
+  hypothesis: Implementing "Add JSON output format and specific field extraction flag
+    to scripts/extract_last_failure.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/repeat_failures.json, scripts/extract_last_failure.py,
+    tests/test_extract_last_failure.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/repeat_failures.json
+  - scripts/extract_last_failure.py
+  - tests/test_extract_last_failure.py
+- id: LESS-20260825-1a60434d
+  date: '2026-08-25'
+  cycle_id: cycle-1a60434df6a5
+  task_id: Add failure signature fingerprinting and lookback window to scripts/check_last_c
+  hypothesis: Implementing "Add failure signature fingerprinting and lookback window
+    to scripts/check_last_cycle_repeat.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/check_last_cycle_repeat.py, tests/test_check_last_cycle_repeat.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/check_last_cycle_repeat.py
+  - tests/test_check_last_cycle_repeat.py
+- id: LESS-20260825-873885c8
+  date: '2026-08-25'
+  cycle_id: cycle-873885c8f7b9
+  task_id: Add AST syntax check and import validation for target paths in scripts/verify_an
+  hypothesis: Implementing "Add AST syntax check and import validation for target
+    paths in scripts/verify_and_proof.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/verify_and_proof.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/verify_and_proof.py
+- id: LESS-20260825-e1080a18
+  date: '2026-08-25'
+  cycle_id: cycle-e1080a18966d
+  task_id: Fix timezone-naive datetime validator execution and exit code handling
+  hypothesis: Implementing "Fix timezone-naive datetime validator execution and exit
+    code handling" improves operator value.
+  result: 'Committed 1 commit(s): memory/repeat_failures.json'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - memory/repeat_failures.json
+- id: LESS-20260825-842d3c7f
+  date: '2026-08-25'
+  cycle_id: cycle-842d3c7f3f4d
+  task_id: Add failure stage breakdown reporting to scripts/count_recent_failures.py
+  hypothesis: Implementing "Add failure stage breakdown reporting to scripts/count_recent_failures.py"
+    improves operator value.
+  result: 'Committed 2 commit(s): memory/confirmation_status.json, memory/repeat_failures.json,
+    scripts/count_recent_failures.py, tests/test_count_recent_failures.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/confirmation_status.json
+  - memory/repeat_failures.json
+  - scripts/count_recent_failures.py
+  - tests/test_count_recent_failures.py
+- id: LESS-20260825-700e8c54
+  date: '2026-08-25'
+  cycle_id: cycle-700e8c54442a
+  task_id: Add configurable window days and threshold verification to scripts/check_confirm
+  hypothesis: Implementing "Add configurable window days and threshold verification
+    to scripts/check_confirmation_ratio.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/confirmation_status.json, scripts/check_confirmation_ratio.py,
+    tests/test_check_confirmation_ratio.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/confirmation_status.json
+  - scripts/check_confirmation_ratio.py
+  - tests/test_check_confirmation_ratio.py
+- id: LESS-20260825-ab342a5e
+  date: '2026-08-25'
+  cycle_id: cycle-ab342a5e99e1
+  task_id: Add configurable source directory and archive destination arguments to
+    scripts/a
+  hypothesis: Implementing "Add configurable source directory and archive destination
+    arguments to scripts/archive_old_reports.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/archive_old_reports.py, tests/test_archive_old_reports.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/archive_old_reports.py
+  - tests/test_archive_old_reports.py
+- id: LESS-20260825-0bd2aea7
+  date: '2026-08-25'
+  cycle_id: cycle-0bd2aea7c264
+  task_id: Add structured JSON output and path arguments to scripts/validate_yaml_syntax.py
+  hypothesis: Implementing "Add structured JSON output and path arguments to scripts/validate_yaml_syntax.py"
+    improves operator value.
+  result: 'Committed 1 commit(s): scripts/validate_yaml_syntax.py, tests/test_validate_yaml_syntax.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/validate_yaml_syntax.py
+  - tests/test_validate_yaml_syntax.py
+- id: LESS-20260825-ad42b06f
+  date: '2026-08-25'
+  cycle_id: cycle-ad42b06fd523
+  task_id: Add JSON report output and target path filtering to scripts/validate_unused_impo
+  hypothesis: Implementing "Add JSON report output and target path filtering to scripts/validate_unused_imports.py"
+    improves operator value.
+  result: 'Committed 1 commit(s): scripts/validate_unused_imports.py, tests/test_validate_unused_imports.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/validate_unused_imports.py
+  - tests/test_validate_unused_imports.py
+- id: LESS-20260825-29209bf8
+  date: '2026-08-25'
+  cycle_id: cycle-29209bf858cb
+  task_id: Add error classification matching and structured JSON output to scripts/check_la
+  hypothesis: Implementing "Add error classification matching and structured JSON
+    output to scripts/check_last_cycle_repeat.py" improves operator value.
+  result: 'Committed 2 commit(s): scripts/check_last_cycle_repeat.py, tests/test_check_last_cycle_repeat.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/check_last_cycle_repeat.py
+  - tests/test_check_last_cycle_repeat.py
+- id: LESS-20260825-36d7315f
+  date: '2026-08-25'
+  cycle_id: cycle-36d7315f534e
+  task_id: Add structured JSON output and stage filtering to scripts/extract_last_failure.p
+  hypothesis: Implementing "Add structured JSON output and stage filtering to scripts/extract_last_failure.py"
+    improves operator value.
+  result: 'Committed 1 commit(s): memory/confirmation_status.json, memory/prevent_repeats.json,
+    memory/repeat_failures.json, scripts/extract_last_failure.py, tests/test_extract_last_failure.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/confirmation_status.json
+  - memory/prevent_repeats.json
+  - memory/repeat_failures.json
+  - scripts/extract_last_failure.py
+  - tests/test_extract_last_failure.py
+- id: LESS-20260825-20bbb77c
+  date: '2026-08-25'
+  cycle_id: cycle-20bbb77c4a10
+  task_id: Add structured JSON output mode to scripts/validate_type_comparison.py
+  hypothesis: Implementing "Add structured JSON output mode to scripts/validate_type_comparison.py"
+    improves operator value.
+  result: 'Committed 1 commit(s): scripts/validate_type_comparison.py, tests/test_validate_type_comparison.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/validate_type_comparison.py
+  - tests/test_validate_type_comparison.py
+- id: LESS-20260825-62ffebdb
+  date: '2026-08-25'
+  cycle_id: cycle-62ffebdbf659
+  task_id: Add JSON summary output and fail-fast execution flag to scripts/run_all_tests.py
+  hypothesis: Implementing "Add JSON summary output and fail-fast execution flag to
+    scripts/run_all_tests.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/run_all_tests.py, tests/test_run_all_tests.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/run_all_tests.py
+  - tests/test_run_all_tests.py
+- id: LESS-20260825-c09e3799
+  date: '2026-08-25'
+  cycle_id: cycle-c09e37992835
+  task_id: Add confirmed integration metrics and cycle health stats to scripts/control_plan
+  hypothesis: Implementing "Add confirmed integration metrics and cycle health stats
+    to scripts/control_plane_summary.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/control_plane_summary.py, tests/test_control_plane_summary.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/control_plane_summary.py
+  - tests/test_control_plane_summary.py
+- id: LESS-20260825-af523f3b
+  date: '2026-08-25'
+  cycle_id: cycle-af523f3b8d3d
+  task_id: Add target path verification and required proof metadata validation to
+    scripts/v
+  hypothesis: Implementing "Add target path verification and required proof metadata
+    validation to scripts/validate_cycle_handoff.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/validate_cycle_handoff.py, tests/test_validate_cycle_handoff.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/validate_cycle_handoff.py
+  - tests/test_validate_cycle_handoff.py
+- id: LESS-20260825-ea545ca8
+  date: '2026-08-25'
+  cycle_id: cycle-ea545ca8fb42
+  task_id: Add min-ratio threshold validation and non-zero exit code to scripts/check_confi
+  hypothesis: Implementing "Add min-ratio threshold validation and non-zero exit code
+    to scripts/check_confirmation_ratio.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/check_confirmation_ratio.py, tests/test_check_confirmation_ratio.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/check_confirmation_ratio.py
+  - tests/test_check_confirmation_ratio.py
+- id: LESS-20260825-aa278860
+  date: '2026-08-25'
+  cycle_id: cycle-aa2788602fe4
+  task_id: Add failure reason normalization and hash stripping to scripts/check_last_cycle_
+  hypothesis: Implementing "Add failure reason normalization and hash stripping to
+    scripts/check_last_cycle_repeat.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/check_last_cycle_repeat.py, tests/test_check_last_cycle_repeat.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/check_last_cycle_repeat.py
+  - tests/test_check_last_cycle_repeat.py
+- id: LESS-20260825-50a1def8
+  date: '2026-08-25'
+  cycle_id: cycle-50a1def86f9a
+  task_id: Add os.system and os.popen AST checks to scripts/validate_no_shell_true.py
+  hypothesis: Implementing "Add os.system and os.popen AST checks to scripts/validate_no_shell_true.py"
+    improves operator value.
+  result: 'Committed 1 commit(s): scripts/validate_no_shell_true.py, tests/test_validate_no_shell_true.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/validate_no_shell_true.py
+  - tests/test_validate_no_shell_true.py
+- id: LESS-20260825-531cd89c
+  date: '2026-08-25'
+  cycle_id: cycle-531cd89ce0f7
+  task_id: Add structured JSON output mode and directory scanning to scripts/validate_no_ev
+  hypothesis: Implementing "Add structured JSON output mode and directory scanning
+    to scripts/validate_no_eval_exec.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/validate_no_eval_exec.py, tests/test_validate_no_eval_exec.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/validate_no_eval_exec.py
+  - tests/test_validate_no_eval_exec.py
+- id: LESS-20260825-d2df789e
+  date: '2026-08-25'
+  cycle_id: cycle-d2df789e95e0
+  task_id: Fix import resolution and exit code handling in scripts/validate_unused_imports.
+  hypothesis: Implementing "Fix import resolution and exit code handling in scripts/validate_unused_imports.py"
+    improves operator value.
+  result: 'Committed 1 commit(s): memory/confirmation_status.json, memory/prevent_repeats.json,
+    memory/repeat_failures.json'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - memory/confirmation_status.json
+  - memory/prevent_repeats.json
+  - memory/repeat_failures.json
+- id: LESS-20260825-34de2183
+  date: '2026-08-25'
+  cycle_id: cycle-34de2183e259
+  task_id: Add windowed repeat rate calculation and threshold violation flagging to
+    scripts
+  hypothesis: Implementing "Add windowed repeat rate calculation and threshold violation
+    flagging to scripts/analyze_repeat_failures.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/prevent_repeats.json, memory/repeat_failures.json,
+    scripts/analyze_repeat_failures.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/prevent_repeats.json
+  - memory/repeat_failures.json
+  - scripts/analyze_repeat_failures.py
+- id: LESS-20260825-bdf0b42b
+  date: '2026-08-25'
+  cycle_id: cycle-bdf0b42ba267
+  task_id: Implement count_recent_failures function to tally non-success cycle outcomes
+  hypothesis: Implementing "Implement count_recent_failures function to tally non-success
+    cycle outcomes" improves operator value.
+  result: 'Committed 1 commit(s): scripts/count_recent_failures.py, tests/test_count_recent_failures.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/count_recent_failures.py
+  - tests/test_count_recent_failures.py
+- id: LESS-20260825-a821e5fe
+  date: '2026-08-25'
+  cycle_id: cycle-a821e5fe1a27
+  task_id: Add CLI execution entrypoint to scripts/check_git_clean_branch.py
+  hypothesis: Implementing "Add CLI execution entrypoint to scripts/check_git_clean_branch.py"
+    improves operator value.
+  result: 'Committed 1 commit(s): scripts/check_git_clean_branch.py, tests/test_check_git_clean_branch.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/check_git_clean_branch.py
+  - tests/test_check_git_clean_branch.py
+- id: LESS-20260825-3314b69b
+  date: '2026-08-25'
+  cycle_id: cycle-3314b69bdaf2
+  task_id: Add structured JSON output and ipdb/pudb detection to scripts/validate_no_debug_
+  hypothesis: Implementing "Add structured JSON output and ipdb/pudb detection to
+    scripts/validate_no_debug_statements.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/run_all_tests.py, scripts/validate_no_debug_statements.py,
+    tests/test_validate_no_debug_statements.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/run_all_tests.py
+  - scripts/validate_no_debug_statements.py
+  - tests/test_validate_no_debug_statements.py
+- id: LESS-20260825-b2b66d48
+  date: '2026-08-25'
+  cycle_id: cycle-b2b66d48a3b8
+  task_id: Wire scripts/validate_mutable_defaults.py into scripts/run_all_tests.py
+    suite
+  hypothesis: Implementing "Wire scripts/validate_mutable_defaults.py into scripts/run_all_tests.py
+    suite" improves operator value.
+  result: 'Committed 1 commit(s): memory/confirmation_status.json'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - memory/confirmation_status.json
+- id: LESS-20260825-fad59505
+  date: '2026-08-25'
+  cycle_id: cycle-fad595053459
+  task_id: Add duplicate object key detection to scripts/validate_json_syntax.py
+  hypothesis: Implementing "Add duplicate object key detection to scripts/validate_json_syntax.py"
+    improves operator value.
+  result: 'Committed 1 commit(s): scripts/validate_json_syntax.py, tests/test_validate_json_syntax.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/validate_json_syntax.py
+  - tests/test_validate_json_syntax.py
+- id: LESS-20260825-c9b735fb
+  date: '2026-08-25'
+  cycle_id: cycle-c9b735fb7254
+  task_id: Add structured JSON reporting and chronological order validation to scripts/vali
+  hypothesis: Implementing "Add structured JSON reporting and chronological order
+    validation to scripts/validate_history_format.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/validate_history_format.py, tests/test_validate_history_format.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/validate_history_format.py
+  - tests/test_validate_history_format.py
+- id: LESS-20260825-37d6a551
+  date: '2026-08-25'
+  cycle_id: cycle-37d6a551f0d9
+  task_id: Add Windows reserved name checks and JSON report output to scripts/validate_file
+  hypothesis: Implementing "Add Windows reserved name checks and JSON report output
+    to scripts/validate_filename_compatibility.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/validate_filename_compatibility.py, tests/test_validate_filename_compatibility.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/validate_filename_compatibility.py
+  - tests/test_validate_filename_compatibility.py
+- id: LESS-20260825-8871470d
+  date: '2026-08-25'
+  cycle_id: cycle-8871470d4ad5
+  task_id: Add structured JSON reporting and line offset tracking to scripts/validate_docum
+  hypothesis: Implementing "Add structured JSON reporting and line offset tracking
+    to scripts/validate_documentation_code_blocks.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/validate_documentation_code_blocks.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/validate_documentation_code_blocks.py
+- id: LESS-20260825-b957628f
+  date: '2026-08-25'
+  cycle_id: cycle-b957628fe3e5
+  task_id: Update script exclusion filters and exit status handling in scripts/validate_tes
+  hypothesis: Implementing "Update script exclusion filters and exit status handling
+    in scripts/validate_test_existence.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/repeat_failures.json, scripts/validate_test_existence.py,
+    tests/test_validate_test_existence.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/repeat_failures.json
+  - scripts/validate_test_existence.py
+  - tests/test_validate_test_existence.py
+- id: LESS-20260825-319c1d1f
+  date: '2026-08-25'
+  cycle_id: cycle-319c1d1fe80b
+  task_id: Add silent pass handler detection to scripts/validate_exception_handling.py
+  hypothesis: Implementing "Add silent pass handler detection to scripts/validate_exception_handling.py"
+    improves operator value.
+  result: 'Committed 2 commit(s): memory/prevent_repeats.json, memory/repeat_failures.json,
+    scripts/validate_exception_handling.py, tests/test_validate_exception_handling.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/prevent_repeats.json
+  - memory/repeat_failures.json
+  - scripts/validate_exception_handling.py
+  - tests/test_validate_exception_handling.py
+- id: LESS-20260825-2bfc985a
+  date: '2026-08-25'
+  cycle_id: cycle-2bfc985ae9e6
+  task_id: Add confirmed integration metrics and unconfirmed script alerts to scripts/contr
+  hypothesis: Implementing "Add confirmed integration metrics and unconfirmed script
+    alerts to scripts/control_plane_summary.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/control_plane_summary.py, tests/test_control_plane_summary.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/control_plane_summary.py
+  - tests/test_control_plane_summary.py
+- id: LESS-20260824-56808133
+  date: '2026-08-24'
+  cycle_id: cycle-568081338c2d
+  task_id: Add artifact path validation and proof note presence checks to scripts/validate_
+  hypothesis: Implementing "Add artifact path validation and proof note presence checks
+    to scripts/validate_cycle_handoff.py" improves operator value.
+  result: 'Committed 3 commit(s): memory/HISTORY.md, memory/repeat_failures.json,
+    scripts/validate_cycle_handoff.py, tests/test_validate_cycle_handoff.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/repeat_failures.json
+  - scripts/validate_cycle_handoff.py
+  - tests/test_validate_cycle_handoff.py
+- id: LESS-20260824-a5e848c5
+  date: '2026-08-24'
+  cycle_id: cycle-a5e848c5b963
+  task_id: Document root cause and remediation for out_of_band_main_detected failure
+    in les
+  hypothesis: Implementing "Document root cause and remediation for out_of_band_main_detected
+    failure in lessons" improves operator value.
+  result: 'Committed 1 commit(s): lessons/out_of_band_main_detected.md'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Task completed with 0 tool calls in 0s.
+  files_changed:
+  - lessons/out_of_band_main_detected.md
+- id: LESS-20260824-59821cee
+  date: '2026-08-24'
+  cycle_id: cycle-59821cee55b2
+  task_id: Add integration confirmation weighting to scripts/backlog_seeder.py
+  hypothesis: Implementing "Add integration confirmation weighting to scripts/backlog_seeder.py"
+    improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, scripts/backlog_seeder.py, tests/test_backlog_seeder_confirmation.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - scripts/backlog_seeder.py
+  - tests/test_backlog_seeder_confirmation.py
+- id: LESS-20260824-a830b59b
+  date: '2026-08-24'
+  cycle_id: cycle-a830b59b5481
+  task_id: Add touched script smoke testing and execution verification to scripts/verify_an
+  hypothesis: Implementing "Add touched script smoke testing and execution verification
+    to scripts/verify_and_proof.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/verify_and_proof.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - scripts/verify_and_proof.py
+- id: LESS-20260824-31e0fa04
+  date: '2026-08-24'
+  cycle_id: cycle-31e0fa04a056
+  task_id: Create scripts/extract_last_failure.py to read cycles ledger backwards
+    for the l
+  hypothesis: Implementing "Create scripts/extract_last_failure.py to read cycles
+    ledger backwards for the latest failure record" improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/extract_last_failure.py,
+    tests/test_extract_last_failure.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - scripts/extract_last_failure.py
+  - tests/test_extract_last_failure.py
+- id: LESS-20260824-a6c3c1c4
+  date: '2026-08-24'
+  cycle_id: cycle-a6c3c1c46e80
+  task_id: Add cycle confirmation ratio and recent integration status reporting to
+    scripts/
+  hypothesis: Implementing "Add cycle confirmation ratio and recent integration status
+    reporting to scripts/control_plane_summary.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/control_plane_summary.py,
+    tests/test_control_plane_summary.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - scripts/control_plane_summary.py
+  - tests/test_control_plane_summary.py
+- id: LESS-20260824-381b8f27
+  date: '2026-08-24'
+  cycle_id: cycle-381b8f2782a3
+  task_id: Add rolling window filtering and frequency ranking to scripts/summarize_failure_
+  hypothesis: Implementing "Add rolling window filtering and frequency ranking to
+    scripts/summarize_failure_outcomes.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/summarize_failure_outcomes.py,
+    tests/test_summarize_failure_outcomes.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - scripts/summarize_failure_outcomes.py
+  - tests/test_summarize_failure_outcomes.py
+- id: LESS-20260824-1c25796d
+  date: '2026-08-24'
+  cycle_id: cycle-1c25796d3dcc
+  task_id: Fix AST inspection and return status in scripts/validate_sys_path_modification.p
+  hypothesis: Implementing "Fix AST inspection and return status in scripts/validate_sys_path_modification.py"
+    improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/validate_sys_path_modification.py,
+    tests/test_validate_sys_path_modification.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - scripts/validate_sys_path_modification.py
+  - tests/test_validate_sys_path_modification.py
+- id: LESS-20260824-e8bf53c1
+  date: '2026-08-24'
+  cycle_id: cycle-e8bf53c107d0
+  task_id: Add target path and error type comparison to scripts/check_last_cycle_repeat.py
+  hypothesis: Implementing "Add target path and error type comparison to scripts/check_last_cycle_repeat.py"
+    improves operator value.
+  result: 'Committed 3 commit(s): memory/HISTORY.md, memory/MEMORY.md, memory/repeat_failures.json,
+    scripts/check_last_cycle_repeat.py, tests/test_check_last_cycle_repeat.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - memory/repeat_failures.json
+  - scripts/check_last_cycle_repeat.py
+  - tests/test_check_last_cycle_repeat.py
+- id: LESS-20260824-57a5e2a2
+  date: '2026-08-24'
+  cycle_id: cycle-57a5e2a21d55
+  task_id: Add 7-day rolling window calculation and threshold alert to scripts/audit_repeat
+  hypothesis: Implementing "Add 7-day rolling window calculation and threshold alert
+    to scripts/audit_repeat_failures.py" improves operator value.
+  result: 'Committed 3 commit(s): memory/HISTORY.md, memory/MEMORY.md, memory/repeat_failures.json,
+    scripts/audit_repeat_failures.py, tests/test_audit_repeat_failures.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - memory/repeat_failures.json
+  - scripts/audit_repeat_failures.py
+  - tests/test_audit_repeat_failures.py
+- id: LESS-20260824-0ec6ca8a
+  date: '2026-08-24'
+  cycle_id: cycle-0ec6ca8acdac
+  task_id: Add execution timing benchmarks and failure summaries to scripts/run_all_tests.p
+  hypothesis: Implementing "Add execution timing benchmarks and failure summaries
+    to scripts/run_all_tests.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, tests/test_run_all_tests.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Memory updates should be paired with code commits to avoid
+    metadata-only cycles.
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - tests/test_run_all_tests.py
+- id: LESS-20260824-60fc851d
+  date: '2026-08-24'
+  cycle_id: cycle-60fc851d7f9a
+  task_id: Add artifact execution check and return code validation to scripts/verify_and_pr
+  hypothesis: Implementing "Add artifact execution check and return code validation
+    to scripts/verify_and_proof.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/verify_and_proof.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - scripts/verify_and_proof.py
+- id: LESS-20260824-fe7f15ed
+  date: '2026-08-24'
+  cycle_id: cycle-fe7f15edfa0d
+  task_id: Add recurrence threshold filtering and failure category aggregation to
+    scripts/a
+  hypothesis: Implementing "Add recurrence threshold filtering and failure category
+    aggregation to scripts/analyze_repeat_failures.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/analyze_repeat_failures.py,
+    tests/test_analyze_repeat_failures.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - scripts/analyze_repeat_failures.py
+  - tests/test_analyze_repeat_failures.py
+- id: LESS-20260824-645ebf92
+  date: '2026-08-24'
+  cycle_id: cycle-645ebf920398
+  task_id: Add touched file integrity and proof note checks to scripts/validate_cycle_hando
+  hypothesis: Implementing "Add touched file integrity and proof note checks to scripts/validate_cycle_handoff.py"
+    improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/validate_cycle_handoff.py,
+    tests/test_validate_cycle_handoff.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - scripts/validate_cycle_handoff.py
+  - tests/test_validate_cycle_handoff.py
+- id: LESS-20260824-86174011
+  date: '2026-08-24'
+  cycle_id: cycle-86174011ad96
+  task_id: Add confirmed integration ratio and churn metrics to scripts/control_plane_summa
+  hypothesis: Implementing "Add confirmed integration ratio and churn metrics to scripts/control_plane_summary.py"
+    improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/control_plane_summary.py,
+    tests/test_control_plane_summary.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - scripts/control_plane_summary.py
+  - tests/test_control_plane_summary.py
+- id: LESS-20260824-99fb9219
+  date: '2026-08-24'
+  cycle_id: cycle-99fb9219d2d0
+  task_id: Add sliding window rate evaluation and failure reason breakdown to scripts/audit
+  hypothesis: Implementing "Add sliding window rate evaluation and failure reason
+    breakdown to scripts/audit_repeat_failures.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, memory/prevent_repeats.json,
+    memory/repeat_failures.json, scripts/audit_repeat_failures.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - memory/prevent_repeats.json
+  - memory/repeat_failures.json
+  - scripts/audit_repeat_failures.py
+  - tests/test_audit_repeat_failures.py
+- id: LESS-20260824-a135c95f
+  date: '2026-08-24'
+  cycle_id: cycle-a135c95ff382
+  task_id: Add per-suite execution timing and failure summary reporting to scripts/run_all_
+  hypothesis: Implementing "Add per-suite execution timing and failure summary reporting
+    to scripts/run_all_tests.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/run_all_tests.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - scripts/run_all_tests.py
+- id: LESS-20260824-e9a36195
+  date: '2026-08-24'
+  cycle_id: cycle-e9a361954bb7
+  task_id: Add repeat failure suppression filtering to scripts/backlog_seeder.py
+  hypothesis: Implementing "Add repeat failure suppression filtering to scripts/backlog_seeder.py"
+    improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/backlog_seeder.py,
+    tests/test_backlog_seeder_suppression.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - scripts/backlog_seeder.py
+  - tests/test_backlog_seeder_suppression.py
+- id: LESS-20260824-e301a8a7
+  date: '2026-08-24'
+  cycle_id: cycle-e301a8a7eeb5
+  task_id: Add Path read_text and write_text encoding check to scripts/validate_open_encodi
+  hypothesis: Implementing "Add Path read_text and write_text encoding check to scripts/validate_open_encoding.py"
+    improves operator value.
+  result: 'Committed 1 commit(s): scripts/validate_open_encoding.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/validate_open_encoding.py
+- id: LESS-20260824-5c2f9e95
+  date: '2026-08-24'
+  cycle_id: cycle-5c2f9e9519a5
+  task_id: Add failure pattern clustering and recurring error threshold detection
+    to script
+  hypothesis: Implementing "Add failure pattern clustering and recurring error threshold
+    detection to scripts/analyze_repeat_failures.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, scripts/analyze_repeat_failures.py,
+    tests/test_analyze_repeat_failures.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - scripts/analyze_repeat_failures.py
+  - tests/test_analyze_repeat_failures.py
+- id: LESS-20260823-71a9cd75
+  date: '2026-08-23'
+  cycle_id: cycle-71a9cd753407
+  task_id: Add threshold evaluation and JSON summary output to scripts/check_confirmation_r
+  hypothesis: Implementing "Add threshold evaluation and JSON summary output to scripts/check_confirmation_ratio.py"
+    improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/check_confirmation_ratio.py,
+    tests/test_check_confirmation_ratio.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - scripts/check_confirmation_ratio.py
+  - tests/test_check_confirmation_ratio.py
+- id: LESS-20260823-bdc701ab
+  date: '2026-08-23'
+  cycle_id: cycle-bdc701abfefd
+  task_id: Add multiline deprecation marker parsing and JSON summary output to scripts/vali
+  hypothesis: Implementing "Add multiline deprecation marker parsing and JSON summary
+    output to scripts/validate_deprecation_status.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/validate_deprecation_status.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - scripts/validate_deprecation_status.py
+- id: LESS-20260823-c9e29b9f
+  date: '2026-08-23'
+  cycle_id: cycle-c9e29b9f5116
+  task_id: Add broad Exception clause detection and JSON reporting to scripts/validate_exce
+  hypothesis: Implementing "Add broad Exception clause detection and JSON reporting
+    to scripts/validate_exception_handling.py" improves operator value.
+  result: 'Committed 3 commit(s): memory/HISTORY.md, memory/MEMORY.md, memory/prevent_repeats.json,
+    memory/repeat_failures.json, scripts/validate_exception_handling.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - memory/prevent_repeats.json
+  - memory/repeat_failures.json
+  - scripts/validate_exception_handling.py
+  - tests/test_validate_exception_handling.py
+- id: LESS-20260823-f6cf166c
+  date: '2026-08-23'
+  cycle_id: cycle-f6cf166ccb29
+  task_id: Add local package resolution and syntax error resilience to scripts/verify_impor
+  hypothesis: Implementing "Add local package resolution and syntax error resilience
+    to scripts/verify_imports.py" improves operator value.
+  result: 'Committed 1 commit(s): scripts/verify_imports.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - scripts/verify_imports.py
+- id: LESS-20260823-cabd4170
+  date: '2026-08-23'
+  cycle_id: cycle-cabd4170fa72
+  task_id: Add JSON output format and outcome status filtering to scripts/backlog_seeder.py
+  hypothesis: Implementing "Add JSON output format and outcome status filtering to
+    scripts/backlog_seeder.py" improves operator value.
+  result: 'Committed 3 commit(s): memory/HISTORY.md, memory/MEMORY.md, memory/repeat_failures.json,
+    scripts/backlog_seeder.py, tests/test_backlog_seeder_outcomes.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - memory/repeat_failures.json
+  - scripts/backlog_seeder.py
+  - tests/test_backlog_seeder_outcomes.py
+- id: LESS-20260823-c40c135f
+  date: '2026-08-23'
+  cycle_id: cycle-c40c135fac30
+  task_id: Update AST entrypoint rules to recognize standard script termination idioms
+    in s
+  hypothesis: Implementing "Update AST entrypoint rules to recognize standard script
+    termination idioms in scripts/validate_script_entrypoints.py" improves operator
+    value.
+  result: 'Committed 3 commit(s): memory/HISTORY.md, memory/prevent_repeats.json,
+    memory/repeat_failures.json, scripts/validate_script_entrypoints.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/prevent_repeats.json
+  - memory/repeat_failures.json
+  - scripts/validate_script_entrypoints.py
+- id: LESS-20260823-e2fb9f3c
+  date: '2026-08-23'
+  cycle_id: cycle-e2fb9f3cad69
+  task_id: Add artifact import and syntax validation to scripts/validate_cycle_handoff.py
+  hypothesis: Implementing "Add artifact import and syntax validation to scripts/validate_cycle_handoff.py"
+    improves operator value.
+  result: 'Committed 3 commit(s): memory/HISTORY.md, memory/MEMORY.md, memory/prevent_repeats.json,
+    memory/repeat_failures.json, scripts/validate_cycle_handoff.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - memory/prevent_repeats.json
+  - memory/repeat_failures.json
+  - scripts/validate_cycle_handoff.py
+  - tests/test_validate_cycle_handoff.py
+- id: LESS-20260823-fd43a612
+  date: '2026-08-23'
+  cycle_id: cycle-fd43a612da78
+  task_id: Add confirmed integration ratio and confirmation health metrics to scripts/contr
+  hypothesis: Implementing "Add confirmed integration ratio and confirmation health
+    metrics to scripts/control_plane_summary.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/control_plane_summary.py,
+    tests/test_control_plane_summary.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - scripts/control_plane_summary.py
+  - tests/test_control_plane_summary.py
+- id: LESS-20260823-3c26748d
+  date: '2026-08-23'
+  cycle_id: cycle-3c26748d3c8c
+  task_id: Fix encoding validation reporting and exit status in scripts/validate_open_encod
+  hypothesis: Implementing "Fix encoding validation reporting and exit status in scripts/validate_open_encoding.py"
+    improves operator value.
+  result: 'Committed 3 commit(s): memory/HISTORY.md, memory/MEMORY.md, memory/confirmation_status.json,
+    memory/prevent_repeats.json, memory/repeat_failures.json'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - memory/confirmation_status.json
+  - memory/prevent_repeats.json
+  - memory/repeat_failures.json
+  - scripts/validate_open_encoding.py
+- id: LESS-20260823-f4612702
+  date: '2026-08-23'
+  cycle_id: cycle-f4612702401b
+  task_id: Fix exception handler inspection and exit status in scripts/validate_exception_h
+  hypothesis: Implementing "Fix exception handler inspection and exit status in scripts/validate_exception_handling.py"
+    improves operator value.
+  result: 'Committed 3 commit(s): memory/HISTORY.md, memory/MEMORY.md, memory/confirmation_status.json,
+    scripts/validate_exception_handling.py, tests/test_validate_exception_handling.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - memory/confirmation_status.json
+  - scripts/validate_exception_handling.py
+  - tests/test_validate_exception_handling.py
+  - tests/test_workspace_validation_helpers.py
+- id: LESS-20260823-76c2802f
+  date: '2026-08-23'
+  cycle_id: cycle-76c2802f8b62
+  task_id: Add keyword and failure tag filtering to scripts/lesson_lookup.py to retrieve
+    fa
+  hypothesis: Implementing "Add keyword and failure tag filtering to scripts/lesson_lookup.py
+    to retrieve failure avoidance lessons" improves operator value.
+  result: 'Committed 3 commit(s): memory/HISTORY.md, memory/MEMORY.md, memory/repeat_failures.json,
+    scripts/lesson_lookup.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - memory/repeat_failures.json
+  - scripts/lesson_lookup.py
+- id: LESS-20260823-ef380e88
+  date: '2026-08-23'
+  cycle_id: cycle-ef380e88d3f0
+  task_id: Optimize scripts/check_style.py file traversal and AST checking to finish
+    within
+  hypothesis: Implementing "Optimize scripts/check_style.py file traversal and AST
+    checking to finish within timeout" improves operator value.
+  result: 'Committed 3 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/check_style.py,
+    scripts/validate_deprecation_status.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+  - memory/MEMORY.md
+  - scripts/check_style.py
+  - scripts/validate_deprecation_status.py
+- id: LESS-20260823-9325b9a4
+  date: '2026-08-23'
+  cycle_id: cycle-9325b9a4ce99
+  task_id: Add error signature clustering and recurrence frequency calculation to
+    scripts/a
+  hypothesis: Implementing "Add error signature clustering and recurrence frequency
+    calculation to scripts/analyze_repeat_failures.py" improves operator value.
+  result: 'Committed 2 commit(s): memory/HISTORY.md, memory/MEMORY.md, scripts/analyze_repeat_failures.py,
+    tests/test_analyze_repeat_failures.py'
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: Short utility scripts implementable in single bridge session
+    (0 tool calls).
+  files_changed:
+  - memory/HISTORY.md
+- schema_version: 2
+  id: LESS-20260904-260bd269
+  title: Use sys.stdlib_module_names (Python 3.10+) for O(1) standard library module
+    detection instead of dynamic import inspection
+  problem: In cycle-bdea8c5fbdc2, detecting whether a module is part of the standard
+    library required dynamic inspection (importing modules or walking sys.path), which
+    burned tool iterations and exhausted the cycle's turn budget before the change
+    was committed.
+  solution: 'Check membership against sys.stdlib_module_names, a frozenset of all
+    standard library module names available since Python 3.10: `import sys; is_stdlib
+    = name in sys.stdlib_module_names`. For submodules (e.g. ''json.decoder''), check
+    the top-level package name. Combine with importlib.util.find_spec only when you
+    also need to confirm the module is importable in the current environment. This
+    is a constant-time set lookup with no import side effects and no filesystem traversal.'
+  tags:
+  - python
+  - stdlib
+  - performance
+  - detection
+  severity: medium
+  seen_count: 1
+  first_seen: '2026-09-04'
+  last_seen: '2026-09-04'
+  evidence:
+  - cycle-bdea8c5fbdc2
+  date: '2026-09-04'
+  cycle_id: cycle-260bd269e5a0
+  task_id: Record lesson in lessons.yaml on using sys.stdlib_module_names for standard
+    library detection
+  hypothesis: Codifying the sys.stdlib_module_names lookup in lessons.yaml lets future
+    cycles detect standard library modules with a constant-time set membership check
+    instead of dynamic import inspection, avoiding turn-budget exhaustion.
+  result: 'Reflected: lesson recorded from cycle-bdea8c5fbdc2 turn exhaustion analysis.'
+  generalized_insight: Prefer constant-time membership checks against sys.stdlib_module_names
+    over dynamic import or sys.path inspection when classifying modules as standard
+    library vs third-party; reserve importlib.util.find_spec for cases that also require
+    importability confirmation.
+- schema_version: 2
+  id: LESS-20260904-d44ed220
+  title: Stop repeated codebase searches when grep returns empty for newly requested
+    feature terms; proceed directly to inspecting and editing the target script
+  problem: When a task requests a new feature or term that does not yet exist in the
+    codebase, subagents repeatedly re-run grep and list_dir sweeps searching for the
+    term, burning tool iterations on searches that will always return empty. The term
+    is new by definition, so no existing match is possible, and each redundant search
+    wastes a full iteration of the cycle budget.
+  solution: When a task names a new feature, term, or symbol that is not yet present
+    in the codebase, run at most one targeted grep to confirm absence, then stop searching
+    and proceed directly to reading the designated target file and making the edit.
+    Do not re-run the same or similar searches expecting a different result. If the
+    first grep returns empty, treat that as confirmation the feature is new and move
+    to the edit phase immediately.
+  tags:
+  - search
+  - grep
+  - efficiency
+  - turn-budget
+  - new-features
+  severity: medium
+  seen_count: 1
+  first_seen: '2026-09-04'
+  last_seen: '2026-09-04'
+  evidence:
+  - cycle-d44ed220091b
+  date: '2026-09-04'
+  cycle_id: cycle-d44ed220091b
+  task_id: Record lesson in lessons.yaml on avoiding repetitive searches for new feature
+    terms
+  hypothesis: Codifying the bounded-search guideline in lessons.yaml lets subagents
+    skip redundant grep sweeps for new feature terms and proceed directly to target
+    inspection and editing, preserving turn budget for actual implementation work.
+  result: 'Reflected: lesson recorded from cycle analysis of repetitive search patterns.'
+  generalized_insight: When a task introduces a new feature term or symbol, at most
+    one targeted grep confirms absence; further identical or similar searches are
+    wasted iterations. After confirming the term is new, proceed directly to reading
+    the designated target file and making the edit rather than re-searching the codebase.
+- schema_version: 2
+  id: LESS-20260904-90931e43
+  title: Support both repository-relative ('memory/facts/...') and directory-relative
+    ('facts/...') markdown link formats in catalog index consistency tests
+  problem: In cycle-90931e43a3db, a markdown catalog index consistency test resolved
+    every relative link in the index against a single base (the memory/ directory),
+    so links written in the other common format — repository-relative ('memory/facts/...')
+    instead of directory-relative ('facts/...') — were reported as missing files even
+    though the target exists on disk. The test failed on a valid index purely because
+    of the link's path format.
+  solution: When validating relative markdown links in a catalog index (e.g. memory/index.md),
+    resolve each link against both candidate bases — the index file's own directory
+    and the repository root — and treat the link as valid if either resolution yields
+    an existing file. Only report a link as missing when neither candidate path exists.
+    This makes the consistency check format-agnostic for the two relative path conventions
+    used in the catalog.
+  tags:
+  - markdown
+  - catalog
+  - index
+  - link-integrity
+  - relative-paths
+  - testing
+  severity: medium
+  seen_count: 1
+  first_seen: '2026-09-04'
+  last_seen: '2026-09-04'
+  evidence:
+  - cycle-90931e43a3db
+  date: '2026-09-04'
+  cycle_id: cycle-90931e43a3db
+  task_id: Record lesson on supporting dual relative path formats in markdown catalog
+    index consistency tests
+  hypothesis: Codifying the dual-base link resolution rule in lessons.yaml lets future
+    catalog index consistency tests accept both repository-relative and directory-relative
+    markdown links without false-positive missing-file failures.
+  result: 'Reflected: lesson recorded from cycle-90931e43a3db reflection on dual relative
+    path formats.'
+  generalized_insight: Markdown catalog index consistency tests should resolve each
+    relative link against both the index file's directory and the repository root,
+    and only flag a link as missing when neither candidate path exists, so both 'memory/facts/...'
+    and 'facts/...' link formats validate cleanly.
+- schema_version: 2
+  id: LESS-20260905-521b6562
+  title: Pair every new required AGENTS.md section with a REQUIRED_SECTIONS entry
+    in tests/test_agents_structure.py in the same cycle so the standing instruction
+    is permanently enforced against accidental removal
+  problem: In reflection-521b6562e356, a cycle added a new required section to AGENTS.md
+    but left REQUIRED_SECTIONS in tests/test_agents_structure.py untouched, so the
+    new standing instruction had no structural test guarding it and could be dropped
+    in a later cycle without any gate failure. The omission was only caught by manual
+    review, not by the test suite.
+  solution: 'Whenever a new required section is introduced in AGENTS.md, add its exact
+    heading to REQUIRED_SECTIONS in tests/test_agents_structure.py in the same commit,
+    then run python3 -m pytest tests/test_agents_structure.py to confirm the new entry
+    resolves to a present heading. Treat the AGENTS.md edit and the test registration
+    as one atomic change: a section that is not registered is not yet standing policy.'
+  tags:
+  - agents-md
+  - structural-tests
+  - required-sections
+  - testing
+  - reflector
+  severity: medium
+  seen_count: 1
+  first_seen: '2026-09-05'
+  last_seen: '2026-09-05'
+  evidence:
+  - reflection-521b6562e356
+  date: '2026-09-05'
+  cycle_id: cycle-09b9f993614f
+  task_id: Add lesson card for pairing AGENTS.md section additions with test_agents_structure
+    constraints
+  hypothesis: Codifying the AGENTS.md-to-REQUIRED_SECTIONS pairing rule in lessons.yaml
+    lets future cycles register new required sections in the structural test suite
+    in the same commit, so standing instructions are permanently enforced against
+    accidental removal.
+  result: 'Reflected: lesson recorded from reflection-521b6562e356 on pairing AGENTS.md
+    section additions with test_agents_structure constraints.'
+  generalized_insight: Every new required AGENTS.md section must be registered in
+    REQUIRED_SECTIONS in tests/test_agents_structure.py in the same commit, with a
+    targeted pytest run confirming the heading resolves; an unregistered section is
+    not yet standing policy and can be removed without tripping the gate.
+  related:
+  - LESS-REF-5b349fbfddd0
+- schema_version: 2
+  id: LESS-20260905-6d238e44
+  title: Chain the script's own CLI self-test (--test) with the paired pytest suite
+    in a single bounded verification pass before committing
+  problem: In cycle-6d238e44ec05, verification ran the paired pytest suite but skipped
+    the script's own --test self-test, so the CLI entrypoint path (argparse wiring,
+    exit codes, stderr/JSON separation) went unverified and the cycle had to re-run
+    a second pass to confirm the self-test still passed.
+  solution: When a changed script exposes a --test self-test flag, run it first (python3
+    scripts/<name>.py --test) and immediately chain the paired pytest suite (python3
+    -m pytest tests/test_<name>.py) in the same bounded exec call, so both the internal
+    self-test and the external suite are verified in one pass before committing.
+  tags:
+  - testing
+  - verification
+  - self-test
+  - pytest
+  - reflector
+  severity: medium
+  seen_count: 1
+  first_seen: '2026-09-05'
+  last_seen: '2026-09-05'
+  evidence:
+  - cycle-6d238e44ec05
+  date: '2026-09-05'
+  cycle_id: cycle-6d238e44ec05
+  task_id: Add lesson card for chaining CLI self-tests and pytest suites during verification
+  hypothesis: Codifying the self-test-plus-pytest chaining rule in lessons.yaml lets
+    future cycles verify both the script's internal --test self-test and its paired
+    pytest suite in one bounded pass, avoiding a second verification round before
+    commit.
+  result: 'Reflected: lesson recorded from cycle-6d238e44ec05 on chaining CLI self-tests
+    with pytest suites during verification.'
+  generalized_insight: Before committing a changed script, chain its own --test self-test
+    with the paired pytest suite in a single bounded exec call so both the CLI entrypoint
+    path and the external test suite are verified in one pass, eliminating a redundant
+    second verification round.
+  related:
+  - LESS-REF-e13f1cd0f155
+  - LESS-REF-c2ab8feea257-4dc0
+- schema_version: 2
+  id: LESS-20260905-4a577d44
+  title: Use composite tool execution — chained shell queries and parallel independent
+    tool calls — during context discovery to gather multiple facts in one pass
+  problem: 'In cycle-c2ab8feea257, context discovery was performed with a sequence
+    of single-purpose tool calls: one exec for a git query, a separate read_file for
+    the target, another exec for a test run. Each dependent round-trip consumed a
+    full iteration of the bounded cycle budget, and the discovery phase alone burned
+    a large share of the 80-iteration limit before any edit was made.'
+  solution: 'During the discovery phase, batch independent lookups into composite
+    tool executions: chain related shell queries in a single exec call (e.g. `git
+    log --oneline -5 -- <path> && git status --porcelain && grep -n <term> <file>`),
+    and issue independent read_file/list_dir calls in parallel within the same turn
+    rather than one per turn. Reserve sequential calls only for results that genuinely
+    depend on a previous call''s output. This collapses N discovery round-trips into
+    1-2 and preserves budget for the edit and verification phases.'
+  tags:
+  - tool-execution
+  - discovery
+  - efficiency
+  - turn-budget
+  - reflector
+  severity: medium
+  seen_count: 1
+  first_seen: '2026-09-05'
+  last_seen: '2026-09-05'
+  evidence:
+  - cycle-c2ab8feea257
+  date: '2026-09-05'
+  cycle_id: cycle-c2ab8feea257
+  task_id: Add lesson card for composite tool execution and chained discovery in lessons/lessons.yaml
+  hypothesis: Codifying the composite-tool-execution rule in lessons.yaml lets subagents
+    collapse multiple independent discovery round-trips into chained shell queries
+    and parallel tool calls, preserving the bounded turn budget for editing and verification.
+  result: 'Reflected: lesson recorded from cycle-c2ab8feea257 on chaining shell queries
+    and issuing parallel calls during context discovery.'
+  generalized_insight: During context discovery, chain related shell queries into
+    a single exec call and issue independent read_file/list_dir calls in parallel
+    within the same turn; keep calls sequential only when a later call depends on
+    an earlier result, so discovery costs 1-2 iterations instead of one per lookup.
+  related:
+  - LESS-REF-c2ab8feea257-4dc0
+  - LESS-REF-cc2d7c8ac095-9d60
+- schema_version: 2
+  id: LESS-20260905-9fff55dc
+  title: Re-evaluate composite preflight gate detection status after executing auto-refresh
+    actions so the gate reflects the post-refresh state rather than the pre-refresh
+    snapshot
+  problem: In reflection-45a8d4511e3e, a composite preflight gate that detects stale
+    feed cache files and optionally auto-refreshes them returned its verdict from
+    the pre-refresh detection pass. When the refresh action succeeded, the gate still
+    reported the feeds as stale (and the cycle as blocked) because it never re-ran
+    the detection step after the refresh, so a successful refresh was invisible to
+    the gate and the cycle was needlessly blocked on a condition that no longer held.
+  solution: 'When a composite preflight gate both detects a condition and executes
+    a corrective action (e.g. refresh_stale_feeds), re-run the detection step after
+    the action completes and base the gate ok/stale verdict on that post-refresh re-evaluation,
+    not the original snapshot. This is exactly what scripts/check_stale_feeds.py preflight_feed_cache
+    does: it calls check_stale_feeds, runs refresh_stale_feeds when refresh=True and
+    feeds are stale, then calls check_stale_feeds a second time and returns the re-checked
+    stale list and ok flag. A gate that mutates state must always re-detect before
+    reporting.'
+  tags:
+  - preflight
+  - gate
+  - post-refresh
+  - re-evaluation
+  - feed-cache
+  - reflector
+  severity: medium
+  seen_count: 1
+  first_seen: '2026-09-05'
+  last_seen: '2026-09-05'
+  evidence:
+  - reflection-45a8d4511e3e
+  date: '2026-09-05'
+  cycle_id: cycle-9fff55dc6c77
+  task_id: Add lesson card for post-refresh gate re-evaluation in lessons/lessons.yaml
+  hypothesis: Codifying the post-refresh re-evaluation rule in lessons.yaml lets future
+    composite preflight gates re-run their detection step after any corrective action,
+    so a successful refresh clears the gate instead of leaving the cycle blocked on
+    a stale pre-refresh verdict.
+  result: 'Reflected: lesson recorded from reflection-45a8d4511e3e on re-evaluating
+    gate detection status after auto-refresh actions.'
+  generalized_insight: A composite preflight gate that executes a corrective action
+    (refresh, cleanup, regeneration) must re-run its detection step after the action
+    and base its pass/fail verdict on the post-action state; returning the pre-action
+    snapshot makes successful corrections invisible and blocks cycles on conditions
+    that no longer hold.
+  related:
+  - LESS-REF-2782e96c24a8
