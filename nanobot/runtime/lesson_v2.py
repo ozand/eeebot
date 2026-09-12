@@ -62,6 +62,24 @@ _RELATED_CAP = 3  # max slugs per entry
 _RELATED_MIN_SHARED_TAGS = 2  # minimum shared glossary tags to auto-link
 _RELATED_SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}")
 _INLINE_RELATED_RE = re.compile(r"\[\[([^\]]+)\]\]")
+_MAX_TITLE_DIAGNOSTIC_CHARS = 160
+_TITLE_GATE_PASS_REASON = "title_gate_pass"
+def _title_gate_reason(
+    card: dict[str, Any], existing: list[dict[str, Any]] = (),
+) -> dict[str, str] | None:
+    """Reject a title that collides with an existing selection key."""
+    title = _quality_text(card.get("title"))
+    if not title:
+        return None
+    for entry in existing[:_MAX_ENTRIES]:
+        if not isinstance(entry, dict) or not _quality_text(entry.get("title")):
+            continue
+        if title == _quality_text(entry.get("title")):
+            return {
+                "reason": "title_gate:duplicate_title",
+                "duplicate_id": str(entry.get("id") or entry.get("path") or "")[:200],
+            }
+    return None
 
 
 def solution_is_meaningful(problem: Any, solution: Any) -> bool:
@@ -189,7 +207,7 @@ def markdown_lesson_pair(workspace: Path, row: dict[str, Any]) -> dict[str, Any]
 
 
 def allow_mint(card: dict[str, Any], existing: list[dict[str, Any]], state_dir: Path, *, workspace: Path | None = None, extending: bool = False) -> bool:
-    """Record refusal on curator decisions; diagnostic I/O never fails a cycle."""
+    """Run the bounded mint gate and record pass/refusal diagnostics."""
     entries = list(existing[:_MAX_ENTRIES])
     if workspace is not None:
         from nanobot.runtime.lesson_index import read_index, read_index_archives
@@ -203,19 +221,33 @@ def allow_mint(card: dict[str, Any], existing: list[dict[str, Any]], state_dir: 
             if pair:
                 entries.append(pair)
     reason = mint_quality_reason(card, entries, extending=extending)
-    if reason is None:
-        return True
+    if reason is None and not extending and card.get("title"):
+        reason = _title_gate_reason(card, entries)
     try:
-        path = Path(state_dir) / "curator/decisions.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        row = {"ts": datetime.now(timezone.utc).isoformat(), "lesson_id": card.get("id"),
-               "decision": "mint_rejected", **reason,
-               "instruction": "Extend the existing lesson with evidence instead of minting" if reason["reason"] == "duplicate" else "Supply a reusable condition and distinct corrective action"}
-        with path.open("a", encoding="utf-8") as stream:
+        decision_path = Path(state_dir) / "curator/decisions.jsonl"
+        decision_path.parent.mkdir(parents=True, exist_ok=True)
+        if reason is None:
+            row = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "lesson_id": card.get("id"),
+                "decision": "mint_gate_passed",
+                "reason": _TITLE_GATE_PASS_REASON,
+            }
+        else:
+            row = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "lesson_id": card.get("id"),
+                "decision": "mint_rejected",
+                **reason,
+                "reason": str(reason.get("reason") or "unknown")[:_MAX_TITLE_DIAGNOSTIC_CHARS],
+                "instruction": "Extend the existing lesson with evidence instead of minting" if reason["reason"] == "duplicate" else "Supply a reusable condition and distinct corrective action",
+            }
+        with decision_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(row, ensure_ascii=False) + "\n")
     except OSError:
         pass
-    return False
+    return reason is None
+
 
 
 def validate_lesson_for_mint(card: Any) -> bool:
