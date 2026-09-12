@@ -9,12 +9,15 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.utils.helpers import current_time_str, estimate_prompt_tokens
-
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
-from nanobot.utils.helpers import build_assistant_message, detect_image_mime
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
+from nanobot.utils.helpers import (
+    build_assistant_message,
+    current_time_str,
+    detect_image_mime,
+    estimate_prompt_tokens,
+)
 
 
 class SystemPromptOverflowError(RuntimeError):
