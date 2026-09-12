@@ -25,6 +25,21 @@ python -m pytest tests/ -v       # run the test suite
 ruff check nanobot/              # lint
 ```
 
+## Repository hook setup
+
+The versioned `hooks/pre-commit` guard prevents accidental commits on `main` or
+this repository's configured default branch. Existing checkouts and worktrees
+must opt in once from their repository root:
+
+```bash
+git config core.hooksPath hooks
+```
+
+This task does not install the hook in any live checkout. Feature branches,
+feature worktrees, and detached HEADs remain unaffected. If an operator
+intentionally needs to commit to the protected branch, the deliberate escape
+hatch is `git commit --no-verify`.
+
 ## Code style
 
 We care about more than passing lint — code should stay small, calm, and
