@@ -1409,7 +1409,124 @@ _REFLECTOR_POOL_SLUG = "reflector_pool.json"
 _REFLECTOR_POOL_SCHEMA = "curator-reflector-pool-v1"
 _REFLECTOR_CARD_EVIDENCE_CAP = 8
 _REFLECTOR_KINDS = frozenset({"error_pattern", "approach_hint"})
-_REFLECTOR_DEFAULT_TOPIC_TAG = "runtime"
+_REFLECTOR_TOPIC_TERMS: tuple[tuple[str, str], ...] = (
+    ("architecture", "architecture"),
+    ("config", "config"),
+    ("configuration", "config"),
+    ("configure", "config"),
+    ("bridge", "infra"),
+    ("retry", "infra"),
+    ("retries", "infra"),
+    ("connection", "infra"),
+    ("transient", "infra"),
+    ("timeout", "infra"),
+    ("fallback", "config"),
+    ("gateway", "config"),
+    ("model", "config"),
+    ("provider", "config"),
+    ("route", "config"),
+    ("server", "config"),
+    ("gate", "gate"),
+    ("git", "git"),
+    ("branch", "git"),
+    ("commit", "git"),
+    ("worktree", "git"),
+    ("infra", "infra"),
+    ("host", "infra"),
+    ("systemd", "infra"),
+    ("lint", "lint"),
+    ("sidecar", "sidecar"),
+    ("watermark", "sidecar"),
+    ("rotation", "rotation"),
+    ("archive", "rotation"),
+    ("prompt", "prompt"),
+    ("context", "prompt"),
+    ("token", "prompt"),
+    ("security", "security"),
+    ("credential", "security"),
+    ("subagent", "subagent"),
+    ("tool", "tooling"),
+    ("tools", "tooling"),
+    ("sh", "tooling"),
+    ("bash", "tooling"),
+    ("shell", "tooling"),
+    ("pipeline", "tooling"),
+    ("pipelines", "tooling"),
+    ("substitution", "tooling"),
+    ("duplicate", "refactor"),
+    ("duplicates", "refactor"),
+    ("shared", "refactor"),
+    ("extract", "refactor"),
+    ("drift", "refactor"),
+    ("ordering", "tooling"),
+    ("precedence", "tooling"),
+    ("pattern", "tooling"),
+    ("patterns", "tooling"),
+    ("categorizer", "tooling"),
+    ("test", "test"),
+    ("pytest", "test"),
+    ("read", "runtime"),
+    ("reader", "runtime"),
+    ("reads", "runtime"),
+    ("parser", "runtime"),
+    ("parse", "runtime"),
+    ("file", "runtime"),
+    ("files", "runtime"),
+    ("memory", "runtime"),
+    ("large", "runtime"),
+    ("section", "runtime"),
+    ("thing", "runtime"),
+    ("observation", "runtime"),
+    ("condition", "runtime"),
+    ("node", "runtime"),
+    ("missing", "runtime"),
+    ("unparseable", "runtime"),
+    ("log", "runtime"),
+    ("journal", "runtime"),
+    ("runtime", "runtime"),
+    ("allocate", "runtime"),
+    ("array", "runtime"),
+    ("optional", "runtime"),
+    ("value", "runtime"),
+    ("condition", "runtime"),
+    ("section", "runtime"),
+    ("lesson", "runtime"),
+    ("card", "runtime"),
+    ("title", "runtime"),
+    ("response", "runtime"),
+    ("api", "runtime"),
+    ("json", "runtime"),
+    ("memory", "runtime"),
+    ("malformed", "runtime"),
+    ("row", "runtime"),
+    ("rows", "runtime"),
+    ("input", "runtime"),
+    ("large", "runtime"),
+    ("cycle", "runtime"),
+    ("steps", "runtime"),
+    ("verdict", "runtime"),
+    ("inconclusive", "runtime"),
+    ("target", "runtime"),
+    ("modifications", "runtime"),
+    ("deferring", "runtime"),
+    ("timeouts", "runtime"),
+)
+
+
+def _reflector_topic_tags(problem: str, detail: str) -> list[str]:
+    """Derive topical tags from observed condition and recommendation text.
+
+    Terms are deliberately drawn from the shared controlled vocabulary. A
+    card with no matching term is declined rather than receiving a default
+    tag, because a fallback would recreate the constant-tag defect.
+    """
+    text = f"{problem} {detail}".casefold()
+    words = set(re.findall(r"[a-z][a-z0-9_-]*", text))
+    tags: list[str] = []
+    for term, tag in _REFLECTOR_TOPIC_TERMS:
+        if term in words and tag not in tags:
+            tags.append(tag)
+    return tags
 
 
 def reflector_tag_drift(
@@ -1538,6 +1655,7 @@ def _reflector_rows_after(path: Path, cursor: str, limit: int) -> tuple[list[dic
 def _reflector_card(
     *, card_id: str, detail: str, problem: str, cycles: list[str], days: list[str],
     first_seen: str, last_seen: str, kind: str = "approach_hint",
+    state_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     # The title is a selection key: derive it from this card's observation and
     # recommendation, never from the recommendation kind. This keeps sibling
@@ -1557,6 +1675,14 @@ def _reflector_card(
         return None
     if re.search(r"\bcycle-[0-9a-f]+\b", problem, re.I) and re.fullmatch(r"[\s,.:;\d]*(?:in|the|cycle|terminated|ended|with|a|partial|outcome|and|files_changed|after|turns|failed|success|completed|\[|\]|=|[\s,.:;\d])+", observed.lower()):
         return None
+    tags = _reflector_topic_tags(problem, detail)
+    if not tags:
+        if state_dir is not None:
+            _write_decision(
+                Path(state_dir), card_id, "mint_declined",
+                "no_controlled_topic_tag", LESSONS_REL,
+            )
+        return None
     return {
         "schema_version": 2, "id": card_id,
         "title": title,
@@ -1568,7 +1694,7 @@ def _reflector_card(
         # in the live store were such same-row siblings).
         "problem": problem[:400],
         "solution": detail[:500],
-        "tags": [_REFLECTOR_DEFAULT_TOPIC_TAG], "severity": "medium",
+        "tags": tags, "severity": "medium",
         # Provenance is a producer fact, not a topical tag. The cycle ids
         # remain the card's evidence; keeping one explicit source field avoids
         # making the same fact part of both the topic vocabulary and metadata.
@@ -1809,7 +1935,8 @@ def promote_reflector_recommendations_to_v2(
             words = keyword_set(detail)
             if _reflector_card(card_id=cycle_id, detail=detail, problem=problem,
                                cycles=[cycle_id], days=[day], first_seen=day,
-                               last_seen=day, kind=str(item.get("kind") or "")) is None:
+                               last_seen=day, kind=str(item.get("kind") or ""),
+                               state_dir=state_dir) is None:
                 _write_decision(state_dir, cycle_id, "mint_declined",
                                 "insufficient_distinct_condition_and_action", LESSONS_REL)
                 stats["rejected"] += 1
@@ -1826,7 +1953,7 @@ def promote_reflector_recommendations_to_v2(
                 card = _reflector_card(
                     card_id=_new_card_id(existing_ids, cycle_id, detail), detail=detail, problem=problem,
                     cycles=[cycle_id], days=[day], first_seen=day, last_seen=day,
-                    kind=str(item.get("kind") or "approach_hint"),
+                    kind=str(item.get("kind") or "approach_hint"), state_dir=state_dir,
                 )
                 if card is None:
                     _write_decision(state_dir, cycle_id, "mint_declined", "insufficient_distinct_condition_and_action", LESSONS_REL)
@@ -1897,7 +2024,7 @@ def promote_reflector_recommendations_to_v2(
             detail=str(cluster["detail"]), problem=str(cluster.get("problem") or ""),
             cycles=list(cluster["cycles"]), days=list(cluster["days"]),
             first_seen=str(cluster.get("first_seen") or last_day)[:10], last_seen=last_day,
-            kind=str(cluster.get("kind") or "approach_hint"),
+            kind=str(cluster.get("kind") or "approach_hint"), state_dir=state_dir,
         )
         if card is None:
             _write_decision(state_dir, str(cluster["cycles"][0]), "mint_declined", "insufficient_distinct_condition_and_action", LESSONS_REL)
