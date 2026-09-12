@@ -1273,7 +1273,8 @@ class TestFailOpen:
 
 
 def _append_proposed(
-    state_dir: Path, cycle_id: str, demand_id: str, ts: str | None = None, serves: str | None = None
+    state_dir: Path, cycle_id: str, demand_id: str, ts: str | None = None,
+    serves: str | None = None, lane: str | None = None,
 ) -> None:
     event = {
         "phase": "proposed",
@@ -1285,6 +1286,8 @@ def _append_proposed(
         event["ts"] = ts
     if serves:
         event["serves"] = serves
+    if lane:
+        event["lane"] = lane
     cycle_ledger.append_event(state_dir, event)
 
 
@@ -1324,6 +1327,53 @@ def _completed_sidecar(state_dir: Path) -> dict:
 
 
 class TestCompletedSidecar:
+    def test_fallback_success_folds_with_distinct_identity(self, tmp_path):
+        """The production fallback cycle namespace supplies the identity."""
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "fallback-cycle", "", ts=_now_iso(2))
+        # The fallback writer's current proposed row carries no demand_id or
+        # lane; its cycle-id namespace is the production identity.
+        _append_outcome(
+            state_dir, "fallback-cycle", "success", ts=_now_iso(1),
+            files_changed=["scripts/fallback.py"],
+        )
+
+        assert demand._fold_completed(state_dir) == {"fallback:fallback-cycle"}
+        entry = _completed_sidecar(state_dir)["entries"]["fallback:fallback-cycle"]
+        assert entry["cycle_id"] == "fallback-cycle"
+        assert entry["lane"] == "fallback"
+        assert entry["demand_id"] is None
+
+    def test_fallback_identity_is_non_vacuous_against_isolated_unfixed_copy(self, tmp_path):
+        source = Path(__file__).parents[1] / "nanobot" / "runtime" / "demand.py"
+        text = source.read_text(encoding="utf-8")
+        marker = 'elif lane == "fallback" or cycle_id.startswith("fallback-"):'
+        assert marker in text
+        broken = text.replace(marker, 'elif lane == "fallback":', 1)
+        assert broken != text
+        isolated = tmp_path / "demand_unfixed.py"
+        isolated.write_text(broken, encoding="utf-8")
+        namespace = {"__file__": str(isolated), "__name__": "demand_unfixed"}
+        exec(compile(broken, str(isolated), "exec"), namespace)
+        isolated_demand = namespace["_fold_completed"]
+        state_dir = _state_dir(tmp_path / "unfixed")
+        _append_proposed(state_dir, "fallback-copy", "", ts=_now_iso(2))
+        _append_outcome(state_dir, "fallback-copy", "success", ts=_now_iso(1), files_changed=["scripts/fallback.py"])
+        assert isolated_demand(state_dir) == set()
+
+    def test_normal_success_still_folds_by_demand_id(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "normal-cycle", "priority-normal123", ts=_now_iso(2))
+        _append_outcome(
+            state_dir, "normal-cycle", "success", ts=_now_iso(1),
+            files_changed=["scripts/normal.py"],
+        )
+
+        assert demand._fold_completed(state_dir) == {"priority-normal123"}
+        entries = _completed_sidecar(state_dir)["entries"]
+        assert "priority-normal123" in entries
+        assert "fallback:normal-cycle" not in entries
+
     def test_fold_pairs_proposed_with_same_cycle_success(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _append_proposed(state_dir, "c1", "priority-abcabcabcabc", ts=_now_iso(20))
