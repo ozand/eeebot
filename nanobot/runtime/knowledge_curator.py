@@ -340,7 +340,6 @@ def lessons_after(
 
     recover_aged_out = False
     cursor_archive = _find_cursor_archive(state_dir, watermark)
-    cursor_timestamp = _parse_entry_timestamp(watermark_timestamp)
     if status == "cursor_orphaned" and cursor_archive:
         recover_aged_out = True
         status = "cursor_aged_out"
@@ -375,6 +374,7 @@ def lessons_after(
 
 
 def _read_index(workspace: Path) -> str:
+    """Read bounded knowledge indexes, including retained lesson rows."""
     parts = []
     for rel in ("memory/index.md", "docs/index.md"):
         path = workspace / rel
@@ -382,6 +382,21 @@ def _read_index(workspace: Path) -> str:
             parts.append(f"## {rel}\n{path.read_text(encoding='utf-8')[:12_000]}")
         except Exception:
             parts.append(f"## {rel}\n(missing)")
+    lesson_path = workspace / "lessons" / "index.md"
+    try:
+        from nanobot.runtime.lesson_index import read_index, read_index_archives
+        entries = read_index(lesson_path)
+        source = "lesson_index"
+        if not entries:
+            entries = read_index_archives(lesson_path)
+            source = "lesson_index_archive" if entries else "lesson_index_unavailable"
+        rows = [str(entry.get("approach") or "") for entry in entries]
+        if rows:
+            parts.append(f"## lessons/index.md ({source})\n" + "\n".join(rows))
+        else:
+            parts.append("## lessons/index.md\n(unavailable: no retained index rows)")
+    except Exception:
+        parts.append("## lessons/index.md\n(unavailable: index lookup failed)")
     return "\n\n".join(parts)
 
 

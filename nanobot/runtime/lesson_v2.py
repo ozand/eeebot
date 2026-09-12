@@ -16,13 +16,13 @@ Lateral links (#1095):
 from __future__ import annotations
 
 import hashlib
-from difflib import SequenceMatcher
 import json
 import os
 import re
 import tempfile
 import time
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -185,9 +185,13 @@ def allow_mint(card: dict[str, Any], existing: list[dict[str, Any]], state_dir: 
     """Record refusal on curator decisions; diagnostic I/O never fails a cycle."""
     entries = list(existing[:_MAX_ENTRIES])
     if workspace is not None:
-        from nanobot.runtime.lesson_index import read_index
+        from nanobot.runtime.lesson_index import read_index, read_index_archives
         entries += bounded_load_yaml(Path(workspace) / "lessons/errors.yaml")
-        for row in read_index(Path(workspace) / "lessons/index.md"):
+        index_path = Path(workspace) / "lessons/index.md"
+        index_entries = read_index(index_path)
+        if not index_entries:
+            index_entries = read_index_archives(index_path)
+        for row in index_entries:
             pair = markdown_lesson_pair(Path(workspace), row)
             if pair:
                 entries.append(pair)
