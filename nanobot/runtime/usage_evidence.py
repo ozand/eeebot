@@ -82,6 +82,7 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.runtime import benchmark_evidence
+from nanobot.runtime.schemas import QUALIFYING_ARTIFACT_DIRS
 
 USAGE_SCHEMA = "usage-evidence-v1"
 
@@ -168,7 +169,7 @@ _EVIDENCE_EPOCH = datetime(2026, 7, 16, tzinfo=timezone.utc)
 
 _ARCHIVE_MARKER_LINES = 5  # bounded archived-stub check window (#800)
 _ARCHIVE_MARKERS = ("DEPRECATED", "ARCHIVED")
-_SCRIPT_DIRS = ("scripts", "surfaces")  # #1035: artifact candidate directories
+_SCRIPT_DIRS = QUALIFYING_ARTIFACT_DIRS  # #1035: artifact candidate directories
 
 # #809: operator decay protect-list. The decay lane only sees harness-
 # observable disk signals (pycache/output) — it cannot see systemd/cron

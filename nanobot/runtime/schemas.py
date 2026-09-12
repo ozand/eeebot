@@ -10,6 +10,9 @@ CONTROLLED_LESSON_TAGS: frozenset[str] = frozenset({
     "security", "sidecar", "state", "subagent", "test", "tooling",
 })
 LESSON_SEVERITIES: tuple[str, ...] = ("low", "medium", "high", "critical")
+# Candidate artifact directories shared by usage, demand, quality, and
+# hypothesis-verdict readers. Keep the eligibility policy in one public place.
+QUALIFYING_ARTIFACT_DIRS: tuple[str, ...] = ("scripts", "surfaces")
 
 
 class CycleReport(TypedDict, total=False):

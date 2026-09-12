@@ -33,7 +33,9 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-_SCRIPT_DIRS = ("scripts", "surfaces")
+from nanobot.runtime.schemas import QUALIFYING_ARTIFACT_DIRS
+
+_SCRIPT_DIRS = QUALIFYING_ARTIFACT_DIRS
 _TRIVIAL_TOKENS = frozenset()  # deliberately empty — see module docstring / proposal.md alternatives
 _MIN_TOKEN_LEN = 4
 _JACCARD_THRESHOLD = 0.5

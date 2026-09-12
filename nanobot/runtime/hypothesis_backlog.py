@@ -867,7 +867,7 @@ def _inconclusive_split(
     that cannot be classified because its timestamp is invalid.
     """
     from nanobot.runtime.hypothesis_verdict import CONFIRM_WINDOW_DAYS
-    from nanobot.runtime.usage_evidence import _SCRIPT_DIRS
+    from nanobot.runtime.schemas import QUALIFYING_ARTIFACT_DIRS
 
     keys = (
         "inconclusive_within_window",
@@ -913,7 +913,7 @@ def _inconclusive_split(
         qualifying = [
             str(path).strip()
             for path in files
-            if any(str(path or "").strip().startswith(f"{directory}/") for directory in _SCRIPT_DIRS)
+            if any(str(path or "").strip().startswith(f"{directory}/") for directory in QUALIFYING_ARTIFACT_DIRS)
         ] if isinstance(files, list) else []
         if not qualifying:
             counts["inconclusive_undatable_no_qualifying_artifact"] += 1

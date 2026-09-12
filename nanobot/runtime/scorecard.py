@@ -86,9 +86,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
-
 from nanobot.runtime import state_access
+from nanobot.runtime.schemas import QUALIFYING_ARTIFACT_DIRS
 
 SCORECARD_SCHEMA = "scorecard-v1"
 
@@ -866,7 +865,7 @@ def _cost_section(state_dir: Path, now: datetime, integrations: int) -> dict[str
 
 # ─── section: quality (V1, instance repo) ───────────────────────────────────
 
-_SCRIPT_DIRS = ("scripts", "surfaces")  # mirrors demand._SCRIPT_DIRS
+_SCRIPT_DIRS = QUALIFYING_ARTIFACT_DIRS
 
 
 def _own_compile_failures(repo: Path) -> list[str]:
