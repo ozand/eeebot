@@ -28,17 +28,34 @@ ruff check nanobot/              # lint
 ## Repository hook setup
 
 The versioned `hooks/pre-commit` guard prevents accidental commits on `main` or
-this repository's configured default branch. Existing checkouts and worktrees
-must opt in once from their repository root:
+this repository's configured default branch. Do not configure
+`core.hooksPath hooks`: that path is relative to the working tree, so an older
+branch without `hooks/pre-commit` silently has no protection.
+
+Install a branch-independent copy outside the working tree from the repository
+root. This uses `origin/main` as the reviewed source and works even when the
+current branch predates the hook:
 
 ```bash
-git config core.hooksPath hooks
+git_dir="$(git rev-parse --git-dir)"
+mkdir -p "$git_dir/repo-hooks"
+git show origin/main:hooks/pre-commit > "$git_dir/repo-hooks/pre-commit"
+chmod +x "$git_dir/repo-hooks/pre-commit"
+git config core.hooksPath "$git_dir/repo-hooks"
 ```
 
-This task does not install the hook in any live checkout. Feature branches,
-feature worktrees, and detached HEADs remain unaffected. If an operator
-intentionally needs to commit to the protected branch, the deliberate escape
-hatch is `git commit --no-verify`.
+Verify that the configured path points to an executable hook:
+
+```bash
+hook_path="$(git config --get core.hooksPath)" && test -n "$hook_path" && test -x "$hook_path/pre-commit" && printf 'installed: %s\n' "$hook_path/pre-commit"
+```
+
+Each existing checkout or worktree must opt in separately. The copied hook does
+not update on `git pull`; rerun the installation recipe after an approved
+change to `hooks/pre-commit`. This documentation change does not install or
+configure any live checkout. Feature branches, feature worktrees, and detached
+HEADs remain unaffected. If an operator intentionally needs to commit to the
+protected branch, the deliberate escape hatch is `git commit --no-verify`.
 
 ## Code style
 

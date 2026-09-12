@@ -1,22 +1,51 @@
 # Repository Git hooks
 
-The repository-owned hooks live here so they are versioned and reviewable. Git
-only invokes them after a checkout configures this directory as its hooks path.
+The repository-owned hooks live here so they are versioned and reviewable. The
+`hooks/` directory is the source of truth; the installed copy below is the
+branch-independent runtime location.
+
+## Why `core.hooksPath hooks` is not enough
+
+`core.hooksPath hooks` points into the current working tree. The setting can
+survive a pull, but the hook file exists only on branches that contain
+`hooks/pre-commit`. If an older branch predates this directory, Git finds no
+hook and skips it silently: a configured path is not the same thing as a
+working guard.
 
 ## Existing checkout setup
 
-From the repository root, run this once:
+Install the hook outside the working tree so changing branches cannot remove
+it. From the repository root, run this once. `git rev-parse --git-dir` resolves
+the right Git directory for a normal checkout or a linked worktree; in a normal
+checkout this is the `.git/repo-hooks` location:
 
 ```bash
-git config core.hooksPath hooks
+git_dir="$(git rev-parse --git-dir)"
+mkdir -p "$git_dir/repo-hooks"
+git show origin/main:hooks/pre-commit > "$git_dir/repo-hooks/pre-commit"
+chmod +x "$git_dir/repo-hooks/pre-commit"
+git config core.hooksPath "$git_dir/repo-hooks"
 ```
 
-The setting is local to that checkout/worktree and is not changed by cloning or
-pulling. Each existing checkout or worktree must opt in separately; this PR does
-not install or configure the hook in the shared `T:/Code/eeebot` checkout.
+The source is read from `origin/main`, so this also works while the current
+branch predates `hooks/pre-commit`. If `origin/main` is not available locally,
+fetch it first or substitute another reviewed ref containing the versioned
+hook.
 
-New clones can opt in immediately after cloning with the same command. The
-hook remains inactive until this setup step is performed.
+Verify both configuration and the executable file; do not treat a successful
+`git config` command as proof that Git can invoke the hook:
+
+```bash
+hook_path="$(git config --get core.hooksPath)" && test -n "$hook_path" && test -x "$hook_path/pre-commit" && printf 'installed: %s\n' "$hook_path/pre-commit"
+```
+
+Each existing checkout or worktree must opt in separately. This documentation
+change does not install or configure any live checkout. New clones must run the
+same installation and verification steps after cloning.
+
+The copied hook does not update on `git pull`: pulling updates the versioned
+source under `hooks/`, not the file outside the working tree. Re-run the
+installation recipe after an approved hook change to refresh the copied guard.
 
 ## Protected branch behavior
 
