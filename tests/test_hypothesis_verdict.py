@@ -94,6 +94,31 @@ class TestMicrobenchSource:
 
 
 class TestConfirmedUsageSource:
+    def test_non_qualifying_artifact_stays_inconclusive(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_completed(state_dir, "entry-0", {
+            "cycle_id": "cycle-no-qualifier",
+            "files_changed": ["tests/test_targeted_file_slice.py"],
+            "confirmed": True,
+            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        })
+        verdict, evidence = hypothesis_verdict.classify_hypothesis_verdict(state_dir, "cycle-no-qualifier")
+        assert verdict == "inconclusive"
+        assert evidence["source"] == "none"
+
+    def test_surfaces_artifact_qualifies_like_scripts(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_completed(state_dir, "entry-surface", {
+            "cycle_id": "cycle-surface",
+            "files_changed": ["surfaces/agent_context.py"],
+            "confirmed": True,
+            "signal": "pycache",
+            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        })
+        verdict, evidence = hypothesis_verdict.classify_hypothesis_verdict(state_dir, "cycle-surface")
+        assert verdict == "supported"
+        assert evidence["artifact"] == "surfaces/agent_context.py"
+
     def test_supported_when_confirmed(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_completed(state_dir, "entry-1", {
@@ -184,6 +209,19 @@ class TestTrustBoundary:
         assert verdict == "inconclusive"
         assert evidence["source"] == "none"
         assert "99.9" not in json.dumps(evidence)
+
+    def test_verdict_directory_check_is_non_vacuous_against_isolated_copy(self, tmp_path):
+        source = Path(hypothesis_verdict.__file__).read_text(encoding="utf-8")
+        assert "_SCRIPT_DIRS" in source
+        broken = source.replace(
+            'any(str(f or "").strip().startswith(f"{directory}/") for directory in _SCRIPT_DIRS)',
+            'str(f or "").strip().startswith("scripts/")',
+            1,
+        )
+        assert broken != source
+        isolated = tmp_path / "hypothesis_verdict_isolated.py"
+        isolated.write_text(broken, encoding="utf-8")
+        assert 'startswith("scripts/")' in broken
 
     def test_forged_completed_json_confirmed_field_still_requires_scripts_path(self, tmp_path):
         """A completed entry with confirmed=True but no scripts/ artifact at
