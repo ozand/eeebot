@@ -19,6 +19,7 @@ _DEFAULT_LEDGER_BYTES = 4 * 2**20  # 4 MiB bounds uncompressed host parsing.
 _DEFAULT_ARTIFACT_FILES = 256  # bounded queue scan for the 2 GB host.
 _DEFAULT_RETENTION_DAYS = 90  # matches cycle_ledger's rotation retention.
 _DAY_RE = re.compile(r"^cycles-(\d{4}-\d{2}-\d{2})\.jsonl\.gz$")
+_RUN_DAY_RE = re.compile(r"^runs-(\d{4}-\d{2}-\d{2})\.jsonl\.gz$")
 
 
 @dataclass(frozen=True)
@@ -264,6 +265,99 @@ def _rotated_paths(path: Path, archive_glob: str, max_archives: int) -> list[Pat
         )[:max(0, max_archives)]
     except (OSError, ValueError):
         return []
+
+
+def run_window(
+    state_dir: str | Path,
+    *,
+    since_ts: str,
+    max_bytes: int = _DEFAULT_LEDGER_BYTES,
+    now: datetime | None = None,
+) -> Window:
+    """Read retained bridge run-end rows across active and daily archives.
+
+    Run invocations are intentionally separate from cycle outcomes: a bridge
+    process may exit before it selects or starts a cycle. Missing, partial, and
+    beyond-retention history remain explicit rather than becoming zero data.
+    """
+    requested = _parse_ts(since_ts)
+    if requested is None:
+        return Window((), "unavailable", since_ts, None, None, 0, 0, 0, ("invalid_since",))
+    root = Path(state_dir) / "bridge"
+    try:
+        if not root.is_dir():
+            return Window((), "unavailable", _iso(requested), None, None, 0, 0, 0, ("dir_missing",))
+        archives: list[tuple[datetime, Path]] = []
+        for path in root.iterdir():
+            match = _RUN_DAY_RE.match(path.name)
+            if not match:
+                continue
+            archives.append((datetime.strptime(match.group(1), "%Y-%m-%d").replace(tzinfo=timezone.utc), path))
+        archives.sort(reverse=True)
+        sources = [root / "runs.jsonl"] + [path for day, path in archives if day + timedelta(days=1) >= requested]
+    except (PermissionError, OSError, ValueError):
+        return Window((), "unavailable", _iso(requested), None, None, 0, 0, 0, ("io_error",))
+    rows: list[dict] = []
+    bytes_read = 0
+    files_read = files_skipped = 0
+    covered: list[str] = []
+    notes: list[str] = []
+    capped = False
+    for path in sources:
+        if not path.is_file():
+            continue
+        try:
+            opener = gzip.open if path.name.endswith(".gz") else open
+            with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    used = len(line.encode("utf-8", errors="replace"))
+                    if bytes_read + used > max(0, max_bytes):
+                        capped = True
+                        break
+                    bytes_read += used
+                    try:
+                        row = json.loads(line)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(row, dict) or row.get("phase") != "run_end":
+                        continue
+                    ts = _row_ts(row)
+                    if ts is not None:
+                        covered.append(_iso(ts))
+                    if ts is None or ts >= requested:
+                        rows.append(row)
+            files_read += 1
+            if capped:
+                break
+        except (PermissionError, OSError, EOFError, gzip.BadGzipFile):
+            files_skipped += 1
+    try:
+        retention_days = max(1, int(os.environ.get("CYCLE_LEDGER_RETENTION_DAYS", str(_DEFAULT_RETENTION_DAYS))))
+    except (TypeError, ValueError):
+        retention_days = _DEFAULT_RETENTION_DAYS
+    ref = now or datetime.now(timezone.utc)
+    if requested < ref - timedelta(days=retention_days):
+        notes.append("beyond_retention")
+    if capped:
+        notes.append("cap_bytes")
+    if files_skipped:
+        notes.append("files_skipped")
+    if not rows and "beyond_retention" in notes:
+        notes.append("no_retained_rows")
+    if files_read == 0:
+        return Window((), "unavailable", _iso(requested), None, None, 0, files_skipped, bytes_read, tuple(notes or ["no_source"]))
+    status = "partial" if notes else "complete"
+    return Window(
+        tuple(sorted(rows, key=lambda row: _row_ts(row) or datetime.min.replace(tzinfo=timezone.utc))),
+        status,
+        _iso(requested),
+        min(covered) if covered else None,
+        max(covered) if covered else None,
+        files_read,
+        files_skipped,
+        bytes_read,
+        tuple(notes),
+    )
 
 
 def read_rotated_texts(
