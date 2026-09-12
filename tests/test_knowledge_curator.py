@@ -237,9 +237,7 @@ def test_curator_stages_promotions_not_workspace(tmp_path):
     assert manifest[0]["action"] == "create"
     # Decisions sidecar records staged + duplicate (#1209: promoted only after the bridge pushes)
     rows = [json.loads(x) for x in (state / "curator/decisions.jsonl").read_text().splitlines()]
-    # Exhaustive set intentionally includes mint gate decisions alongside
-    # curator decisions; this is a reviewed contract expansion.
-    assert {r["decision"] for r in rows} == {"staged", "duplicate", "mint_gate_passed"}
+    assert {r["decision"] for r in rows} == {"staged", "duplicate"}
     duplicate_row = next(r for r in rows if r["decision"] == "duplicate")
     assert duplicate_row["target_file"] == "memory/facts/covered.md"
 
