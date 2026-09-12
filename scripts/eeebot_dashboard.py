@@ -1763,6 +1763,12 @@ def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
         supported_display = lifecycle_status
         refuted_display = lifecycle_status
         inconclusive_display = lifecycle_status
+        inconclusive_within_window_display = lifecycle_status
+        inconclusive_aged_display = lifecycle_status
+        inconclusive_undatable_display = lifecycle_status
+        inconclusive_undatable_no_qualifying_artifact_display = lifecycle_status
+        inconclusive_undatable_no_completion_display = lifecycle_status
+        inconclusive_undatable_invalid_timestamp_display = lifecycle_status
         verdict_summary_text = lifecycle_status
         lifecycle_status_text = lifecycle_status
     else:
@@ -1786,7 +1792,42 @@ def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
         refuted_display = str(refuted) if refuted is not None else "unavailable"
         inconclusive = lifecycle_counts.get("inconclusive")
         inconclusive_display = str(inconclusive) if inconclusive is not None else "unavailable"
+        split_status = lifecycle_counts.get("inconclusive_split_status")
+        if split_status == "unavailable":
+            inconclusive_within_window_display = "unavailable"
+            inconclusive_aged_display = "unavailable"
+            inconclusive_undatable_display = "unavailable"
+            inconclusive_undatable_no_qualifying_artifact_display = "unavailable"
+            inconclusive_undatable_no_completion_display = "unavailable"
+            inconclusive_undatable_invalid_timestamp_display = "unavailable"
+        else:
+            inconclusive_within_window = lifecycle_counts.get("inconclusive_within_window")
+            inconclusive_aged = lifecycle_counts.get("inconclusive_aged")
+            inconclusive_undatable = lifecycle_counts.get("inconclusive_undatable")
+            no_qualifying = lifecycle_counts.get("inconclusive_undatable_no_qualifying_artifact")
+            no_completion = lifecycle_counts.get("inconclusive_undatable_no_completion")
+            invalid_timestamp = lifecycle_counts.get("inconclusive_undatable_invalid_timestamp")
+            inconclusive_within_window_display = (
+                str(inconclusive_within_window) if inconclusive_within_window is not None else "unavailable"
+            )
+            inconclusive_aged_display = str(inconclusive_aged) if inconclusive_aged is not None else "unavailable"
+            inconclusive_undatable_display = (
+                str(inconclusive_undatable) if inconclusive_undatable is not None else "unavailable"
+            )
+            inconclusive_undatable_no_qualifying_artifact_display = (
+                str(no_qualifying) if no_qualifying is not None else "unavailable"
+            )
+            inconclusive_undatable_no_completion_display = (
+                str(no_completion) if no_completion is not None else "unavailable"
+            )
+            inconclusive_undatable_invalid_timestamp_display = (
+                str(invalid_timestamp) if invalid_timestamp is not None else "unavailable"
+            )
 
+        # #1510 obligation 4: the three inconclusive populations are mutually
+        # exclusive. Undatable rows are not an age measurement and retain a
+        # reason breakdown so missing completion links do not look like early
+        # rows or healthy zeroes.
         # #1510 finding 2 (as measured): 7 of 139 live rows carry a verdict
         # at all. Three bare counts read as a healthy small sample; the same
         # three counts against their denominator read as what they are.
@@ -1851,6 +1892,12 @@ def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
         "hypotheses_supported_lifecycle_count": supported_display,
         "hypotheses_refuted_lifecycle_count": refuted_display,
         "hypotheses_inconclusive_lifecycle_count": inconclusive_display,
+        "hypotheses_inconclusive_within_window_count": inconclusive_within_window_display,
+        "hypotheses_inconclusive_aged_count": inconclusive_aged_display,
+        "hypotheses_inconclusive_undatable_count": inconclusive_undatable_display,
+        "hypotheses_inconclusive_undatable_no_qualifying_artifact_count": inconclusive_undatable_no_qualifying_artifact_display,
+        "hypotheses_inconclusive_undatable_no_completion_count": inconclusive_undatable_no_completion_display,
+        "hypotheses_inconclusive_undatable_invalid_timestamp_count": inconclusive_undatable_invalid_timestamp_display,
         "hypotheses_verdict_summary_text": verdict_summary_text,
         "hypotheses_lifecycle_status_text": lifecycle_status_text,
         "hypotheses_durable_fill_text": durable_fill_text,
@@ -2739,6 +2786,12 @@ _HTML_ESCAPE_KEYS: list[str] = [
     "hypotheses_orphaned_lifecycle_count_html", "hypotheses_lifecycle_keys_text_html",
     "hypotheses_supported_lifecycle_count_html", "hypotheses_refuted_lifecycle_count_html",
     "hypotheses_inconclusive_lifecycle_count_html",
+    "hypotheses_inconclusive_within_window_count_html",
+    "hypotheses_inconclusive_aged_count_html",
+    "hypotheses_inconclusive_undatable_count_html",
+    "hypotheses_inconclusive_undatable_no_qualifying_artifact_count_html",
+    "hypotheses_inconclusive_undatable_no_completion_count_html",
+    "hypotheses_inconclusive_undatable_invalid_timestamp_count_html",
     "hypotheses_verdict_summary_text_html", "hypotheses_lifecycle_status_text_html",
     "hypotheses_durable_fill_text_html",
     "goal_gaps_line_html",
@@ -2816,6 +2869,12 @@ _HTML_KEY_MAP: dict[str, str] = {
     "hypotheses_supported_lifecycle_count_html": "hypotheses_supported_lifecycle_count",
     "hypotheses_refuted_lifecycle_count_html": "hypotheses_refuted_lifecycle_count",
     "hypotheses_inconclusive_lifecycle_count_html": "hypotheses_inconclusive_lifecycle_count",
+    "hypotheses_inconclusive_within_window_count_html": "hypotheses_inconclusive_within_window_count",
+    "hypotheses_inconclusive_aged_count_html": "hypotheses_inconclusive_aged_count",
+    "hypotheses_inconclusive_undatable_count_html": "hypotheses_inconclusive_undatable_count",
+    "hypotheses_inconclusive_undatable_no_qualifying_artifact_count_html": "hypotheses_inconclusive_undatable_no_qualifying_artifact_count",
+    "hypotheses_inconclusive_undatable_no_completion_count_html": "hypotheses_inconclusive_undatable_no_completion_count",
+    "hypotheses_inconclusive_undatable_invalid_timestamp_count_html": "hypotheses_inconclusive_undatable_invalid_timestamp_count",
     "hypotheses_verdict_summary_text_html": "hypotheses_verdict_summary_text",
     "hypotheses_lifecycle_status_text_html": "hypotheses_lifecycle_status_text",
     "hypotheses_durable_fill_text_html": "hypotheses_durable_fill_text",
@@ -3327,6 +3386,14 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                     <div class="metric-item">
                         <span class="metric-label">Verdict yield:</span>
                         <span class="metric-value">{hypotheses_verdict_summary_text_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Inconclusive split (14-day window):</span>
+                        <span class="metric-value">within {hypotheses_inconclusive_within_window_count_html} / aged {hypotheses_inconclusive_aged_count_html} / undatable {hypotheses_inconclusive_undatable_count_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Undatable reasons:</span>
+                        <span class="metric-value">no qualifying artifact {hypotheses_inconclusive_undatable_no_qualifying_artifact_count_html} / no completion {hypotheses_inconclusive_undatable_no_completion_count_html} / invalid timestamp {hypotheses_inconclusive_undatable_invalid_timestamp_count_html}</span>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Orphaned (absent from inputs at last pass):</span>

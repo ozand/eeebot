@@ -44,7 +44,7 @@ This is the third instrument in sequence that omits the number answering its own
 
 3. **The selection rate is counted.** Cycles serving a `hypothesis` demand over total terminal cycles, on the same window as the other scorecard rates. Third priority with `limit=1` is currently an assumption; this makes it a decision with a number behind it.
 
-4. **`inconclusive` splits into `inconclusive_within_window` and `inconclusive_aged`.** The second bucket — past `CONFIRM_WINDOW_DAYS` with no measured signal — is the population that says whether the `scripts/` condition needs widening. Without the split, a structurally unverdictable hypothesis is indistinguishable from a fresh one for as long as the corpus lives.
+4. **`inconclusive` splits into three independently reported buckets:** `inconclusive_within_window` for a qualifying completion record inside `CONFIRM_WINDOW_DAYS`, `inconclusive_aged` for one past that window without a measured signal, and `inconclusive_undatable` when the row cannot be aged. The undatable population additionally reports its reasons: no qualifying artifact was touched, or no matching completion record exists (with invalid timestamps remaining an explicit partial/unavailable case). Undatable is never folded into either age bucket. The undatable population — not the aged bucket — is the input to the decision whether the `scripts/` condition needs widening. Without this split, a structurally unverdictable hypothesis is indistinguishable from a fresh one for as long as the corpus lives.
 
 This decision is reporting only. It does not change `classify_hypothesis_verdict`'s rules or thresholds, `append_hypotheses` identity (ADR-007), `DURABLE_MAX_ENTRIES`, `TOP_N`, `SUPPORTED_TOP_N`, `CONFIRM_WINDOW_DAYS`, demand priority order, or the `limit=1` experiment concurrency. Nothing it adds is read by fitness, targets or gaps.
 
@@ -54,7 +54,7 @@ This decision is reporting only. It does not change `classify_hypothesis_verdict
 
 The subsystem becomes answerable. "Are hypotheses useful" resolves to a distribution rather than an impression, and the answer arrives before anyone proposes changing the verdict rules to improve it.
 
-`inconclusive_aged` is the evidence needed to decide whether verdict source 2's `scripts/` condition is too narrow. That decision currently has no data and therefore cannot be made responsibly; after this it has exactly one number.
+`inconclusive_undatable_no_qualifying_artifact` is the evidence needed to decide whether verdict source 2's qualifying-directory condition is too narrow. `inconclusive_aged` remains a separate, valid-but-unresolved population and may be zero until rows actually age. The decision currently has no data and therefore cannot be made responsibly; after this it has an explicit count and reason breakdown.
 
 A low selection rate, if that is what the count shows, is a cheap finding with a cheap fix — priority order and `limit` are configuration. Today it would be invisible for as long as the defect stream stays busy.
 
@@ -72,7 +72,7 @@ Verdict derivation and its two sources, the 5.0% microbench threshold, the 14-da
 
 - **Feed hypothesis outcomes into fitness so the loop is accountable for its yield.** Rejected. `lifecycle_counts` excludes them deliberately, and that exclusion is the same boundary #1457 examines: a loop that can improve its own score by improving its own statistics has an incentive to read and then shape its evaluator. Accountability here comes from the number being visible to the operator, not from it being wired into the loop's objective.
 
-- **Widen verdict source 2 beyond `scripts/` artifacts now.** Rejected as premature. The condition may well be too narrow, but #1328 is the precedent: every pre-LLM cooling key looked reasonable and would have blocked 27–40% of would-be successes. `inconclusive_aged` is the measurement that turns this from a plausible fix into a justified one.
+- **Widen verdict source 2 beyond its qualifying artifact directories now.** Rejected as premature. The condition may well be too narrow, but #1328 is the precedent: every pre-LLM cooling key looked reasonable and would have blocked 27–40% of would-be successes. `inconclusive_undatable_no_qualifying_artifact` is the measurement that turns this from a plausible fix into a justified one; `inconclusive_aged` is a separate age outcome, not evidence that the directory condition itself is unreachable.
 
 - **Retire `inconclusive` and force a binary verdict after the window.** Rejected. It would convert "we did not measure this" into "this did not work", which is precisely the fabrication the harness-derived verdict exists to prevent, and it would corrupt `supported_hypotheses` — the one path that reaches the tech tree.
 
@@ -83,7 +83,7 @@ Verdict derivation and its two sources, the 5.0% microbench threshold, the 14-da
 # Test Contract
 
 - A fixture containing both `durable` and `lifecycle` rows reports two totals that reconcile independently with `DURABLE_MAX_ENTRIES` and `lifecycle_counts`; neither figure absorbs the other.
-- A lifecycle fixture with rows past `CONFIRM_WINDOW_DAYS` and rows within it splits into `inconclusive_aged` and `inconclusive_within_window` with the expected counts; a row with a measured verdict appears in neither.
+- A lifecycle fixture with rows past `CONFIRM_WINDOW_DAYS`, rows within it, no qualifying artifact, and no completion link splits into `inconclusive_aged`, `inconclusive_within_window`, and `inconclusive_undatable`, with the undatable reason counters identifying each cause; a row with a measured verdict appears in none of the three.
 - An `orphaned` row from #1346 is counted in the population it belongs to and is not silently included in `evaluated_last_pass`.
 - The selection-rate counter over a ledger fixture with known `serves: hypothesis` rows returns the expected ratio, and returns a labelled unavailable rather than zero when the ledger is absent — per the #1173 reader contract.
 - A test asserts `classify_hypothesis_verdict`'s thresholds and sources are unchanged by this work.
@@ -96,7 +96,7 @@ Verdict derivation and its two sources, the 5.0% microbench threshold, the 14-da
 - #1345 — claim-keyed novelty: 20 durable entries were about four ideas.
 - #1346 — lifecycle fossils: `stale`, `orphaned`, `evaluated_last_pass`.
 - #1457 — the loop can read its own evaluator; the boundary this ADR declines to cross.
-- #822 — the sidecar allowlist that verdict source 2's `scripts/` condition inherits.
+- #822 — the sidecar allowlist precedent for verdict source 2's qualifying artifact condition.
 - #1328 — measure a suppression rule against outcomes before building it.
 - #1335 — enhancement-shaped cycles on scripts nothing runs.
 - #878 — RSI stage 4: hypothesis → experiment → report loop.

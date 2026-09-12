@@ -1542,6 +1542,9 @@ def test_verdict_distribution_unavailable_when_unreadable_never_zeros() -> None:
     assert partial["hypotheses_supported_lifecycle_count"] == "3"
     assert partial["hypotheses_refuted_lifecycle_count"] == "1"
     assert partial["hypotheses_inconclusive_lifecycle_count"] == "unavailable"
+    assert partial["hypotheses_inconclusive_within_window_count"] == "unavailable"
+    assert partial["hypotheses_inconclusive_aged_count"] == "unavailable"
+    assert partial["hypotheses_inconclusive_undatable_count"] == "unavailable"
     assert partial["hypotheses_verdict_summary_text"] == "unavailable"
 
     # 6. lifecycle_counts present but missing 'total' -- the three verdict
@@ -1591,12 +1594,25 @@ def test_verdict_distribution_renders_against_its_denominator() -> None:
     tile = DASHBOARD.format_hypotheses_tile({
         "sources": {"lifecycle": {"source_status": "valid", "entry_count": 41}},
         "lifecycle_counts": {
-            "answered": 12, "supported": 5, "refuted": 0, "inconclusive": 7, "total": 41,
+            "answered": 12, "supported": 5, "refuted": 0, "inconclusive": 7,
+            "inconclusive_split_status": "complete",
+            "inconclusive_within_window": 3, "inconclusive_aged": 1,
+            "inconclusive_undatable": 1,
+            "inconclusive_undatable_no_qualifying_artifact": 1,
+            "inconclusive_undatable_no_completion": 0,
+            "inconclusive_undatable_invalid_timestamp": 0,
+            "total": 41,
         },
     })
     assert tile["hypotheses_supported_lifecycle_count"] == "5"
     assert tile["hypotheses_refuted_lifecycle_count"] == "0"
     assert tile["hypotheses_inconclusive_lifecycle_count"] == "7"
+    assert tile["hypotheses_inconclusive_within_window_count"] == "3"
+    assert tile["hypotheses_inconclusive_aged_count"] == "1"
+    assert tile["hypotheses_inconclusive_undatable_count"] == "1"
+    assert tile["hypotheses_inconclusive_undatable_no_qualifying_artifact_count"] == "1"
+    assert tile["hypotheses_inconclusive_undatable_no_completion_count"] == "0"
+    assert tile["hypotheses_inconclusive_undatable_invalid_timestamp_count"] == "0"
     assert tile["hypotheses_verdict_summary_text"] == (
         "12 of 41 rows carry a verdict (supported 5, refuted 0, inconclusive 7)"
     )

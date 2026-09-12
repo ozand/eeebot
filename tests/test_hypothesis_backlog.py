@@ -667,6 +667,65 @@ class TestLifecycleCounts:
         assert counts["total"] == 0 and counts["orphaned"] == 0
 
 
+class TestInconclusiveSplit:
+    def test_splits_window_aged_and_undatable_with_reasons(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_lifecycle(state_dir, {
+            "hyp-within": {"status": "answered", "verdict": "inconclusive", "answered_evidence": "cycle-within"},
+            "hyp-aged": {"status": "answered", "verdict": "inconclusive", "answered_evidence": "cycle-aged"},
+            "hyp-no-artifact": {"status": "answered", "verdict": "inconclusive", "answered_evidence": "cycle-no-artifact"},
+            "hyp-no-completion": {"status": "answered", "verdict": "inconclusive", "answered_evidence": "cycle-no-completion"},
+            "hyp-supported": {"status": "answered", "verdict": "supported", "answered_evidence": "cycle-supported"},
+        })
+        completed = state_dir / "demand" / "completed.json"
+        completed.parent.mkdir(parents=True)
+        now = datetime(2026, 9, 20, tzinfo=timezone.utc)
+        completed.write_text(json.dumps({"entries": {
+            "within": {"cycle_id": "cycle-within", "files_changed": ["scripts/a.py"], "confirmed": False, "ts": "2026-09-19T00:00:00Z"},
+            "aged": {"cycle_id": "cycle-aged", "files_changed": ["scripts/b.py"], "confirmed": False, "ts": "2026-09-01T00:00:00Z"},
+            "no-artifact": {"cycle_id": "cycle-no-artifact", "files_changed": ["nanobot/runtime/x.py"], "confirmed": False, "ts": "2026-09-01T00:00:00Z"},
+        }}), encoding="utf-8")
+
+        counts = hypothesis_backlog.lifecycle_counts(state_dir, now=now)
+        assert counts["inconclusive_within_window"] == 1
+        assert counts["inconclusive_aged"] == 1
+        assert counts["inconclusive_undatable"] == 2
+        assert counts["inconclusive_undatable_no_qualifying_artifact"] == 1
+        assert counts["inconclusive_undatable_no_completion"] == 1
+        assert counts["inconclusive_undatable_invalid_timestamp"] == 0
+        assert counts["inconclusive_split_status"] == "complete"
+
+    def test_invalid_completion_timestamp_is_partial_not_zero(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_lifecycle(state_dir, {
+            "hyp-invalid": {"status": "answered", "verdict": "inconclusive", "answered_evidence": "cycle-invalid"},
+        })
+        completed = state_dir / "demand" / "completed.json"
+        completed.parent.mkdir(parents=True)
+        completed.write_text(json.dumps({"entries": {
+            "invalid": {"cycle_id": "cycle-invalid", "files_changed": ["scripts/a.py"], "confirmed": False, "ts": "not-a-timestamp"},
+        }}), encoding="utf-8")
+
+        counts = hypothesis_backlog.lifecycle_counts(state_dir, now=datetime(2026, 9, 20, tzinfo=timezone.utc))
+        assert counts["inconclusive_within_window"] == 0
+        assert counts["inconclusive_aged"] == 0
+        assert counts["inconclusive_undatable"] == 1
+        assert counts["inconclusive_undatable_invalid_timestamp"] == 1
+        assert counts["inconclusive_split_status"] == "partial"
+
+    def test_missing_completion_sidecar_is_unavailable_not_empty_split(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_lifecycle(state_dir, {
+            "hyp": {"status": "answered", "verdict": "inconclusive", "answered_evidence": "cycle"},
+        })
+
+        counts = hypothesis_backlog.lifecycle_counts(state_dir, now=datetime(2026, 9, 20, tzinfo=timezone.utc))
+        assert counts["inconclusive_split_status"] == "unavailable"
+        assert "inconclusive_within_window" not in counts
+        assert "inconclusive_aged" not in counts
+        assert "inconclusive_undatable" not in counts
+
+
 class TestHasInFlightExperiment:
     def test_false_with_no_candidates(self, tmp_path):
         state_dir = _state_dir(tmp_path)
