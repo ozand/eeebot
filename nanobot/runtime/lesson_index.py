@@ -144,10 +144,24 @@ def find_index_matches(path: Path, predicate: Callable[[dict], bool]) -> list[di
     """Find relevant rows in the newest archive containing a match.
 
     This is the bounded miss path for readers that rank an index rather than
-    holding an exact filename. It still stops at the first newest archive with
-    a match and never scans older archives after that hit.
+    holding an exact filename. The central reader opens archives newest-first
+    and stops at the first archive containing a match.
     """
-    return read_index_archives(path, predicate)
+    lookup = lookup_rotated_text(
+        path,
+        archive_glob=f"{Path(path).stem}-*.md.gz",
+        matches=lambda text: any(
+            predicate(entry) for entry in _parse_index_text(text, source="lesson_index_archive")
+        ),
+        max_archives=_MAX_ARCHIVE_FILES,
+        max_bytes=_MAX_ARCHIVE_BYTES,
+    )
+    if lookup.text is None:
+        return []
+    return [
+        entry for entry in _parse_index_text(lookup.text, source="lesson_index_archive")
+        if predicate(entry)
+    ]
 
 
 def _cell(text: str, cap: int = 240) -> str:
