@@ -636,6 +636,31 @@ def _record_scan_failure(
 _EXECUTOR_RESULT_UNSET = object()
 _EXECUTOR_RESULT_UNAVAILABLE = object()
 
+# #1546: subagent.py's own terminal statuses whose persisted `result` is a
+# fixed canned stub (`"Cancelled before completion."`, `f"Error: {e}"`, the
+# wall-clock/loop-breaker text) rather than the model's considered final
+# answer. A scan of one of these can never contain a real `[Lesson <id>]`
+# marker, so it must not be reported the same way a genuine zero is.
+# `"ok"` (real answer, though occasionally itself a canned "no response"
+# fallback — #1546 does not attempt to detect that narrower case) and a
+# missing/legacy status (no `status` key at all, from before this field
+# existed) both continue to read as trustworthy, unchanged from before.
+_NOT_FINAL_SUBAGENT_STATUSES = frozenset({"cancelled", "error", "bounded_stop", "blocked"})
+
+
+class _ExecutorResultNotFinal:
+    """#1546: a persisted result exists, but its own status says it is a
+    stub, not a considered final answer. Carries what was scanned (or at
+    least its length) and the observed status, so `record_citations` can
+    record them instead of the reader having to cross-check the ledger.
+    """
+
+    __slots__ = ("status", "length")
+
+    def __init__(self, status: str, length: int) -> None:
+        self.status = status
+        self.length = length
+
 
 def read_executor_result(
     state_dir: Path,
@@ -643,7 +668,15 @@ def read_executor_result(
     *,
     max_bytes: int = _EXECUTOR_RESULT_MAX_BYTES,
 ) -> str | object:
-    """Read the bounded persisted executor answer, or an unavailable sentinel."""
+    """Read the bounded persisted executor answer, or an unavailable sentinel.
+
+    Returns the raw string when the payload's own ``status`` is ``"ok"`` or
+    absent (legacy rows written before that field existed). Returns an
+    :class:`_ExecutorResultNotFinal` when ``status`` names a canned-stub
+    terminal state (see :data:`_NOT_FINAL_SUBAGENT_STATUSES`) — the text is
+    real but structurally cannot contain a citation marker, so it must not
+    be scanned as if it were.
+    """
     if not task_id:
         return _EXECUTOR_RESULT_UNAVAILABLE
     try:
@@ -654,7 +687,12 @@ def read_executor_result(
             return _EXECUTOR_RESULT_UNAVAILABLE
         payload = json.loads(path.read_text(encoding="utf-8"))
         result = payload.get("result") if isinstance(payload, dict) else None
-        return result if isinstance(result, str) else _EXECUTOR_RESULT_UNAVAILABLE
+        if not isinstance(result, str):
+            return _EXECUTOR_RESULT_UNAVAILABLE
+        status = payload.get("status") if isinstance(payload, dict) else None
+        if isinstance(status, str) and status in _NOT_FINAL_SUBAGENT_STATUSES:
+            return _ExecutorResultNotFinal(status, len(result))
+        return result
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return _EXECUTOR_RESULT_UNAVAILABLE
 
@@ -691,6 +729,29 @@ def record_citations(
         except Exception as error:
             _record_scan_failure(directory, scan, current, error)
         return []
+    if isinstance(executor_result, _ExecutorResultNotFinal):
+        # #1546: a real persisted result whose own status marks it a canned
+        # stub (cancelled/error/bounded_stop/blocked) — it cannot contain a
+        # citation marker, so it must not read as a confirmed zero. Reuses
+        # the "unavailable" status (no new vocabulary value, per #1312) with
+        # its own reason, and — unlike the plain-unavailable case above,
+        # where nothing was read at all — records what was scanned (its
+        # length) and the subagent status that disqualified it, so the next
+        # reader does not have to open the subagent file to find out.
+        scan: dict[str, object] = {
+            "scan_ran": False,
+            "cycle_id": str(cycle_id),
+            "status": "unavailable",
+            "notes": ["executor_result_not_final", f"subagent_status:{executor_result.status}"],
+            "scanned_chars": executor_result.length,
+            "ts": timestamp,
+        }
+        try:
+            _rotate_citation_file(directory, _CITATION_SCAN_FILE, current)
+            _append_citation_rows(directory / _CITATION_SCAN_FILE, [scan], current, max_rows=_CITATION_SCAN_MAX_ROWS)
+        except Exception as error:
+            _record_scan_failure(directory, scan, current, error)
+        return []
     if executor_result is _EXECUTOR_RESULT_UNSET:
         scan_texts = [str(text or "") for text in (texts or [])]
     else:
@@ -706,6 +767,10 @@ def record_citations(
         "lesson_ids": ids,
         "status": "complete",
         "notes": [],
+        # #1546: what was actually scanned, so a reader does not have to
+        # cross-check the ledger by hand to tell a substantive answer from
+        # a near-empty one behind the same status/marker_count pair.
+        "scanned_chars": sum(len(text) for text in scan_texts),
         "ts": timestamp,
     }
     citation_failed = False
