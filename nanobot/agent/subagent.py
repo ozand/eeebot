@@ -13,6 +13,7 @@ from loguru import logger
 
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from nanobot.agent.tools.memory_search import MemorySearchTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.toolsets import EXECUTOR_TOOL_NAMES as EXECUTOR_TOOLSET
@@ -272,6 +273,10 @@ class SubagentManager:
                 timeout=self.exec_config.timeout,
                 restrict_to_workspace=self.restrict_to_workspace,
                 path_append=self.exec_config.path_append,
+            ))
+            tools.register(MemorySearchTool(
+                workspace=self.workspace,
+                state_dir=self._state_root,
             ))
             if self.web_tools_enabled:
                 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool

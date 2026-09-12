@@ -22,8 +22,8 @@ def test_interactive_context_keeps_legacy_memory(tmp_path: Path):
     assert "FULL LEGACY BODY" in prompt
 
 
-def test_loop_memory_context_keeps_resident_rules_and_drops_whole_entries(tmp_path: Path):
-    """#1443: small caps cannot remove the rules block or split an entry."""
+def test_loop_memory_context_keeps_resident_rules_and_replaces_remainder_with_pointer(tmp_path: Path):
+    """#1481: resident rules stay; recency-selected remainder leaves the prompt."""
     from nanobot.agent.memory import MemoryStore
 
     mem_dir = tmp_path / "memory"
@@ -53,13 +53,20 @@ def test_loop_memory_context_keeps_resident_rules_and_drops_whole_entries(tmp_pa
     assert "[DO NOT touch]" in ctx
     assert "[Rules]" in ctx
     assert "[Key paths on host]" in ctx
-    assert "Crucial latest discovered fact" in ctx
-    assert "Brand New Fact" in ctx
+    assert "Crucial latest discovered fact" not in ctx
+    assert "Brand New Fact" not in ctx
     assert "Old Fact 0" not in ctx
+    assert "search_memory(query, limit)" in ctx
+    assert "complete with zero results is a real zero" in ctx
+    assert "unavailable is not empty memory" in ctx
     assert "[trimmed" not in ctx
-    assert store.last_index_fit["dropped_entries"] > 0
+    assert store.last_index_fit["remainder_kept_chars"] == 0
+    assert store.last_index_fit["remainder_searchable_entries"] == 102
+    assert store.last_index_fit["remainder_searchable_chars"] > 0
+    assert store.last_index_fit["dropped_entries"] == 0
     assert all(len(line) <= store.MAX_INDEX_ENTRY_CHARS for line in ctx.splitlines() if line.startswith("- ") or line.startswith("* "))
     assert store.last_index_fit["resident_chars"] <= len(ctx)
+    assert len(ctx) < 1500
 
 
 def test_overlong_index_entry_is_word_bounded_and_reports_loss(tmp_path: Path):
@@ -102,7 +109,9 @@ def test_context_fit_records_memory_index_drop_details(tmp_path: Path):
     prompt = builder.build_system_prompt(loop_profile=True)
     fit = builder.last_fit
     assert "[Identity]" in prompt and "[Rules]" in prompt
-    assert fit["memory_index"]["dropped_entries"] > 0
+    assert fit["memory_index"]["dropped_entries"] == 0
+    assert fit["memory_index"]["remainder_kept_chars"] == 0
+    assert fit["memory_index"]["remainder_searchable_entries"] == 101
     assert fit["memory_index"]["resident_chars"] > 0
 
 

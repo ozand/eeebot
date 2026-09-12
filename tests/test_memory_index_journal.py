@@ -92,7 +92,9 @@ def test_resident_fields_survive_into_the_builder_fit(tmp_path: Path):
     assert memory_index["status"] == "present"
     assert memory_index["resident_matched"] == 5
     assert memory_index["resident_missing"] == []
-    assert memory_index["dropped_entries"] > 0
+    assert memory_index["dropped_entries"] == 0
+    assert memory_index["remainder_kept_chars"] == 0
+    assert memory_index["remainder_searchable_entries"] == 201
 
 
 def test_a_renamed_rule_entry_reaches_the_builder_fit_by_name(tmp_path: Path):

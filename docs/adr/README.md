@@ -23,3 +23,6 @@ Conventions:
 | [ADR-005](ADR-005-terminal-demand-attempt-count.md) | Count terminal demand cycles as futility attempts | proposed |
 | [ADR-006](ADR-006-preserve-suppression-reasons.md) | Preserve suppression reasons separately in the scorecard | proposed |
 | [ADR-007](ADR-007-deterministic-hypothesis-claim-identity.md) | Deterministic hypothesis claim identity and collision strengthening | proposed |
+| ADR-008 | Reserved by open PR #1508 | proposed |
+| ADR-009 | Reserved by in-flight #1510 work | proposed |
+| [ADR-010](ADR-010-memory-remainder-is-retrieved-not-resident.md) | The loop retrieves non-resident memory through one bounded FTS5 tool | proposed |

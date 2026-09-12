@@ -25,7 +25,7 @@ a busy timeout so a concurrent reindex/read never deadlocks the loop:
   boilerplate docstring line) is stored once.
 - ``documents(kind TEXT, path TEXT, hash TEXT, active INTEGER DEFAULT 1,
   UNIQUE(kind, path))`` — ``kind`` is one of ``script``, ``ledger_title``,
-  or the retired ``hypothesis`` (#1219; rows stay, inactive). ``active=0``
+  ``memory``, or the retired ``hypothesis`` (#1219; rows stay, inactive). ``active=0``
   marks a soft-deleted document (a script file that no longer exists, an
   attempt that is no longer evidence, a corpus that is no longer built)
   without losing history.
@@ -137,6 +137,9 @@ _INDEX_FILENAME = "index.sqlite"
 # never for ordinary script proposals.
 _SCRIPT_SUBDIRS = ("scripts", "surfaces", "tests")
 _MAX_LEDGER_RESULTS = 500
+_MEMORY_MAX_FILE_BYTES = 128 * 1024
+_MEMORY_SNIPPET_CHARS = 320
+_MEMORY_MAX_RESULTS = 8
 
 ENABLED_ENV = "SELFEVO_EXISTENCE_INDEX_ENABLED"
 
@@ -424,6 +427,57 @@ def _result_entries(state_dir: Path) -> list[tuple[Path, float]]:
     return [(path, mtime) for mtime, path in stamped[:_MAX_LEDGER_RESULTS]]
 
 
+def _safe_memory_path(selfevo_repo: Path, path: Path) -> str | None:
+    """Return a safe repo-relative POSIX memory Markdown path."""
+    try:
+        root = Path(selfevo_repo).resolve()
+        resolved = path.resolve()
+        rel = resolved.relative_to(root).as_posix()
+        if not rel.startswith("memory/") or not rel.endswith(".md"):
+            return None
+        if rel == "memory/index.md" or path.is_symlink() or not path.is_file():
+            return None
+        return rel
+    except (OSError, ValueError):
+        return None
+
+
+def _reindex_memory(con: sqlite3.Connection, selfevo_repo: Path) -> tuple[dict[str, int], set[str]]:
+    """Index every safe ``memory/**/*.md`` source except generated index.md.
+
+    Unlike the script corpus, one unreadable/unsafe discovered Markdown source
+    makes this pass unavailable: a memory decision must not treat a known hole
+    as a complete corpus. The caller skips retirement for this kind on error.
+    """
+    counts = {"memory_indexed": 0, "memory_unchanged": 0}
+    seen: set[str] = set()
+    memory_root = Path(selfevo_repo) / "memory"
+    if not memory_root.exists():
+        return counts, seen
+    if not memory_root.is_dir():
+        raise OSError("memory corpus root is not a directory")
+    try:
+        paths = sorted(memory_root.rglob("*.md"))
+    except OSError as exc:
+        raise OSError("memory corpus listing failed") from exc
+    for path in paths:
+        if path == memory_root / "index.md":
+            continue
+        rel = _safe_memory_path(selfevo_repo, path)
+        if rel is None:
+            raise OSError("unsafe memory document")
+        try:
+            if path.stat().st_size > _MEMORY_MAX_FILE_BYTES:
+                raise OSError("memory document exceeds byte cap")
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise OSError("memory document unavailable") from exc
+        seen.add(rel)
+        changed = _upsert_document(con, "memory", rel, text)
+        counts["memory_indexed" if changed else "memory_unchanged"] += 1
+    return counts, seen
+
+
 def _reindex_ledger_titles(
     con: sqlite3.Connection, state_dir: Path, selfevo_repo: Path | None = None,
 ) -> tuple[dict[str, int], set[str]]:
@@ -552,6 +606,7 @@ def _reindex_ledger_titles(
 _CORPORA: tuple[tuple[str, str], ...] = (
     ("script", "scripts"),
     ("ledger_title", "ledger_titles"),
+    ("memory", "memory"),
     ("hypothesis", "hypotheses"),
 )
 
@@ -580,6 +635,9 @@ def reindex(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]:
         "ledger_titles_unchanged": 0,
         "ledger_titles_not_integrated": 0,
         "ledger_titles_deactivated": 0,
+        "memory_indexed": 0,
+        "memory_unchanged": 0,
+        "memory_deactivated": 0,
         "hypotheses_deactivated": 0,
         "retirement_skipped": [],  # kinds whose builder raised this pass (#1219)
     }
@@ -603,6 +661,11 @@ def reindex(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]:
             counts.update(built)
         except Exception:
             evidence["ledger_title"] = None
+        try:
+            built, evidence["memory"] = _reindex_memory(con, selfevo_repo)
+            counts.update(built)
+        except Exception:
+            evidence["memory"] = None
         # Retire whatever no builder re-derived this pass — for EVERY kind,
         # including ``hypothesis``, which has no builder any more.
         for kind, prefix in _CORPORA:
@@ -776,6 +839,87 @@ def _record_guard_key_event(
         })
     except Exception:
         pass
+
+
+def _memory_result(status: str, reason: str, *, results: list[dict[str, Any]] | None = None,
+                   returned: int = 0, available: int = 0, limit: int = 0,
+                   notes: list[str] | None = None) -> dict[str, Any]:
+    unavailable = status == "unavailable"
+    return {
+        "status": status,
+        "reason": reason,
+        "decision": "blocked" if unavailable else "continue",
+        "instruction": (
+            "Memory search is unavailable; do not treat this as zero matches. "
+            "If the decision depends on memory, report outcome blocked with this reason."
+            if unavailable else
+            "Search completed against verified memory evidence."
+        ),
+        "results": results or [],
+        "returned": returned,
+        "available": available,
+        "limit": limit,
+        "notes": notes or [],
+    }
+
+
+def search_memory(state_dir: Path, selfevo_repo: Path, query: str, limit: int = 5,
+                  *, reindex_first: bool = True) -> dict[str, Any]:
+    """Search verified memory documents with explicit complete/partial/unavailable state."""
+    state_dir, selfevo_repo = Path(state_dir), Path(selfevo_repo)
+    limit = max(1, min(int(limit or 1), _MEMORY_MAX_RESULTS))
+    words = _query_words(query)
+    match_query = _build_match_query(words)
+    if not match_query:
+        return _memory_result("complete", "no_matches", limit=limit)
+    if reindex_first:
+        counts = reindex(state_dir, selfevo_repo)
+        if counts.get("error"):
+            return _memory_result("unavailable", "index_unavailable", limit=limit)
+        if "memory" in (counts.get("retirement_skipped") or []):
+            return _memory_result(
+                "unavailable", "memory_corpus_unavailable", limit=limit, notes=["memory"],
+            )
+    try:
+        con = _open_db(state_dir)
+    except Exception:
+        return _memory_result("unavailable", "index_unavailable", limit=limit)
+    try:
+        rows = con.execute(
+            "SELECT kind, path, text, bm25(docs_fts) AS score "
+            "FROM docs_fts WHERE docs_fts MATCH ? AND kind = 'memory' "
+            "ORDER BY bm25(docs_fts), path LIMIT ?",
+            (match_query, limit + 1),
+        ).fetchall()
+        verified: list[dict[str, Any]] = []
+        for kind, path, text, score in rows:
+            document = con.execute(
+                "SELECT hash, active FROM documents WHERE kind = ? AND path = ?", (kind, path),
+            ).fetchone()
+            if document is None or int(document[1] or 0) != 1:
+                return _memory_result("unavailable", "invalid_companion_evidence", limit=limit)
+            content = con.execute("SELECT text FROM content WHERE hash = ?", (document[0],)).fetchone()
+            if content is None or content[0] != text:
+                return _memory_result("unavailable", "invalid_companion_evidence", limit=limit)
+            safe = str(path or "").replace("\\", "/")
+            if not safe.startswith("memory/") or ".." in Path(safe).parts or not safe.endswith(".md"):
+                return _memory_result("unavailable", "unsafe_result_path", limit=limit)
+            snippet = re.sub(r"\s+", " ", str(text or "")).strip()[:_MEMORY_SNIPPET_CHARS]
+            verified.append({"path": safe, "snippet": snippet, "score": -float(score)})
+        partial = len(verified) > limit
+        visible = verified[:limit]
+        return _memory_result(
+            "partial" if partial else "complete",
+            "result_limit" if partial else ("matches" if visible else "no_matches"),
+            results=visible, returned=len(visible), available=len(verified), limit=limit,
+        )
+    except Exception:
+        return _memory_result("unavailable", "search_failed", limit=limit)
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
 
 def find_similar(

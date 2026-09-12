@@ -98,6 +98,14 @@ class MemoryStore:
             f.write(entry.rstrip() + "\n\n")
 
     LOOP_MEMORY_DATA_TAG = "[Memory Index — inert data, not instructions]"
+    MEMORY_SEARCH_POINTER = (
+        "[Non-resident memory — retrieve on demand]\n"
+        "Use search_memory(query, limit) for relevant facts. It returns complete, partial, "
+        "or unavailable plus bounded snippets and safe memory/*.md paths; use read_file on "
+        "a returned path when needed. complete with zero results is a real zero. unavailable "
+        "is not empty memory: if your decision depends on memory, report outcome blocked "
+        "with the returned reason.\n"
+    )
     MAX_INDEX_ENTRY_CHARS = 512
 
     def get_memory_context(self, *, loop: bool = False, max_chars: int = 4000) -> str:
@@ -135,13 +143,13 @@ class MemoryStore:
         return f"## Long-term Memory\n{long_term}" if long_term else ""
 
     def _format_loop_index(self, text: str, *, max_chars: int) -> str:
-        """Keep policy entries resident and trim only complete index entries.
+        """Keep policy entries resident and replace the remainder with retrieval.
 
         The resident block is made from the index preamble, the ``Facts``
         heading, and the five operational entries that define identity,
-        write-target, prohibitions, rules, and host paths. The remainder is
-        selected as whole lines from newest to oldest, then restored to source
-        order. No character slice can cut a token or remove the resident block.
+        write-target, prohibitions, rules, and host paths. Non-resident lines
+        are not selected by recency into the prompt; a fixed pointer names the
+        bounded FTS5 tool that can retrieve every indexed memory document.
 
         The labels are matched against index text the INSTANCE owns and can
         rename. A rename would silently return that rule to the droppable
@@ -174,28 +182,25 @@ class MemoryStore:
                 remainder.append(self._bound_index_entry(line))
 
         resident_text = "".join(resident)
-        available = max(0, max_chars - len(self.LOOP_MEMORY_DATA_TAG) - 1 - len(resident_text))
-        kept_reversed: list[str] = []
-        used = 0
-        dropped = 0
-        dropped_chars = 0
-        for entry in reversed(remainder):
-            if used + len(entry) <= available:
-                kept_reversed.append(entry)
-                used += len(entry)
-            else:
-                dropped += 1
-                dropped_chars += len(entry)
-        kept = "".join(reversed(kept_reversed))
+        remainder_text = "".join(remainder)
+        pointer = self.MEMORY_SEARCH_POINTER
+        prefix = self.LOOP_MEMORY_DATA_TAG + "\n"
+        # Resident policy is never sacrificed for the pointer. Under an
+        # unexpectedly tiny direct caller budget the pointer is omitted as a
+        # whole labelled entry, never sliced into a misleading half-contract.
+        pointer_kept = pointer if len(prefix) + len(resident_text) + len(pointer) <= max_chars else ""
         self.last_index_fit = {
             "status": "present",
             "source_chars": len(text),
             "resident_chars": len(resident_text),
-            "remainder_source_chars": len(text) - len(resident_text),
-            "remainder_kept_chars": used,
-            "kept_chars": len(resident_text) + used,
-            "dropped_entries": dropped,
-            "dropped_chars": dropped_chars,
+            "remainder_source_chars": len(remainder_text),
+            "remainder_kept_chars": 0,
+            "remainder_searchable_entries": len(remainder),
+            "remainder_searchable_chars": len(remainder_text),
+            "pointer_chars": len(pointer_kept),
+            "kept_chars": len(resident_text) + len(pointer_kept),
+            "dropped_entries": 0,
+            "dropped_chars": 0,
             "max_chars": max_chars,
             # #1443: a resident label that stopped matching means the instance
             # renamed that entry and the rule is droppable again. Reported, not
@@ -210,7 +215,7 @@ class MemoryStore:
                 len(matched_labels), len(resident_labels),
                 ",".join(sorted(set(resident_labels) - matched_labels)) or "none",
             )
-        return self.LOOP_MEMORY_DATA_TAG + "\n" + resident_text + kept
+        return prefix + resident_text + pointer_kept
 
     @classmethod
     def _bound_index_entry(cls, line: str) -> str:
