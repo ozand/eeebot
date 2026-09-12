@@ -6,7 +6,7 @@ from typing import Any, TypedDict
 
 CONTROLLED_LESSON_TAGS: frozenset[str] = frozenset({
     "architecture", "config", "curator", "docs", "gate", "git", "infra",
-    "lint", "perf", "prompt", "reflector", "refactor", "rotation", "runtime",
+    "lint", "perf", "prompt", "refactor", "rotation", "runtime",
     "security", "sidecar", "state", "subagent", "test", "tooling",
 })
 LESSON_SEVERITIES: tuple[str, ...] = ("low", "medium", "high", "critical")
@@ -65,6 +65,8 @@ class CycleHealth(TypedDict, total=False):
 
 class LessonV2(TypedDict, total=False):
     schema_version: int
+    source: str
+    provenance: dict[str, Any]
     id: str
     title: str
     problem: str
