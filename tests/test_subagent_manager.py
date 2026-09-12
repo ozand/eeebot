@@ -17,6 +17,27 @@ def test_executor_declared_and_registered_tool_names_match():
     assert "Use your tools: " + ", ".join(SubagentManager.declared_tool_names()) + "." in bridge.build_task({}, "goal", "")
 
 
+def test_runtime_registration_assertion_rejects_declared_tool_divergence(tmp_path, monkeypatch):
+    """H2 parity is enforced by the unchanged runtime assertion, not only tuple equality."""
+    import asyncio
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.bus.queue import MessageBus
+
+    class Provider:
+        def get_default_model(self):
+            return "test-model"
+
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus())
+    manager.registered_tool_names = lambda: manager.declared_tool_names()[:-1]
+    asyncio.run(manager._run_subagent("task", "task", "label", {"channel": "cli", "chat_id": "direct"}))
+    rows = list(manager._telemetry_dir.glob("*.json"))
+    assert len(rows) == 1
+    import json
+    payload = json.loads(rows[0].read_text(encoding="utf-8"))
+    assert payload["status"] == "error"
+    assert "registered tool set must match the configured declaration" in payload["result"]
+
+
 def test_interactive_subagent_role_keeps_web_tools_available():
     from nanobot.agent.subagent import SubagentManager
 

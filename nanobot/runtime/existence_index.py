@@ -451,12 +451,18 @@ def _reindex_memory(con: sqlite3.Connection, selfevo_repo: Path) -> tuple[dict[s
     """
     counts = {"memory_indexed": 0, "memory_unchanged": 0}
     seen: set[str] = set()
-    memory_root = Path(selfevo_repo) / "memory"
+    repo_root = Path(selfevo_repo)
+    if not repo_root.is_dir():
+        raise OSError("workspace unavailable")
+    memory_root = repo_root / "memory"
     if not memory_root.exists():
-        return counts, seen
+        raise OSError("memory corpus root is missing")
     if not memory_root.is_dir():
         raise OSError("memory corpus root is not a directory")
     try:
+        directories = [memory_root, *memory_root.rglob("*")]
+        if any(path.is_symlink() and path.is_dir() for path in directories):
+            raise OSError("symlinked memory directory")
         paths = sorted(memory_root.rglob("*.md"))
     except OSError as exc:
         raise OSError("memory corpus listing failed") from exc
@@ -692,6 +698,7 @@ def reindex(state_dir: Path, selfevo_repo: Path) -> dict[str, Any]:
 
 _WORD_RE = re.compile(r"[A-Za-z]{3,}")
 _CONTENT_WORD_RE = re.compile(r"[A-Za-z]{4,}")
+_MEMORY_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 
 # #757: titles that announce a test-suite-for-subject intent, e.g.
 # "Create test suite for approval truth normalization script" or
@@ -868,10 +875,8 @@ def search_memory(state_dir: Path, selfevo_repo: Path, query: str, limit: int = 
     """Search verified memory documents with explicit complete/partial/unavailable state."""
     state_dir, selfevo_repo = Path(state_dir), Path(selfevo_repo)
     limit = max(1, min(int(limit or 1), _MEMORY_MAX_RESULTS))
-    words = _query_words(query)
+    words = sorted({word.lower() for word in _MEMORY_WORD_RE.findall(query or "")})
     match_query = _build_match_query(words)
-    if not match_query:
-        return _memory_result("complete", "no_matches", limit=limit)
     if reindex_first:
         counts = reindex(state_dir, selfevo_repo)
         if counts.get("error"):
@@ -880,6 +885,8 @@ def search_memory(state_dir: Path, selfevo_repo: Path, query: str, limit: int = 
             return _memory_result(
                 "unavailable", "memory_corpus_unavailable", limit=limit, notes=["memory"],
             )
+    if not match_query:
+        return _memory_result("complete", "no_matches", limit=limit)
     try:
         con = _open_db(state_dir)
     except Exception:
@@ -1009,7 +1016,8 @@ def find_similar(
     try:
         rows = con.execute(
             "SELECT kind, path, text, bm25(docs_fts) AS score "
-            "FROM docs_fts WHERE docs_fts MATCH ? ORDER BY bm25(docs_fts) LIMIT ?",
+            "FROM docs_fts WHERE docs_fts MATCH ? AND kind != 'memory' "
+            "ORDER BY bm25(docs_fts) LIMIT ?",
             (match_query, max(1, limit)),
         ).fetchall()
         # FTS rows are only an index view.  Never treat a dangling FTS row as

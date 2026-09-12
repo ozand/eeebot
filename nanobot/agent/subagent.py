@@ -298,6 +298,7 @@ class SubagentManager:
             iteration = 0
             final_result: str | None = None
             stop_reason: str | None = None
+            memory_unavailable_reason: str = ""
             # #1101: loop-breaker state
             _lbk = _loop_breaker_k()
             _lb_last_key: str | None = None
@@ -366,12 +367,30 @@ class SubagentManager:
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.debug("Subagent [{}] executing: {} with arguments: {}", task_id, tool_call.name, args_str)
                         result = await tools.execute(tool_call.name, tool_call.arguments)
+                        if tool_call.name == "search_memory":
+                            try:
+                                memory_result = json.loads(result)
+                                if (
+                                    isinstance(memory_result, dict)
+                                    and memory_result.get("status") == "unavailable"
+                                    and memory_result.get("decision") == "blocked"
+                                ):
+                                    memory_unavailable_reason = str(
+                                        memory_result.get("reason") or "memory_unavailable"
+                                    )[:200]
+                            except (TypeError, ValueError):
+                                # A malformed result is also unavailable evidence,
+                                # never a real zero-result search.
+                                memory_unavailable_reason = "invalid_memory_search_result"
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
                             "name": tool_call.name,
                             "content": result,
                         })
+                    if memory_unavailable_reason:
+                        stop_reason = "memory_search_unavailable"
+                        break
                     # #959/#1122 context compaction: trim old tool results once
                     # per provider response, using real prompt usage plus the
                     # estimated appended delta for this iteration. Fail-open.
@@ -437,6 +456,15 @@ class SubagentManager:
                     final_result = response.content
                     break
 
+            if memory_unavailable_reason:
+                final_result = json.dumps({
+                    "action_taken": "Memory-dependent work deferred because verified memory retrieval was unavailable.",
+                    "files_changed": [],
+                    "outcome": "blocked",
+                    "concrete_next_action": "Restore the memory search corpus and retry.",
+                    "findings": [f"memory_search_unavailable:{memory_unavailable_reason}"],
+                }, ensure_ascii=False)
+                stop_reason = "memory_search_unavailable"
             if stop_reason == "identical_call_loop":
                 final_result = (
                     f"Task aborted: subagent repeated the same tool call "
@@ -451,7 +479,9 @@ class SubagentManager:
                 final_result = "Task completed but no final response was generated."
 
             finished_at = self._utc_now()
-            _telem_status = "bounded_stop" if stop_reason else "ok"
+            _telem_status = "blocked" if stop_reason == "memory_search_unavailable" else (
+                "bounded_stop" if stop_reason else "ok"
+            )
             self._write_subagent_telemetry(
                 task_id,
                 self._build_subagent_telemetry_payload(

@@ -523,7 +523,7 @@ class TestRetirementContract:
         monkeypatch.setattr(ei, "_reindex_scripts", _boom)
         counts = ei.reindex(state_dir, repo)
 
-        assert counts["retirement_skipped"] == ["script"]
+        assert counts["retirement_skipped"] == ["script", "memory"]
         assert counts["scripts_deactivated"] == 0
         assert _active_by_kind(state_dir) == {"script": 1, "_fts_rows": 1}, "the live script corpus survived the failed pass"
 
