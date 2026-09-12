@@ -62,6 +62,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from nanobot.runtime.usage_evidence import _SCRIPT_DIRS
+
 # #822 microbench: the minimum measured improvement (percent, lower baseline
 # time minus candidate time over baseline) to call a hypothesis "supported"
 # rather than "refuted". Crude, fixed threshold — this is a steering signal,
@@ -148,7 +150,11 @@ def _confirmed_usage_verdict(
             files = entry.get("files_changed")
             if not isinstance(files, list):
                 continue
-            script_files = [str(f).strip() for f in files if str(f or "").strip().startswith("scripts/")]
+            script_files = [
+                str(f).strip()
+                for f in files
+                if any(str(f or "").strip().startswith(f"{directory}/") for directory in _SCRIPT_DIRS)
+            ]
             if not script_files:
                 continue
             if entry.get("confirmed") is True:
