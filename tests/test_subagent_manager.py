@@ -5,7 +5,7 @@ def test_executor_declared_and_registered_tool_names_match():
     from nanobot.agent.subagent import SubagentManager
 
     assert SubagentManager.declared_tool_names() == (
-        "read_file", "write_file", "edit_file", "list_dir", "exec"
+        "read_file", "write_file", "edit_file", "list_dir", "exec", "search_memory"
     )
     manager = object.__new__(SubagentManager)
     manager.web_tools_enabled = False
@@ -23,7 +23,7 @@ def test_interactive_subagent_role_keeps_web_tools_available():
     manager = object.__new__(SubagentManager)
     manager.web_tools_enabled = True
     assert manager.registered_tool_names() == (
-        "read_file", "write_file", "edit_file", "list_dir", "exec", "web_search", "web_fetch"
+        "read_file", "write_file", "edit_file", "list_dir", "exec", "search_memory", "web_search", "web_fetch"
     )
 
 

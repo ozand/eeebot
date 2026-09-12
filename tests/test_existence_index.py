@@ -558,7 +558,7 @@ class TestRetirementContract:
 
         assert (second["scripts_deactivated"], second["ledger_titles_deactivated"], second["hypotheses_deactivated"]) == (1, 0, 0)
         assert _active_by_kind(state_dir) == {"_fts_rows": 0}
-        assert [kind for kind, _ in ei._CORPORA] == ["script", "ledger_title", "hypothesis"]
+        assert [kind for kind, _ in ei._CORPORA] == ["script", "ledger_title", "memory", "hypothesis"]
 
 
 # ─── #840: related_scripts (relevance ranking for the proposer inventory) ──

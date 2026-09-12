@@ -1834,7 +1834,11 @@ def build_task(req: dict, goal_text: str, report_source: str,
     _verification_note = (
         '' if _pytest_available else '     (pytest is not installed — use python3 -c imports as smoke tests)'
     )
-    declared_tool_names = declared_tool_names or ("read_file", "write_file", "edit_file", "list_dir", "exec")
+    # Keep the literal fallback for standalone AST-extracted contract tests;
+    # production passes the shared declaration explicitly at both call sites.
+    declared_tool_names = declared_tool_names or (
+        "read_file", "write_file", "edit_file", "list_dir", "exec", "search_memory",
+    )
     lines += [
         '## Your instructions',
         'You MUST take a concrete action in this session. Do not return a review only.',
