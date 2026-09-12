@@ -43,8 +43,8 @@ def test_error_pattern_titles_are_derived_per_card():
     assert first["title"] != second["title"]
     assert first["title"] == first["problem"]
     assert second["title"] == second["problem"]
-    assert first["tags"] == ["config"]
-    assert second["tags"] == ["runtime"]
+    assert first["tags"] == ["infra", "config"]
+    assert second["tags"] == ["infra", "runtime"]
     assert first["source"] == "reflector"
     assert second["source"] == "reflector"
 
@@ -59,7 +59,7 @@ def test_real_cluster_has_three_distinct_fields():
     assert card["title"] == card["problem"]
     assert card["title"] != "Reusable corrective approach"
     assert card["solution"]
-    assert card["tags"] == ["runtime"]
+    assert card["tags"] == ["refactor", "tooling", "runtime"]
     assert card["source"] == "reflector"
 
 
