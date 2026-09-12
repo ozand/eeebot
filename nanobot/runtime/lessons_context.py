@@ -70,6 +70,7 @@ _MIN_SHARED_WORDS = 2
 
 _TITLE_CAP = 200
 _TEXT_CAP = 400
+_QUOTED_HYPOTHESIS_RE = re.compile(r'"([^"\n]+)"')
 # Related hint cap: at most this many slugs rendered in a card (#1095).
 _RELATED_HINT_CAP = 3
 
@@ -152,7 +153,10 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """
     normalized = dict(entry)
     if not normalized.get("title") and normalized.get("hypothesis"):
-        normalized["title"] = _cap(normalized["hypothesis"], _TITLE_CAP)
+        hypothesis = str(normalized["hypothesis"])
+        quoted = _QUOTED_HYPOTHESIS_RE.search(hypothesis)
+        title = quoted.group(1) if quoted else hypothesis
+        normalized["title"] = _cap(title, _TITLE_CAP)
     if not normalized.get("approach") and normalized.get("result"):
         normalized["approach"] = normalized["result"]
     if not normalized.get("reusable_insight") and normalized.get("generalized_insight"):
