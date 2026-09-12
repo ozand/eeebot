@@ -73,6 +73,13 @@ def test_verified_absent_skill_is_not_in_catalogue(tmp_path: Path, monkeypatch):
     assert "<name>active</name>" in summary
 
 
+def test_missing_skill_file_is_not_in_catalogue(tmp_path: Path):
+    loader = SkillsLoader(tmp_path, builtin_skills_dir=tmp_path / "builtins")
+    missing = {"name": "gone", "path": str(tmp_path / "skills" / "gone" / "SKILL.md"), "source": "workspace"}
+
+    assert loader._is_retired_skill(missing, set()) is True
+
+
 def test_unverified_present_skill_remains_in_catalogue(tmp_path: Path, monkeypatch):
     skills = tmp_path / "skills"
     _skill(skills, "pending")
