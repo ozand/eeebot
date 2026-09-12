@@ -85,6 +85,43 @@ def _health_metrics(*, report_status: str, materialized_status: str) -> dict:
     }
 
 
+def test_format_rate_preserves_unavailable_zero_and_percentage() -> None:
+    assert DASHBOARD.format_rate(None) == "unavailable"
+    assert DASHBOARD.format_rate(0.0) == "0.0%"
+    assert DASHBOARD.format_rate(0.01602) == "1.6%"
+
+
+def test_dashboard_renders_hypothesis_selection_rate_from_scorecard(tmp_path: Path, monkeypatch) -> None:
+    state_dir = tmp_path / "state"
+    scorecard_dir = state_dir / "scorecard"
+    scorecard_dir.mkdir(parents=True)
+    (scorecard_dir / "latest.json").write_text(json.dumps({
+        "window_days": 7,
+        "loop": {"hypothesis_selection_rate": 0.0236},
+    }), encoding="utf-8")
+    monkeypatch.setattr(DASHBOARD, "STATE_DIR", state_dir)
+
+    metrics = DASHBOARD.collect_metrics_uncached()
+    assert metrics["hypothesis_selection_rate"] == 0.0236
+    assert metrics["hypothesis_selection_rate_text"] == "2.4%"
+    html_out = DASHBOARD.render_html(_render_ready(metrics))
+    assert "Hypothesis selection rate (7-day):" in html_out
+    assert "2.4%" in html_out
+
+
+def test_dashboard_renders_unavailable_selection_rate_without_zero(tmp_path: Path, monkeypatch) -> None:
+    state_dir = tmp_path / "state"
+    scorecard_dir = state_dir / "scorecard"
+    scorecard_dir.mkdir(parents=True)
+    (scorecard_dir / "latest.json").write_text(json.dumps({"window_days": 7, "loop": {}}), encoding="utf-8")
+    monkeypatch.setattr(DASHBOARD, "STATE_DIR", state_dir)
+
+    metrics = DASHBOARD.collect_metrics_uncached()
+    assert metrics["hypothesis_selection_rate"] is None
+    assert metrics["hypothesis_selection_rate_text"] == "unavailable"
+    assert "unavailable" in DASHBOARD.render_html(_render_ready(metrics))
+
+
 def test_cycle_progress_health_dimension_distinguishes_states() -> None:
     base = _health_metrics(report_status="fresh", materialized_status="fresh")
     base["cycle_progress"] = {"state": "stalled", "hours_since_last_success": 6.4, "consecutive_non_integrating_cycles": 26, "dominant_reason": "dirty_tree"}
