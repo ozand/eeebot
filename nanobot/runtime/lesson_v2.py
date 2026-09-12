@@ -15,13 +15,14 @@ Lateral links (#1095):
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
 import re
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,11 @@ from nanobot.runtime.schemas import CONTROLLED_LESSON_TAGS, LESSON_SEVERITIES
 _MAX_FILE_BYTES = 2 * 1024 * 1024
 _MAX_FILE_AGE_DAYS = 90
 _MAX_ENTRIES = 200
+_CITATION_SCAN_MAX_ROWS = 2_000
+_CITATION_SCAN_MAX_ARCHIVES = 16
+CITATION_SCAN_RETENTION_DAYS = 14
+_CITATION_SCAN_FILE = "scans.jsonl"
+_CITATION_ARCHIVE_DIR = "archive"
 _WORD_RE = re.compile(r"[a-z]{3,}")
 _MIN_SOLUTION_MEANINGFUL_CHARS = 20
 _FILLER_SOLUTIONS = frozenset({
@@ -483,43 +489,255 @@ def related_hint(entry: dict[str, Any], *, cap: int = _RELATED_CAP) -> str:
     return "related: " + ", ".join(slugs)
 
 
+def _citation_now(value: datetime | None) -> datetime:
+    current = value or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        return current.replace(tzinfo=timezone.utc)
+    return current.astimezone(timezone.utc)
+
+
+def _citation_ts(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _atomic_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+    finally:
+        try:
+            os.unlink(name)
+        except FileNotFoundError:
+            pass
+
+
+def _read_jsonl(path: Path, limit: int) -> list[dict[str, object]]:
+    if not path.is_file() or path.stat().st_size > _MAX_FILE_BYTES:
+        return []
+    rows: list[dict[str, object]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        item = json.loads(line)
+        if isinstance(item, dict):
+            rows.append(item)
+    return rows[-limit:]
+
+
+def _read_gzip_jsonl(path: Path, limit: int) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                item = json.loads(line)
+                if isinstance(item, dict):
+                    rows.append(item)
+    return rows[-limit:]
+
+
+def _write_gzip_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    os.close(fd)
+    try:
+        with gzip.open(name, "wt", encoding="utf-8") as handle:
+            handle.write("".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows))
+        os.replace(name, path)
+    finally:
+        try:
+            os.unlink(name)
+        except FileNotFoundError:
+            pass
+
+
+def _archive_day(directory: Path, stem: str, day: str, rows: list[dict[str, object]]) -> None:
+    archive = directory / _CITATION_ARCHIVE_DIR / f"{stem}-{day}.jsonl.gz"
+    existing = _read_gzip_jsonl(archive, _CITATION_SCAN_MAX_ROWS) if archive.is_file() else []
+    _write_gzip_jsonl(archive, (existing + rows)[-_CITATION_SCAN_MAX_ROWS:])
+
+
+def _rotate_citation_file(directory: Path, filename: str, now: datetime) -> None:
+    """Archive prior-date rows by their own UTC date and prune old archives."""
+    active = directory / filename
+    if not active.is_file():
+        return
+    rows = _read_jsonl(active, _CITATION_SCAN_MAX_ROWS)
+    if not rows:
+        return
+    stem = filename.removesuffix(".jsonl")
+    current: list[dict[str, object]] = []
+    old_by_day: dict[str, list[dict[str, object]]] = {}
+    for row in rows:
+        timestamp = _citation_ts(row.get("ts"))
+        if timestamp is None or timestamp.date() == now.date():
+            current.append(row)
+        else:
+            old_by_day.setdefault(timestamp.date().isoformat(), []).append(row)
+    for day, old_rows in old_by_day.items():
+        _archive_day(directory, stem, day, old_rows)
+    _atomic_jsonl(active, current)
+    cutoff = (now - timedelta(days=CITATION_SCAN_RETENTION_DAYS)).date()
+    archive_dir = directory / _CITATION_ARCHIVE_DIR
+    if archive_dir.is_dir():
+        for archive in archive_dir.glob(f"{stem}-*.jsonl.gz"):
+            try:
+                day = datetime.strptime(archive.name[len(stem) + 1:-len(".jsonl.gz")], "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if day < cutoff:
+                archive.unlink(missing_ok=True)
+
+
+def _append_citation_rows(
+    path: Path,
+    rows: list[dict[str, object]],
+    now: datetime,
+    *,
+    max_rows: int = _MAX_ENTRIES,
+) -> None:
+    """Append bounded JSONL rows, preserving the legacy citation path."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = _read_jsonl(path, max_rows)
+    _atomic_jsonl(path, (existing + rows)[-max_rows:])
+
+
+def _record_scan_failure(
+    directory: Path,
+    scan: dict[str, object],
+    now: datetime,
+    error: Exception,
+) -> None:
+    """Best-effort secondary trace when the primary scan ledger cannot be written."""
+    try:
+        failure = dict(scan)
+        failure["status"] = "unavailable"
+        failure["notes"] = ["scan_write_failed", type(error).__name__]
+        _append_citation_rows(
+            directory / "scan-failures.jsonl", [failure], now,
+            max_rows=_CITATION_SCAN_MAX_ROWS,
+        )
+    except Exception:
+        pass
+
+
 def record_citations(
     state_dir: Path,
     cycle_id: str,
     texts: list[str],
     *,
     max_chars: int = 64_000,
+    now: datetime | None = None,
 ) -> list[str]:
-    """Grep bounded proposal/transcript text and atomically record usage rows."""
-    ids: set[str] = set()
+    """Scan bounded response fields and persist both hits and zero-result scans.
+
+    The scan ledger is retained for :data:`CITATION_SCAN_RETENTION_DAYS` days.
+    A successful zero-marker scan is evidence; an absent ledger is not.
+    """
+    current = _citation_now(now)
     pattern = re.compile(r"\[Lesson\s+([A-Za-z0-9_-]+)\]", re.IGNORECASE)
+    matches: list[str] = []
     for text in texts:
-        ids.update(pattern.findall(str(text or "")[:max_chars]))
-    if not ids:
-        return []
-    path = Path(state_dir) / "lesson_usage" / "citations.jsonl"
+        matches.extend(pattern.findall(str(text or "")[:max_chars]))
+    ids = sorted(set(matches))
+    timestamp = current.isoformat().replace("+00:00", "Z")
+    directory = Path(state_dir) / "lesson_usage"
+    scan: dict[str, object] = {
+        "scan_ran": True,
+        "cycle_id": str(cycle_id),
+        "marker_count": len(matches),
+        "lesson_ids": ids,
+        "status": "complete",
+        "notes": [],
+        "ts": timestamp,
+    }
+    citation_failed = False
     try:
-        rows: list[dict[str, str]] = []
-        if path.exists():
-            stat = path.stat()
-            if stat.st_size <= _MAX_FILE_BYTES:
-                rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-                rows = [row for row in rows if isinstance(row, dict)][-_MAX_ENTRIES:]
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        rows.extend({"lesson_id": lesson_id, "cycle_id": cycle_id, "ts": now} for lesson_id in sorted(ids))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows[-_MAX_ENTRIES:]))
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(name, path)
-        finally:
+        if ids:
+            citation_rows = [{"lesson_id": lesson_id, "cycle_id": str(cycle_id), "ts": timestamp} for lesson_id in ids]
             try:
-                os.unlink(name)
-            except FileNotFoundError:
-                pass
-        return sorted(ids)
-    except Exception:
-        return []
+                _append_citation_rows(directory / "citations.jsonl", citation_rows, current)
+            except Exception as error:
+                citation_failed = True
+                scan["status"] = "unavailable"
+                scan["notes"] = ["citation_write_failed", type(error).__name__]
+        try:
+            scan_path = directory / _CITATION_SCAN_FILE
+            _rotate_citation_file(directory, _CITATION_SCAN_FILE, current)
+            _append_citation_rows(
+                scan_path, [scan], current, max_rows=_CITATION_SCAN_MAX_ROWS,
+            )
+        except Exception as error:
+            _record_scan_failure(directory, scan, current, error)
+    except Exception as error:
+        _record_scan_failure(directory, scan, current, error)
+    return [] if citation_failed else ids
+
+
+def _citation_sources(directory: Path) -> list[Path]:
+    archive_dir = directory / _CITATION_ARCHIVE_DIR
+    archives = sorted(archive_dir.glob("scans-*.jsonl.gz"), reverse=True) if archive_dir.is_dir() else []
+    failures = sorted(archive_dir.glob("scan-failures-*.jsonl.gz"), reverse=True) if archive_dir.is_dir() else []
+    return ([directory / _CITATION_SCAN_FILE] if (directory / _CITATION_SCAN_FILE).is_file() else []) + [
+        *archives[:_CITATION_SCAN_MAX_ARCHIVES],
+        directory / "scan-failures.jsonl",
+        *failures[:_CITATION_SCAN_MAX_ARCHIVES],
+    ]
+
+
+def read_citation_scans(
+    state_dir: Path,
+    *,
+    since: datetime | None = None,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Read bounded retained scan evidence with explicit retention states."""
+    current = _citation_now(now)
+    directory = Path(state_dir) / "lesson_usage"
+    requested = None if since is None else _citation_now(since)
+    cutoff = current - timedelta(days=CITATION_SCAN_RETENTION_DAYS)
+    if requested is not None and requested < cutoff:
+        return {"status": "unavailable", "rows": [], "notes": ["beyond_retention"]}
+    sources = _citation_sources(directory)
+    if not sources:
+        return {"status": "missing", "rows": [], "notes": []}
+    rows: list[dict[str, object]] = []
+    try:
+        for source in sources[:1 + 2 * _CITATION_SCAN_MAX_ARCHIVES + 1]:
+            if not source.is_file():
+                continue
+            remaining = _CITATION_SCAN_MAX_ROWS - len(rows)
+            if remaining <= 0:
+                break
+            if source.name.endswith(".gz"):
+                rows.extend(_read_gzip_jsonl(source, remaining))
+            else:
+                rows.extend(_read_jsonl(source, remaining))
+        retained: list[dict[str, object]] = []
+        stale = False
+        for row in rows:
+            timestamp = _citation_ts(row.get("ts"))
+            if timestamp is None:
+                continue
+            if timestamp < cutoff:
+                stale = True
+                continue
+            if requested is None or timestamp >= requested:
+                retained.append(row)
+        retained.sort(key=lambda row: _citation_ts(row.get("ts")) or datetime.min.replace(tzinfo=timezone.utc))
+        if not retained and stale:
+            return {"status": "unavailable", "rows": [], "notes": ["beyond_retention"]}
+        return {"status": "present" if retained else "empty", "rows": retained, "notes": []}
+    except Exception as error:
+        return {"status": "unavailable", "rows": [], "notes": [type(error).__name__]}

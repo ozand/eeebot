@@ -10,6 +10,18 @@ import yaml
 
 from nanobot.runtime.bridge import _write_structured_lesson, build_task
 from nanobot.runtime.knowledge_curator import promote_reflector_recommendations_to_v2
+from nanobot.runtime.lesson_v2 import (
+    bounded_load_yaml,
+    find_duplicate,
+    keyword_jaccard,
+    normalize_problem,
+    read_citation_scans,
+    record_citations,
+    solution_is_meaningful,
+    validate_lesson,
+    validate_lesson_for_mint,
+)
+from nanobot.runtime.schemas import CONTROLLED_LESSON_TAGS
 
 
 def _materialize_staged_lessons(workspace: Path, state_dir: Path) -> None:
@@ -24,19 +36,6 @@ def _materialize_staged_lessons(workspace: Path, state_dir: Path) -> None:
         if entry.get("kind") == LESSONS_KIND:
             payload_path = state_dir / "curator" / _STAGED_DIR / entry["payload_file"]
             apply_staged_lesson_cards(workspace, json.loads(payload_path.read_text(encoding="utf-8")))
-
-
-from nanobot.runtime.lesson_v2 import (  # noqa: E402
-    bounded_load_yaml,
-    find_duplicate,
-    keyword_jaccard,
-    normalize_problem,
-    record_citations,
-    solution_is_meaningful,
-    validate_lesson,
-    validate_lesson_for_mint,
-)
-from nanobot.runtime.schemas import CONTROLLED_LESSON_TAGS
 
 
 def _base_artifact(**extra: object) -> dict:
@@ -110,6 +109,73 @@ def test_citations_are_bounded_and_reporting_only(tmp_path: Path) -> None:
     assert rows == [{"lesson_id": "LESS-1", "cycle_id": "cycle-1", "ts": rows[0]["ts"]}]
 
 
+def test_citation_scan_records_zero_result(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    assert record_citations(state, "cycle-zero", ["no lesson marker here"]) == []
+
+    result = read_citation_scans(state)
+    assert result["status"] == "present"
+    assert result["rows"][-1]["scan_ran"] is True
+    assert result["rows"][-1]["marker_count"] == 0
+    assert result["rows"][-1]["cycle_id"] == "cycle-zero"
+
+
+def test_citation_scan_records_positive_result(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    assert record_citations(state, "cycle-hit", ["response [Lesson LESS-1] [Lesson LESS-2]"]) == ["LESS-1", "LESS-2"]
+
+    row = read_citation_scans(state)["rows"][-1]
+    assert row["scan_ran"] is True
+    assert row["marker_count"] == 2
+    assert row["cycle_id"] == "cycle-hit"
+
+
+def test_citation_writer_failure_is_recorded_fail_open(tmp_path: Path, monkeypatch) -> None:
+    state = tmp_path / "state"
+    original = Path.read_text
+
+    def broken_read(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == "citations.jsonl":
+            raise OSError("citation store unavailable")
+        return original(self, *args, **kwargs)
+
+    citations = state / "lesson_usage" / "citations.jsonl"
+    citations.parent.mkdir(parents=True)
+    citations.write_text("not-json\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "read_text", broken_read)
+
+    assert record_citations(state, "cycle-failed", ["[Lesson LESS-1]"]) == []
+    row = read_citation_scans(state)["rows"][-1]
+    assert row["scan_ran"] is True
+    assert row["marker_count"] == 1
+    assert row["status"] == "unavailable"
+    assert "citation_write_failed" in row["notes"]
+
+
+def test_citation_scan_rotation_and_beyond_retention(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from nanobot.runtime import lesson_v2
+
+    state = tmp_path / "state"
+    first = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert record_citations(state, "cycle-old", ["none"], now=first) == []
+    assert record_citations(state, "cycle-new", ["none"], now=first + timedelta(days=1)) == []
+    assert list((state / "lesson_usage" / "archive").glob("scans-*.jsonl.gz"))
+
+    retained = read_citation_scans(state, since=first + timedelta(hours=1), now=first + timedelta(days=1))
+    assert retained["status"] == "present"
+    assert [row["cycle_id"] for row in retained["rows"]] == ["cycle-new"]
+
+    beyond = read_citation_scans(
+        state,
+        since=first - timedelta(days=lesson_v2.CITATION_SCAN_RETENTION_DAYS + 1),
+        now=first + timedelta(days=1),
+    )
+    assert beyond["status"] == "unavailable"
+    assert "beyond_retention" in beyond["notes"]
+
+
 def test_bounded_reader_skips_before_open(tmp_path: Path, monkeypatch) -> None:
     old = tmp_path / "old.yaml"
     old.write_text("lessons:\n  - problem: old\n", encoding="utf-8")
@@ -177,8 +243,9 @@ def test_solution_validator_rejects_near_duplicate() -> None:
 
 
 def test_curator_folds_duplicate_and_upgrades_meaningless_solution(tmp_path: Path) -> None:
-    from nanobot.runtime.knowledge_curator import promote_reflector_recommendations_to_v2
     import yaml
+
+    from nanobot.runtime.knowledge_curator import promote_reflector_recommendations_to_v2
 
     # State path needs to have a file at reflector/reflections.jsonl
     state_dir = tmp_path / "state"
@@ -200,13 +267,13 @@ def test_curator_folds_duplicate_and_upgrades_meaningless_solution(tmp_path: Pat
         }]
     }), encoding="utf-8")
 
-    count = promote_reflector_recommendations_to_v2(tmp_path, state_dir)
+    promote_reflector_recommendations_to_v2(tmp_path, state_dir)
     _materialize_staged_lessons(tmp_path, state_dir)
 
     with target.open(encoding="utf-8") as f:
         doc = yaml.safe_load(f)
     cards = doc.get("lessons", [])
-    
+
     # Assert card count is strictly 1 (deduped rather than proliferating)
     assert len(cards) == 1
     # Assert the meaningless template solution was upgraded to the new concrete one extracted from reflector output
