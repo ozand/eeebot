@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+# Refuse accidental commits on the repository's protected branch. Detached HEADs
+# deliberately pass through: they have no branch to protect.
+branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+[ -n "$branch" ] || exit 0
+
+default_branch="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+case "$default_branch" in
+    origin/*) default_branch=${default_branch#origin/} ;;
+esac
+if [ -z "$default_branch" ]; then
+    default_branch="$(git config --get init.defaultBranch 2>/dev/null || true)"
+fi
+[ -n "$default_branch" ] || default_branch=main
+
+if [ "$branch" = "main" ] || [ "$branch" = "$default_branch" ]; then
+    cat >&2 <<'EOF'
+eeebot: refusing commit on the shared main/default branch.
+
+Use a worktree instead:
+  git worktree add -b <branch> T:/Code/.worktrees/eeebot-<issue> main
+  cd T:/Code/.worktrees/eeebot-<issue>
+  ... commit and open a PR against main ...
+
+If this is an intentional operator commit to main, use `git commit --no-verify` deliberately.
+EOF
+    exit 1
+fi
+
+exit 0
