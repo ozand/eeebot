@@ -131,6 +131,84 @@ def test_executor_result_citation_boundary_distinguishes_hit_zero_and_absent(tmp
     assert "lesson_ids" not in missing_row
     assert "executor_result_unavailable" in missing_row["notes"]
 
+    assert "scanned_chars" in zero_row
+    assert zero_row["scanned_chars"] == len("Done without a citation")
+
+
+def test_executor_result_records_length_when_scanned(tmp_path: Path) -> None:
+    """#1546: a reader must not have to open the subagent file to tell a
+    substantive scan from a near-empty one behind the same status/marker_count.
+    """
+    state = tmp_path / "state"
+    text = "A real answer with plenty of words and " + ("x" * 500)
+    assert record_citations(state, "cycle-length", executor_result=text) == []
+    row = read_citation_scans(state)["rows"][-1]
+    assert row["status"] == "complete"
+    assert row["scanned_chars"] == len(text)
+
+
+def test_cancelled_repair_stub_is_not_reported_as_a_confirmed_zero(tmp_path: Path) -> None:
+    """#1546: `bridge.py`'s citation call site can, in principle, resolve to
+    a repair-turn spawn (see test_bridge_authoritative_subagent.py for when).
+    Whichever spawn is fed in here, one whose own persisted `status` names a
+    canned-stub terminal state must never read the same as a real zero —
+    that was the whole point of the issue (a cancelled/errored/bounded_stop/
+    blocked stub cannot structurally contain a `[Lesson <id>]` marker).
+    """
+    for status, stub_text in (
+        ("cancelled", "Cancelled before completion."),
+        ("error", "Error: LLM execution failed: connection reset"),
+        ("bounded_stop", "Stopped: wall-clock deadline reached."),
+        ("blocked", "Blocked: identical tool-call loop detected."),
+    ):
+        subagents = tmp_path / "state" / "subagents"
+        subagents.mkdir(parents=True, exist_ok=True)
+        task_id = f"stub-{status}"
+        (subagents / f"{task_id}.json").write_text(
+            json.dumps({"result": stub_text, "status": status}), encoding="utf-8",
+        )
+        state = tmp_path / "state"
+        executor_result = read_executor_result(state, task_id)
+        # Not the plain "nothing could be read at all" sentinel, and not a
+        # bare string either — a distinct, third outcome carrying what was
+        # actually there.
+        assert executor_result is not None
+        assert not isinstance(executor_result, str)
+
+        cycle_id = f"cycle-{status}-stub"
+        assert record_citations(state, cycle_id, executor_result=executor_result) == []
+        row = [r for r in read_citation_scans(state)["rows"] if r["cycle_id"] == cycle_id][-1]
+        assert row["status"] == "unavailable"
+        assert "marker_count" not in row
+        assert "lesson_ids" not in row
+        assert row["scanned_chars"] == len(stub_text)
+        assert "executor_result_not_final" in row["notes"]
+        assert f"subagent_status:{status}" in row["notes"]
+
+
+def test_ok_status_and_missing_status_are_both_still_trusted(tmp_path: Path) -> None:
+    """#1546 must not make every result suspicious — an explicit `status: ok`
+    and a legacy row with no `status` key at all (written before that field
+    existed) both keep reading as a real, scannable answer, unchanged.
+    """
+    state = tmp_path / "state"
+    subagents = state / "subagents"
+    subagents.mkdir(parents=True, exist_ok=True)
+    (subagents / "ok-task.json").write_text(
+        json.dumps({"result": "Done. [Lesson LESS-OK]", "status": "ok"}), encoding="utf-8",
+    )
+    (subagents / "legacy-task.json").write_text(
+        json.dumps({"result": "Done. [Lesson LESS-LEGACY]"}), encoding="utf-8",
+    )
+
+    ok_result = read_executor_result(state, "ok-task")
+    assert ok_result == "Done. [Lesson LESS-OK]"
+    assert record_citations(state, "cycle-ok-status", executor_result=ok_result) == ["LESS-OK"]
+
+    legacy_result = read_executor_result(state, "legacy-task")
+    assert legacy_result == "Done. [Lesson LESS-LEGACY]"
+    assert record_citations(state, "cycle-legacy-status", executor_result=legacy_result) == ["LESS-LEGACY"]
+
 
 def test_citations_are_bounded_and_reporting_only(tmp_path: Path) -> None:
     state = tmp_path / "state"

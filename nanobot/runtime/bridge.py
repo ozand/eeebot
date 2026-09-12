@@ -2936,6 +2936,11 @@ async def _main_impl_body():
         _test_weakening_soft: 'list[str]' = []
         main_sha_after = main_sha_before
         _repair_attempts = 0
+        # #1546: task_ids of each repair-turn spawn, oldest first — used after
+        # the repair loop to find the most recent attempt that actually
+        # completed (status "ok"), since the primary spawn's own answer can
+        # be superseded by a later repair that fixed what the primary missed.
+        _repair_task_ids: 'list[str]' = []
         _smoke_passed = True
         _smoke_ran = False
         try:
@@ -3211,6 +3216,12 @@ async def _main_impl_body():
                         task=_repair_prompt,
                         task_id=f'selfevo-repair-{_repair_attempts}',
                     )
+                    # #1546: capture NOW, same reason as #1118 above — the key
+                    # is live in _repair_mgr._running_tasks only until this
+                    # spawn's own done-callback pops it.
+                    _repair_spawn_id = next(iter(_repair_mgr._running_tasks), None)
+                    if _repair_spawn_id:
+                        _repair_task_ids.append(_repair_spawn_id)
                     try:
                         await asyncio.wait_for(
                             asyncio.gather(*list(_repair_mgr._running_tasks.values()), return_exceptions=True),
@@ -3258,6 +3269,15 @@ async def _main_impl_body():
                         baseline_test_names=_baseline_test_names,
                     )
                     print(f'smoke (after repair {_repair_attempts}): {"PASS" if _smoke_passed else "FAIL"}')
+            # #1546: the citation scan (see _read_executor_result/_record_lesson_citations
+            # far below) must read whichever spawn's answer is actually authoritative for
+            # this cycle, not always the primary. `_subagent_task_id` above stays fixed to
+            # the primary spawn for its existing consumers (crash_record classification,
+            # _executor_llm_error) — this is a separate resolution, citation-only, so none
+            # of those other reads change behaviour.
+            _citation_subagent_task_id = _authoritative_subagent_task_id(
+                STATE_DIR, _subagent_task_id, _repair_task_ids,
+            )
             # ─────────────────────────────────────────────────────────────────────
 
             # #678 F1/F3: recompute the changed-file set and violation split across
@@ -3795,6 +3815,12 @@ async def _main_impl_body():
             'score': locals().get('cand_score', float('-inf')),
             'cycle_tier': locals().get('_cycle_tier', 'script'),
             'subagent_task_id': locals().get('_subagent_task_id', None),
+            # #1546: falls back to the primary task_id itself when the repair
+            # loop never ran (or never produced an "ok" attempt) — see
+            # _authoritative_subagent_task_id above.
+            'citation_subagent_task_id': locals().get(
+                '_citation_subagent_task_id', locals().get('_subagent_task_id', None),
+            ),
             'executor_llm_error': locals().get('_executor_llm_error_text', ''),
             'system_prompt_overflow': locals().get('_system_prompt_overflow_text', ''),
             'run_stop_reason': locals().get('_run_stop_reason', ''),
@@ -3898,6 +3924,7 @@ async def _main_impl_body():
     _integrated = _res['integrated']
     _cycle_tier = _res.get('cycle_tier', 'script')
     _subagent_task_id = _res.get('subagent_task_id')
+    _citation_subagent_task_id = _res.get('citation_subagent_task_id', _subagent_task_id)
     _executor_llm_error_text = str(_res.get('executor_llm_error') or '')
     _system_prompt_overflow_text = str(_res.get('system_prompt_overflow') or '')
     _prompt_fit_rung = None
@@ -4054,7 +4081,10 @@ async def _main_impl_body():
             read_executor_result as _read_executor_result,
             record_citations as _record_lesson_citations,
         )
-        _executor_result = _read_executor_result(STATE_DIR, _subagent_task_id)
+        # #1546: the authoritative-attempt resolution (primary vs. a later
+        # repair spawn that actually completed), not the fixed primary
+        # `_subagent_task_id` used by the diagnostics above.
+        _executor_result = _read_executor_result(STATE_DIR, _citation_subagent_task_id)
         _record_lesson_citations(
             STATE_DIR,
             _cycle_id,
@@ -4444,6 +4474,52 @@ _INCONCLUSIVE_REASONS = frozenset({
     'switch_base_gate_blocked', 'head_on_main_precondition_failed',
     'no_commit', 'internal_error', 'executor_llm_error',
 })
+
+
+def _subagent_own_status(state_dir: Path, task_id: 'str | None') -> str:
+    """#1546: best-effort read of a persisted subagent's own ``status`` field.
+
+    Fail-open to ``""`` on any read problem, missing file, or malformed
+    payload — callers treat an unreadable status the same as "not ok",
+    never as evidence either way.
+    """
+    if not task_id:
+        return ''
+    try:
+        payload = json.loads((Path(state_dir) / 'subagents' / f'{task_id}.json').read_text(encoding='utf-8'))
+        if not isinstance(payload, dict):
+            return ''
+        return str(payload.get('status') or '')
+    except Exception:
+        return ''
+
+
+def _authoritative_subagent_task_id(
+    state_dir: Path, primary_task_id: 'str | None', repair_task_ids: 'list[str]',
+) -> 'str | None':
+    """#1546: which spawn's persisted result is authoritative for this cycle.
+
+    `_subagent_task_id` (bridge.py, captured once right after the primary
+    spawn) is fixed to the FIRST attempt for the whole cycle, including its
+    other consumers (crash_record classification, `_executor_llm_error`) —
+    that is correct for those, since they ask specifically about the primary
+    spawn's own outcome. But a cycle that entered the repair loop may have a
+    LATER attempt that is the one which actually finished with a real answer
+    (`status: "ok"`), while the primary's own text is stale or was itself a
+    smoke-failing attempt. Reading the citation scan is asking "what did the
+    cycle ultimately produce", not "what did the first attempt say" — so this
+    resolves to the most recent attempt (newest repair first, falling back to
+    the primary) whose own telemetry says ``status == "ok"``.
+
+    Falls back to `primary_task_id` when no attempt (repair or primary) ever
+    reached ``"ok"`` — that is still the most complete record of what the
+    cycle did, and #1546 part 2 (`read_executor_result`) is what keeps a
+    non-"ok" result from being reported as a trustworthy zero either way.
+    """
+    for candidate in reversed(repair_task_ids):
+        if _subagent_own_status(state_dir, candidate) == 'ok':
+            return candidate
+    return primary_task_id
 
 
 def _executor_llm_error(state_dir: Path, task_id: 'str | None') -> str:
