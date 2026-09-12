@@ -201,9 +201,13 @@ def test_decisions_record_staged_then_promoted_with_the_pushed_sha(tmp_path: Pat
     promote_reflector_recommendations_to_v2(repo, state, max_items=2)
     rows = _decisions(state)
     assert rows, "staging must leave a decision row"
-    assert {r["decision"] for r in rows} == {"staged"}
-    assert rows[0]["lesson_id"].startswith("LESS-REF-")
-    assert rows[0]["target_file"] == LESSONS_REL
+    # Exhaustive set intentionally includes the lesson-v2 mint gate's
+    # positive observability marker; this is a reviewed contract expansion,
+    # not incidental churn in the pickup decision stream.
+    assert {r["decision"] for r in rows} == {"staged", "mint_gate_passed"}
+    staged_row = next(r for r in rows if r["decision"] == "staged")
+    assert staged_row["lesson_id"].startswith("LESS-REF-")
+    assert staged_row["target_file"] == LESSONS_REL
 
     _cycle_start_reset(repo)
     assert _pickup_staged_promotions(repo, state) == 1

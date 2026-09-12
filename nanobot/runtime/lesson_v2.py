@@ -64,23 +64,21 @@ _RELATED_SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}")
 _INLINE_RELATED_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _MAX_TITLE_DIAGNOSTIC_CHARS = 160
 _TITLE_GATE_PASS_REASON = "title_gate_pass"
-_TITLE_GATE_PASS_FILE = "title_gate.json"
-_TITLE_GATE_GENERIC_WORDS = frozenset({
-    "approach", "approaches", "card", "corrective", "error", "failure", "lesson", "pattern",
-    "prevention", "process", "recommendation", "recurring", "reusable",
-    "resolution", "solution", "strategy", "technique", "template",
-})
-
-
-def _title_gate_reason(card: dict[str, Any]) -> dict[str, str] | None:
-    """Reject titles made only from generic lesson-genre vocabulary."""
+def _title_gate_reason(
+    card: dict[str, Any], existing: list[dict[str, Any]] = (),
+) -> dict[str, str] | None:
+    """Reject a title that collides with an existing selection key."""
     title = _quality_text(card.get("title"))
-    condition = keyword_set(card.get("problem") or card.get("root_cause"))
-    if not title or not condition:
+    if not title:
         return None
-    title_words = set(_WORD_RE.findall(title))
-    if title_words and title_words <= _TITLE_GATE_GENERIC_WORDS and condition:
-        return {"reason": "title_gate:genre_only"}
+    for entry in existing[:_MAX_ENTRIES]:
+        if not isinstance(entry, dict) or not _quality_text(entry.get("title")):
+            continue
+        if title == _quality_text(entry.get("title")):
+            return {
+                "reason": "title_gate:duplicate_title",
+                "duplicate_id": str(entry.get("id") or entry.get("path") or "")[:200],
+            }
     return None
 
 
@@ -224,38 +222,31 @@ def allow_mint(card: dict[str, Any], existing: list[dict[str, Any]], state_dir: 
                 entries.append(pair)
     reason = mint_quality_reason(card, entries, extending=extending)
     if reason is None and not extending and card.get("title"):
-        reason = _title_gate_reason(card)
+        reason = _title_gate_reason(card, entries)
     try:
         decision_path = Path(state_dir) / "curator/decisions.jsonl"
-        marker_path = decision_path.parent / _TITLE_GATE_PASS_FILE
         decision_path.parent.mkdir(parents=True, exist_ok=True)
-        marker_status = "skipped" if extending else ("passed" if reason is None else "rejected")
-        marker_reason = "extension" if extending else str(
-            reason.get("reason") if reason else _TITLE_GATE_PASS_REASON
-        )[:_MAX_TITLE_DIAGNOSTIC_CHARS]
-        marker_path.write_text(
-            json.dumps({
-                "status": marker_status,
-                "reason": marker_reason,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
         if reason is None:
-            return True
-        row = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "lesson_id": card.get("id"),
-            "decision": "mint_rejected",
-            **reason,
-            "reason": str(reason.get("reason") or "unknown")[:_MAX_TITLE_DIAGNOSTIC_CHARS],
-            "instruction": "Extend the existing lesson with evidence instead of minting" if reason["reason"] == "duplicate" else "Supply a reusable condition and distinct corrective action",
-        }
+            row = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "lesson_id": card.get("id"),
+                "decision": "mint_gate_passed",
+                "reason": _TITLE_GATE_PASS_REASON,
+            }
+        else:
+            row = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "lesson_id": card.get("id"),
+                "decision": "mint_rejected",
+                **reason,
+                "reason": str(reason.get("reason") or "unknown")[:_MAX_TITLE_DIAGNOSTIC_CHARS],
+                "instruction": "Extend the existing lesson with evidence instead of minting" if reason["reason"] == "duplicate" else "Supply a reusable condition and distinct corrective action",
+            }
         with decision_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(row, ensure_ascii=False) + "\n")
     except OSError:
         pass
-    return False
+    return reason is None
 
 
 

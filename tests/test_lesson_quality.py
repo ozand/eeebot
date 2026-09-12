@@ -101,29 +101,24 @@ def test_real_live_reflector_paraphrased_duplicates():
     assert reason_dde_7c7["duplicate_id"] == "LESS-REF-7c7d36e5d201-5015"
 
 
-def test_title_gate_rejects_genre_titles_and_records_bounded_reason(tmp_path):
-    for index, title in enumerate((
-        "Reusable corrective approach",
-        "Recurring failure prevention",
-        "Reusable corrective strategy",
-    )):
-        state_dir = tmp_path / f"case-{index}"
-        card = {
-            "title": title,
-            "problem": "Parser crashes on malformed nested tokens",
-            "solution": "Use chunked generator streaming instead of reading entire file into memory",
-            "tags": ["runtime"],
-            "severity": "medium",
-            "evidence": ["cycle-title-gate"],
-        }
-        assert not lesson_v2.allow_mint(card, [], state_dir)
-        row = json.loads((state_dir / "curator/decisions.jsonl").read_text().splitlines()[-1])
-        assert row["decision"] == "mint_rejected"
-        assert row["reason"] == "title_gate:genre_only"
-        assert len(row["reason"]) <= lesson_v2._MAX_TITLE_DIAGNOSTIC_CHARS
+def test_title_gate_rejects_duplicate_titles_and_records_bounded_reason(tmp_path):
+    card = {
+        "title": "Parser crash on malformed nested tokens",
+        "problem": "Parser crashes on malformed nested tokens",
+        "solution": "Use chunked generator streaming instead of reading entire file into memory",
+        "tags": ["runtime"],
+        "severity": "medium",
+        "evidence": ["cycle-title-gate"],
+    }
+    assert not lesson_v2.allow_mint(card, [{"id": "existing-1", "title": card["title"]}], tmp_path)
+    row = json.loads((tmp_path / "curator/decisions.jsonl").read_text().splitlines()[-1])
+    assert row["decision"] == "mint_rejected"
+    assert row["reason"] == "title_gate:duplicate_title"
+    assert row["duplicate_id"] == "existing-1"
+    assert len(row["reason"]) <= lesson_v2._MAX_TITLE_DIAGNOSTIC_CHARS
 
 
-def test_title_gate_accepts_condition_title_and_records_pass(tmp_path):
+def test_title_gate_accepts_unique_condition_title_and_records_pass(tmp_path):
     card = {
         "title": "Parser crash on malformed nested tokens",
         "problem": "Parser crashes on malformed nested tokens",
@@ -133,30 +128,15 @@ def test_title_gate_accepts_condition_title_and_records_pass(tmp_path):
         "evidence": ["cycle-title-gate"],
     }
     assert lesson_v2.allow_mint(card, [], tmp_path)
-    assert not (tmp_path / "curator" / "decisions.jsonl").exists()
-    marker = json.loads((tmp_path / "curator" / "title_gate.json").read_text())
-    assert marker["status"] == "passed"
-    assert marker["reason"] == "title_gate_pass"
+    row = json.loads((tmp_path / "curator" / "decisions.jsonl").read_text().splitlines()[-1])
+    assert row["decision"] == "mint_gate_passed"
+    assert row["reason"] == "title_gate_pass"
 
 
 def test_title_gate_without_execution_has_no_pass_marker(tmp_path):
     assert not (tmp_path / "curator" / "decisions.jsonl").exists()
     assert not (tmp_path / "curator" / "title_gate.json").exists()
 
-
-def test_title_gate_marker_distinguishes_extension_from_mint_pass(tmp_path):
-    card = {
-        "title": "Parser crash on malformed nested tokens",
-        "problem": "Parser crashes on malformed nested tokens",
-        "solution": "Use chunked generator streaming instead of reading entire file into memory",
-        "tags": ["runtime"],
-        "severity": "medium",
-        "evidence": ["cycle-title-gate"],
-    }
-    assert lesson_v2.allow_mint(card, [], tmp_path, extending=True)
-    marker = json.loads((tmp_path / "curator" / "title_gate.json").read_text())
-    assert marker["status"] == "skipped"
-    assert marker["reason"] == "extension"
 
 
 def test_rejection_records_existing_decision_surface(tmp_path):
