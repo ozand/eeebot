@@ -1,0 +1,993 @@
+- id: ERR-20260912-d0574690
+  date: '2026-09-12'
+  cycle_id: cycle-d0574690c207
+  task_id: Wire recursive testsuite traversal skill into scripts/verify_and_proof.py
+    to enu
+  hypothesis: Cycle failed due to gate_failed.
+  result: 'Failed/rejected: gate_failed'
+  reason: gate_failed
+  violated_check: gate_failed
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid gate_failed: cycle gate verification or execution failed.'
+- id: ERR-20260912-861355a6
+  date: '2026-09-12'
+  cycle_id: cycle-861355a6a49b
+  task_id: Batch script checking into a single execution pass in scripts/validate_unused_im
+  hypothesis: Cycle failed due to mutation_surface_violation.
+  result: 'Failed/rejected: mutation_surface_violation'
+  reason: mutation_surface_violation
+  violated_check: mutation_surface_violation
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid mutation_surface_violation: cycle gate verification
+    or execution failed.'
+- id: ERR-20260912-da6c95e3
+  date: '2026-09-12'
+  cycle_id: cycle-da6c95e3817b
+  task_id: Retire unused composite-context-inspection skill and remove directory
+  hypothesis: Cycle failed due to mutation_surface_violation.
+  result: 'Failed/rejected: mutation_surface_violation'
+  reason: mutation_surface_violation
+  violated_check: mutation_surface_violation
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid mutation_surface_violation: cycle gate verification
+    or execution failed.'
+- id: ERR-20260912-51ca52a5
+  date: '2026-09-12'
+  cycle_id: cycle-51ca52a5a96a
+  task_id: Add structured record normalization and conflict detection to scripts/approval_t
+  hypothesis: Cycle failed due to mutation_surface_violation.
+  result: 'Failed/rejected: mutation_surface_violation'
+  reason: mutation_surface_violation
+  violated_check: mutation_surface_violation
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid mutation_surface_violation: cycle gate verification
+    or execution failed.'
+- id: ERR-20260912-32c17dcf
+  date: '2026-09-12'
+  cycle_id: cycle-32c17dcfabf3
+  task_id: Package recurring verify_and_proof inspection procedure into skill
+  hypothesis: Cycle failed due to mutation_surface_violation.
+  result: 'Failed/rejected: mutation_surface_violation'
+  reason: mutation_surface_violation
+  violated_check: mutation_surface_violation
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid mutation_surface_violation: cycle gate verification
+    or execution failed.'
+- id: ERR-20260911-4b4bdcf4
+  date: '2026-09-11'
+  cycle_id: cycle-4b4bdcf4bec7
+  task_id: Fix default target scanning and exit code in scripts/validate_markdown_format.py
+  hypothesis: Cycle failed due to executor_llm_error.
+  result: 'Failed/rejected: executor_llm_error'
+  reason: executor_llm_error
+  violated_check: executor_llm_error
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid executor_llm_error: cycle gate verification or execution
+    failed.'
+- id: ERR-20260911-af2a878e
+  date: '2026-09-11'
+  cycle_id: cycle-af2a878efdb0
+  task_id: Support zero-argument invocation in scripts/check_ast_line_count.py by
+    defaultin
+  hypothesis: Cycle failed due to executor_llm_error.
+  result: 'Failed/rejected: executor_llm_error'
+  reason: executor_llm_error
+  violated_check: executor_llm_error
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid executor_llm_error: cycle gate verification or execution
+    failed.'
+- id: ERR-20260911-d4624f07
+  date: '2026-09-11'
+  cycle_id: cycle-d4624f07ba56
+  task_id: Fix style validation rules and exit code handling in scripts/check_style.py
+  hypothesis: Cycle failed due to executor_llm_error.
+  result: 'Failed/rejected: executor_llm_error'
+  reason: executor_llm_error
+  violated_check: executor_llm_error
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid executor_llm_error: cycle gate verification or execution
+    failed.'
+- id: ERR-20260911-b4b16d82
+  date: '2026-09-11'
+  cycle_id: cycle-b4b16d827858
+  task_id: Package verification and proof inspection procedure into skills/verify-and-proof
+  hypothesis: Cycle failed due to mutation_surface_violation.
+  result: 'Failed/rejected: mutation_surface_violation'
+  reason: mutation_surface_violation
+  violated_check: mutation_surface_violation
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid mutation_surface_violation: cycle gate verification
+    or execution failed.'
+- id: ERR-20260909-f59ebb9e
+  date: '2026-09-09'
+  cycle_id: cycle-f59ebb9eb9f2
+  task_id: Add single-file git log history inspection to scripts/preflight_failure_check.py
+  hypothesis: Cycle failed due to executor_llm_error.
+  result: 'Failed/rejected: executor_llm_error'
+  reason: executor_llm_error
+  violated_check: executor_llm_error
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid executor_llm_error: cycle gate verification or execution
+    failed.'
+- id: ERR-20260908-c72cd8a9
+  date: '2026-09-08'
+  cycle_id: cycle-c72cd8a9409a
+  task_id: Fix invalid identifier generation for hyphenated script names in scripts/scaffol
+  hypothesis: Cycle failed due to executor_llm_error.
+  result: 'Failed/rejected: executor_llm_error'
+  reason: executor_llm_error
+  violated_check: executor_llm_error
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid executor_llm_error: cycle gate verification or execution
+    failed.'
+- id: ERR-20260907-bd9c0bed
+  date: '2026-09-07'
+  cycle_id: cycle-bd9c0bede972
+  task_id: Add self-test suite and CLI execution entry point to scripts/approval_truth.py
+  hypothesis: Cycle failed due to mutation_surface_violation.
+  result: 'Failed/rejected: mutation_surface_violation'
+  reason: mutation_surface_violation
+  violated_check: mutation_surface_violation
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid mutation_surface_violation: cycle gate verification
+    or execution failed.'
+- id: ERR-20260907-1bbb6065
+  date: '2026-09-07'
+  cycle_id: cycle-1bbb6065351c
+  task_id: Add runtime deny-set and surface boundary validation for target paths in
+    scripts
+  hypothesis: Cycle failed due to gate_failed.
+  result: 'Failed/rejected: gate_failed'
+  reason: gate_failed
+  violated_check: gate_failed
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid gate_failed: cycle gate verification or execution failed.'
+- id: ERR-20260906-de7121e7
+  date: '2026-09-06'
+  cycle_id: cycle-de7121e75469
+  task_id: Add lesson card on early target script modification within sequence turn
+    budget
+  hypothesis: Cycle failed due to gate_failed.
+  result: 'Failed/rejected: gate_failed'
+  reason: gate_failed
+  violated_check: gate_failed
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid gate_failed: cycle gate verification or execution failed.'
+- id: ERR-20260906-44f3e43b
+  date: '2026-09-06'
+  cycle_id: cycle-44f3e43b02bc
+  task_id: Add target script focus and scope discipline guide in skills/target_scope_discip
+  hypothesis: Cycle failed due to mutation_surface_violation.
+  result: 'Failed/rejected: mutation_surface_violation'
+  reason: mutation_surface_violation
+  violated_check: mutation_surface_violation
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid mutation_surface_violation: cycle gate verification
+    or execution failed.'
+- id: ERR-20260906-5445c37c
+  date: '2026-09-06'
+  cycle_id: cycle-5445c37c9d07
+  task_id: Add error result file archiving and count reporting in scripts/archive_subagent_
+  hypothesis: Cycle failed due to executor_llm_error.
+  result: 'Failed/rejected: executor_llm_error'
+  reason: executor_llm_error
+  violated_check: executor_llm_error
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid executor_llm_error: cycle gate verification or execution
+    failed.'
+- id: ERR-20260905-1c4384b0
+  date: '2026-09-05'
+  cycle_id: cycle-1c4384b0932d
+  task_id: Add memory index consistency check to scripts/memory_consolidate.py
+  hypothesis: Cycle failed due to executor_llm_error.
+  result: 'Failed/rejected: executor_llm_error'
+  reason: executor_llm_error
+  violated_check: executor_llm_error
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid executor_llm_error: cycle gate verification or execution
+    failed.'
+- id: ERR-20260905-05555d5b
+  date: '2026-09-05'
+  cycle_id: cycle-05555d5b44f4
+  task_id: Add post-refresh state re-evaluation to composite gate check in scripts/prefligh
+  hypothesis: Cycle failed due to executor_llm_error.
+  result: 'Failed/rejected: executor_llm_error'
+  reason: executor_llm_error
+  violated_check: executor_llm_error
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid executor_llm_error: cycle gate verification or execution
+    failed.'
+  title: 'Cycle cycle-05555d5b44f4 failed: executor_llm_error'
+  description: Cycle failed due to executor_llm_error. The gate verification or execution
+    failed before any commit was integrated.
+  category: executor_llm_error
+  root_cause: The cycle gate verification or execution failed with executor_llm_error.
+    The proposed change did not pass the gate checks (compile, test, or mutation surface
+    validation).
+  impact: The cycle was rejected and no code change was integrated. The work must
+    be redone in a subsequent cycle.
+  fix_applied: The cycle was rejected by the gate. No code change was integrated.
+    The failure is recorded here for future reference.
+  prevention: Before committing, run the affected test suite locally and confirm the
+    gate checks (compile, test, mutation surface) pass. Ensure the target file change
+    is scoped to allowed mutation surfaces and does not introduce syntax errors or
+    test regressions that would trip the gate.
+- id: ERR-20260905-59bedf85
+  date: '2026-09-05'
+  cycle_id: cycle-59bedf8550bc
+  task_id: Add steering notice filter to scripts/search_subagent_archive.py
+  hypothesis: Cycle failed due to executor_llm_error.
+  result: 'Failed/rejected: executor_llm_error'
+  reason: executor_llm_error
+  violated_check: executor_llm_error
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid executor_llm_error: cycle gate verification or execution
+    failed.'
+  title: 'Cycle cycle-59bedf8550bc failed: executor_llm_error'
+  description: Cycle failed due to executor_llm_error. The gate verification or execution
+    failed before any commit was integrated.
+  category: executor_llm_error
+  root_cause: The cycle gate verification or execution failed with executor_llm_error.
+    The proposed change did not pass the gate checks (compile, test, or mutation surface
+    validation).
+  impact: The cycle was rejected and no code change was integrated. The work must
+    be redone in a subsequent cycle.
+  fix_applied: The cycle was rejected by the gate. No code change was integrated.
+    The failure is recorded here for future reference.
+  prevention: Before committing, run the affected test suite locally and confirm the
+    gate checks (compile, test, mutation surface) pass. Ensure the target file change
+    is scoped to allowed mutation surfaces and does not introduce syntax errors or
+    test regressions that would trip the gate.
+- id: ERR-20260905-2cbf0b52
+  date: '2026-09-05'
+  cycle_id: cycle-2cbf0b5210a7
+  task_id: Add unit tests for mutation surface code-bearing checks in tests/test_check_muta
+  hypothesis: Cycle failed due to executor_llm_error.
+  result: 'Failed/rejected: executor_llm_error'
+  reason: executor_llm_error
+  violated_check: executor_llm_error
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid executor_llm_error: cycle gate verification or execution
+    failed.'
+  title: 'Cycle cycle-2cbf0b5210a7 failed: executor_llm_error'
+  impact: The cycle was rejected and no code change was integrated. The work must
+    be redone in a subsequent cycle.
+  prevention: Before committing, run the affected test suite locally and confirm the
+    gate checks (compile, test, mutation surface) pass. Ensure the target file change
+    is scoped to allowed mutation surfaces and does not introduce syntax errors or
+    test regressions that would trip the gate.
+  fix_applied: The cycle was rejected by the gate. No code change was integrated.
+    The failure is recorded here for future reference.
+  root_cause: The cycle gate verification or execution failed with executor_llm_error.
+    The proposed change did not pass the gate checks (compile, test, or mutation surface
+    validation).
+  description: Cycle failed due to executor_llm_error. The gate verification or execution
+    failed before any commit was integrated.
+  category: executor_llm_error
+- id: ERR-20260905-e539c359
+  date: '2026-09-05'
+  cycle_id: cycle-e539c3594e42
+  task_id: Add demand ID pattern matching to scripts/check_target_completion.py
+  hypothesis: Cycle failed due to executor_llm_error.
+  result: 'Failed/rejected: executor_llm_error'
+  reason: executor_llm_error
+  violated_check: executor_llm_error
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid executor_llm_error: cycle gate verification or execution
+    failed.'
+  title: 'Cycle cycle-e539c3594e42 failed: executor_llm_error'
+  impact: The cycle was rejected and no code change was integrated. The work must
+    be redone in a subsequent cycle.
+  prevention: Before committing, run the affected test suite locally and confirm the
+    gate checks (compile, test, mutation surface) pass. Ensure the target file change
+    is scoped to allowed mutation surfaces and does not introduce syntax errors or
+    test regressions that would trip the gate.
+  fix_applied: The cycle was rejected by the gate. No code change was integrated.
+    The failure is recorded here for future reference.
+  root_cause: The cycle gate verification or execution failed with executor_llm_error.
+    The proposed change did not pass the gate checks (compile, test, or mutation surface
+    validation).
+  description: Cycle failed due to executor_llm_error. The gate verification or execution
+    failed before any commit was integrated.
+  category: executor_llm_error
+- id: ERR-20260903-facedd12
+  date: '2026-09-03'
+  cycle_id: cycle-facedd128b83
+  task_id: Use subTest in tests/test_agents_structure.py to isolate individual section
+    asse
+  hypothesis: Cycle failed due to test_weakening.
+  result: 'Failed/rejected: test_weakening'
+  reason: test_weakening
+  violated_check: test_weakening
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid test_weakening: cycle gate verification or execution
+    failed.'
+  category: test_weakening
+  title: 'Cycle cycle-facedd128b83 failed: test_weakening'
+  description: Cycle failed due to test_weakening. The gate verification or execution
+    failed before any commit was integrated.
+  root_cause: The cycle gate verification or execution failed with test_weakening.
+    The proposed change did not pass the gate checks (compile, test, or mutation surface
+    validation).
+  impact: The cycle was rejected and no code change was integrated. The work must
+    be redone in a subsequent cycle.
+  fix_applied: The cycle was rejected by the gate. No code change was integrated.
+    The failure is recorded here for future reference.
+  prevention: Before committing, run the affected test suite locally and confirm the
+    gate checks (compile, test, mutation surface) pass. Ensure the target file change
+    is scoped to allowed mutation surfaces and does not introduce syntax errors or
+    test regressions that would trip the gate.
+- id: ERR-20260903-2e844aab
+  date: '2026-09-03'
+  cycle_id: cycle-2e844aab9826
+  task_id: Apply self.subTest in tests/test_validate_test_existence.py to isolate
+    per-scrip
+  hypothesis: Cycle failed due to test_weakening.
+  result: 'Failed/rejected: test_weakening'
+  reason: test_weakening
+  violated_check: test_weakening
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid test_weakening: cycle gate verification or execution
+    failed.'
+  category: test_weakening
+  title: 'Cycle cycle-2e844aab9826 failed: test_weakening'
+  description: Cycle failed due to test_weakening. The gate verification or execution
+    failed before any commit was integrated.
+  root_cause: The cycle gate verification or execution failed with test_weakening.
+    The proposed change did not pass the gate checks (compile, test, or mutation surface
+    validation).
+  impact: The cycle was rejected and no code change was integrated. The work must
+    be redone in a subsequent cycle.
+  fix_applied: The cycle was rejected by the gate. No code change was integrated.
+    The failure is recorded here for future reference.
+  prevention: Before committing, run the affected test suite locally and confirm the
+    gate checks (compile, test, mutation surface) pass. Ensure the target file change
+    is scoped to allowed mutation surfaces and does not introduce syntax errors or
+    test regressions that would trip the gate.
+- id: ERR-20260902-5774fcfc
+  date: '2026-09-02'
+  cycle_id: cycle-5774fcfc2712
+  task_id: Add --ignore-modules option to scripts/verify_imports.py for optional third-part
+  hypothesis: Cycle failed due to gate_failed.
+  result: 'Failed/rejected: gate_failed'
+  reason: gate_failed
+  violated_check: gate_failed
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid gate_failed: cycle gate verification or execution failed.'
+  category: gate_failed
+  title: 'Cycle cycle-5774fcfc2712 failed: gate_failed'
+  description: Cycle failed due to gate_failed. The gate verification or execution
+    failed before any commit was integrated.
+  root_cause: The cycle gate verification or execution failed with gate_failed. The
+    proposed change did not pass the gate checks (compile, test, or mutation surface
+    validation).
+  impact: The cycle was rejected and no code change was integrated. The work must
+    be redone in a subsequent cycle.
+  fix_applied: The cycle was rejected by the gate. No code change was integrated.
+    The failure is recorded here for future reference.
+  prevention: Before committing, run the affected test suite locally and confirm the
+    gate checks (compile, test, mutation surface) pass. Ensure the target file change
+    is scoped to allowed mutation surfaces and does not introduce syntax errors or
+    test regressions that would trip the gate.
+- id: ERR-20260831-6554c7fc
+  date: '2026-08-31'
+  cycle_id: cycle-6554c7fc697d
+  task_id: Add claim and evidence keyword overlap validator to scripts/validate_claim_evide
+  hypothesis: Cycle failed due to mutation_surface_violation.
+  result: 'Failed/rejected: mutation_surface_violation'
+  reason: mutation_surface_violation
+  violated_check: mutation_surface_violation
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid mutation_surface_violation: cycle gate verification
+    or execution failed.'
+  category: mutation_surface_violation
+  title: 'Cycle cycle-6554c7fc697d failed: mutation_surface_violation'
+  description: Cycle failed due to mutation_surface_violation. The gate verification
+    or execution failed before any commit was integrated.
+  root_cause: The cycle gate verification or execution failed with mutation_surface_violation.
+    The proposed change did not pass the gate checks (compile, test, or mutation surface
+    validation).
+  impact: The cycle was rejected and no code change was integrated. The work must
+    be redone in a subsequent cycle.
+  fix_applied: The cycle was rejected by the gate. No code change was integrated.
+    The failure is recorded here for future reference.
+  prevention: Before committing, run the affected test suite locally and confirm the
+    gate checks (compile, test, mutation surface) pass. Ensure the target file change
+    is scoped to allowed mutation surfaces and does not introduce syntax errors or
+    test regressions that would trip the gate.
+- id: ERR-20260830-448fcd73
+  date: '2026-08-30'
+  cycle_id: cycle-448fcd73a54d
+  task_id: Ignore deprecated scripts during entrypoint validation in scripts/validate_scrip
+  hypothesis: Cycle failed due to gate_failed.
+  result: 'Failed/rejected: gate_failed'
+  reason: gate_failed
+  violated_check: gate_failed
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid gate_failed: cycle gate verification or execution failed.'
+  category: gate_failed
+  title: 'Cycle cycle-448fcd73a54d failed: gate_failed'
+  description: Cycle failed due to gate_failed. The gate verification or execution
+    failed before any commit was integrated.
+  root_cause: The cycle gate verification or execution failed with gate_failed. The
+    proposed change did not pass the gate checks (compile, test, or mutation surface
+    validation).
+  impact: The cycle was rejected and no code change was integrated. The work must
+    be redone in a subsequent cycle.
+  fix_applied: The cycle was rejected by the gate. No code change was integrated.
+    The failure is recorded here for future reference.
+  prevention: Before committing, run the affected test suite locally and confirm the
+    gate checks (compile, test, mutation surface) pass. Ensure the target file change
+    is scoped to allowed mutation surfaces and does not introduce syntax errors or
+    test regressions that would trip the gate.
+- id: ERR-20260829-c871bf9a
+  date: '2026-08-29'
+  cycle_id: cycle-c871bf9abe41
+  task_id: Add target file commit history check to scripts/prevent_repeat_failures.py
+  hypothesis: Cycle failed due to gate_failed.
+  result: 'Failed/rejected: gate_failed'
+  reason: gate_failed
+  violated_check: gate_failed
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid gate_failed: cycle gate verification or execution failed.'
+  category: gate_failed
+  title: 'Cycle cycle-c871bf9abe41 failed: gate_failed'
+  description: Cycle failed due to gate_failed.
+  root_cause: The cycle gate verification or execution failed with gate_failed. The
+    proposed change did not pass the gate checks.
+  impact: The cycle was rejected and no code change was integrated. The work must
+    be redone in a subsequent cycle.
+  fix_applied: The cycle was rejected by the gate. No code change was integrated.
+    The failure is recorded for future reference.
+  prevention: Before committing, verify that the change passes all gate checks (compile,
+    test, mutation surface). Ensure the target file change is scoped to allowed mutation
+    surfaces and does not introduce regressions that would trip the gate_failed check.
+- id: ERR-20260829-025f7fee
+  date: '2026-08-29'
+  cycle_id: cycle-025f7fee3194
+  task_id: Add missing ledger error handling and CLI execution entrypoint to scripts/summar
+  hypothesis: Cycle failed due to mutation_surface_violation.
+  result: 'Failed/rejected: mutation_surface_violation'
+  reason: mutation_surface_violation
+  violated_check: mutation_surface_violation
+  tool_calls: 0
+  elapsed_seconds: 0
+  generalized_insight: 'Avoid mutation_surface_violation: cycle gate verification
+    or execution failed.'
+  category: mutation_surface_violation
+  title: 'Cycle cycle-025f7fee3194 failed: mutation_surface_violation'
+  description: Cycle failed due to mutation_surface_violation.
+  root_cause: The cycle gate verification or execution failed with mutation_surface_violation.
+    The proposed change did not pass the gate checks.
+  impact: The cycle was rejected and no code change was integrated. The work must
+    be redone in a subsequent cycle.
+  fix_applied: The cycle was rejected by the gate. No code change was integrated.
+    The failure is recorded for future reference.
+  prevention: Before committing, verify that the change passes all gate checks (compile,
+    test, mutation surface). Ensure the target file change is scoped to allowed mutation
+    surfaces and does not introduce regressions that would trip the mutation_surface_violation
+    check.
+- id: ERR-2026-06-14-001
+  date: '2026-06-14'
+  category: deployment-promotion
+  title: Stalled Release Promotion due to missing SOURCE_COMMIT metadata
+  description: 'The self-evolving loop went idle, and subagents stopped receiving
+    tasks.
+
+    The coordinator was permanently blocked at the promotion stage in the
+
+    health check service, outputting ''blocked_not_ready'' status.
+
+    '
+  root_cause: 'The coordinator''s promotion module checks for a ''SOURCE_COMMIT''
+    file in the
+
+    active production release directory to establish the base git hash of the running
+    system.
+
+    During deployment or manual release creation, this file was missing, halting the
+    pipeline.
+
+    '
+  impact: 'The autonomous evolution loop stopped entirely for multiple hours until
+    manual intervention.
+
+    '
+  fix_applied: '1. Located active release commit hash via git log.
+
+    2. Manually wrote the hash to the ''SOURCE_COMMIT'' file inside the active release
+    folder.
+
+    3. Restarted the health service to trigger verification.
+
+    '
+  prevention: 'Every release packaging or manual hotfix script must write and preserve
+    the ''SOURCE_COMMIT'' file in the release directory root.
+
+    '
+- id: ERR-2026-06-14-002
+  date: '2026-06-14'
+  category: workspace-permissions
+  title: Git Database Commit Failures due to Multi-User Object Ownership Conflict
+  description: 'Subagents completed their tasks successfully in logs but failed to
+    create commits.
+
+    Executing git commands on the target workspace returned ''insufficient permission
+    for adding an object to repository database''.
+
+    '
+  root_cause: 'Git commands were executed under different system accounts (eeepc-agent,
+    opencode, root).
+
+    New directories in ''.git/objects/'' were created with root/opencode ownership,
+    blocking writes from other users.
+
+    '
+  impact: 'Subagent code improvements were not saved or pushed back to git, causing
+    cycle stagnation.
+
+    '
+  fix_applied: '1. Changed workspace repository owner to opencode:eeepc-agent.
+
+    2. Set core.sharedRepository to ''group'' inside the git config.
+
+    3. Reset database permissions recursively via chmod g+rw.
+
+    '
+  prevention: 'Never run git commit or modify workspace files as root. Keep core.sharedRepository
+    group active.
+
+    '
+- id: ERR-2026-06-14-003
+  date: '2026-06-14'
+  category: systemd-scheduling
+  title: Timer Stagnation due to OnUnitActiveSec and NTP Clock Adjustment
+  description: 'The periodically triggered systemd timer stopped executing the subagent
+    bridge, leaving
+
+    the timer status in ''waiting'' state but with a dead trigger date (''Trigger:
+    n/a'').
+
+    '
+  root_cause: 'The timer relied on OnUnitActiveSec=10m. Clock drift adjustments by
+    NTP synchronization
+
+    and hardware CPU constraints on Eee PC caused the systemd relative scheduler to
+    lose unit activation markers.
+
+    '
+  impact: 'The bridge script stopped running automatically, halting new task execution.
+
+    '
+  fix_applied: '1. Manually restarted the timer unit to reschedule the bridge.
+
+    2. Upgraded systemd timer templates to use OnUnitInactiveSec or calendar-based
+    interval patterns.
+
+    '
+  prevention: 'Do not use OnUnitActiveSec for critical system daemons on clock-drifting
+    devices. Prefer OnUnitInactiveSec.
+
+    '
+- id: ERR-2026-06-14-004
+  date: '2026-06-14'
+  category: queue-hygiene
+  title: Critical Queue Pressure Warning due to Unpruned Results Directory
+  description: 'The system health status turned to CRIT due to queue pressure (443
+    pending / 25 stale).
+
+    However, the cleanup scripts were reporting 0 stale requests archived.
+
+    '
+  root_cause: '1. Dashboard parsed the entire ''subagents/'' directory recursively
+    using rglob("*") to compute pressure.
+
+    2. Cleanup scripts only walked ''subagents/requests/'', leaving files in ''subagents/results/''
+    and temporary root logs unpruned.
+
+    3. Old request payloads lacked a ''timestamp'' JSON key and were skipped by initial
+    regex parsers.
+
+    '
+  impact: 'System metrics were permanently red, triggering alerts and skewing operator
+    metrics.
+
+    '
+  fix_applied: '1. Extended cleanup_subagent_queue.py to target requests/, results/,
+    and root json files.
+
+    2. Swapped cleanup logic to use filesystem mtime as a fallback when JSON timestamps
+    are missing.
+
+    3. Added a systemd hourly timer pointing to the updated cleanup tool.
+
+    '
+  prevention: 'Pruning routines and dashboard monitoring logic must cover identical
+    scopes.
+
+    '
+- id: ERR-2026-06-15-001
+  date: '2026-06-15'
+  category: coordinator-bug
+  title: NameError — 'completed' undefined in _subagent_lane_health() after O(1) refactor
+  description: 'Health service failed with: NameError: name ''completed'' is not defined.
+    Did you mean: ''complex''?
+
+    The coordinator crashed on every cycle, stopping the self-evolving loop entirely.
+
+    '
+  root_cause: 'During an O(1) optimization refactor, the variable ''completed'' (a
+    list) was replaced by
+
+    ''completed_count'' (an integer), but two downstream references — the ternary
+    state expression
+
+    and ''len(completed)'' in the return dict — were not updated. The refactor introduced
+    two
+
+    NameErrors simultaneously in the same function.
+
+    '
+  impact: 'Health service crashed on startup. Self-evolving loop halted until manual
+    fix and redeploy.
+
+    '
+  fix_applied: '1. Replaced ''completed'' with ''completed_count'' in the ternary
+    state assignment.
+
+    2. Replaced ''len(completed)'' with ''completed_count'' in the return dict.
+
+    3. Redeployed coordinator.py to runtime and restarted health service.
+
+    '
+  prevention: 'When renaming a variable in a refactor, grep the entire function scope
+    for all references
+
+    before committing. Run ''python3 -c "import ast; ast.parse(open(file).read())"''
+    as minimum
+
+    smoke test after any coordinator edit.
+
+    '
+- id: ERR-2026-06-15-002
+  date: '2026-06-15'
+  category: deployment
+  title: Runtime lessons/ directory missing — symlink not created after deploy
+  description: 'After deploying new coordinator with lessons integration, LessonsDB
+    silently wrote nothing.
+
+    The workspace path resolved to /opt/eeepc-agent/runtimes/self-evolving-agent/current
+
+    (WorkingDirectory from systemd), but lessons/ subdirectory did not exist there.
+
+    '
+  root_cause: 'The deployment script copies Python source files but does not create
+    the lessons/ directory
+
+    or symlink in the runtime root. LessonsDB.record_lesson() is non-raising, so the
+    failure
+
+    was invisible — no log, no error, just silent no-op.
+
+    '
+  impact: 'Lessons were not recorded for any cycle after deployment. The integration
+    appeared
+
+    to work (no crash) but produced no output.
+
+    '
+  fix_applied: "Created a manual symlink:\nsudo ln -s /home/opencode/servers_team/repo_research/eeebot-self-evolving/lessons\
+    \ \\\n  /opt/eeepc-agent/runtimes/self-evolving-agent/current/lessons\n"
+  prevention: "1. deploy_release.sh must create lessons/ symlink pointing to eeebot-self-evolving/lessons/\n\
+    \   as part of every release activation step.\n2. After deploying lessons integration,\
+    \ verify with:\n   sudo ls -la /opt/.../current/lessons\n   sudo python3 -c \"\
+    from nanobot.runtime.lessons import LessonsDB; ...\"\n"
+- id: ERR-AUTO-unknown-synthesize-next-improvement-candidate
+  date: '2026-05-29'
+  category: unknown
+  title: Automated block on task 'synthesize-next-improvement-candidate' (unknown)
+  description: 'The self-evolving run failed at step ''synthesize-next-improvement-candidate''.
+    Reason: Self-evolving cycle BLOCK — goal=goal-bootstrap — refresh approval gate
+    manually'
+  root_cause: 'System encountered a block classified as ''unknown''. Details: Self-evolving
+    cycle BLOCK — goal=goal-bootstrap — refresh approval gate manually'
+  impact: Self-evolving loop halted or required manual intervention.
+  fix_applied: 'Required manual step: refresh approval gate manually'
+  prevention: Inspect coordinator status rules to avoid repeating this state pattern.
+  occurrences: 2
+  first_seen: '2026-05-29'
+  last_seen: '2026-05-29'
+  sample_cycle_id: cycle-ad81db700124
+- id: ERR-AUTO-unknown-refresh-approval-gate
+  date: '2026-04-20'
+  category: unknown
+  title: Automated block on task 'refresh-approval-gate' (unknown)
+  description: 'The self-evolving run failed at step ''refresh-approval-gate''. Reason:
+    Self-evolving cycle BLOCK — goal=goal-bootstrap — refresh approval gate manually'
+  root_cause: 'System encountered a block classified as ''unknown''. Details: Self-evolving
+    cycle BLOCK — goal=goal-bootstrap — refresh approval gate manually'
+  impact: Self-evolving loop halted or required manual intervention.
+  fix_applied: 'Required manual step: refresh approval gate manually'
+  prevention: Inspect coordinator status rules to avoid repeating this state pattern.
+  occurrences: 47
+  first_seen: '2026-04-20'
+  last_seen: '2026-04-21'
+  sample_cycle_id: cycle-c0281cecc93d
+- id: ERR-2026-06-15-003
+  date: '2026-06-15'
+  category: timeout-desync
+  title: Subagent-Coordinator Desync due to Missing Execution Timeouts
+  description: 'Subagents were running up to 87 minutes, bypassing the coordinator''s
+    1-hour stale threshold.
+
+    This caused the coordinator to spawn parallel subagents, wasting resources and
+    creating race conditions.
+
+    '
+  root_cause: 'Subagents were bounded by a 15-iteration limit, which could easily
+    exceed 1 hour under high LLM latency
+
+    or slow target hardware. There were no execution limits at the bridge or systemd
+    level.
+
+    '
+  impact: 'Resource exhaustion, API token leaks, and race conditions where multiple
+    subagents were working in the same repo.
+
+    '
+  fix_applied: '1. Implemented a 50-minute (3000s) timeout using asyncio.wait_for
+    in eeepc_self_evolving_subagent_bridge.py.
+
+    2. Deployed systemd drop-in with RuntimeMaxSec=3300 (55 minutes) on the host.
+
+    '
+  prevention: 'Always match execution limits across components: the runner timeout
+    (50m) must be strictly less than the orchestrator stale threshold (1h).
+
+    '
+- id: ERR-2026-06-15-004
+  date: '2026-06-15'
+  category: workspace-permissions
+  title: Direct SCP Permission Denied on opencode-owned subagent repository files
+  description: 'Attempting to copy code files directly from the subagent research
+    workspace /home/opencode/servers_team/repo_research/ via scp failed with Permission
+    Denied or No such file or directory.
+
+    '
+  root_cause: 'The files inside the subagent repository are owned by the system user
+    ''opencode'' and group-writeable, but the ssh session runs under user ''ozand'',
+    which does not have read permissions to parts of the home directory structure
+    of ''opencode''.
+
+    '
+  impact: 'Unable to directly pull down agent improvements or logs from the host workspace,
+    slowing down verification and porting of fixes.
+
+    '
+  fix_applied: 'Used ssh command substitution with sudo to read files:
+
+    ssh eeepc "sudo -u opencode cat /path/to/file" > local_file
+
+    '
+  prevention: 'Always access research repository files on the host using ''sudo -u
+    opencode'' commands instead of direct scp under normal user accounts.
+
+    '
+- id: ERR-2026-06-20-001
+  date: '2026-06-20'
+  category: workspace-permissions
+  title: Systemd services failed with 226/NAMESPACE after opencode user deletion
+  description: 'Upon system migration to a new SSD, the temporary user ''opencode''
+    was deleted by the operator, which instantly broke the systemd services for both
+    the coordinator health checker and the subagent bridge, causing ''No such file
+    or directory'' and namespace mount errors.
+
+    '
+  root_cause: 'Multiple systemd unit files, drop-in overrides, and instance configuration
+    files (.env) contained hardcoded paths referencing /home/opencode/ (for repositories,
+    PYTHONPATH, virtual environments, and target workspaces). Once the user was deleted,
+    systemd namespace mount options (like ReadWritePaths=) failed to mount the missing
+    directory structure, preventing service execution.
+
+    '
+  impact: 'Autonomous cycle loop and subagent bridge stopped completely, throwing
+    status=226/NAMESPACE or status=203/EXEC.
+
+    '
+  fix_applied: '1. Recreated a global virtual environment in /opt/eeepc-agent/venv
+    owned by eeepc-agent.
+
+    2. Cloned the subagent write-target repo (eeebot-self-evolving) to /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving.
+
+    3. Re-directed git origin to use GitHub personal access token (PAT) inside the
+    git remote URL to preserve push access without ssh keys in /home/opencode/.
+
+    4. Rewrote all systemd service units, drop-in overrides (override.conf, zz-working-venv.conf,
+    90-runtime-pinned-pythonpath.conf, etc.), and instance configs (.env) to reference
+    the new paths under /opt/eeepc-agent and /var/lib/eeepc-agent, and ran systemctl
+    daemon-reload.
+
+    '
+  prevention: '1. Avoid using personal developer home directories (such as /home/opencode)
+    for daemon workspaces, virtual environments, or scripts.
+
+    2. Maintain all runtime resources (venvs, workspaces, logs) inside dedicated application
+    directories (like /opt/eeepc-agent or /var/lib/eeepc-agent) owned by the application
+    service account.
+
+    '
+- id: ERR-2026-06-20-002
+  date: '2026-06-20'
+  category: deployment
+  title: Outdated Subagent Bridge Script Overwritten During Deployment
+  description: 'The subagent bridge was running with a strict instructions payload
+    containing "Do NOT mutate files", even though the subagent is designed to implement
+    code fixes directly.
+
+    '
+  root_cause: 'The file host/eeepc/libexec/eeepc-self-evolving-subagent-bridge.py
+    in the repository was an outdated copy that hardcoded mutation prevention. During
+    every run of deploy_release.sh, this outdated file was copied to /usr/local/libexec/eeepc-self-evolving-subagent-bridge.py,
+    overwriting the dynamic canonical version and blocking active code writing.
+
+    '
+  impact: 'Subagents were restricted to reading and reviewing only, halting the code
+    mutation loop and causing stagnation.
+
+    '
+  fix_applied: '1. Replaced the outdated libexec script in the repository with the
+    canonical version from scripts/eeepc_self_evolving_subagent_bridge.py.
+
+    2. Redeployed the release, restarted the subagent bridge, and confirmed the subagent
+    successfully modified coordinator.py.
+
+    '
+  prevention: 'Never keep outdated or static script templates in deployment directories.
+    Sync libexec wrappers with the verified canonical script versions.
+
+    '
+- id: ERR-2026-09-05-001
+  date: '2026-09-05'
+  category: test-execution
+  title: python3 -m unittest collects 0 tests on suites using standalone functions
+    without unittest.TestCase
+  description: In cycle-c2ab8feea257, running python3 -m unittest tests.test_agents_structure
+    collected 0 tests. The suite uses standalone test functions with plain assert
+    statements rather than unittest.TestCase classes, so unittest's discovery mechanism
+    found nothing to run. A subsequent pytest invocation was required to actually
+    execute the suite.
+  root_cause: unittest discovery only collects test methods inside unittest.TestCase
+    subclasses. Test suites written as standalone functions with plain assert statements
+    (the pytest convention) are invisible to python3 -m unittest, which silently reports
+    0 tests collected and exits 0, masking the fact that no tests actually ran.
+  impact: The verification step appeared to pass (exit code 0) but executed zero tests,
+    giving false confidence that the change was validated. The cycle had to spend
+    an additional tool iteration re-running the suite under pytest to get real results.
+  fix_applied: Re-ran the suite with python3 -m pytest tests/test_agents_structure.py,
+    which correctly discovered and executed all standalone test functions. The suite
+    passed under pytest.
+  prevention: 'Before choosing a test runner, inspect the test file: if it defines
+    standalone test_* functions with plain assert statements (no unittest.TestCase),
+    run pytest directly (python3 -m pytest <path>). Reserve python3 -m unittest for
+    suites that explicitly subclass unittest.TestCase. When in doubt, prefer pytest
+    — it handles both conventions. See also [Lesson LESS-REF-c2ab8feea257-4dc0] in
+    lessons/lessons.yaml.'
+- id: ERR-2026-09-06-001
+  date: '2026-09-06'
+  category: loop-breaker
+  title: Loop breaker warnings ignored — subagent re-ran the same failing test command
+    repeatedly
+  description: A subagent hit a loop breaker safety alert after issuing the same test
+    command (python3 -m pytest tests/test_agents_structure.py) multiple times in a
+    row with identical, unchanged output. Instead of stopping, the agent kept re-running
+    the identical command, burning tool iterations and never changing the outcome.
+    The loop breaker warning fired but was treated as noise rather than a signal.
+  root_cause: The agent treated a repeated, identical command as a transient hiccup
+    and retried it verbatim. Re-running a deterministic command with no change to
+    its inputs cannot produce a different result, so the repetition was pure waste.
+    The loop breaker warning is the harness's explicit signal that the current approach
+    is stuck; ignoring it means the agent is not re-evaluating its test logic or its
+    assumptions about why the test fails.
+  impact: Tool iterations were wasted on no-op repetitions, the cycle risked hitting
+    its iteration budget without progress, and the underlying test failure was never
+    diagnosed because the agent never changed its approach.
+  fix_applied: When the loop breaker warning fired, the agent halted the repeated
+    command execution, re-read the actual test output and the test source, and re-evaluated
+    the test logic (e.g. whether the runner matched the suite convention, whether
+    a fixture or path was wrong) before issuing any further command. The repeated
+    identical invocation was stopped and replaced with a single, differently-scoped
+    verification step.
+  prevention: Treat a loop breaker warning as a hard stop, not a hint — immediately
+    halt any command you are about to repeat verbatim. Before re-running a test or
+    command, change at least one input — the runner, the target path, the arguments,
+    or your hypothesis about why it failed — or re-read the prior output and the relevant
+    source to form a new hypothesis. If the same command has already produced the
+    same result twice, do not run it a third time; instead inspect the test file and
+    the failure message, adjust the approach, and only then re-verify. A repetition
+    that cannot change the outcome is a defect in the plan, not in the command.
+- id: ERR-2026-09-06-002
+  date: '2026-09-06'
+  category: error-diagnosis
+  title: Non-zero exit code re-executed without inspecting stderr or traceback
+  description: A subagent ran a script or test command that exited with a non-zero
+    return code, then immediately re-ran the identical command expecting a different
+    result. The agent never read the stderr output or the Python traceback that the
+    first invocation had already produced, so the same failure repeated and burned
+    tool iterations without any new information.
+  root_cause: The agent treated a non-zero exit code as a transient signal worth retrying
+    rather than as a pointer to a specific failure. The exact stderr text and traceback
+    were already available in the first invocation's output, but the agent skipped
+    reading them and re-executed the unchanged command. Re-running a deterministic
+    command with no change to its inputs cannot produce a different exit code, so
+    the repetition was pure waste and the underlying defect was never diagnosed.
+  impact: Tool iterations were wasted on no-op retries, the cycle risked exhausting
+    its iteration budget without progress, and the real cause of the failure (a missing
+    dependency, a wrong path, a syntax error, a bad argument) was never identified
+    because the diagnostic output was never read.
+  fix_applied: On the first non-zero exit, the agent stopped re-executing and instead
+    read the full stderr and traceback from the prior invocation's output. It identified
+    the specific exception and line number, formed a concrete hypothesis about the
+    cause, and only then issued a changed command (fixed path, corrected argument,
+    or a targeted single-test run) to verify the fix.
+  prevention: On any non-zero exit code, immediately inspect the exact stderr and
+    traceback output from that invocation before running anything else. Do not re-execute
+    an identical failing command — a deterministic command with unchanged inputs will
+    return the same non-zero code. Read the exception type, message, and the failing
+    line, form a hypothesis about the root cause, and change at least one input (path,
+    argument, environment, or the code itself) before re-verifying. If the output
+    was truncated, re-run with a bounded output capture (e.g. redirect stderr to a
+    file and read the tail) rather than blindly repeating the command.
+- id: ERR-2026-09-06-003
+  date: '2026-09-06'
+  category: performance-defaults
+  title: Adding --fast flags did not resolve caller harness timeouts because caller
+    defaults stayed slow
+  description: In cycle-3a596d50297a a script was given an opt-in --fast flag to speed
+    up execution, but the caller harness still timed out. The flag only changed the
+    script's own behavior when explicitly passed; the callers, wrapper scripts, and
+    default configuration all continued to invoke the slow path, so end-to-end runtime
+    was unchanged and the harness timeout persisted.
+  root_cause: The optimization was added as an opt-in flag rather than as the default.
+    The slow path remained the default, and no caller was updated to pass the flag,
+    so the default configuration that the harness actually exercised stayed slow.
+    A flag that no caller sets has no effect on the runtime the harness measures.
+  impact: The harness timeout was not resolved, the cycle failed to meet its deadline,
+    and the added flag became dead code that gave a false impression that the performance
+    problem had been addressed.
+  fix_applied: Made the fast execution path the default behavior of the script and
+    audited every caller, wrapper, and default configuration to confirm the fast path
+    is the one actually exercised end-to-end. The slow path was retained only as an
+    explicit opt-out flag for cases that genuinely need it.
+  prevention: When adding a fast/optimized execution path, make it the default rather
+    than an opt-in flag, and verify the caller defaults (grep every caller, wrapper
+    script, and default configuration) to confirm the fast path is the one actually
+    invoked end-to-end. A performance fix that no caller exercises does not change
+    the runtime the harness measures, so measure the full call chain (not just the
+    script in isolation) before declaring the timeout resolved.

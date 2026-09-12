@@ -31,17 +31,32 @@ from pathlib import Path
 _MAX_ACTIVE_ENTRIES: int = 200
 _MAX_ACTIVE_BYTES: int = 2 * 1024 * 1024  # 2 MB
 
+# #1533: an entry's leading field, i.e. its boundary marker. Legacy rows
+# (bridge._write_structured_lesson, and every errors.yaml row) write "id"
+# first. Schema-v2 lessons (#1071 onward — the only thing still minting into
+# lessons.yaml) write "schema_version" first instead, and lessons.yaml's
+# writers prepend (newest-first), so the file's leading entry has been a v2
+# row, and therefore invisible to a parser that only recognized "- id:",
+# since v2 entries first existed. "- id:" alone made _parse_entries collapse
+# the entire file to one chunk on every call — a silent, permanent no-op,
+# not a crash, so nothing observed it.
+_ENTRY_BOUNDARY_PREFIXES: tuple[str, ...] = ("- id:", "- schema_version:")
+
+
+def _is_entry_boundary(stripped_line: str, leading_spaces: int) -> bool:
+    return leading_spaces in (0, 2) and stripped_line.startswith(_ENTRY_BOUNDARY_PREFIXES)
+
 
 def _parse_entries(raw_bytes: bytes) -> tuple[bool, list[bytes]]:
     """Split raw YAML bytes into (is_dict_wrapped, list_of_entry_chunks).
 
-    We do NOT parse YAML — we only split on top-level ``- id:`` / ``- `` list
-    item boundaries so that we can slice entries without risking a re-serialise
-    round-trip. Returns ``(is_dict_wrapped, chunks)`` where ``is_dict_wrapped``
-    is True when the file starts with a ``lessons:`` or ``errors:`` mapping key
-    (written by ``bridge._write_structured_lesson``), and ``chunks`` is a list of
-    raw entry byte strings (including leading ``- `` marker and all continuation
-    lines for that entry).
+    We do NOT parse YAML — we only split on top-level entry-boundary / ``- ``
+    list item boundaries so that we can slice entries without risking a
+    re-serialise round-trip. Returns ``(is_dict_wrapped, chunks)`` where
+    ``is_dict_wrapped`` is True when the file starts with a ``lessons:`` or
+    ``errors:`` mapping key, and ``chunks`` is a list of raw entry byte
+    strings (including the leading ``- `` marker and all continuation lines
+    for that entry).
 
     Falls back to returning the whole file as one chunk on any parse ambiguity so
     rotation always degrades to a no-op rather than corrupting the file.
@@ -63,18 +78,18 @@ def _parse_entries(raw_bytes: bytes) -> tuple[bool, list[bytes]]:
             content_start = i + 1
         break
 
-    # Split into entry chunks. An entry ALWAYS begins with its "- id:" field
-    # (bridge._write_structured_lesson writes id first for both lessons.yaml
-    # and errors.yaml), at 0 or 2 spaces of indent. A bare "- " line is a
-    # nested list item (e.g. a files_changed entry) and must NEVER be treated
-    # as a boundary — the first live rotation (#991) used bare "- " at an
-    # assumed 2-indent and tore entries apart on their files_changed lists.
+    # Split into entry chunks. An entry ALWAYS begins with one of
+    # _ENTRY_BOUNDARY_PREFIXES, at 0 or 2 spaces of indent. A bare "- " line
+    # is a nested list item (e.g. a files_changed entry) and must NEVER be
+    # treated as a boundary — the first live rotation (#991) used bare "- "
+    # at an assumed 2-indent and tore entries apart on their files_changed
+    # lists.
     entry_chunks: list[list[str]] = []
     current: list[str] = []
     for line in lines[content_start:]:
         stripped_line = line.lstrip()
         leading_spaces = len(line) - len(stripped_line)
-        if leading_spaces in (0, 2) and stripped_line.startswith("- id:"):
+        if _is_entry_boundary(stripped_line, leading_spaces):
             if current:
                 entry_chunks.append(current)
             current = [line]
@@ -83,11 +98,11 @@ def _parse_entries(raw_bytes: bytes) -> tuple[bool, list[bytes]]:
     if current:
         entry_chunks.append(current)
 
-    # Leading lines before the first "- id:" boundary: pure whitespace is
+    # Leading lines before the first recognized boundary: pure whitespace is
     # harmless — fold it into the first real entry. Anything else means we
     # failed to identify the format; degrade to a single chunk (no-op
     # rotation) rather than archiving an orphan fragment (#991).
-    if entry_chunks and not entry_chunks[0][0].lstrip().startswith("- id:"):
+    if entry_chunks and not entry_chunks[0][0].lstrip().startswith(_ENTRY_BOUNDARY_PREFIXES):
         head = entry_chunks.pop(0)
         if any(ln.strip() for ln in head):
             body = "".join(lines[content_start:])
