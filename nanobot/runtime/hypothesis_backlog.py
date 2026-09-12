@@ -850,7 +850,105 @@ def supported_hypotheses(state_dir: Path, n: int = SUPPORTED_TOP_N) -> list[dict
         return []
 
 
-def lifecycle_counts(state_dir: Path) -> dict[str, int]:
+def _inconclusive_split(
+    state_dir: Path,
+    entries: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Classify inconclusive rows without turning missing evidence into zero.
+
+    The confirmation window starts at ``demand/completed.json``'s ``ts`` --
+    the completion record is the evidence event, while lifecycle ``answered_at``
+    is only bookkeeping. Rows without a resolvable completion record or a
+    qualifying artifact remain explicitly undatable; they are never treated as
+    early or aged. A readable completion sidecar therefore returns ``complete``
+    even when it contains undatable rows; ``partial`` is reserved for a row
+    that cannot be classified because its timestamp is invalid.
+    """
+    from nanobot.runtime.hypothesis_verdict import CONFIRM_WINDOW_DAYS
+    from nanobot.runtime.usage_evidence import _SCRIPT_DIRS
+
+    keys = (
+        "inconclusive_within_window",
+        "inconclusive_aged",
+        "inconclusive_undatable",
+        "inconclusive_undatable_no_qualifying_artifact",
+        "inconclusive_undatable_no_completion",
+        "inconclusive_undatable_invalid_timestamp",
+    )
+    inconclusive = [
+        entry for entry in entries.values()
+        if isinstance(entry, dict) and str(entry.get("verdict") or "") == "inconclusive"
+    ]
+    if not inconclusive:
+        return {"inconclusive_split_status": "complete", **{key: 0 for key in keys}}
+
+    try:
+        completed_path = Path(state_dir) / "demand" / "completed.json"
+        if not completed_path.is_file():
+            return {"inconclusive_split_status": "unavailable"}
+        completed = json.loads(completed_path.read_text(encoding="utf-8"))
+        completed_entries = completed.get("entries") if isinstance(completed, dict) else None
+        if not isinstance(completed_entries, dict):
+            return {"inconclusive_split_status": "unavailable"}
+    except Exception:
+        return {"inconclusive_split_status": "unavailable"}
+
+    now = now or datetime.now(timezone.utc)
+    counts = {key: 0 for key in keys}
+    for lifecycle_entry in inconclusive:
+        cycle_id = str(lifecycle_entry.get("answered_evidence") or "")
+        completion = next(
+            (
+                item for item in completed_entries.values()
+                if isinstance(item, dict) and str(item.get("cycle_id") or "") == cycle_id
+            ),
+            None,
+        )
+        if completion is None:
+            counts["inconclusive_undatable_no_completion"] += 1
+            continue
+        files = completion.get("files_changed")
+        qualifying = [
+            str(path).strip()
+            for path in files
+            if any(str(path or "").strip().startswith(f"{directory}/") for directory in _SCRIPT_DIRS)
+        ] if isinstance(files, list) else []
+        if not qualifying:
+            counts["inconclusive_undatable_no_qualifying_artifact"] += 1
+            continue
+        completed_ts = _parse_ts(completion.get("ts"))
+        if completed_ts is None:
+            counts["inconclusive_undatable_invalid_timestamp"] += 1
+            continue
+        if completed_ts.tzinfo is None:
+            completed_ts = completed_ts.replace(tzinfo=timezone.utc)
+        age_days = (now - completed_ts).total_seconds() / 86400.0
+        if age_days >= CONFIRM_WINDOW_DAYS:
+            counts["inconclusive_aged"] += 1
+        else:
+            counts["inconclusive_within_window"] += 1
+
+    counts["inconclusive_undatable"] = sum(
+        counts[key]
+        for key in (
+            "inconclusive_undatable_no_qualifying_artifact",
+            "inconclusive_undatable_no_completion",
+            "inconclusive_undatable_invalid_timestamp",
+        )
+    )
+    counts["inconclusive_split_status"] = (
+        "partial" if counts["inconclusive_undatable_invalid_timestamp"] else "complete"
+    )
+    return counts
+
+
+def lifecycle_counts(
+    state_dir: Path,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     """Counts over every lifecycle entry — read by
     ``scorecard._control_plane_snapshot`` and the dashboard for VISIBILITY
     ONLY, never fed into fitness/targets/gaps. Fail-open to ``{}``.
@@ -870,7 +968,13 @@ def lifecycle_counts(state_dir: Path) -> dict[str, int]:
     could not be read at the last pass; when > 0 no orphan marks were made),
     ``last_pass_recorded`` (0 until a #1346 pass has run — then ``orphaned`` and
     ``evaluated_last_pass`` are unmeasured, not zero; a corrupt sidecar
-    returns ``{}``), ``input_id_collisions`` (input entries sharing a ``hypothesis_id`` with
+    returns ``{}``), and the additive inconclusive split: qualifying rows are
+    counted as ``inconclusive_within_window`` or ``inconclusive_aged`` using
+    the completion record's timestamp; rows without a qualifying artifact or
+    completion link are ``inconclusive_undatable`` with reason counters. If
+    the completion source is unreadable, split keys are omitted and
+    ``inconclusive_split_status`` is ``unavailable``. ``input_id_collisions``
+    (input entries sharing a ``hypothesis_id`` with
     another entry at the last pass — several hypotheses behind one row),
     and the key-prefix breakdown ``prefix_hypothesis`` (``hypothesis-*``, the
     ids of the planner retired in #923 — 91 of the 115 live rows on
@@ -931,6 +1035,7 @@ def lifecycle_counts(state_dir: Path) -> dict[str, int]:
                 counts["claim_keyed"] += 1
                 claims[claim] = claims.get(claim, 0) + 1
         counts["claim_collisions"] = sum(n - 1 for n in claims.values() if n > 1)
+        counts.update(_inconclusive_split(state_dir, entries, now=now))
         return counts
     except Exception:
         return {}
