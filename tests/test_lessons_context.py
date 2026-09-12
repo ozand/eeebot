@@ -479,6 +479,25 @@ class TestOnDiskShapes:
 
         assert _safe_load_yaml(path) == []
 
+    def test_normalize_entry_extracts_real_hypothesis_title(self):
+        normalized = _normalize_entry({
+            "id": "L1",
+            "hypothesis": 'Implementing "Optimize scripts/verify_imports.py import resolution to avoid harness timeout" improves operator value.',
+        })
+        assert normalized["title"] == "Optimize scripts/verify_imports.py import resolution to avoid harness timeout"
+
+    def test_normalize_entry_without_quotes_keeps_usable_fallback(self):
+        normalized = _normalize_entry({
+            "id": "L2",
+            "hypothesis": "Improve dashboard ledger digest helper for faster reads",
+        })
+        assert normalized["title"] == "Improve dashboard ledger digest helper for faster reads"
+
+    def test_different_quoted_hypotheses_produce_different_titles(self):
+        first = _normalize_entry({"hypothesis": 'Implementing "Optimize scripts/verify_imports.py import resolution" improves operator value.'})
+        second = _normalize_entry({"hypothesis": 'Implementing "Add target path comparison to check_last_cycle_repeat.py" improves operator value.'})
+        assert first["title"] != second["title"]
+
     def test_normalize_entry_fills_gaps_without_overwriting(self):
         live = _normalize_entry({
             "id": "L1",
@@ -492,7 +511,7 @@ class TestOnDiskShapes:
         assert live["reusable_insight"] == "It worked"
 
         legacy = _normalize_entry({
-            "id": "L2",
+            "id": "L3",
             "title": "Already has a title",
             "approach": "Already has an approach",
             "reusable_insight": "Already has an insight",
