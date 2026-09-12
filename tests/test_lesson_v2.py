@@ -16,6 +16,7 @@ from nanobot.runtime.lesson_v2 import (
     keyword_jaccard,
     normalize_problem,
     read_citation_scans,
+    read_executor_result,
     record_citations,
     solution_is_meaningful,
     validate_lesson,
@@ -99,6 +100,30 @@ def test_dedup_increments_seen_count_without_append(tmp_path: Path) -> None:
     data = yaml.safe_load((repo / "lessons" / "lessons.yaml").read_text(encoding="utf-8"))
     assert len(data["lessons"]) == 1
     assert data["lessons"][0]["seen_count"] == 2
+
+
+def test_executor_result_citation_boundary_distinguishes_hit_zero_and_absent(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    results = state / "subagents"
+    results.mkdir(parents=True)
+    (results / "hit.json").write_text(json.dumps({"result": "Done [Lesson LESS-HIT]"}), encoding="utf-8")
+    (results / "zero.json").write_text(json.dumps({"result": "Done without a citation"}), encoding="utf-8")
+
+    hit = read_executor_result(state, "hit")
+    assert hit == "Done [Lesson LESS-HIT]"
+    assert record_citations(state, "cycle-hit-result", executor_result=hit) == ["LESS-HIT"]
+
+    zero = read_executor_result(state, "zero")
+    assert zero == "Done without a citation"
+    assert record_citations(state, "cycle-zero-result", executor_result=zero) == []
+    zero_row = read_citation_scans(state)["rows"][-1]
+    assert zero_row["status"] == "complete" and zero_row["marker_count"] == 0
+
+    assert read_executor_result(state, "missing") is not None
+    assert record_citations(state, "cycle-missing-result", executor_result=read_executor_result(state, "missing")) == []
+    missing_row = read_citation_scans(state)["rows"][-1]
+    assert missing_row["status"] == "unavailable"
+    assert "executor_result_unavailable" in missing_row["notes"]
 
 
 def test_citations_are_bounded_and_reporting_only(tmp_path: Path) -> None:
