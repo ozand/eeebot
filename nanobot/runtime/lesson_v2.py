@@ -648,7 +648,9 @@ def read_executor_result(
         return _EXECUTOR_RESULT_UNAVAILABLE
     try:
         path = Path(state_dir) / "subagents" / f"{task_id}.json"
-        if not path.is_file() or path.stat().st_size > max_bytes:
+        if not path.is_file():
+            return _EXECUTOR_RESULT_UNAVAILABLE
+        if path.stat().st_size > max_bytes:
             return _EXECUTOR_RESULT_UNAVAILABLE
         payload = json.loads(path.read_text(encoding="utf-8"))
         result = payload.get("result") if isinstance(payload, dict) else None
@@ -679,8 +681,6 @@ def record_citations(
         scan = {
             "scan_ran": False,
             "cycle_id": str(cycle_id),
-            "marker_count": 0,
-            "lesson_ids": [],
             "status": "unavailable",
             "notes": ["executor_result_unavailable"],
             "ts": timestamp,

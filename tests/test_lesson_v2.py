@@ -123,6 +123,8 @@ def test_executor_result_citation_boundary_distinguishes_hit_zero_and_absent(tmp
     assert record_citations(state, "cycle-missing-result", executor_result=read_executor_result(state, "missing")) == []
     missing_row = read_citation_scans(state)["rows"][-1]
     assert missing_row["status"] == "unavailable"
+    assert "marker_count" not in missing_row
+    assert "lesson_ids" not in missing_row
     assert "executor_result_unavailable" in missing_row["notes"]
 
 
