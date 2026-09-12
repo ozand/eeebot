@@ -104,6 +104,10 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.runtime.reflector:_save_watermark",
     ),
     "scorecard": ("nanobot.runtime.scorecard:compute_scorecard",),
+    "bridge": (
+        "nanobot.crash_record:record_exit",
+        "nanobot.crash_record:_start_run_marker",
+    ),
     # knowledge_curator's nested-layout fallback (``<state_dir>/state/reflector``)
     # — an alias of the reflector journal, not a directory of its own.
     "state": (

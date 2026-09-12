@@ -36,7 +36,8 @@ import json
 import os
 import sys
 import traceback
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -49,9 +50,14 @@ ENV_MARKER = "NANOBOT_BRIDGE_EXIT_RECORD"
 BRIDGE_MODULE = "nanobot.runtime.bridge"
 RECORDS_REL = Path("bridge") / "exits.jsonl"
 STREAK_REL = Path("bridge") / "exit_streak.json"
+RUNS_REL = Path("bridge") / "runs.jsonl"
+RUN_MARKER_REL = Path("bridge") / "run.json"
+RUNS_SCHEMA = "bridge-run-v1"
 STREAK_SCHEMA = "bridge-exit-streak-v1"
 MERGE_WINDOW_S = 300.0
+RUN_RETENTION_DAYS = 90
 _armed = False
+_run_metadata: dict[str, Any] = {}
 
 
 def _now_iso(now: datetime | None = None) -> str:
@@ -128,6 +134,128 @@ def _write_atomic(path: Path, payload: dict[str, Any]) -> None:
     os.replace(temp, path)
 
 
+def set_run_metadata(metadata: Mapping[str, Any] | None = None, **values: Any) -> None:
+    """Set truthful metadata for the current bridge process.
+
+    The bridge owns the classification (for example, a loop-breaker abort),
+    while this stdlib-only recorder owns durable run timing. Values are bounded
+    to simple JSON-compatible scalars so an observability failure cannot alter
+    bridge control flow.
+    """
+    global _run_metadata
+    for key, value in dict(metadata or {}, **values).items():
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            _run_metadata[str(key)] = value
+
+
+def _run_retention_days() -> int:
+    raw = os.environ.get("CYCLE_LEDGER_RETENTION_DAYS", str(RUN_RETENTION_DAYS)).strip()
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return RUN_RETENTION_DAYS
+
+
+def _run_day(name: str) -> str | None:
+    if not (name.startswith("runs-") and name.endswith(".jsonl.gz")):
+        return None
+    day = name[len("runs-"):-len(".jsonl.gz")]
+    try:
+        datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return day
+
+
+def _rotate_runs(root: Path, active: Path, now: datetime) -> None:
+    """Rotate completed run rows daily and prune beyond the bounded horizon."""
+    try:
+        if active.exists():
+            day = datetime.fromtimestamp(active.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%d")
+            today = now.strftime("%Y-%m-%d")
+            if day != today:
+                archive = root / f"runs-{day}.jsonl.gz"
+                import gzip
+                with active.open("rb") as source, gzip.open(archive, "wb") as target:
+                    target.write(source.read())
+                active.unlink()
+    except OSError:
+        pass
+    cutoff = (now.date() - timedelta(days=_run_retention_days())).toordinal()
+    for archive in root.glob("runs-*.jsonl.gz"):
+        day = _run_day(archive.name)
+        if not day:
+            continue
+        try:
+            if datetime.strptime(day, "%Y-%m-%d").date().toordinal() < cutoff:
+                archive.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _record_run_end(root: Path, *, outcome: str, exit_status: Any, source: str, service_result: str, stamp: str) -> None:
+    """Materialize one run row from the marker, including signal-only exits."""
+    marker_path = root / RUN_MARKER_REL
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        if not isinstance(marker, dict):
+            return
+        started = _parse_iso(marker.get("started_at"))
+        finished = _parse_iso(stamp)
+        if started is None or finished is None:
+            return
+        metadata = dict(_run_metadata)
+        if source == "systemd" and (
+            service_result in {"timeout", "watchdog", "oom-kill"}
+            or str(exit_status).lower() in {"timeout", "watchdog", "oom-kill"}
+            or str(exit_code).lower() in {"timeout", "watchdog", "oom-kill"}
+        ):
+            metadata["classification"] = "unit_timeout"
+        classification = str(metadata.get("classification") or ("completion" if outcome == "success" else "failed"))
+        row = {
+            "schema_version": RUNS_SCHEMA,
+            "phase": "run_end",
+            "run_id": str(marker.get("run_id") or ""),
+            "started_at": _now_iso(started),
+            "finished_at": _now_iso(finished),
+            "duration_s": round(max(0.0, (finished - started).total_seconds()), 3),
+            "classification": classification,
+            "outcome": outcome,
+            "exit_status": exit_status,
+            "source": source,
+        }
+        for key in ("cycle_id", "request_id", "reason"):
+            if key in metadata:
+                row[key] = metadata[key]
+        runs_dir = root / RUNS_REL.parent
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        active = root / RUNS_REL
+        _rotate_runs(runs_dir, active, finished)
+        with active.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        marker_path.unlink(missing_ok=True)
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+
+
+def _start_run_marker(root: Path) -> None:
+    global _run_metadata
+    _run_metadata = {}
+    marker_path = root / RUN_MARKER_REL
+    started = datetime.now(timezone.utc)
+    try:
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_atomic(marker_path, {
+            "schema_version": RUNS_SCHEMA,
+            "run_id": f"run-{uuid.uuid4().hex[:16]}",
+            "started_at": _now_iso(started),
+        })
+    except OSError as exc:
+        print(f"bridge-run-record: start marker not written: {exc!r}", file=sys.stderr)
+
+
 def record_exit(
     root: str | Path,
     *,
@@ -156,6 +284,8 @@ def record_exit(
         "pid": os.getpid(), "argv": list(getattr(sys, "orig_argv", sys.argv))[:6],
     }
     try:
+        _record_run_end(root, outcome=outcome, exit_status=exit_status, source=source,
+                        service_result=service_result, stamp=stamp)
         records_path.parent.mkdir(parents=True, exist_ok=True)
         streak = _load_streak(streak_path)
         last_ts = _parse_iso(streak.get("updated_at"))
@@ -217,7 +347,9 @@ def arm(argv: list[str] | None = None, env: Mapping[str, str] | None = None) -> 
     global _armed
     if _armed or not is_bridge_invocation(argv, env):
         return _armed
-    sys.excepthook = _excepthook_recording(sys.excepthook, state_dir(env))
+    root = state_dir(env)
+    sys.excepthook = _excepthook_recording(sys.excepthook, root)
+    _start_run_marker(root)
     _armed = True
     return True
 

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import bridge, cycle_ledger, llm_proposer
+from nanobot.runtime import bridge, cycle_ledger, llm_proposer, state_access
 
 
 def _read_ledger(state_dir: Path) -> list[dict]:
@@ -193,6 +193,45 @@ class TestTypedHelpers:
         outcome_rows = [r for r in rows if r["phase"] == "outcome"]
         assert len(outcome_rows) == 1
         assert [r["phase"] for r in rows] == ["started", "dedup", "gate", "outcome"]
+
+
+def test_run_window_is_state_access_owned_and_reports_retained_rows(tmp_path):
+    from nanobot import crash_record
+
+    state = tmp_path / "state"
+    crash_record._start_run_marker(state)
+    crash_record.record_exit(state, outcome="success", exit_status=0)
+    since = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+    window = state_access.run_window(state, since_ts=since)
+    assert window.status == "complete"
+    assert len(window.rows) == 1
+    assert window.rows[0]["phase"] == "run_end"
+
+
+def test_run_window_beyond_retention_is_explicit(tmp_path):
+    old = datetime.now(timezone.utc) - timedelta(days=100)
+    state = tmp_path / "state"
+    run_dir = state / "bridge"
+    run_dir.mkdir(parents=True)
+    archive = run_dir / "runs-2020-01-01.jsonl.gz"
+    import gzip
+    with gzip.open(archive, "wt", encoding="utf-8") as fh:
+        fh.write(json.dumps({"phase": "run_end", "duration_s": 10}) + "\\n")
+    window = state_access.run_window(state, since_ts=old.isoformat().replace("+00:00", "Z"))
+    assert window.status == "unavailable"
+    assert window.rows == ()
+    assert "beyond_retention" in window.notes
+    assert "no_retained_rows" in window.notes
+
+
+def test_run_window_pruned_store_is_unavailable_not_empty(tmp_path):
+    state = tmp_path / "state"
+    (state / "bridge").mkdir(parents=True)
+    window = state_access.run_window(
+        state, since_ts=(datetime.now(timezone.utc) - timedelta(days=100)).isoformat().replace("+00:00", "Z"),
+    )
+    assert window.status == "unavailable"
+    assert "beyond_retention" in window.notes
 
 
 # ─── rotation ──────────────────────────────────────────────────────────────────
