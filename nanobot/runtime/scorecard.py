@@ -628,6 +628,12 @@ def _loop_section(
     fallback_rejects = 0
     fallback_rejects_by_reason: dict[str, int] = {}
     fallback_target_paths: set[str] = set()
+    # #1510 / ADR-009 obligation 3: count terminal cycles whose proposal
+    # selected a hypothesis demand. This is visibility-only; it is deliberately
+    # absent from _TARGETS and never participates in gaps, fitness, or demand
+    # selection. Sets make duplicate ledger rows non-inflating.
+    hypothesis_cycle_ids: set[str] = set()
+    terminal_cycle_ids: set[str] = set()
     proposals = 0
     proposer_rejects = 0
     self_dedup_rejects = 0
@@ -664,6 +670,15 @@ def _loop_section(
             idle_rows += 1
         elif phase == "proposed":
             proposals += 1
+            # #1510: `demand_id` is the canonical, persisted identity of the
+            # selected demand. Count hypothesis demand ids rather than free-
+            # form `serves`/`hypothesis_ref` text, which can describe a claim
+            # without proving that a hypothesis demand was selected.
+            demand_id = str(row.get("demand_id") or "").strip().casefold()
+            if demand_id.startswith("hypothesis-"):
+                cycle_id = str(row.get("cycle_id") or "").strip()
+                if cycle_id:
+                    hypothesis_cycle_ids.add(cycle_id)
         elif phase == "proposer_reject":
             proposer_rejects += 1
             if str(row.get("reason") or "").strip() == "self_dedup":
@@ -678,13 +693,15 @@ def _loop_section(
                     fallback_target_paths.add(target_path)
         elif phase == "outcome":
             outcome_rows += 1
+            cycle_id = str(row.get("cycle_id") or "").strip()
+            if cycle_id:
+                terminal_cycle_ids.add(cycle_id)
             outcome = str(row.get("outcome") or "").strip().lower()
             if str(row.get("lane") or "").strip() == "fallback":
                 fallback_cycles += 1
                 if outcome == "success":
                     fallback_successes += 1
             if outcome == "success":
-                cycle_id = str(row.get("cycle_id") or "").strip()
                 if cycle_id in decay_cycles:
                     decay_integrations += 1
                 else:
@@ -717,6 +734,7 @@ def _loop_section(
             elif outcome == "failed":
                 failed_outcomes += 1
     cycleish = idle_rows + outcome_rows
+    hypothesis_served_cycles = len(hypothesis_cycle_ids & terminal_cycle_ids)
     repeat_failures = duplicate_failure_skips + self_dedup_rejects
     attempts = proposals + proposer_rejects
     # #1055 definition: failed outcomes plus rejects. Each attempt counts at
@@ -767,6 +785,14 @@ def _loop_section(
         "wasted_attempts": wasted_attempts,
         "idle_rows": idle_rows,
         "cycleish_rows": cycleish,
+        # #1510: ADR-009 obligation 3. The denominator is every distinct
+        # terminal cycle id in this same seven-day ledger window, including
+        # skipped/failed terminal cycles. A zero denominator is None via
+        # _ratio, not a misleading zero rate. Reporting-only: no target or gap
+        # is derived from this metric.
+        "terminal_cycles": len(terminal_cycle_ids),
+        "hypothesis_served_cycles": hypothesis_served_cycles,
+        "hypothesis_selection_rate": _ratio(hypothesis_served_cycles, len(terminal_cycle_ids)),
         # idle is healthy (honest no-op, #760) — reported, never targeted.
         "idle_share": _ratio(idle_rows, cycleish),
         "repeat_failures": repeat_failures,
