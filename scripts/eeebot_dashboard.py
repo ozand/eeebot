@@ -645,6 +645,16 @@ def compute_reward_distribution(rewards: list[tuple[str, float, str]]) -> dict[s
     }
 
 
+def format_rate(value: Any, *, precision: int = 1) -> str:
+    """Render a ratio as a percentage without turning ``None`` into zero."""
+    if value is None:
+        return "unavailable"
+    try:
+        return f"{float(value) * 100:.{precision}f}%"
+    except (TypeError, ValueError):
+        return "unavailable"
+
+
 def format_reward_distribution(dist: dict[str, float]) -> str:
     """Format reward distribution stats for CLI display."""
     if dist["count"] == 0:
@@ -1941,6 +1951,13 @@ def collect_metrics_uncached() -> dict[str, Any]:
     hypotheses_scan = scan_hypotheses_sources(STATE_DIR)
     scorecard_snapshot = load_json(STATE_DIR / "scorecard" / "latest.json", None)
     goal_gaps_line = format_goal_gaps_line(scorecard_snapshot)
+    scorecard_loop = scorecard_snapshot.get("loop", {}) if isinstance(scorecard_snapshot, dict) else {}
+    hypothesis_selection_rate = (
+        scorecard_loop.get("hypothesis_selection_rate")
+        if isinstance(scorecard_loop, dict)
+        else None
+    )
+    hypothesis_selection_rate_text = format_rate(hypothesis_selection_rate)
     _hyp_sources = hypotheses_scan.get("sources", {})
     (
         _prompt_fit_age, _skills_age, _lessons_age, _lessons_index_age,
@@ -2103,6 +2120,8 @@ def collect_metrics_uncached() -> dict[str, Any]:
             "goal_gaps_line": goal_gaps_line,
         }),
         "goal_gaps_line": goal_gaps_line,
+        "hypothesis_selection_rate": hypothesis_selection_rate,
+        "hypothesis_selection_rate_text": hypothesis_selection_rate_text,
         "queue_snapshot": queue_snapshot,
         "materialized_cycle": format_materialized_cycle(materialized),
         "queue_depth": queue_depth,
@@ -2773,6 +2792,7 @@ _HTML_ESCAPE_KEYS: list[str] = [
     "cpu_load_html", "mem_pct_html", "disk_pct_html",
     # Reward distribution statistics
     "reward_distribution_html",
+    "hypothesis_selection_rate_text_html",
     # Health status is computed below from the dimensions; do not look it up in metrics.
     # Knowledge plane (#1347)
     "prompt_fit_rung_html", "prompt_fit_chars_html", "prompt_fit_headroom_html", "prompt_fit_dropped_count_html",
@@ -2840,6 +2860,7 @@ _HTML_KEY_MAP: dict[str, str] = {
     "disk_pct_html": "disk_pct",
     # Reward distribution statistics
     "reward_distribution_html": "reward_distribution",
+    "hypothesis_selection_rate_text_html": "hypothesis_selection_rate_text",
     # Health status
     "overall_health_html": "overall_health",
     "health_status_html": "health_status",
@@ -3166,6 +3187,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                          <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{oldest_stale_path_html}</div>
                      </div>
 
+                    <div class="metric-item">
+                        <span class="metric-label">Hypothesis selection rate (7-day):</span>
+                        <span class="metric-value">{hypothesis_selection_rate_text_html}</span>
+                    </div>
                     <div class="metric-item">
                         <span class="metric-label">Reward Momentum:</span>
                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{reward_momentum_html}</div>
