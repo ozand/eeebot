@@ -1409,7 +1409,75 @@ _REFLECTOR_POOL_SLUG = "reflector_pool.json"
 _REFLECTOR_POOL_SCHEMA = "curator-reflector-pool-v1"
 _REFLECTOR_CARD_EVIDENCE_CAP = 8
 _REFLECTOR_KINDS = frozenset({"error_pattern", "approach_hint"})
-_REFLECTOR_DEFAULT_TOPIC_TAG = "runtime"
+_REFLECTOR_TOPIC_TERMS: tuple[tuple[str, str], ...] = (
+    ("architecture", "architecture"),
+    ("config", "config"),
+    ("configuration", "config"),
+    ("configure", "config"),
+    ("fallback", "config"),
+    ("gateway", "config"),
+    ("model", "config"),
+    ("provider", "config"),
+    ("route", "config"),
+    ("server", "config"),
+    ("gate", "gate"),
+    ("git", "git"),
+    ("branch", "git"),
+    ("commit", "git"),
+    ("worktree", "git"),
+    ("infra", "infra"),
+    ("host", "infra"),
+    ("systemd", "infra"),
+    ("lint", "lint"),
+    ("sidecar", "sidecar"),
+    ("watermark", "sidecar"),
+    ("rotation", "rotation"),
+    ("archive", "rotation"),
+    ("prompt", "prompt"),
+    ("context", "prompt"),
+    ("token", "prompt"),
+    ("security", "security"),
+    ("credential", "security"),
+    ("subagent", "subagent"),
+    ("tool", "tooling"),
+    ("test", "test"),
+    ("pytest", "test"),
+    ("read", "runtime"),
+    ("reader", "runtime"),
+    ("reads", "runtime"),
+    ("parser", "runtime"),
+    ("parse", "runtime"),
+    ("file", "runtime"),
+    ("files", "runtime"),
+    ("memory", "runtime"),
+    ("large", "runtime"),
+    ("section", "runtime"),
+    ("thing", "runtime"),
+    ("observation", "runtime"),
+    ("condition", "runtime"),
+    ("node", "runtime"),
+    ("missing", "runtime"),
+    ("unparseable", "runtime"),
+    ("log", "runtime"),
+    ("journal", "runtime"),
+    ("runtime", "runtime"),
+)
+
+
+def _reflector_topic_tags(problem: str, detail: str) -> list[str]:
+    """Derive topical tags from observed condition and recommendation text.
+
+    Terms are deliberately drawn from the shared controlled vocabulary. A
+    card with no matching term is declined rather than receiving a default
+    tag, because a fallback would recreate the constant-tag defect.
+    """
+    text = f"{problem} {detail}".casefold()
+    words = set(re.findall(r"[a-z][a-z0-9_-]*", text))
+    tags: list[str] = []
+    for term, tag in _REFLECTOR_TOPIC_TERMS:
+        if term in words and tag not in tags:
+            tags.append(tag)
+    return tags
 
 
 def reflector_tag_drift(
@@ -1557,6 +1625,9 @@ def _reflector_card(
         return None
     if re.search(r"\bcycle-[0-9a-f]+\b", problem, re.I) and re.fullmatch(r"[\s,.:;\d]*(?:in|the|cycle|terminated|ended|with|a|partial|outcome|and|files_changed|after|turns|failed|success|completed|\[|\]|=|[\s,.:;\d])+", observed.lower()):
         return None
+    tags = _reflector_topic_tags(problem, detail)
+    if not tags:
+        return None
     return {
         "schema_version": 2, "id": card_id,
         "title": title,
@@ -1568,7 +1639,7 @@ def _reflector_card(
         # in the live store were such same-row siblings).
         "problem": problem[:400],
         "solution": detail[:500],
-        "tags": [_REFLECTOR_DEFAULT_TOPIC_TAG], "severity": "medium",
+        "tags": tags, "severity": "medium",
         # Provenance is a producer fact, not a topical tag. The cycle ids
         # remain the card's evidence; keeping one explicit source field avoids
         # making the same fact part of both the topic vocabulary and metadata.
