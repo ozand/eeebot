@@ -72,14 +72,17 @@ def test_run_marker_and_exit_materialize_queryable_duration(tmp_path):
 
     state = tmp_path / "state"
     crash_record._start_run_marker(state)
-    marker = json.loads((state / "bridge" / "run.json").read_text(encoding="utf-8"))
+    marker_path = state / "bridge" / "run.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["started_at"] = crash_record._now_iso(NOW)
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
     crash_record.set_run_metadata(cycle_id="cycle-1", classification="completion", reason="success")
     crash_record.record_exit(state, outcome="success", exit_status=0, now=NOW + timedelta(seconds=42))
     rows = _run_rows(state)
     assert len(rows) == 1
     assert rows[0]["phase"] == "run_end"
     assert rows[0]["run_id"] == marker["run_id"]
-    assert rows[0]["duration_s"] >= 0
+    assert rows[0]["duration_s"] == pytest.approx(42.0, abs=0.01)
     assert rows[0]["classification"] == "completion"
     assert rows[0]["cycle_id"] == "cycle-1"
     assert not (state / "bridge" / "run.json").exists()

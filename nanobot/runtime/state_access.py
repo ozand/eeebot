@@ -345,6 +345,8 @@ def run_window(
     if not rows and "beyond_retention" in notes:
         notes.append("no_retained_rows")
     if files_read == 0:
+        if "beyond_retention" in notes:
+            return Window((), "unavailable", _iso(requested), None, None, 0, files_skipped, bytes_read, tuple(notes))
         return Window((), "unavailable", _iso(requested), None, None, 0, files_skipped, bytes_read, tuple(notes or ["no_source"]))
     status = "partial" if notes else "complete"
     return Window(

@@ -211,15 +211,27 @@ def test_run_window_is_state_access_owned_and_reports_retained_rows(tmp_path):
 def test_run_window_beyond_retention_is_explicit(tmp_path):
     old = datetime.now(timezone.utc) - timedelta(days=100)
     state = tmp_path / "state"
-    run_dir = state / "bridge" / "runs"
+    run_dir = state / "bridge"
     run_dir.mkdir(parents=True)
     archive = run_dir / "runs-2020-01-01.jsonl.gz"
     import gzip
     with gzip.open(archive, "wt", encoding="utf-8") as fh:
         fh.write(json.dumps({"phase": "run_end", "duration_s": 10}) + "\\n")
     window = state_access.run_window(state, since_ts=old.isoformat().replace("+00:00", "Z"))
+    assert window.status == "unavailable"
+    assert window.rows == ()
     assert "beyond_retention" in window.notes
     assert "no_retained_rows" in window.notes
+
+
+def test_run_window_pruned_store_is_unavailable_not_empty(tmp_path):
+    state = tmp_path / "state"
+    (state / "bridge").mkdir(parents=True)
+    window = state_access.run_window(
+        state, since_ts=(datetime.now(timezone.utc) - timedelta(days=100)).isoformat().replace("+00:00", "Z"),
+    )
+    assert window.status == "unavailable"
+    assert "beyond_retention" in window.notes
 
 
 # ─── rotation ──────────────────────────────────────────────────────────────────
