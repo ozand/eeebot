@@ -95,6 +95,75 @@ class TestLoopSection:
         assert loop["repeat_failures"] == 2
         assert loop["repeat_failure_rate"] == round(2 / 3, 4)
 
+    def test_hypothesis_selection_rate_counts_served_terminal_cycles(self, tmp_path):
+        """#1510 / ADR-009: one rate over terminal cycles in the same window."""
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [
+                {"phase": "proposed", "cycle_id": "h1", "demand_id": "hypothesis-h1", "serves": "demand hypothesis-h1", "ts": _iso(40)},
+                {"phase": "outcome", "cycle_id": "h1", "outcome": "success", "ts": _iso(39)},
+                {"phase": "proposed", "cycle_id": "h2", "serves": "priority p2", "ts": _iso(30)},
+                {"phase": "outcome", "cycle_id": "h2", "outcome": "failed", "ts": _iso(29)},
+                {"phase": "outcome", "cycle_id": "h3", "outcome": "skipped-noop", "ts": _iso(19)},
+            ],
+        )
+        loop = scorecard.compute_scorecard(state_dir, None, force=True)["loop"]
+        assert loop["terminal_cycles"] == 3
+        assert loop["hypothesis_served_cycles"] == 1
+        assert loop["hypothesis_selection_rate"] == round(1 / 3, 4)
+        assert "hypothesis_selection_rate" not in scorecard._TARGETS
+
+    def test_hypothesis_selection_rate_is_none_for_empty_terminal_window(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_ledger(state_dir, [])
+        loop = scorecard.compute_scorecard(state_dir, None, force=True)["loop"]
+        assert loop["terminal_cycles"] == 0
+        assert loop["hypothesis_served_cycles"] == 0
+        assert loop["hypothesis_selection_rate"] is None
+        assert not any(g["metric"] == "hypothesis_selection_rate" for g in scorecard.compute_scorecard(state_dir, None, force=True)["gaps"])
+
+    def test_hypothesis_selection_rate_does_not_count_unfinished_proposal(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [{"phase": "proposed", "cycle_id": "h1", "serves": "hypothesis h1", "ts": _iso(10)}],
+        )
+        loop = scorecard.compute_scorecard(state_dir, None, force=True)["loop"]
+        assert loop["terminal_cycles"] == 0
+        assert loop["hypothesis_served_cycles"] == 0
+        assert loop["hypothesis_selection_rate"] is None
+
+    def test_hypothesis_text_without_canonical_demand_id_is_not_counted(self, tmp_path):
+        """A free-form legacy marker cannot fabricate a selection."""
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [
+                {"phase": "proposed", "cycle_id": "h1", "serves": "hypothesis h1", "ts": _iso(10)},
+                {"phase": "outcome", "cycle_id": "h1", "outcome": "skipped-duplicate", "ts": _iso(9)},
+            ],
+        )
+        loop = scorecard.compute_scorecard(state_dir, None, force=True)["loop"]
+        assert loop["terminal_cycles"] == 1
+        assert loop["hypothesis_served_cycles"] == 0
+        assert loop["hypothesis_selection_rate"] == 0.0
+
+    def test_hypothesis_selection_rate_deduplicates_terminal_rows(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_ledger(
+            state_dir,
+            [
+                {"phase": "proposed", "cycle_id": "h1", "demand_id": "hypothesis-h1", "ts": _iso(10)},
+                {"phase": "outcome", "cycle_id": "h1", "outcome": "success", "ts": _iso(9)},
+                {"phase": "outcome", "cycle_id": "h1", "outcome": "success", "ts": _iso(8)},
+            ],
+        )
+        loop = scorecard.compute_scorecard(state_dir, None, force=True)["loop"]
+        assert loop["terminal_cycles"] == 1
+        assert loop["hypothesis_served_cycles"] == 1
+        assert loop["hypothesis_selection_rate"] == 1.0
+
     def test_new_proposer_reasons_do_not_count_as_repeat_failures(self, tmp_path):
         state_dir = tmp_path / "state"
         _write_ledger(state_dir, [
