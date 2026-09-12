@@ -5,7 +5,6 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any
 
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
@@ -123,10 +122,14 @@ class SkillsLoader:
         """
         try:
             from nanobot.runtime.state import resolve_runtime_state_root
+            from nanobot.runtime.state_access import sidecar
             state_path = resolve_runtime_state_root(self.workspace) / "demand" / "skill_retirement_cooldown.json"
-            if not state_path.is_file():
+            loaded = sidecar(state_path, default=None, max_bytes=64 * 1024)
+            if loaded.status == "absent":
                 return set()
-            data: Any = json.loads(state_path.read_text(encoding="utf-8"))
+            if loaded.status != "present":
+                return None
+            data = loaded.data
             paths = data.get("paths") if isinstance(data, dict) else None
             if not isinstance(paths, dict):
                 return None
