@@ -50,7 +50,29 @@ def test_yaml_entries_reports_invalid_archive_shape(tmp_path):
     entries, status = _yaml_entries(raw)
     assert entries == []
     assert status == "unavailable"
-    assert "parse" in status or status == "unavailable"
+
+
+def test_valid_lesson_archives_return_entries_without_diagnostics(tmp_path):
+    archive = tmp_path / "lessons" / "archive"
+    archive.mkdir(parents=True)
+    with gzip.open(archive / "lessons-valid.yaml.gz", "wt", encoding="utf-8") as fh:
+        fh.write("lessons:\n- id: LESS-valid\n  approach: retained\n")
+
+    diagnostics: list[dict[str, str]] = []
+    entries = list(iter_lessons(tmp_path, diagnostics=diagnostics))
+    assert [entry["id"] for entry in entries] == ["LESS-valid"]
+    assert diagnostics == []
+
+
+def test_empty_lesson_archives_return_empty_without_diagnostics(tmp_path):
+    archive = tmp_path / "lessons" / "archive"
+    archive.mkdir(parents=True)
+    with gzip.open(archive / "lessons-empty.yaml.gz", "wt", encoding="utf-8") as fh:
+        fh.write("lessons: []\n")
+
+    diagnostics: list[dict[str, str]] = []
+    assert list(iter_lessons(tmp_path, diagnostics=diagnostics)) == []
+    assert diagnostics == []
 
 
 def test_iter_lessons_reports_unparseable_archive_without_stopping(tmp_path):
