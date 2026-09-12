@@ -37,6 +37,27 @@ def test_unavailable_is_not_empty_and_tool_requires_blocked_decision(tmp_path: P
     assert "do not treat this as zero matches" in payload["instruction"].lower()
 
 
+def test_missing_workspace_is_unavailable_not_a_complete_empty_corpus(tmp_path: Path):
+    result = ei.search_memory(tmp_path / "state", tmp_path / "missing-repo", "anything", limit=3)
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "memory_corpus_unavailable"
+    assert result["decision"] == "blocked"
+
+
+def test_existing_wrong_workspace_without_memory_is_unavailable(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    result = ei.search_memory(tmp_path / "state", repo, "anything", limit=3)
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "memory_corpus_unavailable"
+
+
+def test_short_query_checks_availability_before_reporting_zero(tmp_path: Path):
+    result = ei.search_memory(tmp_path / "state", tmp_path / "missing-repo", "猫", limit=3)
+    assert result["status"] == "unavailable"
+    assert result["decision"] == "blocked"
+
+
 def test_complete_zero_is_distinct_from_unavailable(tmp_path: Path):
     repo, state = tmp_path / "repo", tmp_path / "state"
     _write(repo, "memory/facts/one.md", "# One\nknown durable evidence\n")
@@ -116,6 +137,71 @@ def test_unsafe_or_unreadable_memory_source_makes_corpus_unavailable_without_ret
     assert result["status"] == "unavailable"
     assert result["reason"] == "memory_corpus_unavailable"
     assert "memory" in result["notes"]
+
+
+def test_non_ascii_query_is_searchable(tmp_path: Path):
+    repo, state = tmp_path / "repo", tmp_path / "state"
+    _write(repo, "memory/facts/ru.md", "# Память\nпроверка разрешений каталога\n")
+    result = ei.search_memory(state, repo, "разрешений каталога", limit=3)
+    assert result["status"] == "complete"
+    assert result["results"][0]["path"] == "memory/facts/ru.md"
+
+
+def test_symlinked_memory_directory_is_unavailable(tmp_path: Path):
+    repo, state = tmp_path / "repo", tmp_path / "state"
+    target = tmp_path / "outside"
+    _write(target, "secret.md", "outside evidence")
+    (repo / "memory").mkdir(parents=True)
+    try:
+        (repo / "memory" / "linked").symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlink unavailable")
+    result = ei.search_memory(state, repo, "outside evidence", limit=3)
+    assert result["status"] == "unavailable"
+    assert result["decision"] == "blocked"
+
+
+def test_memory_rows_do_not_crowd_existing_dedup_candidates(tmp_path: Path):
+    repo, state = tmp_path / "repo", tmp_path / "state"
+    _write(repo, "scripts/track_memory.py", '"""track memory usage over time"""\n')
+    for i in range(12):
+        _write(repo, f"memory/facts/noise_{i}.md", f"monitor ram memory usage noise {i}\n")
+    ei.reindex(state, repo)
+    hits = ei.find_similar(state, "monitor RAM and memory usage", limit=5)
+    assert any(row["path"] == "scripts/track_memory.py" for row in hits)
+
+
+def test_executor_forces_blocked_outcome_after_unavailable_memory_tool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMResponse, ToolCallRequest
+    from nanobot.agent.tools import memory_search
+
+    class Provider:
+        calls = 0
+        def get_default_model(self): return "test-model"
+        async def chat_with_retry(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(content=None, tool_calls=[ToolCallRequest(
+                    id="m1", name="search_memory", arguments={"query": "needed fact"},
+                )])
+            return LLMResponse(content='{"outcome":"completed","files_changed":[]}')
+
+    monkeypatch.setattr(memory_search, "search_memory", lambda *a, **k: {
+        "status": "unavailable", "reason": "index_unavailable", "decision": "blocked",
+        "instruction": "do not treat as zero", "results": [], "returned": 0,
+        "available": 0, "limit": 5, "notes": [],
+    })
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus())
+    asyncio.run(manager._run_subagent("task", "task", "label", {"channel": "cli", "chat_id": "direct"}))
+    telemetry = json.loads(next(manager._telemetry_dir.glob("*.json")).read_text(encoding="utf-8"))
+    final = json.loads(telemetry["result"])
+    assert telemetry["status"] == "blocked"
+    assert telemetry["stop_reason"] == "memory_search_unavailable"
+    assert final["outcome"] == "blocked"
+    assert final["files_changed"] == []
+    assert final["findings"] == ["memory_search_unavailable:index_unavailable"]
 
 
 def test_tool_bounds_limit_query_and_snippets_and_returns_safe_paths(tmp_path: Path):
