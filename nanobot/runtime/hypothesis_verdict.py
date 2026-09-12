@@ -62,7 +62,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from nanobot.runtime.usage_evidence import _SCRIPT_DIRS
+from nanobot.runtime.schemas import QUALIFYING_ARTIFACT_DIRS
 
 # #822 microbench: the minimum measured improvement (percent, lower baseline
 # time minus candidate time over baseline) to call a hypothesis "supported"
@@ -153,7 +153,7 @@ def _confirmed_usage_verdict(
             script_files = [
                 str(f).strip()
                 for f in files
-                if any(str(f or "").strip().startswith(f"{directory}/") for directory in _SCRIPT_DIRS)
+                if any(str(f or "").strip().startswith(f"{directory}/") for directory in QUALIFYING_ARTIFACT_DIRS)
             ]
             if not script_files:
                 continue

@@ -82,6 +82,7 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.runtime import benchmark_evidence
+from nanobot.runtime.schemas import QUALIFYING_ARTIFACT_DIRS
 
 USAGE_SCHEMA = "usage-evidence-v1"
 
@@ -168,7 +169,6 @@ _EVIDENCE_EPOCH = datetime(2026, 7, 16, tzinfo=timezone.utc)
 
 _ARCHIVE_MARKER_LINES = 5  # bounded archived-stub check window (#800)
 _ARCHIVE_MARKERS = ("DEPRECATED", "ARCHIVED")
-_SCRIPT_DIRS = ("scripts", "surfaces")  # #1035: artifact candidate directories
 
 # #809: operator decay protect-list. The decay lane only sees harness-
 # observable disk signals (pycache/output) — it cannot see systemd/cron
@@ -639,7 +639,7 @@ def _ops_file_names_script(text: str, stem: str) -> bool:
 
 def _is_confirmable_path(rel: str) -> bool:
     """Return True iff `rel` is a candidate artifact path (under scripts/ or surfaces/)."""
-    return any(rel.startswith(f"{d}/") for d in _SCRIPT_DIRS) and rel.endswith(".py")
+    return any(rel.startswith(f"{d}/") for d in QUALIFYING_ARTIFACT_DIRS) and rel.endswith(".py")
 
 
 def _reference_index(
@@ -657,7 +657,7 @@ def _reference_index(
     try:
         repo = Path(selfevo_repo)
         script_stems: dict[str, list[str]] = {}
-        for dirname in _SCRIPT_DIRS:
+        for dirname in QUALIFYING_ARTIFACT_DIRS:
             d = repo / dirname
             if d.is_dir():
                 for p in d.glob("*.py"):
@@ -678,7 +678,7 @@ def _reference_index(
         # instance cannot commit a forged one through the mutation surface.
         #
         consumer_files: list[Path] = []
-        for dirname in _SCRIPT_DIRS:
+        for dirname in QUALIFYING_ARTIFACT_DIRS:
             d = repo / dirname
             if d.is_dir():
                 consumer_files.extend(d.glob("*.py"))
@@ -802,7 +802,7 @@ def refresh_usage(state_dir: Path, selfevo_repo: Path | None) -> dict[str, Any]:
         ref_index = _reference_index(state_dir, repo, sidecar_data=data) if _reference_signal_enabled() else {}
 
         script_files: list[Path] = []
-        for dirname in _SCRIPT_DIRS:
+        for dirname in QUALIFYING_ARTIFACT_DIRS:
             d = repo / dirname
             if d.is_dir():
                 script_files.extend(sorted(d.glob("*.py")))
@@ -1252,7 +1252,7 @@ def _ops_referenced_paths(selfevo_repo: Path) -> set[str]:
     try:
         repo = Path(selfevo_repo)
         script_stems: dict[str, list[str]] = {}
-        for dirname in _SCRIPT_DIRS:
+        for dirname in QUALIFYING_ARTIFACT_DIRS:
             d = repo / dirname
             if d.is_dir():
                 for p in d.glob("*.py"):
@@ -1308,9 +1308,9 @@ def owner_live_ratio(
         repo = Path(selfevo_repo)
         now = now or datetime.now(timezone.utc)
 
-        # Inventory candidate files across _SCRIPT_DIRS
+        # Inventory candidate files across QUALIFYING_ARTIFACT_DIRS
         inventory_paths: list[str] = []
-        for dirname in _SCRIPT_DIRS:
+        for dirname in QUALIFYING_ARTIFACT_DIRS:
             d = repo / dirname
             if not d.is_dir():
                 continue

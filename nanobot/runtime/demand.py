@@ -156,6 +156,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from nanobot.runtime.schemas import QUALIFYING_ARTIFACT_DIRS
 from nanobot.runtime.state_access import Window, artifacts, evidence_status, ledger_window
 
 logger = logging.getLogger(__name__)
@@ -249,7 +250,6 @@ _EXHAUSTING_REJECT_REASONS = frozenset({"self_dedup", "enhancement_without_calle
 _NOOP_OUTCOMES = {"completed_no_commit", "skipped-duplicate"}
 _ESCALATION_MODEL_ENV = "SELFEVO_ESCALATION_MODEL"
 
-_SCRIPT_DIRS = ("scripts", "surfaces")  # mirrors system_map._SCRIPT_DIRS
 
 _EXHAUSTED_SCHEMA = "demand-exhausted-v1"
 _COMPLETED_SCHEMA = "demand-completed-v1"
@@ -867,7 +867,7 @@ def _compile_defects(
             failures = watermark["failures"]
         else:
             failures = []
-            for dirname in _SCRIPT_DIRS:
+            for dirname in QUALIFYING_ARTIFACT_DIRS:
                 d = repo / dirname
                 if not d.is_dir():
                     continue
