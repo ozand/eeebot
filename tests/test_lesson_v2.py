@@ -59,7 +59,11 @@ def test_schema_rejects_missing_required_fields_and_unknown_tags() -> None:
     assert not validate_lesson({**card, "problem": ""})
     assert not validate_lesson({**card, "solution": ""})
     assert not validate_lesson({**card, "tags": ["not-controlled"]})
-    assert set(("runtime", "reflector", "test")) <= CONTROLLED_LESSON_TAGS
+    assert not validate_lesson({**card, "tags": ["reflector"]})
+    assert validate_lesson({**card, "tags": ["runtime"], "source": "reflector"})
+    assert "runtime" in CONTROLLED_LESSON_TAGS
+    assert "curator" in CONTROLLED_LESSON_TAGS
+    assert "reflector" not in CONTROLLED_LESSON_TAGS
 
 
 def test_normalization_and_dedup() -> None:
@@ -248,6 +252,8 @@ def test_curator_promotes_reflector_delta(tmp_path: Path) -> None:
     lessons = yaml.safe_load((workspace / "lessons" / "lessons.yaml").read_text(encoding="utf-8"))
     assert validate_lesson_for_mint(lessons["lessons"][0])
     assert lessons["lessons"][0]["solution"] == "Use bounded parser reads incrementally for large files"
+    assert lessons["lessons"][0]["tags"] == ["runtime"]
+    assert lessons["lessons"][0]["source"] == "reflector"
 
 
 def test_solution_validator_rejects_reflector_template() -> None:

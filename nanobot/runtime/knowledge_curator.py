@@ -60,6 +60,7 @@ from nanobot.runtime.lesson_v2 import (
     validate_lesson_for_mint,
 )
 from nanobot.runtime.model_registry import resolve_model
+from nanobot.runtime.schemas import CONTROLLED_LESSON_TAGS
 from nanobot.runtime.state_access import ledger_window
 
 MAX_WRITES_DEFAULT = 3
@@ -1408,7 +1409,84 @@ _REFLECTOR_POOL_SLUG = "reflector_pool.json"
 _REFLECTOR_POOL_SCHEMA = "curator-reflector-pool-v1"
 _REFLECTOR_CARD_EVIDENCE_CAP = 8
 _REFLECTOR_KINDS = frozenset({"error_pattern", "approach_hint"})
+_REFLECTOR_DEFAULT_TOPIC_TAG = "runtime"
 
+
+def reflector_tag_drift(
+    workspace: Path,
+    *,
+    state_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Report tags outside the current controlled vocabulary.
+
+    Sources are the active lesson/error YAML files and all retained lesson
+    archives. Missing optional sources are ignored; a present unreadable
+    source is reported as partial/unavailable rather than as zero drift.
+    """
+    workspace = Path(workspace)
+    source_paths = [workspace / "lessons" / name for name in ("lessons.yaml", "errors.yaml")]
+    archive_dir = workspace / "lessons" / "archive"
+    try:
+        source_paths.extend(sorted(archive_dir.glob("*.yaml.gz")))
+    except OSError:
+        pass
+    entries: list[dict[str, Any]] = []
+    readable = 0
+    unreadable = 0
+    present = 0
+    try:
+        for path in source_paths:
+            try:
+                exists = path.exists()
+            except OSError:
+                exists = False
+            if not exists:
+                continue
+            present += 1
+            try:
+                opener = gzip.open if path.name.endswith(".gz") else open
+                with opener(path, "rt", encoding="utf-8") as handle:
+                    parsed, status = _yaml_entries(handle.read())
+                if status != "complete":
+                    unreadable += 1
+                    continue
+                readable += 1
+                entries.extend(parsed)
+            except Exception:
+                unreadable += 1
+        if not present:
+            status = "unavailable"
+        elif readable == 0:
+            status = "unavailable"
+        elif unreadable:
+            status = "partial"
+        else:
+            status = "complete"
+        unknown = sorted({
+            str(tag).strip()
+            for entry in entries
+            for tag in (entry.get("tags") or [])
+            if isinstance(tag, str) and tag.strip() and tag.strip() not in CONTROLLED_LESSON_TAGS
+        })
+        return {
+            "status": status,
+            "sources_present": present,
+            "sources_read": readable,
+            "sources_unavailable": unreadable,
+            "rows_read": len(entries),
+            "undefined_tags": unknown,
+            "undefined_tag_count": len(unknown),
+        }
+    except Exception:
+        return {
+            "status": "unavailable",
+            "sources_present": present,
+            "sources_read": readable,
+            "sources_unavailable": unreadable,
+            "rows_read": len(entries),
+            "undefined_tags": [],
+            "undefined_tag_count": 0,
+        }
 
 def _reflector_pool_path(state_dir: Path) -> Path:
     return Path(state_dir) / "curator" / _REFLECTOR_POOL_SLUG
@@ -1490,7 +1568,11 @@ def _reflector_card(
         # in the live store were such same-row siblings).
         "problem": problem[:400],
         "solution": detail[:500],
-        "tags": ["reflector"], "severity": "medium",
+        "tags": [_REFLECTOR_DEFAULT_TOPIC_TAG], "severity": "medium",
+        # Provenance is a producer fact, not a topical tag. The cycle ids
+        # remain the card's evidence; keeping one explicit source field avoids
+        # making the same fact part of both the topic vocabulary and metadata.
+        "source": "reflector",
         "seen_count": max(1, len(cycles)),
         "first_seen": first_seen, "last_seen": last_seen,
         "evidence": list(cycles[:_REFLECTOR_CARD_EVIDENCE_CAP]),

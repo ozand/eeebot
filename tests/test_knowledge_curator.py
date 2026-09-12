@@ -6,15 +6,16 @@ from pathlib import Path
 
 from nanobot.runtime.knowledge_curator import (
     _ACTION_INDEX_SEGMENTS,
-    _yaml_entries,
-    iter_lessons,
     _fact_path,
     _messages,
+    _yaml_entries,
     clear_staged_manifest,
     fit_lessons_to_input_budget,
+    iter_lessons,
     lessons_after,
     load_staged_manifest,
     migrate_loose_lessons,
+    reflector_tag_drift,
     run_curation,
 )
 
@@ -50,6 +51,37 @@ def test_yaml_entries_reports_invalid_archive_shape(tmp_path):
     entries, status = _yaml_entries(raw)
     assert entries == []
     assert status == "unavailable"
+
+
+def test_reflector_tag_drift_reports_clean_and_mutated_isolated_corpus(tmp_path):
+    workspace = tmp_path / "workspace"
+    lessons = workspace / "lessons"
+    lessons.mkdir(parents=True)
+    path = lessons / "lessons.yaml"
+    path.write_text("lessons:\n- id: L1\n  tags: [runtime, curator]\n", encoding="utf-8")
+
+    clean = reflector_tag_drift(workspace)
+    assert clean["status"] == "complete"
+    assert clean["undefined_tags"] == []
+
+    path.write_text("lessons:\n- id: L1\n  tags: [runtime, invented-topic]\n", encoding="utf-8")
+    mutated = reflector_tag_drift(workspace)
+    assert mutated["status"] == "complete"
+    assert mutated["undefined_tags"] == ["invented-topic"]
+
+
+def test_reflector_tag_drift_distinguishes_partial_and_unavailable(tmp_path):
+    workspace = tmp_path / "workspace"
+    lessons = workspace / "lessons"
+    lessons.mkdir(parents=True)
+    (lessons / "lessons.yaml").write_text("lessons: []\n", encoding="utf-8")
+    (lessons / "errors.yaml").write_bytes(b"not: [yaml")
+    assert reflector_tag_drift(workspace)["status"] == "partial"
+
+    unavailable = tmp_path / "unavailable"
+    (unavailable / "lessons").mkdir(parents=True)
+    (unavailable / "lessons" / "lessons.yaml").write_bytes(b"not: [yaml")
+    assert reflector_tag_drift(unavailable)["status"] == "unavailable"
 
 
 def test_valid_lesson_archives_return_entries_without_diagnostics(tmp_path):

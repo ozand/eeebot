@@ -84,7 +84,7 @@ def _lessons(workspace: Path) -> list[dict]:
 def _card(card_id: str, solution: str, problem: str, *, seen: int = 1, evidence: list[str] | None = None) -> dict:
     return {
         "schema_version": 2, "id": card_id, "title": solution[:200], "problem": problem, "solution": solution,
-        "tags": ["reflector"], "severity": "medium", "seen_count": seen,
+        "tags": ["runtime"], "source": "reflector", "severity": "medium", "seen_count": seen,
         "first_seen": "2026-08-29", "last_seen": "2026-08-29", "evidence": evidence or [],
     }
 

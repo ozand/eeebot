@@ -17,9 +17,7 @@ push). Durability is asserted with ``git show origin/main:<path>`` only.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
-import time
 from pathlib import Path
 
 import yaml
@@ -156,7 +154,8 @@ def test_reflector_mint_survives_cycle_start_reset_and_two_integrations(tmp_path
     assert len(cards) == 1
     assert cards[0]["id"].startswith("LESS-REF-1209abcdef00")
     assert cards[0]["solution"] == "Read a bounded tail of the journal instead of the whole file"
-    assert cards[0]["tags"] == ["reflector"]
+    assert cards[0]["tags"] == ["runtime"]
+    assert cards[0]["source"] == "reflector"
     assert cards[0]["seen_count"] == 2  # #1171: one card for the two cycles that recommended it
     assert load_staged_manifest(state) == []
 
