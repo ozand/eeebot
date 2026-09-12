@@ -1728,6 +1728,27 @@ def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
     lifecycle_src = sources.get("lifecycle", {})
     lifecycle_status = lifecycle_src.get("source_status", "unavailable")
 
+    # #1510 finding 2: durable.json's own bound (DURABLE_MAX_ENTRIES) shown
+    # against its live entry count -- the population `lifecycle`'s
+    # active/answered/stale never described, and the one 20/20-shaped number
+    # on this tile that IS capped. Absent/unreadable source status propagates,
+    # never a fabricated ratio.
+    durable_src = sources.get("durable", {})
+    durable_status = durable_src.get("source_status", "unavailable")
+    if durable_status != "valid":
+        durable_fill_text = durable_status
+    else:
+        durable_count = durable_src.get("entry_count")
+        if durable_count is None:
+            durable_fill_text = "unavailable"
+        else:
+            try:
+                from nanobot.runtime.hypothesis_backlog import DURABLE_MAX_ENTRIES
+
+                durable_fill_text = f"{durable_count} / {DURABLE_MAX_ENTRIES}"
+            except Exception:
+                durable_fill_text = "unavailable"
+
     # Disambiguate source-level absence from reader/import failure (#1358):
     # - If lifecycle.json itself is missing / unreadable / malformed on disk,
     #   report that exact source status across all lifecycle fields (never mask
@@ -1739,6 +1760,11 @@ def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
         answered_display = lifecycle_status
         orphaned_text = lifecycle_status
         keys_text = lifecycle_status
+        supported_display = lifecycle_status
+        refuted_display = lifecycle_status
+        inconclusive_display = lifecycle_status
+        verdict_summary_text = lifecycle_status
+        lifecycle_status_text = lifecycle_status
     else:
         lifecycle_counts = hyp.get("lifecycle_counts") or {}
         # A counts dict that simply lacks the key is missing data, not zero
@@ -1748,6 +1774,45 @@ def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
             answered_display = str(answered)
         else:
             answered_display = "unavailable"
+
+        # #1510 finding 1: the verdict distribution lifecycle_counts already
+        # computes (supported/refuted/inconclusive, same dict as answered
+        # above -- unconditional per-entry counts, not gated on a #1346
+        # reconciliation pass) was computed but never rendered. Same
+        # absent-key-is-unavailable-never-zero discipline as answered.
+        supported = lifecycle_counts.get("supported")
+        supported_display = str(supported) if supported is not None else "unavailable"
+        refuted = lifecycle_counts.get("refuted")
+        refuted_display = str(refuted) if refuted is not None else "unavailable"
+        inconclusive = lifecycle_counts.get("inconclusive")
+        inconclusive_display = str(inconclusive) if inconclusive is not None else "unavailable"
+
+        # #1510 finding 2 (as measured): 7 of 139 live rows carry a verdict
+        # at all. Three bare counts read as a healthy small sample; the same
+        # three counts against their denominator read as what they are.
+        # Rendered only when every addend is present -- a partial sum from a
+        # missing count would silently understate the real denominator.
+        _verdict_total = lifecycle_counts.get("total")
+        if supported is None or refuted is None or inconclusive is None or _verdict_total is None:
+            verdict_summary_text = "unavailable"
+        else:
+            verdicted = supported + refuted + inconclusive
+            verdict_summary_text = (
+                f"{verdicted} of {_verdict_total} rows carry a verdict "
+                f"(supported {supported}, refuted {refuted}, inconclusive {inconclusive})"
+            )
+
+        # #1510 finding 2: active/answered/stale are lifecycle.json's own
+        # `status` partition (mutually exclusive per entry -- lifecycle_counts
+        # counts each row once), not a second, contradictory population. They
+        # were never rendered anywhere on this page; there was no counting
+        # defect to fix, only a missing row to add.
+        active = lifecycle_counts.get("active")
+        stale = lifecycle_counts.get("stale")
+        if active is None or answered is None or stale is None:
+            lifecycle_status_text = "unavailable"
+        else:
+            lifecycle_status_text = f"{active} active / {answered} answered / {stale} stale"
 
         # #1346: orphaned / total, from the same counts dict; absent = unavailable,
         # never "0". A pre-#1346 lifecycle file has no orphan marks yet, so the
@@ -1783,6 +1848,12 @@ def format_hypotheses_tile(hyp: dict[str, Any]) -> dict[str, Any]:
         "hypotheses_answered_lifecycle_count": answered_display,
         "hypotheses_orphaned_lifecycle_count": orphaned_text,
         "hypotheses_lifecycle_keys_text": keys_text,
+        "hypotheses_supported_lifecycle_count": supported_display,
+        "hypotheses_refuted_lifecycle_count": refuted_display,
+        "hypotheses_inconclusive_lifecycle_count": inconclusive_display,
+        "hypotheses_verdict_summary_text": verdict_summary_text,
+        "hypotheses_lifecycle_status_text": lifecycle_status_text,
+        "hypotheses_durable_fill_text": durable_fill_text,
     }
 
 
@@ -2666,6 +2737,10 @@ _HTML_ESCAPE_KEYS: list[str] = [
     "lessons_corpus_size_html", "lessons_indexed_count_html",
     "hypotheses_sources_text_html", "hypotheses_answered_lifecycle_count_html",
     "hypotheses_orphaned_lifecycle_count_html", "hypotheses_lifecycle_keys_text_html",
+    "hypotheses_supported_lifecycle_count_html", "hypotheses_refuted_lifecycle_count_html",
+    "hypotheses_inconclusive_lifecycle_count_html",
+    "hypotheses_verdict_summary_text_html", "hypotheses_lifecycle_status_text_html",
+    "hypotheses_durable_fill_text_html",
     "goal_gaps_line_html",
 ]
 _HTML_KEY_MAP: dict[str, str] = {
@@ -2738,6 +2813,12 @@ _HTML_KEY_MAP: dict[str, str] = {
     "hypotheses_answered_lifecycle_count_html": "hypotheses_answered_lifecycle_count",
     "hypotheses_orphaned_lifecycle_count_html": "hypotheses_orphaned_lifecycle_count",
     "hypotheses_lifecycle_keys_text_html": "hypotheses_lifecycle_keys_text",
+    "hypotheses_supported_lifecycle_count_html": "hypotheses_supported_lifecycle_count",
+    "hypotheses_refuted_lifecycle_count_html": "hypotheses_refuted_lifecycle_count",
+    "hypotheses_inconclusive_lifecycle_count_html": "hypotheses_inconclusive_lifecycle_count",
+    "hypotheses_verdict_summary_text_html": "hypotheses_verdict_summary_text",
+    "hypotheses_lifecycle_status_text_html": "hypotheses_lifecycle_status_text",
+    "hypotheses_durable_fill_text_html": "hypotheses_durable_fill_text",
     "goal_gaps_line_html": "goal_gaps_line",
 }
 
@@ -3227,9 +3308,25 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                         <span class="metric-label">Per-source entry counts:</span>
                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">{hypotheses_sources_text_html}</div>
                     </div>
+                    <!-- #1510 finding 2: active/answered/stale are lifecycle.json's own
+                         status partition; durable.json's population is capped and
+                         reported against that cap. Two rows, correctly attributed --
+                         not one heading over two different stores. -->
                     <div class="metric-item">
-                        <span class="metric-label">Answered (lifecycle) count:</span>
-                        <span class="metric-value">{hypotheses_answered_lifecycle_count_html}</span>
+                        <span class="metric-label">Hypothesis lifecycle &mdash; lifecycle.json:</span>
+                        <span class="metric-value">{hypotheses_lifecycle_status_text_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Durable feed &mdash; durable.json:</span>
+                        <span class="metric-value">{hypotheses_durable_fill_text_html}</span>
+                    </div>
+                    <!-- #1510 finding 1: the verdict distribution lifecycle_counts
+                         already computed but never rendered -- shown against its
+                         own denominator, not as three bare counts (7 of 139 reads
+                         as the loop's real yield; 2 / 0 / 5 alone reads as healthy). -->
+                    <div class="metric-item">
+                        <span class="metric-label">Verdict yield:</span>
+                        <span class="metric-value">{hypotheses_verdict_summary_text_html}</span>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Orphaned (absent from inputs at last pass):</span>

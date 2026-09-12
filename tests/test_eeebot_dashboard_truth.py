@@ -1480,6 +1480,170 @@ def test_lifecycle_counts_disambiguate_missing_file_from_reader_failure() -> Non
     assert valid_file_working_reader["hypotheses_lifecycle_keys_text"] == "hypothesis-*: 91 | hyp-*: 22 | slug-*: 2 | other: 0"
 
 
+def test_verdict_distribution_unavailable_when_unreadable_never_zeros() -> None:
+    """#1510 finding 1: supported/refuted/inconclusive are new published
+    fields. An absent snapshot, or a snapshot whose source file cannot be
+    read, must report 'unavailable' -- never a fabricated 0. This is the
+    assertion the PR exists to guarantee; written before the render test."""
+    # 1. lifecycle.json missing on disk -> the same source status, not a count
+    missing_file = DASHBOARD.format_hypotheses_tile({
+        "sources": {"lifecycle": {"source_status": "missing"}},
+        "lifecycle_counts": {},
+    })
+    assert missing_file["hypotheses_supported_lifecycle_count"] == "missing"
+    assert missing_file["hypotheses_refuted_lifecycle_count"] == "missing"
+    assert missing_file["hypotheses_inconclusive_lifecycle_count"] == "missing"
+    assert missing_file["hypotheses_verdict_summary_text"] == "missing"
+    assert missing_file["hypotheses_lifecycle_status_text"] == "missing"
+
+    # 2. lifecycle.json malformed on disk
+    malformed_file = DASHBOARD.format_hypotheses_tile({
+        "sources": {"lifecycle": {"source_status": "malformed"}},
+        "lifecycle_counts": {},
+    })
+    assert malformed_file["hypotheses_supported_lifecycle_count"] == "malformed"
+    assert malformed_file["hypotheses_refuted_lifecycle_count"] == "malformed"
+    assert malformed_file["hypotheses_inconclusive_lifecycle_count"] == "malformed"
+    assert malformed_file["hypotheses_verdict_summary_text"] == "malformed"
+    assert malformed_file["hypotheses_lifecycle_status_text"] == "malformed"
+
+    # 3. lifecycle.json unreadable on disk
+    unreadable_file = DASHBOARD.format_hypotheses_tile({
+        "sources": {"lifecycle": {"source_status": "unreadable"}},
+        "lifecycle_counts": {},
+    })
+    assert unreadable_file["hypotheses_supported_lifecycle_count"] == "unreadable"
+    assert unreadable_file["hypotheses_refuted_lifecycle_count"] == "unreadable"
+    assert unreadable_file["hypotheses_inconclusive_lifecycle_count"] == "unreadable"
+    assert unreadable_file["hypotheses_verdict_summary_text"] == "unreadable"
+    assert unreadable_file["hypotheses_lifecycle_status_text"] == "unreadable"
+
+    # 4. lifecycle.json valid on disk, but the reader module failed to import
+    #    or lifecycle_counts() itself raised -- an empty counts dict, never 0.
+    valid_file_broken_reader = DASHBOARD.format_hypotheses_tile({
+        "sources": {"lifecycle": {"source_status": "valid", "entry_count": 115}},
+        "lifecycle_counts": {},
+    })
+    assert valid_file_broken_reader["hypotheses_supported_lifecycle_count"] == "unavailable"
+    assert valid_file_broken_reader["hypotheses_refuted_lifecycle_count"] == "unavailable"
+    assert valid_file_broken_reader["hypotheses_inconclusive_lifecycle_count"] == "unavailable"
+    assert valid_file_broken_reader["hypotheses_verdict_summary_text"] == "unavailable"
+    assert valid_file_broken_reader["hypotheses_lifecycle_status_text"] == "unavailable"
+
+    # 5. a counts dict present but missing exactly one of the three verdict
+    #    keys -- the two present counts still render individually, but the
+    #    SUMMARY (a sum of all three plus total) must not silently drop the
+    #    missing addend and understate the denominator; it reports
+    #    unavailable rather than a partial sum.
+    partial = DASHBOARD.format_hypotheses_tile({
+        "sources": {},
+        "lifecycle_counts": {"supported": 3, "refuted": 1, "total": 10},
+    })
+    assert partial["hypotheses_supported_lifecycle_count"] == "3"
+    assert partial["hypotheses_refuted_lifecycle_count"] == "1"
+    assert partial["hypotheses_inconclusive_lifecycle_count"] == "unavailable"
+    assert partial["hypotheses_verdict_summary_text"] == "unavailable"
+
+    # 6. lifecycle_counts present but missing 'total' -- the three verdict
+    #    counts are individually known, yet the denominator cannot be
+    #    stated, so the summary must not silently omit it.
+    no_total = DASHBOARD.format_hypotheses_tile({
+        "sources": {},
+        "lifecycle_counts": {"supported": 2, "refuted": 0, "inconclusive": 5},
+    })
+    assert no_total["hypotheses_verdict_summary_text"] == "unavailable"
+
+    # 7. active/stale present but answered missing -- lifecycle_status_text
+    #    must not fabricate the third bucket either.
+    partial_status = DASHBOARD.format_hypotheses_tile({
+        "sources": {},
+        "lifecycle_counts": {"active": 86, "stale": 44},
+    })
+    assert partial_status["hypotheses_lifecycle_status_text"] == "unavailable"
+
+    # 8. durable.json's own source status propagates, independent of
+    #    lifecycle.json's -- a missing durable feed must not read as "0 / 20".
+    missing_durable = DASHBOARD.format_hypotheses_tile({
+        "sources": {"durable": {"source_status": "missing"}},
+        "lifecycle_counts": {},
+    })
+    assert missing_durable["hypotheses_durable_fill_text"] == "missing"
+
+    # 9. the whole page, with no hypotheses state at all -- must still
+    #    render without raising, and the new fields must read "missing",
+    #    the same discipline test_knowledge_plane_all_missing_renders_without_raising
+    #    already holds every other hypotheses field to.
+    metrics = _health_metrics(report_status="missing", materialized_status="missing")
+    metrics["hypotheses_supported_lifecycle_count"] = "missing"
+    metrics["hypotheses_refuted_lifecycle_count"] = "missing"
+    metrics["hypotheses_inconclusive_lifecycle_count"] = "missing"
+    metrics["hypotheses_verdict_summary_text"] = "missing"
+    metrics["hypotheses_lifecycle_status_text"] = "missing"
+    metrics["hypotheses_durable_fill_text"] = "missing"
+    html_out = DASHBOARD.render_html(_render_ready(metrics))
+    assert "missing" in html_out
+
+
+def test_verdict_distribution_renders_against_its_denominator() -> None:
+    """A bare '2 / 0 / 5' reads as a healthy small sample; '7 of 139 rows
+    carry a verdict' reads as what it is. Render the yield against its
+    population, not as three isolated counts."""
+    tile = DASHBOARD.format_hypotheses_tile({
+        "sources": {"lifecycle": {"source_status": "valid", "entry_count": 41}},
+        "lifecycle_counts": {
+            "answered": 12, "supported": 5, "refuted": 0, "inconclusive": 7, "total": 41,
+        },
+    })
+    assert tile["hypotheses_supported_lifecycle_count"] == "5"
+    assert tile["hypotheses_refuted_lifecycle_count"] == "0"
+    assert tile["hypotheses_inconclusive_lifecycle_count"] == "7"
+    assert tile["hypotheses_verdict_summary_text"] == (
+        "12 of 41 rows carry a verdict (supported 5, refuted 0, inconclusive 7)"
+    )
+
+    metrics = _health_metrics(report_status="fresh", materialized_status="fresh")
+    metrics["hypotheses_verdict_summary_text"] = tile["hypotheses_verdict_summary_text"]
+    metrics["hypotheses_lifecycle_status_text"] = "unavailable"
+    metrics["hypotheses_durable_fill_text"] = "unavailable"
+    html_out = DASHBOARD.render_html(_render_ready(metrics))
+    assert "Verdict yield" in html_out
+    assert "12 of 41 rows carry a verdict" in html_out
+
+
+def test_verdict_and_status_render_against_the_real_isolated_corpus() -> None:
+    """Non-vacuity: real hypotheses/lifecycle.json + durable.json, pulled
+    read-only from the eeepc host (sudo -u eeepc-agent cat, never touching
+    the live release) into an isolated copy -- never git stash. 139 live
+    lifecycle rows, 86 active / 9 answered / 44 stale, and exactly 7 rows
+    (2 supported, 0 refuted, 5 inconclusive) ever received a verdict. Fixed
+    as a committed fixture rather than re-fetched, so this test does not
+    depend on host reachability."""
+    from nanobot.runtime.hypothesis_backlog import lifecycle_counts
+
+    fixture_dir = Path(__file__).resolve().parent / "fixtures" / "hypotheses_1510"
+    counts = lifecycle_counts(fixture_dir)
+    assert counts["total"] == 139
+    assert counts["active"] == 86
+    assert counts["answered"] == 9
+    assert counts["stale"] == 44
+    assert counts["supported"] == 2
+    assert counts["refuted"] == 0
+    assert counts["inconclusive"] == 5
+
+    tile = DASHBOARD.format_hypotheses_tile({
+        "sources": {
+            "lifecycle": {"source_status": "valid", "entry_count": 139},
+            "durable": {"source_status": "valid", "entry_count": 20},
+        },
+        "lifecycle_counts": counts,
+    })
+    assert tile["hypotheses_lifecycle_status_text"] == "86 active / 9 answered / 44 stale"
+    assert tile["hypotheses_durable_fill_text"] == "20 / 20"
+    assert tile["hypotheses_verdict_summary_text"] == (
+        "7 of 139 rows carry a verdict (supported 2, refuted 0, inconclusive 5)"
+    )
+
+
 def test_dashboard_systemd_unit_sets_pythonpath_and_bytecode_flags() -> None:
     """Issue #1358: eeebot-dashboard.service in host/eeepc/systemd/ must set
     Environment=PYTHONPATH to the current release directory and
