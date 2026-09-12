@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 from pathlib import Path
+from typing import Any
 
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
@@ -113,6 +114,36 @@ class SkillsLoader:
 
         return "\n\n---\n\n".join(parts) if parts else ""
 
+    def _retired_skill_paths(self) -> set[str] | None:
+        """Return verified-absent skill paths, or None when state is unreadable.
+
+        Filtering only on positive proof prevents an unreadable retirement
+        sidecar from hiding the executor's entire toolkit: unavailable state
+        means filter nothing, while an artifact still on disk remains visible.
+        """
+        try:
+            from nanobot.runtime.state import resolve_runtime_state_root
+            state_path = resolve_runtime_state_root(self.workspace) / "demand" / "skill_retirement_cooldown.json"
+            if not state_path.is_file():
+                return set()
+            data: Any = json.loads(state_path.read_text(encoding="utf-8"))
+            paths = data.get("paths") if isinstance(data, dict) else None
+            if not isinstance(paths, dict):
+                return None
+            return {
+                str(path).replace("\\", "/")
+                for path, record in paths.items()
+                if isinstance(record, dict) and record.get("status") == "verified_absent"
+            }
+        except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+            return None
+
+    def _is_retired_skill(self, skill: dict[str, str], retired_paths: set[str] | None) -> bool:
+        if retired_paths is None:
+            return False
+        rel = f"skills/{skill['name']}/SKILL.md"
+        return rel in retired_paths or not Path(skill["path"]).is_file()
+
     def build_skills_summary(self, excluded_names: "list[str] | None" = None) -> str:
         """
         Build a summary of all skills (name, description, path, availability).
@@ -136,6 +167,7 @@ class SkillsLoader:
             return ""
 
         excluded_set = set(excluded_names or [])
+        retired_paths = self._retired_skill_paths()
 
         def escape_xml(s: str) -> str:
             return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -143,6 +175,8 @@ class SkillsLoader:
         lines = ["<skills>"]
         for s in all_skills:
             if s["name"] in excluded_set:
+                continue
+            if self._is_retired_skill(s, retired_paths):
                 continue
             name = escape_xml(s["name"])
             path = s["path"]

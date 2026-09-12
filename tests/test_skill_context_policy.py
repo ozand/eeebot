@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from nanobot.agent.context import ContextBuilder
@@ -50,6 +51,74 @@ def test_workspace_skill_locations_are_relative_and_builtin_locations_absolute(t
     summary = SkillsLoader(workspace, builtin_skills_dir=builtins).build_skills_summary()
     assert "<location>skills/workspace-skill/SKILL.md</location>" in summary
     assert str(builtins / "builtin-skill" / "SKILL.md") in summary
+
+
+def _retirement_sidecar(state: Path, paths: dict[str, object]) -> None:
+    target = state / "demand" / "skill_retirement_cooldown.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps({"schema_version": "skill-retirement-cooldown-v1", "paths": paths}), encoding="utf-8")
+
+
+def test_verified_absent_skill_is_not_in_catalogue(tmp_path: Path, monkeypatch):
+    skills = tmp_path / "skills"
+    _skill(skills, "retired")
+    _skill(skills, "active")
+    state = tmp_path / "state"
+    _retirement_sidecar(state, {"skills/retired/SKILL.md": {"status": "verified_absent"}})
+    monkeypatch.setenv("NANOBOT_RUNTIME_STATE_ROOT", str(state))
+
+    summary = SkillsLoader(tmp_path, builtin_skills_dir=tmp_path / "builtins").build_skills_summary()
+
+    assert "<name>retired</name>" not in summary
+    assert "<name>active</name>" in summary
+
+
+def test_unverified_present_skill_remains_in_catalogue(tmp_path: Path, monkeypatch):
+    skills = tmp_path / "skills"
+    _skill(skills, "pending")
+    state = tmp_path / "state"
+    _retirement_sidecar(state, {"skills/pending/SKILL.md": {"status": "unverified"}})
+    monkeypatch.setenv("NANOBOT_RUNTIME_STATE_ROOT", str(state))
+
+    summary = SkillsLoader(tmp_path, builtin_skills_dir=tmp_path / "builtins").build_skills_summary()
+
+    assert "<name>pending</name>" in summary
+
+
+def test_unreadable_retirement_sidecar_filters_nothing(tmp_path: Path, monkeypatch):
+    skills = tmp_path / "skills"
+    _skill(skills, "retired")
+    _skill(skills, "active")
+    sidecar = tmp_path / "state" / "demand" / "skill_retirement_cooldown.json"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text("not json", encoding="utf-8")
+    monkeypatch.setenv("NANOBOT_RUNTIME_STATE_ROOT", str(tmp_path / "state"))
+
+    summary = SkillsLoader(tmp_path, builtin_skills_dir=tmp_path / "builtins").build_skills_summary()
+
+    assert "<name>retired</name>" in summary
+    assert "<name>active</name>" in summary
+
+
+def test_retirement_filter_is_non_vacuous_against_isolated_unfiltered_copy(tmp_path: Path, monkeypatch):
+    skills = tmp_path / "skills"
+    _skill(skills, "retired")
+    state = tmp_path / "state"
+    _retirement_sidecar(state, {"skills/retired/SKILL.md": {"status": "verified_absent"}})
+    monkeypatch.setenv("NANOBOT_RUNTIME_STATE_ROOT", str(state))
+
+    source = Path(__file__).parents[1] / "nanobot" / "agent" / "skills.py"
+    text = source.read_text(encoding="utf-8")
+    assert "verified_absent" in text
+    broken = text.replace("if self._is_retired_skill(s, retired_paths):\n                continue\n", "if False:\n                continue\n", 1)
+    assert broken != text
+    isolated = tmp_path / "skills_loader_isolated.py"
+    isolated.write_text(broken, encoding="utf-8")
+    namespace: dict[str, object] = {"__file__": str(isolated), "__name__": "skills_loader_isolated"}
+    exec(compile(broken, str(isolated), "exec"), namespace)
+    loader = namespace["SkillsLoader"](tmp_path, builtin_skills_dir=tmp_path / "builtins")
+
+    assert "<name>retired</name>" in loader.build_skills_summary()
 
 
 def test_skill_order_is_stable_regardless_of_directory_order(tmp_path: Path, monkeypatch):
