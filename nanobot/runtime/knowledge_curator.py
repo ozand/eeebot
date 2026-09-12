@@ -1432,9 +1432,19 @@ def _reflector_card(
     *, card_id: str, detail: str, problem: str, cycles: list[str], days: list[str],
     first_seen: str, last_seen: str, kind: str = "approach_hint",
 ) -> dict[str, Any] | None:
-    # Labels describe the recommendation class, never a truncated solution.
-    title = {"approach_hint": "Reusable corrective approach", "error_pattern": "Recurring failure prevention"}.get(kind)
-    if not title or not problem.strip() or not detail.strip():
+    # The title is a selection key: derive it from this card's observation and
+    # recommendation, never from the recommendation kind. This keeps sibling
+    # cards distinguishable without inventing a new generator or length cap.
+    if not problem.strip() or not detail.strip():
+        return None
+    title = problem.strip()
+    if kind == "error_pattern":
+        title = f"{problem.strip()}: {detail.strip()}"
+    elif kind == "approach_hint":
+        title = problem.strip()
+    else:
+        return None
+    if not title:
         return None
     # No generated narrative or cycle-only observation can supply a condition.
     observed = re.sub(r"\bcycle-[0-9a-f]+\b", "", problem, flags=re.I)
