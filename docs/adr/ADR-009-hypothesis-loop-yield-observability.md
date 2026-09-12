@@ -1,6 +1,6 @@
 ---
 title: Report the hypothesis loop's verdict yield, and separate unverdictable from undecided
-status: proposed
+status: accepted
 date: 2026-09-12
 authors: [eeebot maintainers]
 related: ["#1510", "#1345", "#1346", "#1457", "#822", "#878", "#1328", "#1335"]
@@ -9,7 +9,7 @@ tags: [hypotheses, observability, runtime]
 
 # Status
 
-Proposed — filed with #1510, ahead of any implementation. Complements ADR-007, which governs claim identity; this record governs what the loop reports about its own yield.
+Accepted — filed with #1510, ahead of any implementation. Complements ADR-007, which governs claim identity; this record governs what the loop reports about its own yield.
 
 # Context
 

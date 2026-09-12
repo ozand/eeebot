@@ -1,6 +1,6 @@
 ---
-title: The live lesson corpus is a retrieval surface, and titles and tags are its selection keys
-status: proposed
+title: The live lesson corpus is a retrieval surface; titles are its selection key and tags are being prepared to become one
+status: accepted
 date: 2026-09-12
 authors: [eeebot maintainers]
 related: ["#1507", "#1505", "#1481", "#1344", "#1070", "#1071", "#1171", "#1511", "#1515", "#1518"]
@@ -9,7 +9,7 @@ tags: [runtime, lessons, knowledge, retrieval]
 
 # Status
 
-Proposed — filed with #1507, ahead of any implementation.
+Accepted — filed with #1507, ahead of any implementation.
 
 **Revision note (2026-09-12):** this record replaces the version filed as PR #1508, which is closed in favour of this one. The decision is unchanged. Three claims in the original argument did not survive reading the current code and were corrected: the selector's actual title-backfill mechanism, the corpus's real size, and the grounds for invariants 1 and 3. See each section below for what changed and why; the short version is that legacy rows turn out to be rankable today (the original claim that they can't was wrong), and tags are not currently read by the selector at all (the original claim that they already are a selection key was also wrong) — so both invariants are re-derived from what the code actually does, not deleted, because a real problem remains in each once correctly diagnosed.
 
