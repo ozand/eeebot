@@ -37,6 +37,7 @@ _CITATION_SCAN_MAX_ARCHIVES = 16
 CITATION_SCAN_RETENTION_DAYS = 14
 _CITATION_SCAN_FILE = "scans.jsonl"
 _CITATION_ARCHIVE_DIR = "archive"
+_EXECUTOR_RESULT_MAX_BYTES = 256 * 1024
 _WORD_RE = re.compile(r"[a-z]{3,}")
 _MIN_SOLUTION_MEANINGFUL_CHARS = 20
 _FILLER_SOLUTIONS = frozenset({
@@ -632,11 +633,38 @@ def _record_scan_failure(
         pass
 
 
+_EXECUTOR_RESULT_UNSET = object()
+_EXECUTOR_RESULT_UNAVAILABLE = object()
+
+
+def read_executor_result(
+    state_dir: Path,
+    task_id: str | None,
+    *,
+    max_bytes: int = _EXECUTOR_RESULT_MAX_BYTES,
+) -> str | object:
+    """Read the bounded persisted executor answer, or an unavailable sentinel."""
+    if not task_id:
+        return _EXECUTOR_RESULT_UNAVAILABLE
+    try:
+        path = Path(state_dir) / "subagents" / f"{task_id}.json"
+        if not path.is_file():
+            return _EXECUTOR_RESULT_UNAVAILABLE
+        if path.stat().st_size > max_bytes:
+            return _EXECUTOR_RESULT_UNAVAILABLE
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        result = payload.get("result") if isinstance(payload, dict) else None
+        return result if isinstance(result, str) else _EXECUTOR_RESULT_UNAVAILABLE
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return _EXECUTOR_RESULT_UNAVAILABLE
+
+
 def record_citations(
     state_dir: Path,
     cycle_id: str,
-    texts: list[str],
+    texts: list[str] | None = None,
     *,
+    executor_result: str | None | object = _EXECUTOR_RESULT_UNSET,
     max_chars: int = 64_000,
     now: datetime | None = None,
 ) -> list[str]:
@@ -647,12 +675,30 @@ def record_citations(
     """
     current = _citation_now(now)
     pattern = re.compile(r"\[Lesson\s+([A-Za-z0-9_-]+)\]", re.IGNORECASE)
-    matches: list[str] = []
-    for text in texts:
-        matches.extend(pattern.findall(str(text or "")[:max_chars]))
-    ids = sorted(set(matches))
     timestamp = current.isoformat().replace("+00:00", "Z")
     directory = Path(state_dir) / "lesson_usage"
+    if executor_result is _EXECUTOR_RESULT_UNAVAILABLE:
+        scan = {
+            "scan_ran": False,
+            "cycle_id": str(cycle_id),
+            "status": "unavailable",
+            "notes": ["executor_result_unavailable"],
+            "ts": timestamp,
+        }
+        try:
+            _rotate_citation_file(directory, _CITATION_SCAN_FILE, current)
+            _append_citation_rows(directory / _CITATION_SCAN_FILE, [scan], current, max_rows=_CITATION_SCAN_MAX_ROWS)
+        except Exception as error:
+            _record_scan_failure(directory, scan, current, error)
+        return []
+    if executor_result is _EXECUTOR_RESULT_UNSET:
+        scan_texts = [str(text or "") for text in (texts or [])]
+    else:
+        scan_texts = [str(executor_result)]
+    matches: list[str] = []
+    for text in scan_texts:
+        matches.extend(pattern.findall(text[:max_chars]))
+    ids = sorted(set(matches))
     scan: dict[str, object] = {
         "scan_ran": True,
         "cycle_id": str(cycle_id),

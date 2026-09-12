@@ -4050,15 +4050,15 @@ async def _main_impl_body():
 
     # Reporting-only citation signal from bounded proposal/transcript fields.
     try:
-        from nanobot.runtime.lesson_v2 import record_citations as _record_lesson_citations
+        from nanobot.runtime.lesson_v2 import (
+            read_executor_result as _read_executor_result,
+            record_citations as _record_lesson_citations,
+        )
+        _executor_result = _read_executor_result(STATE_DIR, _subagent_task_id)
         _record_lesson_citations(
             STATE_DIR,
             _cycle_id,
-            [
-                str(_artifact_data.get('proposal') or ''),
-                str(_artifact_data.get('transcript') or ''),
-                str(_artifact_data.get('response') or ''),
-            ],
+            executor_result=_executor_result,
         )
     except Exception:
         pass
