@@ -138,31 +138,59 @@ def _entry_key(entry: dict[str, Any]) -> str:
     return _entry_id(entry) or str(entry.get("timestamp") or entry.get("date") or "")
 
 
-def _yaml_entries(raw: str) -> list[dict[str, Any]]:
+_MAX_ARCHIVE_DIAGNOSTICS = 10
+
+
+def _yaml_entries(raw: str) -> tuple[list[dict[str, Any]], str]:
+    """Parse a lesson document and preserve valid-empty vs unavailable."""
     try:
         import yaml
         value = yaml.safe_load(raw)
     except Exception:
-        return []
+        return [], "unavailable"
     if isinstance(value, dict):
         value = value.get("lessons") or value.get("errors") or []
-    return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
+    if not isinstance(value, list):
+        return [], "unavailable"
+    return [x for x in value if isinstance(x, dict)], "complete"
 
 
-def iter_lessons(workspace: Path, state_dir: Path | None = None) -> Iterable[dict[str, Any]]:
-    """Yield archived lessons oldest-first, then current live journals and reflections (#1041)."""
+def iter_lessons(
+    workspace: Path,
+    state_dir: Path | None = None,
+    *,
+    diagnostics: list[dict[str, str]] | None = None,
+) -> Iterable[dict[str, Any]]:
+    """Yield archived lessons oldest-first, then current live journals and reflections (#1041).
+
+    Parse failures remain fail-open for iteration, but are attached to the
+    generator so callers can distinguish unavailable archives from valid empty
+    sources without changing the yielded-entry API.
+    """
     workspace = Path(workspace)
     lessons = workspace / "lessons"
     for path in sorted((lessons / "archive").glob("*.yaml.gz")):
         try:
             with gzip.open(path, "rt", encoding="utf-8") as fh:
-                yield from _yaml_entries(fh.read())
+                entries, status = _yaml_entries(fh.read())
+            if status == "unavailable":
+                if diagnostics is not None and len(diagnostics) < _MAX_ARCHIVE_DIAGNOSTICS:
+                    diagnostics.append({"path": path.name, "status": "unavailable", "reason": "parse"})
+                continue
+            yield from entries
         except Exception:
+            if diagnostics is not None and len(diagnostics) < _MAX_ARCHIVE_DIAGNOSTICS:
+                diagnostics.append({"path": path.name, "status": "unavailable", "reason": "read"})
             continue
     for name in ("lessons.yaml", "errors.yaml"):
         path = lessons / name
         try:
-            yield from _yaml_entries(path.read_text(encoding="utf-8"))
+            entries, status = _yaml_entries(path.read_text(encoding="utf-8"))
+            if status == "unavailable":
+                # Active files predate the archive diagnostics contract; preserve
+                # the historical reader behavior and report only archive failures.
+                continue
+            yield from entries
         except Exception:
             continue
 
@@ -324,8 +352,9 @@ def lessons_after(
     state_dir: Path | None = None,
     return_status: bool = False,
     watermark_timestamp: str = "",
+    diagnostics: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], str]:
-    entries = list(iter_lessons(workspace, state_dir=state_dir))
+    entries = list(iter_lessons(workspace, state_dir=state_dir, diagnostics=diagnostics))
     entries.sort(key=_entry_sort_key)
 
     keys = {_entry_key(entry) for entry in entries if _entry_key(entry)}
@@ -2098,6 +2127,13 @@ def run_curation(
     old = _safe_json(wm_path, {})
     watermark = str(old.get("last_processed") or old.get("last_processed_id") or "") if isinstance(old, dict) else ""
     watermark_timestamp = str(old.get("timestamp") or "") if isinstance(old, dict) else ""
+    archive_diagnostics: list[dict[str, str]] = []
+    lessons_after_kwargs: dict[str, Any] = {}
+    try:
+        if "diagnostics" in inspect.signature(lessons_after).parameters:
+            lessons_after_kwargs["diagnostics"] = archive_diagnostics
+    except (TypeError, ValueError):
+        pass
     entries, cursor_status = lessons_after(
         workspace,
         watermark,
@@ -2105,6 +2141,7 @@ def run_curation(
         state_dir=state_dir,
         return_status=True,
         watermark_timestamp=watermark_timestamp,
+        **lessons_after_kwargs,
     )
     reanchor: dict[str, Any] | None = None
     if cursor_status == "cursor_aged_out":
@@ -2122,6 +2159,7 @@ def run_curation(
         curation_stage = {
             "status": empty_status, "processed": 0, "writes": 0, "staged": [],
             **({"reanchor": reanchor} if reanchor else {}),
+            **({"archive_diagnostics": archive_diagnostics} if archive_diagnostics else {}),
         }
         result = {"ok": True, "processed": 0, "writes": 0, "staged": [], "stages": {
             "reflector_mint": reflector_stage,
@@ -2251,6 +2289,7 @@ def run_curation(
             "writes": writes,
             "staged": staged_paths,
             **({"reanchor": reanchor} if reanchor else {}),
+            **({"archive_diagnostics": archive_diagnostics} if archive_diagnostics else {}),
             **input_fit,
         }
         result_dict: dict[str, Any] = {
@@ -2270,7 +2309,10 @@ def run_curation(
                 "timestamp": _now(),
                 "error": str(exc)[:500],
             })
-        curation_stage = {"status": "error", "processed": 0, "writes": 0, "staged": []}
+        curation_stage = {
+            "status": "error", "processed": 0, "writes": 0, "staged": [],
+            **({"archive_diagnostics": archive_diagnostics} if archive_diagnostics else {}),
+        }
         status = _safe_json(state_dir / "curator" / "status.json", {})
         if not isinstance(status, dict):
             status = {}
