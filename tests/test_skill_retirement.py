@@ -16,7 +16,6 @@ from pathlib import Path
 
 from nanobot.runtime import demand
 
-
 # ─── helpers ────────────────────────────────────────────────────────────────
 
 
@@ -330,6 +329,68 @@ def test_cooldown_expires_after_m_days(tmp_path: Path):
 
     cooldown = demand.retired_skill_paths_in_cooldown(state, now, tmp_path / "repo")
     assert "skills/old-skill/SKILL.md" not in cooldown
+
+
+# ─── verification observability ─────────────────────────────────────────────
+
+
+def test_verification_failure_is_observable_and_does_not_raise(tmp_path: Path, monkeypatch):
+    state = tmp_path / "state"
+    repo = _repo(tmp_path)
+    rel = "skills/idle-skill/SKILL.md"
+    now = _now()
+    demand.mark_skill_retired(state, rel, now, repo)
+
+    def fail_verification(*_args):
+        raise OSError("workspace lookup failed")
+
+    monkeypatch.setattr(demand, "_retirement_artifact_state", fail_verification)
+    demand._verify_retirement_markers(state, repo, now)
+
+    record = json.loads((state / "demand" / "skill_retirement_cooldown.json").read_text())["paths"][rel]
+    assert record["status"] == demand._RETIREMENT_UNAVAILABLE
+    assert record["verification"] == "verification_failed"
+    assert record["verification_error"] == "OSError: workspace lookup failed"
+
+
+def test_verification_success_remains_silent_and_preserves_status(tmp_path: Path):
+    state = tmp_path / "state"
+    repo = _repo(tmp_path)
+    rel = "skills/idle-skill/SKILL.md"
+    now = _now()
+    demand.mark_skill_retired(state, rel, now, repo)
+    before = json.loads((state / "demand" / "skill_retirement_cooldown.json").read_text())
+
+    demand._verify_retirement_markers(state, repo, now)
+
+    after = json.loads((state / "demand" / "skill_retirement_cooldown.json").read_text())
+    assert after == before
+
+
+def test_failed_record_does_not_block_other_marker_updates(tmp_path: Path, monkeypatch):
+    state = tmp_path / "state"
+    repo = _repo(tmp_path)
+    now = _now()
+    first = "skills/first/SKILL.md"
+    second = "skills/second/SKILL.md"
+    for rel in (first, second):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("# skill\n", encoding="utf-8")
+        demand.mark_skill_retired(state, rel, now, repo)
+    original = demand._retirement_artifact_state
+
+    def fail_first(repo_arg, rel):
+        if rel == first:
+            raise OSError("first lookup failed")
+        return original(repo_arg, rel)
+
+    monkeypatch.setattr(demand, "_retirement_artifact_state", fail_first)
+    demand._verify_retirement_markers(state, repo, now)
+
+    records = json.loads((state / "demand" / "skill_retirement_cooldown.json").read_text())["paths"]
+    assert records[first]["verification"] == "verification_failed"
+    assert records[second]["status"] == demand._RETIREMENT_UNVERIFIED
+    assert records[second]["verification"] == "artifact_present"
 
 
 # ─── anti-forgery ────────────────────────────────────────────────────────────

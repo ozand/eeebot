@@ -1823,38 +1823,53 @@ def _retirement_record(raw: Any) -> dict[str, Any]:
 def _verify_retirement_markers(
     state_dir: Path, selfevo_repo: Path | None, now: datetime,
 ) -> None:
-    """Refresh marker status from the actual workspace, fail-closed on uncertainty."""
+    """Refresh markers without letting one unexpected record stall the pass.
+
+    Expected artifact unavailability keeps its existing fail-closed status. An
+    unexpected verification error is retained on that record as ``verification``
+    metadata and ``status=unavailable`` so it cannot masquerade as an ordinary
+    not-yet-due ``unverified`` marker. The outer guard remains fail-open.
+    """
     try:
         data = _load_retirement_cooldown(state_dir)
         changed = False
         for rel, raw in list(data.get("paths", {}).items()):
-            record = _retirement_record(raw)
-            artifact = _retirement_artifact_state(selfevo_repo, str(rel))
-            status = (
-                _RETIREMENT_VERIFIED_ABSENT if artifact == "absent"
-                else _RETIREMENT_UNAVAILABLE if artifact == _RETIREMENT_UNAVAILABLE
-                else _RETIREMENT_UNVERIFIED
-            )
-            if record.get("status") != status:
-                record["status"] = status
-                changed = True
-            record["verification"] = {
-                "present": "artifact_present",
-                "absent": "artifact_absent",
-                _RETIREMENT_UNAVAILABLE: "artifact_state_unavailable",
-            }.get(artifact, "artifact_state_unavailable")
-            if status == _RETIREMENT_VERIFIED_ABSENT:
-                verified_at = record.get("verified_at")
-                if not isinstance(verified_at, str) or not verified_at.strip():
-                    record["verified_at"] = now.isoformat().replace("+00:00", "Z")
+            try:
+                record = _retirement_record(raw)
+                artifact = _retirement_artifact_state(selfevo_repo, str(rel))
+                status = (
+                    _RETIREMENT_VERIFIED_ABSENT if artifact == "absent"
+                    else _RETIREMENT_UNAVAILABLE if artifact == _RETIREMENT_UNAVAILABLE
+                    else _RETIREMENT_UNVERIFIED
+                )
+                if record.get("status") != status:
+                    record["status"] = status
                     changed = True
-            else:
-                if "verified_at" in record:
+                record["verification"] = {
+                    "present": "artifact_present",
+                    "absent": "artifact_absent",
+                    _RETIREMENT_UNAVAILABLE: "artifact_state_unavailable",
+                }.get(artifact, "artifact_state_unavailable")
+                if status == _RETIREMENT_VERIFIED_ABSENT:
+                    verified_at = record.get("verified_at")
+                    if not isinstance(verified_at, str) or not verified_at.strip():
+                        record["verified_at"] = now.isoformat().replace("+00:00", "Z")
+                        changed = True
+                elif "verified_at" in record:
                     record.pop("verified_at", None)
                     changed = True
-            if record != raw:
-                data["paths"][rel] = record
-                changed = True
+                if record != raw:
+                    data["paths"][rel] = record
+                    changed = True
+            except Exception as error:
+                failed = _retirement_record(raw)
+                failed["status"] = _RETIREMENT_UNAVAILABLE
+                failed["verification"] = "verification_failed"
+                failed["verification_error"] = f"{type(error).__name__}: {error}"[:500]
+                failed.pop("verified_at", None)
+                if failed != raw:
+                    data["paths"][rel] = failed
+                    changed = True
         if changed:
             _write_json(_retirement_cooldown_path(state_dir), data)
     except Exception:
