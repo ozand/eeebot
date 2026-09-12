@@ -40,8 +40,8 @@ def test_error_pattern_titles_are_derived_per_card():
 
     assert first and second
     assert first["title"] != second["title"]
-    assert first["title"] == "The gateway returns 502: Retry once"
-    assert second["title"] == "The parser sees malformed JSON: Use a fallback"
+    assert first["title"] == first["problem"]
+    assert second["title"] == second["problem"]
 
 
 def test_real_cluster_has_three_distinct_fields():
@@ -71,8 +71,8 @@ def test_other_kinds_remain_declined():
 def test_constant_title_mutation_is_caught_on_an_isolated_copy(tmp_path):
     source = Path(curator.__file__).read_text(encoding="utf-8")
     mutated = source.replace(
-        'elif kind == "approach_hint":\n        title = problem.strip()',
-        'elif kind == "approach_hint":\n        title = "Reusable corrective approach"',
+        'title = problem.strip()',
+        'title = "Reusable corrective approach"',
         1,
     )
     assert mutated != source

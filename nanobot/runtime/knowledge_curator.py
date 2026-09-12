@@ -1437,13 +1437,9 @@ def _reflector_card(
     # cards distinguishable without inventing a new generator or length cap.
     if not problem.strip() or not detail.strip():
         return None
-    title = problem.strip()
-    if kind == "error_pattern":
-        title = f"{problem.strip()}: {detail.strip()}"
-    elif kind == "approach_hint":
-        title = problem.strip()
-    else:
+    if kind not in {"approach_hint", "error_pattern"}:
         return None
+    title = problem.strip()
     if not title:
         return None
     # No generated narrative or cycle-only observation can supply a condition.
