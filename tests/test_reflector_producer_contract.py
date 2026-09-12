@@ -90,6 +90,24 @@ def test_reflector_tags_are_derived_per_subsystem():
     assert all(card["source"] == "reflector" for card in cards)
 
 
+def test_reflector_card_decline_records_existing_decision_surface(tmp_path):
+    card = curator._reflector_card(
+        card_id="no-topic", detail="Apply the orchard remedy",
+        problem="The orchard fruit color was observed", cycles=["cycle-no-topic"],
+        days=["2026-09-01"], first_seen="2026-09-01", last_seen="2026-09-01",
+        state_dir=tmp_path,
+    )
+    assert card is None
+    rows = [json.loads(line) for line in (tmp_path / "curator" / "decisions.jsonl").read_text().splitlines()]
+    assert rows == [{
+        "timestamp": rows[0]["timestamp"],
+        "lesson_id": "no-topic",
+        "decision": "mint_declined",
+        "reason": "no_controlled_topic_tag",
+        "target_file": curator.LESSONS_REL,
+    }]
+
+
 def test_reflector_card_without_a_vocabulary_term_is_declined():
     card = curator._reflector_card(
         card_id="no-topic", detail="Apply the orchard remedy",

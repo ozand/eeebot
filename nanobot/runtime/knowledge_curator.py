@@ -1624,6 +1624,7 @@ def _reflector_rows_after(path: Path, cursor: str, limit: int) -> tuple[list[dic
 def _reflector_card(
     *, card_id: str, detail: str, problem: str, cycles: list[str], days: list[str],
     first_seen: str, last_seen: str, kind: str = "approach_hint",
+    state_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     # The title is a selection key: derive it from this card's observation and
     # recommendation, never from the recommendation kind. This keeps sibling
@@ -1645,6 +1646,11 @@ def _reflector_card(
         return None
     tags = _reflector_topic_tags(problem, detail)
     if not tags:
+        if state_dir is not None:
+            _write_decision(
+                Path(state_dir), card_id, "mint_declined",
+                "no_controlled_topic_tag", LESSONS_REL,
+            )
         return None
     return {
         "schema_version": 2, "id": card_id,
@@ -1898,7 +1904,8 @@ def promote_reflector_recommendations_to_v2(
             words = keyword_set(detail)
             if _reflector_card(card_id=cycle_id, detail=detail, problem=problem,
                                cycles=[cycle_id], days=[day], first_seen=day,
-                               last_seen=day, kind=str(item.get("kind") or "")) is None:
+                               last_seen=day, kind=str(item.get("kind") or ""),
+                               state_dir=state_dir) is None:
                 _write_decision(state_dir, cycle_id, "mint_declined",
                                 "insufficient_distinct_condition_and_action", LESSONS_REL)
                 stats["rejected"] += 1
@@ -1915,7 +1922,7 @@ def promote_reflector_recommendations_to_v2(
                 card = _reflector_card(
                     card_id=_new_card_id(existing_ids, cycle_id, detail), detail=detail, problem=problem,
                     cycles=[cycle_id], days=[day], first_seen=day, last_seen=day,
-                    kind=str(item.get("kind") or "approach_hint"),
+                    kind=str(item.get("kind") or "approach_hint"), state_dir=state_dir,
                 )
                 if card is None:
                     _write_decision(state_dir, cycle_id, "mint_declined", "insufficient_distinct_condition_and_action", LESSONS_REL)
@@ -1986,7 +1993,7 @@ def promote_reflector_recommendations_to_v2(
             detail=str(cluster["detail"]), problem=str(cluster.get("problem") or ""),
             cycles=list(cluster["cycles"]), days=list(cluster["days"]),
             first_seen=str(cluster.get("first_seen") or last_day)[:10], last_seen=last_day,
-            kind=str(cluster.get("kind") or "approach_hint"),
+            kind=str(cluster.get("kind") or "approach_hint"), state_dir=state_dir,
         )
         if card is None:
             _write_decision(state_dir, str(cluster["cycles"][0]), "mint_declined", "insufficient_distinct_condition_and_action", LESSONS_REL)
