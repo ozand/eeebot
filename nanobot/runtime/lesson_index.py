@@ -34,23 +34,52 @@ class IndexLookup:
     reason: str | None = None
 
 
-def _parse_index_text(text: str, *, source: str) -> list[dict]:
-    """Parse complete rows from either the live file or an archive chunk."""
+# #1533 class hunt follow-up: bounded, capped diagnostics -- the shape
+# knowledge_curator.iter_lessons's archive-failure diagnostics already use
+# (#1513), not a log. A signal, not every rejected line.
+_MAX_INDEX_DIAGNOSTICS = 10
+
+
+def _reject_row(diagnostics: list[dict[str, str]] | None, line: str, reason: str) -> None:
+    if diagnostics is None or len(diagnostics) >= _MAX_INDEX_DIAGNOSTICS:
+        return
+    stripped = line.strip()
+    if stripped:
+        diagnostics.append({"line": stripped[:120], "reason": reason})
+
+
+def _parse_index_text(
+    text: str, *, source: str, diagnostics: list[dict[str, str]] | None = None
+) -> list[dict]:
+    """Parse complete rows from either the live file or an archive chunk.
+
+    ``diagnostics``, if given, collects up to :data:`_MAX_INDEX_DIAGNOSTICS`
+    ``{"line", "reason"}`` entries naming rows this parser could not use --
+    ``unrecognized_row_shape`` (the row doesn't match the 3-column pipe-table
+    format at all), ``invalid_filename``, ``field_out_of_bounds``, or
+    ``uncontrolled_tag`` for a row that matched the shape but failed a later
+    check. Purely additive: omitting ``diagnostics`` (the default) changes
+    nothing about which rows are accepted or rejected.
+    """
     if text.startswith(HEADER):
         text = text[len(HEADER):]
     entries = []
     for line in text.splitlines():
         match = re.fullmatch(r"\| \[(.*?)\]\(([^)]+)\) \| (.*?) \| (.*?) \|", line)
         if not match:
+            _reject_row(diagnostics, line, "unrecognized_row_shape")
             continue
         title, filename, prevention, tags = match.groups()
         filename = unquote(filename)
         if '/' in filename or '\\' in filename or not filename.endswith('.md') or filename in {'README.md', 'index.md'}:
+            _reject_row(diagnostics, line, "invalid_filename")
             continue
         if not prevention or len(title) > 200 or len(prevention) > 240:
+            _reject_row(diagnostics, line, "field_out_of_bounds")
             continue
         tag_list = tags.split(', ') if tags else []
         if not set(tag_list) <= CONTROLLED_LESSON_TAGS:
+            _reject_row(diagnostics, line, "uncontrolled_tag")
             continue
         rel = f"lessons/{filename}"
         entries.append({"id": rel, "title": title, "category": tags,
@@ -58,19 +87,48 @@ def _parse_index_text(text: str, *, source: str) -> list[dict]:
     return entries
 
 
-def _read_live_index(path: Path) -> tuple[list[dict], str | None]:
+def _read_live_index(
+    path: Path, *, diagnostics: list[dict[str, str]] | None = None
+) -> tuple[list[dict], str, str | None]:
+    """Read the bounded live index.
+
+    Returns ``(entries, status, reason)``, the #1173 vocabulary
+    (``complete``/``partial``/``unavailable``) rather than a bare error
+    string discarded by every caller. An absent, symlinked, oversized,
+    header-mismatched, or unreadable file is ``unavailable`` (unchanged
+    behavior, now named). New: a file that reads fine but whose EVERY
+    candidate row was rejected by :func:`_parse_index_text` is also
+    ``unavailable`` (``reason="malformed"``) rather than a silent, valid-
+    looking empty index -- matching
+    ``knowledge_lift.read_knowledge_lift_summary``'s
+    ``if not rows: return _unavailable_summary("malformed")`` template. A
+    file where SOME candidate rows parsed and at least one did not is
+    ``partial`` -- ``diagnostics``, when passed, names which and why.
+
+    This changes no parsing behaviour: the same rows are accepted and
+    rejected as before, in the same order, and ``entries`` is exactly what
+    the pre-#1533-follow-up version returned. Only the second and third
+    return values are new; every existing caller here already discarded the
+    old single error string.
+    """
     try:
         if path.is_symlink() or path.stat().st_size > MAX_INDEX_BYTES:
-            return [], "live index unavailable: missing, symlinked, or oversized"
+            return [], "unavailable", "missing_or_oversized"
         text = path.read_text(encoding="utf-8")
         if not text.startswith(HEADER):
-            return [], "live index unavailable: invalid header"
-        entries = _parse_index_text(text, source="lesson_index")
+            return [], "unavailable", "invalid_header"
+        body = text[len(HEADER):]
+        candidate_lines = sum(1 for line in body.splitlines() if line.strip())
+        entries = _parse_index_text(text, source="lesson_index", diagnostics=diagnostics)
         if len(entries) > MAX_FILES:
-            return [], "live index unavailable: entry limit"
-        return entries, None
+            return [], "unavailable", "entry_limit"
+        if candidate_lines and not entries:
+            return [], "unavailable", "malformed"
+        if len(entries) < candidate_lines:
+            return entries, "partial", None
+        return entries, "complete", None
     except (OSError, UnicodeError, ValueError):
-        return [], "live index unavailable: read error"
+        return [], "unavailable", "read_error"
 
 
 def _archive_paths(path: Path) -> list[Path]:
@@ -250,7 +308,7 @@ def read_index(
     """
     if reference is not None:
         return list(resolve_index_reference(path, reference).entries)
-    entries, _error = _read_live_index(Path(path))
+    entries, _status, _reason = _read_live_index(Path(path))
     if include_archives and entries:
         return entries + read_index_archives(path)
     if include_archives and not entries:

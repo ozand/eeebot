@@ -162,3 +162,138 @@ def test_prevention_summary_truncates_on_word_boundary(tmp_path):
     prevents = line.split(" | ")[1]
     assert len(prevents) <= 240
     assert prevents.endswith("word")
+
+
+# ─── #1533 class-hunt follow-up: _read_live_index reports what it drops ───
+#
+# This changes no parsing behaviour -- the same rows are accepted and
+# rejected as before. It only reports it. See the #1533 comment thread for
+# why this was built even though the live index was measured correct: the
+# same silent-degrade shape, with no diagnostic, is what let #1533 itself
+# go unnoticed since #1071.
+
+_FIXTURE_INDEX = Path(__file__).parent / "fixtures/lesson_index_1533/index.md"
+
+
+def test_real_live_index_is_complete_with_empty_diagnostics():
+    """Non-vacuity, the unmutated direction: the actual live lessons/index.md
+    (54 rows, fetched read-only from the deployed host and committed as a
+    fixture) still parses to 54 entries, status=complete, diagnostics
+    empty -- the same number the live #1533 class-hunt check measured
+    through the deployed reader."""
+    from nanobot.runtime.lesson_index import _read_live_index
+
+    diagnostics: list[dict[str, str]] = []
+    entries, status, reason = _read_live_index(_FIXTURE_INDEX, diagnostics=diagnostics)
+    assert len(entries) == 54
+    assert status == "complete"
+    assert reason is None
+    assert diagnostics == []
+
+
+def test_one_unrecognized_row_produces_partial_with_a_named_diagnostic(tmp_path):
+    """Non-vacuity, the mutated direction: the #1533 shape one notch
+    smaller -- a recognized-format index where ONE row the parser cannot
+    key on sits among otherwise-good rows. Isolated mutated copy, never
+    git stash."""
+    from nanobot.runtime.lesson_index import _read_live_index
+
+    mutated = tmp_path / "index.md"
+    lines = _FIXTURE_INDEX.read_text(encoding="utf-8").splitlines(keepends=True)
+    # Corrupt exactly one real row's shape (drop the closing tags cell) --
+    # analogous to a v2-schema row leading with the "wrong" first field.
+    victim = next(i for i, line in enumerate(lines) if line.startswith("| ["))
+    lines[victim] = lines[victim].rstrip("\n").rsplit(" | ", 1)[0] + "\n"
+    mutated.write_text("".join(lines), encoding="utf-8")
+
+    diagnostics: list[dict[str, str]] = []
+    entries, status, reason = _read_live_index(mutated, diagnostics=diagnostics)
+    assert status == "partial"
+    assert reason is None
+    assert len(entries) == 53
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["reason"] == "unrecognized_row_shape"
+
+
+def test_every_row_rejected_is_unavailable_not_an_empty_index(tmp_path):
+    """The case the brief names explicitly: an index whose every line was
+    rejected must not read as an empty index."""
+    from nanobot.runtime.lesson_index import HEADER, _read_live_index
+
+    path = tmp_path / "index.md"
+    path.write_text(HEADER + "not a table row at all\nneither is this\n", encoding="utf-8")
+
+    diagnostics: list[dict[str, str]] = []
+    entries, status, reason = _read_live_index(path, diagnostics=diagnostics)
+    assert entries == []
+    assert status == "unavailable"
+    assert reason == "malformed"
+    assert len(diagnostics) == 2
+    assert all(d["reason"] == "unrecognized_row_shape" for d in diagnostics)
+
+
+def test_genuinely_empty_index_is_complete_not_malformed(tmp_path):
+    """The distinction that makes the above meaningful: zero candidate rows
+    (a fresh, real, empty catalogue) is `complete`, not `unavailable` --
+    only rows that existed and were rejected trip `malformed`."""
+    from nanobot.runtime.lesson_index import HEADER, _read_live_index
+
+    path = tmp_path / "index.md"
+    path.write_text(HEADER, encoding="utf-8")
+
+    entries, status, reason = _read_live_index(path)
+    assert entries == []
+    assert status == "complete"
+    assert reason is None
+
+
+def test_unreadable_file_is_unavailable_with_a_reason(tmp_path):
+    from nanobot.runtime.lesson_index import _read_live_index
+
+    entries, status, reason = _read_live_index(tmp_path / "does_not_exist.md")
+    assert entries == []
+    assert status == "unavailable"
+    assert reason == "read_error"
+
+
+def test_each_rejection_reason_is_named_distinctly():
+    """The four ways a shaped-but-invalid row is dropped inside
+    _parse_index_text, each with its own diagnostic reason -- not just the
+    outer regex mismatch."""
+    from nanobot.runtime.lesson_index import HEADER, _parse_index_text
+
+    body = (
+        HEADER
+        + "| [Bad path](../escape.md) | some prevention text |  |\n"
+        + "| [No prevention](ok2.md) |  |  |\n"
+        + "| [Bad tag](ok.md) | fine prevention text here | not_a_real_tag |\n"
+    )
+    diagnostics: list[dict[str, str]] = []
+    entries = _parse_index_text(body, source="lesson_index", diagnostics=diagnostics)
+    assert entries == []
+    reasons = [d["reason"] for d in diagnostics]
+    assert "invalid_filename" in reasons
+    assert "field_out_of_bounds" in reasons
+    assert "uncontrolled_tag" in reasons
+
+
+def test_diagnostics_are_capped_not_a_log(tmp_path):
+    from nanobot.runtime.lesson_index import HEADER, _MAX_INDEX_DIAGNOSTICS, _read_live_index
+
+    path = tmp_path / "index.md"
+    body = HEADER + "".join(f"not a row {i}\n" for i in range(_MAX_INDEX_DIAGNOSTICS + 15))
+    path.write_text(body, encoding="utf-8")
+
+    diagnostics: list[dict[str, str]] = []
+    _read_live_index(path, diagnostics=diagnostics)
+    assert len(diagnostics) == _MAX_INDEX_DIAGNOSTICS
+
+
+def test_diagnostics_omitted_by_default_changes_nothing():
+    """Callers that don't ask for diagnostics get exactly the same entries,
+    status, and reason as callers that do -- opt-in, not a behavior change."""
+    from nanobot.runtime.lesson_index import _read_live_index
+
+    with_diag = _read_live_index(_FIXTURE_INDEX, diagnostics=[])
+    without_diag = _read_live_index(_FIXTURE_INDEX)
+    assert with_diag == without_diag
