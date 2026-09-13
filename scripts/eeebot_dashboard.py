@@ -2763,9 +2763,6 @@ def render_tui(m: dict[str, Any]) -> str:
         f"║  CPU Load      : {_tui_cell(_cpu_str)} ║",
         f"║  Memory        : {_tui_cell(_mem_str)} ║",
         f"║  Disk          : {_tui_cell(_disk_str)} ║",
-        "╠══════════════════════════════════════════════════════════╣",
-        f"║  Materialized  : {_tui_cell(m['materialized_status'])} ║",
-        f"║  Next Candidate: {_tui_cell(m['next_bounded_candidate'])} ║",
         "╚══════════════════════════════════════════════════════════╝",
     ])
     return "\n".join(lines)
