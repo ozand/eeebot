@@ -37,6 +37,8 @@ _CITATION_SCAN_MAX_ARCHIVES = 16
 CITATION_SCAN_RETENTION_DAYS = 14
 _CITATION_SCAN_FILE = "scans.jsonl"
 _CITATION_ARCHIVE_DIR = "archive"
+_CITATION_PROVENANCE_MAX_CARDS = 3
+_CITATION_SHORT_RESULT_CHARS = 128
 _DECISIONS_FILE = "decisions.jsonl"
 _DECISIONS_RETENTION_DAYS = 30
 _DECISIONS_MAX_ROWS = 2_000
@@ -866,6 +868,33 @@ def read_executor_result(
         return _EXECUTOR_RESULT_UNAVAILABLE
 
 
+def _citation_selector_provenance(
+    lessons_context: dict[str, object] | None,
+) -> dict[str, object]:
+    """Return the bounded set of cards offered in the executor prompt."""
+    context = lessons_context if isinstance(lessons_context, dict) else {}
+    provenance = context.get("selection_provenance")
+    if isinstance(provenance, dict):
+        return {"selection_provenance": provenance}
+    offered: list[str] = []
+    for key in ("relevant_error", "relevant_lesson"):
+        card = context.get(key)
+        if not isinstance(card, dict):
+            continue
+        card_id = str(card.get("id") or "").strip()
+        if card_id and card_id not in offered:
+            offered.append(card_id)
+    offered = offered[:_CITATION_PROVENANCE_MAX_CARDS]
+    return {
+        "selection_provenance": {
+            "source": "executor_prompt_context",
+            "status": "present" if offered else "empty",
+            "selected_ids": offered,
+            "selected_count": len(offered),
+        }
+    }
+
+
 def record_citations(
     state_dir: Path,
     cycle_id: str,
@@ -874,6 +903,8 @@ def record_citations(
     executor_result: str | None | object = _EXECUTOR_RESULT_UNSET,
     max_chars: int = 64_000,
     now: datetime | None = None,
+    lessons_context: dict[str, object] | None = None,
+    selector_provenance: dict[str, object] | None = None,
 ) -> list[str]:
     """Scan bounded response fields and persist both hits and zero-result scans.
 
@@ -884,12 +915,18 @@ def record_citations(
     pattern = re.compile(r"\[Lesson\s+([A-Za-z0-9_-]+)\]", re.IGNORECASE)
     timestamp = current.isoformat().replace("+00:00", "Z")
     directory = Path(state_dir) / "lesson_usage"
+    selector = (
+        {"selection_provenance": selector_provenance}
+        if selector_provenance is not None
+        else _citation_selector_provenance(lessons_context)
+    )
     if executor_result is _EXECUTOR_RESULT_UNAVAILABLE:
         scan = {
             "scan_ran": False,
             "cycle_id": str(cycle_id),
             "status": "unavailable",
             "notes": ["executor_result_unavailable"],
+            **selector,
             "ts": timestamp,
         }
         try:
@@ -913,6 +950,7 @@ def record_citations(
             "status": "unavailable",
             "notes": ["executor_result_not_final", f"subagent_status:{executor_result.status}"],
             "scanned_chars": executor_result.length,
+            **selector,
             "ts": timestamp,
         }
         try:
@@ -936,12 +974,15 @@ def record_citations(
         "lesson_ids": ids,
         "status": "complete",
         "notes": [],
+        **selector,
         # #1546: what was actually scanned, so a reader does not have to
         # cross-check the ledger by hand to tell a substantive answer from
         # a near-empty one behind the same status/marker_count pair.
         "scanned_chars": sum(len(text) for text in scan_texts),
         "ts": timestamp,
     }
+    if scan["marker_count"] == 0 and scan["scanned_chars"] < _CITATION_SHORT_RESULT_CHARS:
+        scan["notes"] = ["short_result_not_confident_zero"]
     citation_failed = False
     try:
         if ids:

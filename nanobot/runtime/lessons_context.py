@@ -215,6 +215,31 @@ def _best_card(
     return best
 
 
+def selection_provenance(
+    selfevo_repo: Path | None, task_title: str, target_path: str = ""
+) -> dict[str, Any]:
+    """Return bounded selector provenance using the same input corpus."""
+    try:
+        if not selfevo_repo or os.environ.get(ENABLED_ENV, "1").strip().lower() in _FALSY:
+            return {"source": "reconstructed", "status": "empty", "selected_ids": []}
+        words = _extract_words(f"{task_title} {target_path}")
+        lessons_dir = Path(selfevo_repo) / "lessons"
+        error_entries = _capped_entries(lessons_dir / "errors.yaml")
+        lesson_entries = _capped_entries(lessons_dir / "lessons.yaml")
+        selected = [
+            _best_card(error_entries, words, "root_cause"),
+            _best_card(lesson_entries, words, "approach"),
+        ]
+        ids = [str(card.get("id")) for card in selected if card and card.get("id")]
+        return {
+            "source": "reconstructed",
+            "status": "present" if ids else "empty",
+            "selected_ids": ids[:3],
+        }
+    except Exception:
+        return {"source": "reconstructed", "status": "unavailable", "selected_ids": []}
+
+
 def build_lessons_context(
     selfevo_repo: Path | None, task_title: str, target_path: str = ""
 ) -> dict[str, Any]:

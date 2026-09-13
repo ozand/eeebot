@@ -69,6 +69,7 @@ from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goa
 from nanobot.runtime.lesson_v2 import (  # noqa: E402
     bounded_load_yaml as _bounded_lesson_load,
 )
+from nanobot.runtime.lessons_context import selection_provenance as _lesson_selection_provenance
 from nanobot.runtime.lesson_v2 import (
     find_duplicate as _find_lesson_duplicate,
 )
@@ -4085,10 +4086,19 @@ async def _main_impl_body():
         # repair spawn that actually completed), not the fixed primary
         # `_subagent_task_id` used by the diagnostics above.
         _executor_result = _read_executor_result(STATE_DIR, _citation_subagent_task_id)
+        # Fallback only: normally the request carries the exact context sent
+        # to the executor; reconstruction is explicitly labelled otherwise.
+        _selector_provenance = _lesson_selection_provenance(
+            STATE_DIR.parent / 'eeebot-self-evolving',
+            str(req.get('task_title') or req.get('semantic_task_id') or ''),
+            str(req.get('target_path') or ''),
+        ) if 'lessons_context' not in req else None
         _record_lesson_citations(
             STATE_DIR,
             _cycle_id,
             executor_result=_executor_result,
+            lessons_context=req.get('lessons_context'),
+            selector_provenance=_selector_provenance,
         )
     except Exception:
         pass
