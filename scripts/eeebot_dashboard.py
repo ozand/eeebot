@@ -146,78 +146,112 @@ _MATERIALIZED_CACHE: dict[str, Any] = {"loaded_at": 0.0, "limit": None, "root_mt
 
 
 def refresh_host_capabilities() -> dict[str, Any]:
-    """Re-scan host hardware and update state/host_capabilities.json."""
+    """Re-scan host hardware and write a manually-triggered inventory.
+
+    Each probe result keeps command failure distinct from a successful empty
+    result.  ``available`` remains as a compatibility field, but consumers
+    must use ``state`` when they need to distinguish ``absent`` from
+    ``probe_unavailable``.  The inventory metadata makes its manual trigger
+    explicit; freshness is derived separately from the file mtime.
+    """
     import subprocess
+
+    def result(state: str, details: str) -> dict[str, Any]:
+        return {
+            "state": state,
+            "available": state == "present",
+            "details": details,
+        }
+
+    def command_probe(command: list[str], parse: Any) -> dict[str, Any]:
+        try:
+            output = subprocess.check_output(command, stderr=subprocess.DEVNULL).decode()
+        except Exception as exc:
+            # FileNotFoundError (missing utility), command failure, and other
+            # execution errors all mean that this probe could not look.
+            return result("probe_unavailable", f"probe failed: {type(exc).__name__}")
+        try:
+            state, details = parse(output)
+        except Exception as exc:
+            return result("probe_unavailable", f"probe output unreadable: {type(exc).__name__}")
+        return result(state, details)
 
     caps: dict[str, Any] = {}
 
-    # Camera
+    # Camera. Use pathlib globbing rather than passing the wildcard literally
+    # to ``ls`` (subprocess does not perform shell expansion).
     try:
-        videos = subprocess.check_output(["ls", "/dev/video*"], stderr=subprocess.DEVNULL).decode().strip().split()
-        caps["camera"] = {"available": bool(videos), "details": f"Detected {', '.join(videos)}"}
-    except Exception:
-        caps["camera"] = {"available": False, "details": "not detected"}
+        videos = sorted(str(path) for path in Path("/dev").glob("video*"))
+        caps["camera"] = result(
+            "present" if videos else "absent",
+            f"Detected {', '.join(videos)}" if videos else "not detected",
+        )
+    except Exception as exc:
+        caps["camera"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
 
     # Bluetooth
-    try:
-        bt = subprocess.check_output(["lsusb"], stderr=subprocess.DEVNULL).decode()
-        bt_lines = [l for l in bt.splitlines() if "Bluetooth" in l or "bluetooth" in l.lower()]
-        caps["bluetooth"] = {"available": bool(bt_lines), "details": bt_lines[0].strip() if bt_lines else "not detected"}
-    except Exception:
-        caps["bluetooth"] = {"available": False, "details": "not detected"}
+    caps["bluetooth"] = command_probe(
+        ["lsusb"],
+        lambda output: (
+            ("present", next(line.strip() for line in output.splitlines() if "bluetooth" in line.lower()))
+            if any("bluetooth" in line.lower() for line in output.splitlines())
+            else ("absent", "not detected")
+        ),
+    )
 
     # WiFi
-    try:
-        ifaces = subprocess.check_output(["ip", "-o", "link", "show"], stderr=subprocess.DEVNULL).decode()
-        wifi_ifaces = [l.split(":")[1].strip() for l in ifaces.splitlines() if "wlan" in l or "wlp" in l]
-        caps["wifi"] = {"available": bool(wifi_ifaces), "details": f"Detected {', '.join(wifi_ifaces)}" if wifi_ifaces else "not detected"}
-    except Exception:
-        caps["wifi"] = {"available": False, "details": "not detected"}
+    def parse_wifi(output: str) -> tuple[str, str]:
+        wifi_ifaces = [line.split(":")[1].strip() for line in output.splitlines() if "wlan" in line or "wlp" in line]
+        return (
+            ("present", f"Detected {', '.join(wifi_ifaces)}")
+            if wifi_ifaces
+            else ("absent", "not detected")
+        )
+
+    caps["wifi"] = command_probe(["ip", "-o", "link", "show"], parse_wifi)
 
     # Microphone
-    try:
-        mic = subprocess.check_output(["arecord", "-l"], stderr=subprocess.DEVNULL).decode()
-        caps["microphone"] = {"available": "card" in mic.lower(), "details": mic.strip().split("\n")[0] if mic.strip() else "not detected"}
-    except Exception:
-        caps["microphone"] = {"available": False, "details": "not detected"}
+    caps["microphone"] = command_probe(
+        ["arecord", "-l"],
+        lambda output: (
+            ("present", output.strip().split("\n")[0])
+            if "card" in output.lower()
+            else ("absent", "not detected")
+        ),
+    )
 
     # CPU
-    try:
-        cpu = open("/proc/cpuinfo").read()
-        model = [l.split(":")[1].strip() for l in cpu.splitlines() if l.startswith("model name")][0]
-        caps["cpu"] = {"available": True, "details": model}
-    except Exception:
-        caps["cpu"] = {"available": False, "details": "unknown"}
+    def read_probe(path: Path, parse: Any) -> dict[str, Any]:
+        try:
+            return result(*parse(path.read_text()))
+        except Exception as exc:
+            return result("probe_unavailable", f"probe failed: {type(exc).__name__}")
+
+    caps["cpu"] = read_probe(
+        Path("/proc/cpuinfo"),
+        lambda text: (
+            "present",
+            next(line.split(":", 1)[1].strip() for line in text.splitlines() if line.startswith("model name")),
+        ),
+    )
 
     # Memory
-    try:
-        mem = open("/proc/meminfo").read()
-        lines = {l.split(":")[0]: l.split(":")[1].strip() for l in mem.splitlines()}
-        caps["memory"] = {"available": True, "details": f"Mem: total={lines.get('MemTotal', '?')} available={lines.get('MemAvailable', '?')}"}
-    except Exception:
-        caps["memory"] = {"available": False, "details": "unknown"}
+    def parse_memory(text: str) -> tuple[str, str]:
+        lines = {line.split(":", 1)[0]: line.split(":", 1)[1].strip() for line in text.splitlines() if ":" in line}
+        if "MemTotal" not in lines:
+            return "absent", "not detected"
+        return "present", f"Mem: total={lines.get('MemTotal', '?')} available={lines.get('MemAvailable', '?')}"
+
+    caps["memory"] = read_probe(Path("/proc/meminfo"), parse_memory)
 
     # Disk
-    try:
-        disk = subprocess.check_output(["df", "-h", "/"], stderr=subprocess.DEVNULL).decode().strip().split("\n")[1]
-        parts = disk.split()
-        caps["disk"] = {"available": True, "details": f"{parts[0]} {parts[1]} total, {parts[2]} used, {parts[3]} free, {parts[4]} used on /"}
-    except Exception:
-        caps["disk"] = {"available": False, "details": "unknown"}
+    def parse_disk(text: str) -> tuple[str, str]:
+        parts = text.strip().splitlines()[1].split()
+        return "present", f"{parts[0]} {parts[1]} total, {parts[2]} used, {parts[3]} free, {parts[4]} used on /"
 
-    # Kernel
-    try:
-        kernel = subprocess.check_output(["uname", "-r"]).decode().strip()
-        caps["kernel"] = {"available": True, "details": kernel}
-    except Exception:
-        caps["kernel"] = {"available": False, "details": "unknown"}
-
-    # Uptime
-    try:
-        uptime = subprocess.check_output(["uptime", "-p"]).decode().strip()
-        caps["uptime"] = {"available": True, "details": uptime}
-    except Exception:
-        caps["uptime"] = {"available": False, "details": "unknown"}
+    caps["disk"] = command_probe(["df", "-h", "/"], parse_disk)
+    caps["kernel"] = command_probe(["uname", "-r"], lambda output: ("present", output.strip()) if output.strip() else ("absent", "not detected"))
+    caps["uptime"] = command_probe(["uptime", "-p"], lambda output: ("present", output.strip()) if output.strip() else ("absent", "not detected"))
 
     # Screen resolution
     try:
@@ -226,18 +260,22 @@ def refresh_host_capabilities() -> dict[str, Any]:
         if fb_size_path.exists():
             screen_res = fb_size_path.read_text().strip().replace(",", "x")
         else:
-            # Fallback to drm modes
             for mode_path in Path("/sys/class/drm").glob("card*-*/modes"):
                 if mode_path.exists():
                     lines = mode_path.read_text().strip().splitlines()
                     if lines:
                         screen_res = lines[0].strip()
                         break
-        caps["screen"] = {"available": screen_res != "unknown", "details": f"Physical Resolution: {screen_res}"}
-    except Exception:
-        caps["screen"] = {"available": False, "details": "unknown"}
+        caps["screen"] = result(
+            "present" if screen_res != "unknown" else "absent",
+            f"Physical Resolution: {screen_res}" if screen_res != "unknown" else "not detected",
+        )
+    except Exception as exc:
+        caps["screen"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
 
     caps["_scan_timestamp"] = datetime.now(timezone.utc).isoformat()
+    caps["_probe_source"] = "manual"
+    caps["_probe_trigger"] = "dashboard_refresh"
 
     # Write to state file
     host_caps_path = STATE_DIR / "host_capabilities.json"
@@ -987,6 +1025,19 @@ def format_host_capability_probe_attention(age_hours: float | None, status: str)
     return "host probe current"
 
 
+def format_host_capability_probe_source(host_caps: dict[str, Any]) -> str:
+    source = host_caps.get("_probe_source") if isinstance(host_caps, dict) else None
+    trigger = host_caps.get("_probe_trigger") if isinstance(host_caps, dict) else None
+    if source and trigger:
+        return f"{source} ({trigger})"
+    if source:
+        return str(source)
+    # Before #1557 the only writer was the dashboard refresh action/CLI and
+    # there was no autonomous capability timer. Make that manual-only fact
+    # visible for legacy inventories instead of presenting it as unknown.
+    return "manual-only (legacy; no autonomous trigger)"
+
+
 def format_refresh_timestamp(timestamp: Any) -> str:
     if timestamp is None:
         return "unknown"
@@ -1252,48 +1303,78 @@ def load_host_capabilities() -> dict[str, Any]:
     return host_caps
 
 
+def _capability_state(info: Any) -> str:
+    """Normalize capability records while keeping legacy files readable."""
+    if not isinstance(info, dict):
+        return "probe_unavailable"
+    state = info.get("state")
+    if state in {"present", "absent", "probe_unavailable", "stale"}:
+        return state
+    # Pre-#1557 inventories had only ``available``. Their false value means
+    # confirmed absence only if the old probe completed; preserve compatibility
+    # while new probe failures are explicitly labelled unavailable.
+    return "present" if bool(info.get("available")) else "absent"
+
+
 def scan_host_capabilities(
     host_caps: dict[str, Any],
-) -> tuple[list[str], list[tuple[str, str]], str, list[tuple[str, str]], str, str]:
+    probe_status: str = "fresh",
+) -> tuple[list[str], list[tuple[str, str]], str, list[tuple[str, str]], str, str, str, str]:
     focus_order = ("camera", "bluetooth", "wifi", "microphone")
     if not host_caps:
         unavailable = "host hardware status unavailable"
-        return [], [], unavailable, [], unavailable, unavailable
+        return [], [], unavailable, [], unavailable, unavailable, unavailable, unavailable
 
     available_caps: list[str] = []
     capability_details: list[tuple[str, str]] = []
     focus_status_parts: list[str] = []
     focus_details: list[tuple[str, str]] = []
     missing_focus_devices: list[str] = []
+    unavailable_focus_devices: list[str] = []
+    stale_focus_devices: list[str] = []
 
     for name, info in host_caps.items():
-        if not isinstance(info, dict):
+        if name.startswith("_") or not isinstance(info, dict):
             continue
-        available = bool(info.get("available"))
-        details = str(info.get("details", "")).strip() or "available"
-        if available:
+        state = _capability_state(info)
+        details = str(info.get("details", "")).strip() or state
+        if probe_status != "stale" and state == "present":
             available_caps.append(name)
             capability_details.append((name, details))
+        elif probe_status == "stale" or state == "stale":
+            capability_details.append((name, f"stale inventory: {details}"))
 
     available_caps.sort()
     capability_details.sort(key=lambda item: item[0])
 
+    symbols = {"present": "✓", "absent": "✗", "probe_unavailable": "?", "stale": "~"}
     for name in focus_order:
         info = host_caps.get(name, {})
-        if not isinstance(info, dict):
-            info = {}
-        available = bool(info.get("available"))
-        details = str(info.get("details", "")).strip() or "available"
-        focus_status_parts.append(f"{name}:{'✓' if available else '✗'}")
-        focus_details.append((name, details))
-        if not available:
+        state = _capability_state(info)
+        details = str(info.get("details", "")).strip() if isinstance(info, dict) else ""
+        details = details or state
+        if probe_status == "stale":
+            focus_status_parts.append(f"{name}:~")
+            focus_details.append((name, f"stale inventory: {details}"))
+            stale_focus_devices.append(name)
+            continue
+        focus_status_parts.append(f"{name}:{symbols[state]}")
+        focus_details.append((name, f"{state}: {details}"))
+        if state == "absent":
             missing_focus_devices.append(name)
+        elif state == "probe_unavailable":
+            unavailable_focus_devices.append(name)
 
-    available_count = len(focus_order) - len(missing_focus_devices)
     focus_status = ", ".join(focus_status_parts)
-    coverage = f"{available_count}/{len(focus_order)} focus devices available"
+    if probe_status == "stale" or stale_focus_devices:
+        coverage = f"unknown/{len(focus_order)} focus devices (inventory stale)"
+    else:
+        available_count = sum(_capability_state(host_caps.get(name)) == "present" for name in focus_order)
+        coverage = f"{available_count}/{len(focus_order)} focus devices available"
     missing = "none" if not missing_focus_devices else ", ".join(missing_focus_devices)
-    return available_caps, capability_details, focus_status, focus_details, coverage, missing
+    unavailable = "none" if not unavailable_focus_devices else ", ".join(unavailable_focus_devices)
+    stale = "none" if not stale_focus_devices else ", ".join(stale_focus_devices)
+    return available_caps, capability_details, focus_status, focus_details, coverage, missing, unavailable, stale
 
 
 def format_host_capability_badges_html(host_capabilities: list[str]) -> str:
@@ -1943,6 +2024,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
         host_capability_probe_age_hours,
         host_capability_probe_status,
     )
+    host_capability_probe_source = format_host_capability_probe_source(host_caps)
 
     # Knowledge plane (#1347): read-only, no new writers/state files.
     prompt_fit = scan_prompt_fit_ledger(STATE_DIR)
@@ -1999,7 +2081,9 @@ def collect_metrics_uncached() -> dict[str, Any]:
         host_focus_details,
         host_capability_coverage,
         host_focus_missing,
-    ) = scan_host_capabilities(host_caps)
+        host_focus_unavailable,
+        host_focus_stale,
+    ) = scan_host_capabilities(host_caps, host_capability_probe_status)
     host_focus_name_set = {name for name, _ in host_focus_details}
 
     queue_depth, stale_queue_requests, oldest_stale_age_hours, archived_count, oldest_stale_request_path = scan_subagent_tree_stats()
@@ -2170,11 +2254,14 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "host_focus_name_set": host_focus_name_set,
         "host_capability_coverage": host_capability_coverage,
         "host_focus_missing": host_focus_missing,
+        "host_focus_unavailable": host_focus_unavailable,
+        "host_focus_stale": host_focus_stale,
         "host_capability_probe_age_hours": host_capability_probe_age_hours,
         "host_capability_probe_age": host_capability_probe_age,
         "host_capability_probe_status": host_capability_probe_status,
         "host_capability_probe": host_capability_probe,
         "host_capability_probe_attention": host_capability_probe_attention,
+        "host_capability_probe_source": host_capability_probe_source,
         # Real-time system metrics (Vector 1: self-optimization monitoring)
         "cpu_load": cpu_load,
         "mem_pct": mem_pct,
@@ -2250,7 +2337,10 @@ def write_snapshot(metrics: dict[str, Any], destination: Path | None = None) -> 
         f"Host Focus: {metrics['host_focus_status']}",
         f"Host Capability Coverage: {metrics['host_capability_coverage']}",
         f"Host Capability Probe: {metrics['host_capability_probe']}",
+        f"Host Capability Probe Source: {metrics.get('host_capability_probe_source', 'unknown')}",
         f"Missing Focus Devices: {metrics['host_focus_missing']}",
+        f"Unavailable Focus Probes: {metrics.get('host_focus_unavailable', 'none')}",
+        f"Stale Focus Inventory: {metrics.get('host_focus_stale', 'none')}",
         f"CPU Load (1m): {metrics.get('cpu_load', 0.0):.2f}",
         f"Memory Usage: {metrics.get('mem_pct', 0.0):.1f}%",
         f"Disk Usage: {metrics.get('disk_pct', 0.0):.1f}%",
@@ -2295,8 +2385,14 @@ def _build_health_dimensions(m: dict[str, Any]) -> list[tuple[str, str, str]]:
 
     # Host coverage
     missing = m["host_focus_missing"]
-    coverage_health = "OK" if missing == "none" else "WARN"
-    dims.append(("host_coverage", coverage_health, f"{m['host_capability_coverage']} (missing: {missing})"))
+    unavailable = m.get("host_focus_unavailable", "none")
+    stale = m.get("host_focus_stale", "none")
+    coverage_health = "OK" if missing == "none" and unavailable == "none" and stale == "none" else "WARN"
+    coverage_detail = (
+        f"{m['host_capability_coverage']} (missing: {missing}; "
+        f"probe unavailable: {unavailable}; stale: {stale})"
+    )
+    dims.append(("host_coverage", coverage_health, coverage_detail))
 
     # Reward health: the only reward source is a retired/frozen report family.
     reward_avg = m["reward_average"]
@@ -2547,11 +2643,13 @@ def render_cli(m: dict[str, Any]) -> str:
     lines.append(f"Last Cleanup Count: {m['last_cleanup_count']}")
     lines.append(f"Last Cleanup Timestamp: {m['last_cleanup_timestamp']}")
     lines.append(f"Queue Health: {m['queue_health']}")
-    if m["host_capabilities"]:
-        lines.append("Host Capabilities: " + ", ".join(m["host_capabilities"]))
+    if m["host_capabilities"] or m.get("host_focus_details"):
+        lines.append("Host Capabilities: " + (", ".join(m["host_capabilities"]) if m["host_capabilities"] else "inventory not current"))
         lines.append(f"Host Focus: {m['host_focus_status']}")
         lines.append(f"Host Capability Coverage: {m['host_capability_coverage']}")
         lines.append(f"Missing Focus Devices: {m['host_focus_missing']}")
+        lines.append(f"Unavailable Focus Probes: {m.get('host_focus_unavailable', 'none')}")
+        lines.append(f"Stale Focus Inventory: {m.get('host_focus_stale', 'none')}")
         for name, details in m["host_focus_details"]:
             lines.append(f"  - {name}: {details}")
         for name, details in m["host_capability_details"]:
@@ -2756,8 +2854,11 @@ def render_tui(m: dict[str, Any]) -> str:
         f"║  Cleanup {cleanup_icon}         : {m['last_cleanup_recency']} ({m['last_cleanup_status']}, count {m['last_cleanup_count']}){' ' * max(0, 5)}║",
         f"║  Host {probe_icon}            : {m['host_capability_coverage']}{' ' * max(0, 20)}║",
         f"║  Probe         : {m['host_capability_probe']}{' ' * max(0, 30)}║",
+        f"║  Probe Source  : {_tui_cell(m.get('host_capability_probe_source', 'unknown'))} ║",
         f"║  Probe Action  : {_tui_cell(m['host_capability_probe_attention'])} ║",
        f"║  Missing Focus : {_tui_cell(m['host_focus_missing'])} ║",
+        f"║  Unavailable   : {_tui_cell(m.get('host_focus_unavailable', 'none'))} ║",
+        f"║  Stale         : {_tui_cell(m.get('host_focus_stale', 'none'))} ║",
         "╠══════════════════════════════════════════════════════════╣",
         # Real-time system metrics (Vector 1: self-optimization)
         f"║  CPU Load      : {_tui_cell(_cpu_str)} ║",
@@ -2780,8 +2881,8 @@ _HTML_ESCAPE_KEYS: list[str] = [
     "artifact_freshness_html", "goal_artifact_signature_html",
     "next_bounded_candidate_html", "queue_health_html",
     "last_cleanup_timestamp_html", "host_focus_status_html", "host_coverage_html",
-    "host_missing_html", "host_capability_probe_html",
-    "host_capability_probe_attention_html", "approval_gate_state_html",
+    "host_missing_html", "host_unavailable_html", "host_stale_html", "host_capability_probe_html",
+    "host_capability_probe_source_html", "host_capability_probe_attention_html", "approval_gate_state_html",
     "last_cleanup_count_html", "last_cleanup_recency_html", "queue_depth_html",
     "stale_queue_requests_html", "archived_count_html", "queue_snapshot_html",
     "materialized_status_html",
@@ -2841,7 +2942,10 @@ _HTML_KEY_MAP: dict[str, str] = {
     "host_focus_status_html": "host_focus_status",
     "host_coverage_html": "host_capability_coverage",
     "host_missing_html": "host_focus_missing",
+    "host_unavailable_html": "host_focus_unavailable",
+    "host_stale_html": "host_focus_stale",
     "host_capability_probe_html": "host_capability_probe",
+    "host_capability_probe_source_html": "host_capability_probe_source",
     "host_capability_probe_attention_html": "host_capability_probe_attention",
     "approval_gate_state_html": "approval_gate_state",
     "last_cleanup_count_html": "last_cleanup_count",
@@ -3264,11 +3368,14 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                          <div style="margin-top: 5px;">{caps_html}</div>
                          <div class="metric-value" style="margin-top: 6px; font-weight: normal; color: var(--text-muted);">{host_coverage_html}</div>
                            <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: var(--muted);">Probe: {host_capability_probe_html}</div>
+                           <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: var(--muted);">Probe Source: {host_capability_probe_source_html}</div>
                            <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: var(--muted);">Probe Action: {host_capability_probe_attention_html}</div>
 
                           <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: var(--muted);">Focus: {host_focus_status_html}</div>
 
                          <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: var(--muted);">Missing: {host_missing_html}</div>
+                         <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: var(--muted);">Unavailable: {host_unavailable_html}</div>
+                         <div class="metric-value" style="margin-top: 4px; font-weight: normal; color: var(--muted);">Stale Inventory: {host_stale_html}</div>
                          <div style="margin-top: 8px;">{cap_details_html}</div>
 
                     </div>
@@ -3611,8 +3718,9 @@ Examples:
         for name, info in caps.items():
             if name.startswith("_"):
                 continue
-            status = "✓" if info.get("available") else "✗"
-            print(f"  {status} {name}: {info.get('details', 'unknown')}")
+            state = info.get("state", "present" if info.get("available") else "absent")
+            status = {"present": "✓", "absent": "✗", "probe_unavailable": "?"}.get(state, "?")
+            print(f"  {status} {name} [{state}]: {info.get('details', 'unknown')}")
         print(f"\nScan timestamp: {caps.get('_scan_timestamp', 'unknown')}")
         return
 

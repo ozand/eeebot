@@ -91,6 +91,106 @@ def test_format_rate_preserves_unavailable_zero_and_percentage() -> None:
     assert DASHBOARD.format_rate(0.01602) == "1.6%"
 
 
+def test_refresh_host_capabilities_distinguishes_probe_failure_and_empty_result(tmp_path: Path, monkeypatch) -> None:
+    class MissingArecord:
+        def __call__(self, command, **kwargs):
+            if command == ["arecord", "-l"]:
+                raise FileNotFoundError("arecord")
+            if command == ["lsusb"]:
+                return b""
+            if command == ["ip", "-o", "link", "show"]:
+                return b""
+            if command == ["df", "-h", "/"]:
+                return b"Filesystem  Size  Used Avail Use% Mounted on\n/dev/sda1  1G  1M  999M  1% /\n"
+            if command == ["uname", "-r"]:
+                return b"test-kernel\n"
+            if command == ["uptime", "-p"]:
+                return b"up 1 minute\n"
+            raise AssertionError(command)
+
+    monkeypatch.setattr(DASHBOARD, "STATE_DIR", tmp_path)
+    monkeypatch.setattr("subprocess.check_output", MissingArecord())
+    monkeypatch.setattr(DASHBOARD.Path, "read_text", lambda self, *args, **kwargs: "model name : test-cpu\n" if str(self) == "/proc/cpuinfo" else "MemTotal: 1 kB\n")
+    monkeypatch.setattr(DASHBOARD.Path, "exists", lambda self: False)
+    monkeypatch.setattr(DASHBOARD.Path, "glob", lambda self, pattern: [])
+
+    caps = DASHBOARD.refresh_host_capabilities()
+
+    assert caps["microphone"] == {
+        "state": "probe_unavailable",
+        "available": False,
+        "details": "probe failed: FileNotFoundError",
+    }
+    assert caps["bluetooth"]["state"] == "absent"
+    assert caps["wifi"]["state"] == "absent"
+    assert caps["_probe_source"] == "manual"
+    assert caps["_probe_trigger"] == "dashboard_refresh"
+
+
+def test_scan_host_capabilities_renders_absent_and_unavailable_differently() -> None:
+    host_caps = {
+        "camera": {"state": "absent", "available": False, "details": "not detected"},
+        "bluetooth": {"state": "present", "available": True, "details": "adapter"},
+        "wifi": {"state": "probe_unavailable", "available": False, "details": "probe failed"},
+        "microphone": {"state": "absent", "available": False, "details": "not detected"},
+    }
+    result = DASHBOARD.scan_host_capabilities(host_caps)
+
+    assert result[2] == "camera:✗, bluetooth:✓, wifi:?, microphone:✗"
+    assert result[4] == "1/4 focus devices available"
+    assert result[5] == "camera, microphone"
+    assert result[6] == "wifi"
+    assert "absent: not detected" in dict(result[3])["camera"]
+    assert "probe_unavailable: probe failed" in dict(result[3])["wifi"]
+
+
+def test_host_coverage_health_keeps_probe_unavailable_non_ok() -> None:
+    metrics = _health_metrics(report_status="fresh", materialized_status="fresh")
+    metrics["host_focus_missing"] = "none"
+    metrics["host_focus_unavailable"] = "wifi"
+    metrics["host_capability_coverage"] = "3/4 focus devices available"
+
+    dimensions = {name: (status, detail) for name, status, detail in DASHBOARD._build_health_dimensions(metrics)}
+    assert dimensions["host_coverage"][0] == "WARN"
+    assert "missing: none" in dimensions["host_coverage"][1]
+    assert "probe unavailable: wifi" in dimensions["host_coverage"][1]
+
+
+def test_scan_host_capabilities_marks_stale_inventory_without_claiming_states() -> None:
+    host_caps = {
+        "camera": {"state": "absent", "available": False, "details": "not detected"},
+        "bluetooth": {"state": "present", "available": True, "details": "adapter"},
+        "wifi": {"state": "probe_unavailable", "available": False, "details": "probe failed"},
+        "microphone": {"state": "absent", "available": False, "details": "not detected"},
+    }
+    result = DASHBOARD.scan_host_capabilities(host_caps, "stale")
+
+    assert result[2] == "camera:~, bluetooth:~, wifi:~, microphone:~"
+    assert result[4] == "unknown/4 focus devices (inventory stale)"
+    assert result[5] == "none"
+    assert result[6] == "none"
+    assert result[7] == "camera, bluetooth, wifi, microphone"
+    assert "stale inventory" in dict(result[3])["camera"]
+
+
+def test_legacy_inventory_source_is_explicitly_manual_only() -> None:
+    assert DASHBOARD.format_host_capability_probe_source({}) == "manual-only (legacy; no autonomous trigger)"
+    assert DASHBOARD.format_host_capability_probe_source({"_probe_source": "manual"}) == "manual"
+    assert DASHBOARD.format_host_capability_probe_source({"_probe_source": "manual", "_probe_trigger": "dashboard_refresh"}) == "manual (dashboard_refresh)"
+
+
+def test_host_coverage_health_keeps_stale_inventory_non_ok() -> None:
+    metrics = _health_metrics(report_status="fresh", materialized_status="fresh")
+    metrics["host_focus_missing"] = "none"
+    metrics["host_focus_unavailable"] = "none"
+    metrics["host_focus_stale"] = "camera, bluetooth, wifi, microphone"
+    metrics["host_capability_coverage"] = "unknown/4 focus devices (inventory stale)"
+
+    dimensions = {name: (status, detail) for name, status, detail in DASHBOARD._build_health_dimensions(metrics)}
+    assert dimensions["host_coverage"][0] == "WARN"
+    assert "stale: camera, bluetooth, wifi, microphone" in dimensions["host_coverage"][1]
+
+
 def test_dashboard_renders_hypothesis_selection_rate_from_scorecard(tmp_path: Path, monkeypatch) -> None:
     state_dir = tmp_path / "state"
     scorecard_dir = state_dir / "scorecard"
