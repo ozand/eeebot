@@ -10,10 +10,14 @@ import yaml
 from nanobot.runtime.bridge import _write_structured_lesson, build_task
 from nanobot.runtime.lessons_context import (
     _MAX_FILE_BYTES,
+    _best_card,
+    _best_card_with_provenance,
     _capped_entries,
+    _extract_words,
     _normalize_entry,
     _safe_load_yaml,
     build_lessons_context,
+    selection_provenance,
 )
 
 
@@ -524,6 +528,48 @@ class TestOnDiskShapes:
     def test_normalize_entry_id_falls_back_to_task_id(self):
         normalized = _normalize_entry({"task_id": "some-task", "hypothesis": "x"})
         assert normalized["id"] == "some-task"
+
+
+def test_selector_provenance_reports_candidates_and_tie_break(tmp_path, monkeypatch):
+    monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+    repo = _repo_with_lessons(tmp_path, errors=[
+        {"id": "ERR-new", "category": "timeout", "title": "Timeout guard fails today", "root_cause": "x", "prevention": "y"},
+        {"id": "ERR-old", "category": "timeout", "title": "Timeout guard fails again", "root_cause": "x", "prevention": "y"},
+    ])
+    provenance = selection_provenance(repo, "Fix timeout guard fails issue")
+    data = provenance["errors"]
+    assert data["status"] == "present"
+    assert data["candidates"][0]["id"] == "ERR-new"
+    assert data["selected_id"] == "ERR-new"
+    assert data["tie_count"] == 2
+    assert data["tie_discarded"] is True
+
+
+def test_selector_provenance_distinguishes_empty_and_below_threshold(tmp_path, monkeypatch):
+    monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+    empty = selection_provenance(tmp_path, "Fix timeout")
+    assert empty["errors"]["status"] == "empty_corpus"
+    repo = _repo_with_lessons(tmp_path, errors=[{"id": "ERR", "title": "Unrelated", "root_cause": "different", "prevention": "y"}])
+    below = selection_provenance(repo, "Fix timeout")
+    assert below["errors"]["status"] == "below_threshold"
+
+
+def test_instrumented_selector_matches_baseline_on_real_corpus(tmp_path, monkeypatch):
+    import copy
+    monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+    repo = tmp_path / "repo"
+    lessons = repo / "lessons"
+    lessons.mkdir(parents=True)
+    errors = [{"id": "E-REAL", "category": "runtime", "title": "Bridge timeout", "root_cause": "timeout"}]
+    lessons.write_text if False else None
+    _write_yaml(lessons / "errors.yaml", errors)
+    from nanobot.runtime.lessons_context import _capped_entries
+    entries = _capped_entries(lessons / "errors.yaml")
+    words = _extract_words("Fix bridge timeout")
+    baseline = copy.deepcopy(_best_card(entries, words, "root_cause"))
+    instrumented, provenance = _best_card_with_provenance(entries, words, "root_cause")
+    assert instrumented == baseline
+    assert provenance["selected_id"] == baseline["id"]
 
 
 class TestNewestFirstOrdering:
