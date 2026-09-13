@@ -221,7 +221,7 @@ def selection_provenance(
     """Return bounded selector provenance using the same input corpus."""
     try:
         if not selfevo_repo or os.environ.get(ENABLED_ENV, "1").strip().lower() in _FALSY:
-            return {"status": "empty", "candidate_ids": [], "selected_ids": []}
+            return {"source": "reconstructed", "status": "empty", "selected_ids": []}
         words = _extract_words(f"{task_title} {target_path}")
         lessons_dir = Path(selfevo_repo) / "lessons"
         error_entries = _capped_entries(lessons_dir / "errors.yaml")
@@ -232,12 +232,12 @@ def selection_provenance(
         ]
         ids = [str(card.get("id")) for card in selected if card and card.get("id")]
         return {
+            "source": "reconstructed",
             "status": "present" if ids else "empty",
-            "candidate_ids": ids[:3],
             "selected_ids": ids[:3],
         }
     except Exception:
-        return {"status": "unavailable", "candidate_ids": [], "selected_ids": []}
+        return {"source": "reconstructed", "status": "unavailable", "selected_ids": []}
 
 
 def build_lessons_context(

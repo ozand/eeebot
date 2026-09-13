@@ -887,12 +887,10 @@ def _citation_selector_provenance(
     offered = offered[:_CITATION_PROVENANCE_MAX_CARDS]
     return {
         "selection_provenance": {
+            "source": "executor_prompt_context",
             "status": "present" if offered else "empty",
-            "candidate_ids": offered,
             "selected_ids": offered,
-            "offered_lesson_ids": offered,
-            "selected_lesson_ids": offered,
-            "offered_lesson_count": len(offered),
+            "selected_count": len(offered),
         }
     }
 

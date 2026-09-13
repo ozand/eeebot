@@ -146,16 +146,16 @@ def test_scan_row_records_bounded_selector_provenance(tmp_path: Path) -> None:
         tmp_path, "cycle-selection", executor_result="A substantive answer", lessons_context=context
     ) == []
     row = read_citation_scans(tmp_path)["rows"][-1]
-    assert row["selection_provenance"]["offered_lesson_ids"] == ["ERR-1", "LESS-1"]
-    assert row["selection_provenance"]["selected_lesson_ids"] == ["ERR-1", "LESS-1"]
-    assert row["selection_provenance"]["offered_lesson_count"] == 2
+    assert row["selection_provenance"]["source"] == "executor_prompt_context"
+    assert row["selection_provenance"]["selected_ids"] == ["ERR-1", "LESS-1"]
+    assert row["selection_provenance"]["selected_count"] == 2
 
 
 def test_empty_selector_provenance_is_explicit(tmp_path: Path) -> None:
     record_citations(tmp_path, "cycle-no-selection", executor_result="A substantive answer")
     row = read_citation_scans(tmp_path)["rows"][-1]
     assert row["selection_provenance"]["status"] == "empty"
-    assert row["selection_provenance"]["candidate_ids"] == []
+    assert row["selection_provenance"]["source"] == "executor_prompt_context"
     assert row["selection_provenance"]["selected_ids"] == []
 
 

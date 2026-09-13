@@ -4086,11 +4086,13 @@ async def _main_impl_body():
         # repair spawn that actually completed), not the fixed primary
         # `_subagent_task_id` used by the diagnostics above.
         _executor_result = _read_executor_result(STATE_DIR, _citation_subagent_task_id)
+        # Fallback only: normally the request carries the exact context sent
+        # to the executor; reconstruction is explicitly labelled otherwise.
         _selector_provenance = _lesson_selection_provenance(
             STATE_DIR.parent / 'eeebot-self-evolving',
             str(req.get('task_title') or req.get('semantic_task_id') or ''),
             str(req.get('target_path') or ''),
-        )
+        ) if 'lessons_context' not in req else None
         _record_lesson_citations(
             STATE_DIR,
             _cycle_id,
