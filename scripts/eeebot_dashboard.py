@@ -2763,9 +2763,6 @@ def render_tui(m: dict[str, Any]) -> str:
         f"║  CPU Load      : {_tui_cell(_cpu_str)} ║",
         f"║  Memory        : {_tui_cell(_mem_str)} ║",
         f"║  Disk          : {_tui_cell(_disk_str)} ║",
-        "╠══════════════════════════════════════════════════════════╣",
-        f"║  Materialized  : {_tui_cell(m['materialized_status'])} ║",
-        f"║  Next Candidate: {_tui_cell(m['next_bounded_candidate'])} ║",
         "╚══════════════════════════════════════════════════════════╝",
     ])
     return "\n".join(lines)
@@ -3221,39 +3218,6 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                 </div>
             </div>
         </div>
-
-        <div class="grid">
-            <div class="card" style="grid-column: span 2;">
-                <h2>Materialized Output</h2>
-                <div class="metric">
-                    <div class="metric-item">
-                        <span class="metric-label">Latest Improvement:</span>
-                        <div class="metric-value" {materialized_source_attrs} style="font-weight: normal; margin-top: 2px;">{materialized_status_html}</div>
-                    </div>
-                    <div class="metric-item">
-                        <span class="metric-label">Concrete Statement:</span>
-                        <div class="metric-value" style="font-weight: normal; margin-top: 2px; color: var(--accent-green);">{concrete_statement_html}</div>
-                    </div>
-                    <div class="metric-item">
-                        <span class="metric-label">Latest Report Status:</span>
-                        <div class="metric-value" {report_source_attrs} style="font-weight: normal; margin-top: 2px; color: var(--accent-amber);">{latest_report_status_html}</div>
-                    </div>
-                    <div class="metric-item">
-                        <span class="metric-label">Artifact Freshness:</span>
-                        <div class="metric-value" style="font-weight: normal; margin-top: 2px; color: var(--text-muted);">{artifact_freshness_html}</div>
-                    </div>
-                    <div class="metric-item">
-                        <span class="metric-label">Goal Artifact Signature:</span>
-                        <div class="metric-value" style="font-weight: normal; color: var(--accent-violet);">{goal_artifact_signature_html}</div>
-                    </div>
-                    <div class="metric-item">
-                        <span class="metric-label">Next Bounded Candidate:</span>
-                        <div class="metric-value" style="font-weight: normal; color: var(--accent-emerald);">{next_bounded_candidate_html}</div>
-                    </div>
-                    {materialized_path_block}
-                     {latest_report_path_block}
-                </div>
-            </div>
 
            <div class="card">
                 <h2>System Health</h2>
