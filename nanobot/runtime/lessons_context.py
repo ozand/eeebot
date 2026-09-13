@@ -176,19 +176,47 @@ def _capped_entries(path: Path) -> list[dict[str, Any]]:
     return [_normalize_entry(e) for e in entries]
 
 
+def _recurrence_bonus(entry: dict[str, Any]) -> int:
+    """Return a small bounded bonus for independently repeated evidence.
+
+    ``seen_count`` records sightings and ``distinct_days`` prevents repeated
+    observations on one day from looking like durable proof. Missing or
+    malformed metadata contributes no bonus; the lexical selector remains
+    usable for legacy cards. The cap keeps recurrence from becoming a new
+    retrieval engine or overwhelming task-word relevance.
+    """
+    seen = entry.get("seen_count")
+    days = entry.get("distinct_days")
+    if (
+        isinstance(seen, bool)
+        or isinstance(days, bool)
+        or not isinstance(seen, int)
+        or not isinstance(days, int)
+        or days < 2
+        or seen < 1
+    ):
+        return 0
+    independent_days = days - 1
+    extra_sightings = max(0, seen - days)
+    return min(2, independent_days + extra_sightings)
+
+
 def _score_entry(task_words: set[str], entry: dict[str, Any], secondary_field: str) -> tuple[int, int]:
     """Return ``(score, shared_word_count)`` for one candidate card.
 
     ``title`` + ``category`` count double; ``secondary_field``
     (``root_cause`` for errors, ``approach`` for lessons, already
     normalized onto the entry by ``_normalize_entry``) counts once.
+    Independent recurrence adds a small bounded proof bonus. Both the live
+    selector and selector-provenance path call this function, so they cannot
+    disagree about recurrence weighting.
     """
     primary_words = _extract_words(f"{entry.get('title', '')} {entry.get('category', '')}")
     secondary_words = _extract_words(entry.get(secondary_field, ""))
     primary_shared = task_words & primary_words
     secondary_shared = task_words & secondary_words
     shared_count = len(primary_shared | secondary_shared)
-    score = 2 * len(primary_shared) + len(secondary_shared)
+    score = 2 * len(primary_shared) + len(secondary_shared) + _recurrence_bonus(entry)
     return score, shared_count
 
 

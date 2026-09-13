@@ -81,6 +81,36 @@ class TestErrorMatching:
         assert result == {}
 
 
+class TestRecurrenceRanking:
+    def test_recurrence_bonus_is_small_and_requires_independent_days(self):
+        from nanobot.runtime.lessons_context import _recurrence_bonus
+
+        assert _recurrence_bonus({"seen_count": 1, "distinct_days": 1}) == 0
+        assert _recurrence_bonus({"seen_count": 4, "distinct_days": 1}) == 0
+        assert _recurrence_bonus({"seen_count": 2, "distinct_days": 2}) == 1
+        assert _recurrence_bonus({"seen_count": 100, "distinct_days": 100}) == 2
+        assert _recurrence_bonus({"seen_count": "bad", "distinct_days": None}) == 0
+
+    def test_recurrence_breaks_close_lexical_match(self):
+        task_words = _extract_words("Fix timeout guard")
+        one_off = {"id": "one", "title": "Timeout guard", "root_cause": "", "seen_count": 1, "distinct_days": 1}
+        repeated = {"id": "repeated", "title": "Timeout guard", "root_cause": "", "seen_count": 2, "distinct_days": 2}
+
+        assert _best_card([one_off, repeated], task_words, "root_cause") is repeated
+
+    def test_provenance_selection_matches_live_selector_with_recurrence(self):
+        entries = [
+            {"id": "one", "title": "Timeout guard", "root_cause": "", "seen_count": 1, "distinct_days": 1},
+            {"id": "repeated", "title": "Timeout guard", "root_cause": "", "seen_count": 2, "distinct_days": 2},
+        ]
+        words = _extract_words("Fix timeout guard")
+        live = _best_card(entries, words, "root_cause")
+        instrumented, provenance = _best_card_with_provenance(entries, words, "root_cause")
+
+        assert instrumented["id"] == live["id"] == "repeated"
+        assert provenance["selected_id"] == live["id"]
+
+
 class TestLessonMatching:
     def test_lesson_and_error_both_matched_from_separate_files(self, tmp_path, monkeypatch):
         monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
