@@ -37,6 +37,11 @@ _CITATION_SCAN_MAX_ARCHIVES = 16
 CITATION_SCAN_RETENTION_DAYS = 14
 _CITATION_SCAN_FILE = "scans.jsonl"
 _CITATION_ARCHIVE_DIR = "archive"
+_DECISIONS_FILE = "decisions.jsonl"
+_DECISIONS_RETENTION_DAYS = 30
+_DECISIONS_MAX_ROWS = 2_000
+_DECISIONS_MAX_ARCHIVES = 16
+_DECISIONS_MAX_FILE_BYTES = 512 * 1024
 _EXECUTOR_RESULT_MAX_BYTES = 256 * 1024
 _WORD_RE = re.compile(r"[a-z]{3,}")
 _MIN_SOLUTION_MEANINGFUL_CHARS = 20
@@ -224,8 +229,6 @@ def allow_mint(card: dict[str, Any], existing: list[dict[str, Any]], state_dir: 
     if reason is None and not extending and card.get("title"):
         reason = _title_gate_reason(card, entries)
     try:
-        decision_path = Path(state_dir) / "curator/decisions.jsonl"
-        decision_path.parent.mkdir(parents=True, exist_ok=True)
         if reason is None:
             row = {
                 "ts": datetime.now(timezone.utc).isoformat(),
@@ -242,8 +245,7 @@ def allow_mint(card: dict[str, Any], existing: list[dict[str, Any]], state_dir: 
                 "reason": str(reason.get("reason") or "unknown")[:_MAX_TITLE_DIAGNOSTIC_CHARS],
                 "instruction": "Extend the existing lesson with evidence instead of minting" if reason["reason"] == "duplicate" else "Supply a reusable condition and distinct corrective action",
             }
-        with decision_path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+        append_curator_decision(Path(state_dir), row)
     except OSError:
         pass
     return reason is None
@@ -569,6 +571,23 @@ def _read_jsonl(path: Path, limit: int) -> list[dict[str, object]]:
     return rows[-limit:]
 
 
+def _decisions_timestamp(row: dict[str, object]) -> datetime | None:
+    return _citation_ts(row.get("timestamp") or row.get("ts"))
+
+
+def _read_decision_rows(path: Path) -> list[dict[str, object]]:
+    if not path.is_file() or path.stat().st_size > _DECISIONS_MAX_FILE_BYTES:
+        return []
+    rows: list[dict[str, object]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        item = json.loads(line)
+        if isinstance(item, dict):
+            rows.append(item)
+    return rows
+
+
 def _read_gzip_jsonl(path: Path, limit: int) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     with gzip.open(path, "rt", encoding="utf-8") as handle:
@@ -627,6 +646,63 @@ def _rotate_citation_file(directory: Path, filename: str, now: datetime) -> None
         for archive in archive_dir.glob(f"{stem}-*.jsonl.gz"):
             try:
                 day = datetime.strptime(archive.name[len(stem) + 1:-len(".jsonl.gz")], "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if day < cutoff:
+                archive.unlink(missing_ok=True)
+
+
+def append_curator_decision(
+    state_dir: Path,
+    row: dict[str, object],
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Append one curator decision through the shared bounded writer."""
+    current = _citation_now(now)
+    path = Path(state_dir) / "curator" / _DECISIONS_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        timestamped = dict(row)
+        timestamped.setdefault("timestamp", current.isoformat().replace("+00:00", "Z"))
+        existing = _read_decision_rows(path)
+        _atomic_jsonl(path, existing + [timestamped])
+        _rotate_decisions(path.parent, current)
+    except Exception:
+        pass
+
+
+def _rotate_decisions(directory: Path, now: datetime) -> None:
+    active = directory / _DECISIONS_FILE
+    if not active.is_file() or active.stat().st_size > _DECISIONS_MAX_FILE_BYTES:
+        return
+    rows = _read_decision_rows(active)
+    if not rows:
+        return
+    if not rows:
+        return
+    by_day: dict[str, list[dict[str, object]]] = {}
+    current: list[dict[str, object]] = []
+    for row in rows:
+        timestamp = _decisions_timestamp(row)
+        if timestamp is None or timestamp.date() == now.date():
+            current.append(row)
+        else:
+            by_day.setdefault(timestamp.date().isoformat(), []).append(row)
+    if len(current) > _DECISIONS_MAX_ROWS:
+        overflow, current = current[:-_DECISIONS_MAX_ROWS], current[-_DECISIONS_MAX_ROWS:]
+        by_day.setdefault(now.date().isoformat(), []).extend(overflow)
+    for day, day_rows in by_day.items():
+        archive = directory / _CITATION_ARCHIVE_DIR / f"decisions-{day}.jsonl.gz"
+        existing = _read_gzip_jsonl(archive, _DECISIONS_MAX_ROWS) if archive.is_file() else []
+        _write_gzip_jsonl(archive, (existing + day_rows)[-_DECISIONS_MAX_ROWS:])
+    _atomic_jsonl(active, current[-_DECISIONS_MAX_ROWS:])
+    cutoff = (now - timedelta(days=_DECISIONS_RETENTION_DAYS)).date()
+    archive_dir = directory / _CITATION_ARCHIVE_DIR
+    if archive_dir.is_dir():
+        for archive in archive_dir.glob("decisions-*.jsonl.gz"):
+            try:
+                day = datetime.strptime(archive.name[10:-9], "%Y-%m-%d").date()
             except ValueError:
                 continue
             if day < cutoff:
@@ -837,6 +913,55 @@ def _citation_sources(directory: Path) -> list[Path]:
         directory / "scan-failures.jsonl",
         *failures[:_CITATION_SCAN_MAX_ARCHIVES],
     ]
+
+
+def read_curator_decisions(
+    state_dir: Path,
+    *,
+    since: datetime | None = None,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Read bounded curator decisions with explicit retention status."""
+    current = _citation_now(now)
+    directory = Path(state_dir) / "curator"
+    active = directory / _DECISIONS_FILE
+    archive_dir = directory / _CITATION_ARCHIVE_DIR
+    archives = (
+        sorted(archive_dir.glob("decisions-*.jsonl.gz"), reverse=True)
+        if archive_dir.is_dir()
+        else []
+    )
+    requested = None if since is None else _citation_now(since)
+    cutoff = current - timedelta(days=_DECISIONS_RETENTION_DAYS)
+    if requested is not None and requested < cutoff:
+        return {"status": "unavailable", "rows": [], "notes": ["beyond_retention"]}
+    if not active.is_file() and not archives:
+        return {"status": "missing", "rows": [], "notes": []}
+    try:
+        rows = _read_jsonl(active, _DECISIONS_MAX_ROWS)
+        for archive in archives[:_DECISIONS_MAX_ARCHIVES]:
+            remaining = _DECISIONS_MAX_ROWS - len(rows)
+            if remaining <= 0:
+                break
+            rows.extend(_read_gzip_jsonl(archive, remaining))
+        retained = []
+        stale = False
+        for row in rows:
+            timestamp = _decisions_timestamp(row)
+            if timestamp is None or timestamp < cutoff:
+                stale = True
+                continue
+            if requested is None or timestamp >= requested:
+                retained.append(row)
+        retained.sort(
+            key=lambda row: _decisions_timestamp(row)
+            or datetime.min.replace(tzinfo=timezone.utc)
+        )
+        if not retained and stale:
+            return {"status": "unavailable", "rows": [], "notes": ["beyond_retention"]}
+        return {"status": "present" if retained else "empty", "rows": retained, "notes": []}
+    except Exception as error:
+        return {"status": "unavailable", "rows": [], "notes": [type(error).__name__]}
 
 
 def read_citation_scans(

@@ -47,6 +47,7 @@ from typing import Any, Callable, Iterable
 
 from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
 from nanobot.runtime.lesson_v2 import (
+    append_curator_decision,
     atomic_write_yaml,
     bounded_load_yaml,
     fill_related_links,
@@ -1055,7 +1056,7 @@ def _write_decision(
     # not surface a safe candidate path; an empty value would be ambiguous.
     if provenance_path is not None:
         row["provenance_path"] = provenance_path
-    _append_jsonl(state / "curator" / "decisions.jsonl", row)
+    append_curator_decision(state, row)
 
 
 def _stage_promotions(

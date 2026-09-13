@@ -11,11 +11,13 @@ import yaml
 from nanobot.runtime.bridge import _write_structured_lesson, build_task
 from nanobot.runtime.knowledge_curator import promote_reflector_recommendations_to_v2
 from nanobot.runtime.lesson_v2 import (
+    append_curator_decision,
     bounded_load_yaml,
     find_duplicate,
     keyword_jaccard,
     normalize_problem,
     read_citation_scans,
+    read_curator_decisions,
     read_executor_result,
     record_citations,
     solution_is_meaningful,
@@ -259,6 +261,78 @@ def test_citation_writer_failure_is_recorded_fail_open(tmp_path: Path, monkeypat
     assert row["marker_count"] == 1
     assert row["status"] == "unavailable"
     assert "citation_write_failed" in row["notes"]
+
+
+def test_curator_decisions_under_bound_do_not_rotate(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 12, tzinfo=timezone.utc)
+    for index in range(3):
+        append_curator_decision(
+            tmp_path, {"lesson_id": f"L{index}", "decision": "staged"}, now=now
+        )
+    assert not list((tmp_path / "curator" / "archive").glob("decisions-*.jsonl.gz"))
+    assert len((tmp_path / "curator" / "decisions.jsonl").read_text().splitlines()) == 3
+
+
+def test_curator_decisions_rotate_and_read_beyond_retention_is_unavailable(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    first = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    append_curator_decision(tmp_path, {"lesson_id": "old", "decision": "staged"}, now=first)
+    append_curator_decision(
+        tmp_path, {"lesson_id": "new", "decision": "promoted"}, now=first + timedelta(days=1)
+    )
+    archives = list((tmp_path / "curator" / "archive").glob("decisions-*.jsonl.gz"))
+    assert len(archives) == 1
+    assert read_curator_decisions(tmp_path, now=first + timedelta(days=1))["status"] == "present"
+    beyond = read_curator_decisions(
+        tmp_path, since=first, now=first + timedelta(days=31)
+    )
+    assert beyond["status"] == "unavailable"
+    assert beyond["notes"] == ["beyond_retention"]
+
+
+def test_curator_decisions_bound_real_shaped_copy(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    path = tmp_path / "curator" / "decisions.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "".join(json.dumps({
+            "timestamp": f"2026-08-{index % 12 + 20:02d}T12:00:00Z",
+            "lesson_id": f"LIVE-{index}", "decision": "unimportant",
+        }) + "\n" for index in range(1_018)),
+        encoding="utf-8",
+    )
+    append_curator_decision(
+        tmp_path, {"lesson_id": "LIVE-final", "decision": "staged"},
+        now=datetime(2026, 9, 12, tzinfo=timezone.utc),
+    )
+    active_rows = path.read_text(encoding="utf-8").splitlines()
+    import gzip
+    archive_rows = sum(
+        1 for archive in (path.parent / "archive").glob("decisions-*.jsonl.gz")
+        for _ in gzip.open(archive, "rt", encoding="utf-8")
+    )
+    assert len(active_rows) < 1_018
+    assert archive_rows > 0
+
+
+def test_curator_decision_writers_share_one_path(tmp_path: Path, monkeypatch) -> None:
+    import nanobot.runtime.knowledge_curator as curator
+    import nanobot.runtime.lesson_v2 as lesson
+
+    calls = []
+    original = lesson.append_curator_decision
+    def spy(state_dir, row, **kwargs):
+        calls.append(row["decision"])
+        return original(state_dir, row, **kwargs)
+    monkeypatch.setattr(lesson, "append_curator_decision", spy)
+    monkeypatch.setattr(curator, "append_curator_decision", spy)
+    lesson.allow_mint(_base_artifact(), [], tmp_path)
+    curator._write_decision(tmp_path, "L1", "staged", "test")
+    assert calls == ["mint_gate_passed", "staged"]
 
 
 def test_citation_scan_rotation_and_beyond_retention(tmp_path: Path) -> None:
