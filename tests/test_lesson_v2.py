@@ -279,9 +279,18 @@ def test_curator_decisions_rotate_and_read_beyond_retention_is_unavailable(tmp_p
     from datetime import datetime, timedelta, timezone
 
     first = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    append_curator_decision(tmp_path, {"lesson_id": "old", "decision": "staged"}, now=first)
+    path = tmp_path / "curator" / "decisions.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "".join(json.dumps({
+            "timestamp": (first if index == 0 else first + timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+            "lesson_id": "old" if index == 0 else f"new-{index}",
+            "decision": "staged", "reason": "x" * 220,
+        }) + "\n" for index in range(2_001)),
+        encoding="utf-8",
+    )
     append_curator_decision(
-        tmp_path, {"lesson_id": "new", "decision": "promoted"}, now=first + timedelta(days=1)
+        tmp_path, {"lesson_id": "new-final", "decision": "promoted"}, now=first + timedelta(days=1)
     )
     archives = list((tmp_path / "curator" / "archive").glob("decisions-*.jsonl.gz"))
     assert len(archives) == 1
@@ -302,6 +311,7 @@ def test_curator_decisions_bound_real_shaped_copy(tmp_path: Path) -> None:
         "".join(json.dumps({
             "timestamp": f"2026-08-{index % 12 + 20:02d}T12:00:00Z",
             "lesson_id": f"LIVE-{index}", "decision": "unimportant",
+            "reason": "x" * 220,
         }) + "\n" for index in range(1_018)),
         encoding="utf-8",
     )
@@ -338,31 +348,53 @@ def test_curator_decision_writers_share_one_path(tmp_path: Path, monkeypatch) ->
 def test_curator_decision_structural_guard_rejects_third_writer(tmp_path: Path) -> None:
     import ast
 
-    import nanobot.runtime.knowledge_curator as curator
+    import pytest
 
-    source = Path(curator.__file__).read_text(encoding="utf-8")
-    def count_direct_writers(text: str) -> int:
-        tree = ast.parse(text)
-        return sum(
-            1 for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "open"
-            and any(
-                isinstance(value, ast.Constant) and value.value == "decisions.jsonl"
-                for value in ast.walk(node)
-            )
-        )
+    root = Path(__file__).parents[1]
+    runtime_paths = [
+        root / "nanobot" / "runtime" / "lesson_v2.py",
+        root / "nanobot" / "runtime" / "knowledge_curator.py",
+    ]
 
-    baseline = count_direct_writers(source)
-    mutated = source.replace(
+    def decision_path_violations(paths: list[Path]) -> list[str]:
+        violations = []
+        for path in paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Constant) or node.value != "decisions.jsonl":
+                    continue
+                parent = next(
+                    (candidate for candidate in ast.walk(tree)
+                     if isinstance(candidate, (ast.Assign, ast.AnnAssign))
+                     and candidate.value is node),
+                    None,
+                )
+                allowed = (
+                    path.name == "lesson_v2.py"
+                    and isinstance(parent, ast.Assign)
+                    and any(
+                        isinstance(target, ast.Name) and target.id == "_DECISIONS_FILE"
+                        for target in parent.targets
+                    )
+                )
+                if not allowed:
+                    violations.append(f"{path.name}:{node.lineno}")
+        return violations
+
+    assert decision_path_violations(runtime_paths) == []
+    curator_source = runtime_paths[1].read_text(encoding="utf-8")
+    mutated = curator_source.replace(
         "def _entry_id(entry: dict[str, Any]) -> str:",
-        'def _third_writer(state):\n    (state / "curator" / "decisions.jsonl").open("a")\n\n\ndef _entry_id(entry: dict[str, Any]) -> str:',
+        'def _rogue_decision_writer(state, row):\n'
+        '    _append_jsonl(state / "curator" / "decisions.jsonl", row)\n\n\n'
+        'def _entry_id(entry: dict[str, Any]) -> str:',
         1,
     )
+    assert mutated != curator_source
     isolated = tmp_path / "knowledge_curator.py"
     isolated.write_text(mutated, encoding="utf-8")
-    assert count_direct_writers(isolated.read_text(encoding="utf-8")) == baseline + 1
+    with pytest.raises(AssertionError):
+        assert decision_path_violations([runtime_paths[0], isolated]) == []
 
 
 def test_citation_scan_rotation_and_beyond_retention(tmp_path: Path) -> None:

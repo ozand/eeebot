@@ -41,7 +41,8 @@ _DECISIONS_FILE = "decisions.jsonl"
 _DECISIONS_RETENTION_DAYS = 30
 _DECISIONS_MAX_ROWS = 2_000
 _DECISIONS_MAX_ARCHIVES = 16
-_DECISIONS_MAX_FILE_BYTES = 512 * 1024
+_DECISIONS_MAX_FILE_BYTES = 2 * 1024 * 1024
+_DECISIONS_ROTATE_BYTES = 200 * 1024
 _EXECUTOR_RESULT_MAX_BYTES = 256 * 1024
 _WORD_RE = re.compile(r"[a-z]{3,}")
 _MIN_SOLUTION_MEANINGFUL_CHARS = 20
@@ -575,17 +576,57 @@ def _decisions_timestamp(row: dict[str, object]) -> datetime | None:
     return _citation_ts(row.get("timestamp") or row.get("ts"))
 
 
-def _read_decision_rows(path: Path) -> list[dict[str, object]]:
+def _read_decision_lines(path: Path) -> list[bytes]:
     if not path.is_file() or path.stat().st_size > _DECISIONS_MAX_FILE_BYTES:
         return []
+    return path.read_bytes().splitlines(keepends=True)
+
+
+def _read_decision_rows(path: Path) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in _read_decision_lines(path):
         if not line.strip():
             continue
         item = json.loads(line)
         if isinstance(item, dict):
             rows.append(item)
     return rows
+
+
+def _write_decision_lines(path: Path, lines: list[bytes]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(b"".join(lines))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+    finally:
+        try:
+            os.unlink(name)
+        except FileNotFoundError:
+            pass
+
+
+def _read_gzip_lines(path: Path) -> list[bytes]:
+    with gzip.open(path, "rb") as handle:
+        return handle.readlines()
+
+
+def _write_gzip_lines(path: Path, lines: list[bytes]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    os.close(fd)
+    try:
+        with gzip.open(name, "wb") as handle:
+            handle.write(b"".join(lines))
+        os.replace(name, path)
+    finally:
+        try:
+            os.unlink(name)
+        except FileNotFoundError:
+            pass
 
 
 def _read_gzip_jsonl(path: Path, limit: int) -> list[dict[str, object]]:
@@ -665,8 +706,11 @@ def append_curator_decision(
         path.parent.mkdir(parents=True, exist_ok=True)
         timestamped = dict(row)
         timestamped.setdefault("timestamp", current.isoformat().replace("+00:00", "Z"))
-        existing = _read_decision_rows(path)
-        _atomic_jsonl(path, existing + [timestamped])
+        existing_lines = _read_decision_lines(path)
+        existing_lines.append(
+            (json.dumps(timestamped, ensure_ascii=False) + "\n").encode("utf-8")
+        )
+        _write_decision_lines(path, existing_lines)
         _rotate_decisions(path.parent, current)
     except Exception:
         pass
@@ -676,27 +720,44 @@ def _rotate_decisions(directory: Path, now: datetime) -> None:
     active = directory / _DECISIONS_FILE
     if not active.is_file() or active.stat().st_size > _DECISIONS_MAX_FILE_BYTES:
         return
-    rows = _read_decision_rows(active)
-    if not rows:
+    lines = _read_decision_lines(active)
+    if (
+        active.stat().st_size <= _DECISIONS_ROTATE_BYTES
+        and len(lines) <= _DECISIONS_MAX_ROWS
+    ):
         return
-    if not rows:
-        return
-    by_day: dict[str, list[dict[str, object]]] = {}
-    current: list[dict[str, object]] = []
-    for row in rows:
+    by_day: dict[str, list[bytes]] = {}
+    current: list[tuple[datetime, bytes]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if not isinstance(row, dict):
+            continue
         timestamp = _decisions_timestamp(row)
-        if timestamp is None or timestamp.date() == now.date():
-            current.append(row)
+        if timestamp is None:
+            current.append((now, line))
+        elif timestamp.date() == now.date():
+            current.append((timestamp, line))
         else:
-            by_day.setdefault(timestamp.date().isoformat(), []).append(row)
-    if len(current) > _DECISIONS_MAX_ROWS:
-        overflow, current = current[:-_DECISIONS_MAX_ROWS], current[-_DECISIONS_MAX_ROWS:]
-        by_day.setdefault(now.date().isoformat(), []).extend(overflow)
-    for day, day_rows in by_day.items():
+            by_day.setdefault(timestamp.date().isoformat(), []).append(line)
+    current.sort(key=lambda item: item[0])
+    current_lines = [line for _, line in current[-_DECISIONS_MAX_ROWS:]]
+    for day, day_lines in by_day.items():
+        if not day_lines:
+            continue
         archive = directory / _CITATION_ARCHIVE_DIR / f"decisions-{day}.jsonl.gz"
-        existing = _read_gzip_jsonl(archive, _DECISIONS_MAX_ROWS) if archive.is_file() else []
-        _write_gzip_jsonl(archive, (existing + day_rows)[-_DECISIONS_MAX_ROWS:])
-    _atomic_jsonl(active, current[-_DECISIONS_MAX_ROWS:])
+        existing = _read_gzip_lines(archive) if archive.is_file() else []
+        combined = existing + day_lines
+        kept = combined[-_DECISIONS_MAX_ROWS:]
+        _write_gzip_lines(archive, kept)
+        if len(day_lines) <= len(kept):
+            archived_tail = kept[-len(day_lines):]
+            before_hash = hashlib.sha256(b"".join(day_lines)).hexdigest()
+            after_hash = hashlib.sha256(b"".join(archived_tail)).hexdigest()
+            if before_hash != after_hash:
+                raise ValueError(f"decision archive hash mismatch for {day}")
+    _write_decision_lines(active, current_lines)
     cutoff = (now - timedelta(days=_DECISIONS_RETENTION_DAYS)).date()
     archive_dir = directory / _CITATION_ARCHIVE_DIR
     if archive_dir.is_dir():
