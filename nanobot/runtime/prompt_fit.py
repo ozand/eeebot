@@ -1,6 +1,7 @@
 """Bounded prompt-fit telemetry shared by scorecard and dashboard readers."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -9,7 +10,10 @@ from nanobot.runtime import state_access
 
 PROMPT_FIT_SCHEMA = "prompt-fit-v1"
 PROMPT_FIT_WINDOW_ROWS = 25
-PROMPT_FIT_WINDOW_DAYS = 7
+# Match the retained ledger horizon so the shared reader preserves the
+# dashboard's historical tail semantics instead of silently dropping older
+# pre-#1379 rows before the 25-row event window is selected.
+PROMPT_FIT_WINDOW_DAYS = 90
 PROMPT_FIT_MAX_BYTES = 4 * 2**20
 PROMPT_FIT_SECTION_CAP = 20
 
@@ -70,7 +74,10 @@ def summarize_prompt_fit_rows(
         row for row in rows
         if isinstance(row, dict) and row.get("phase") == "system_prompt"
     ]
-    prompt_rows.sort(key=lambda row: str(row.get("ts") or row.get("timestamp") or ""))
+    # Preserve the reader's order. ``state_access.ledger_window`` already
+    # orders timestamped rows, while legacy rows without timestamps must retain
+    # their file order so the newest parsed row remains the same as the former
+    # dashboard reader.
     selected = prompt_rows[-max(0, window_rows):]
     has_malformed_row = any(
         (row.get("dropped") is not None and not isinstance(row.get("dropped"), list))
@@ -187,8 +194,6 @@ def read_prompt_fit_summary(
                 for line in handle:
                     if line.strip():
                         has_content = True
-                        import json
-
                         json.loads(line)
             if has_content:
                 source_status = "malformed"
