@@ -873,6 +873,53 @@ class TestWatermarkAndPersistence:
         third = scorecard.compute_scorecard(state_dir, None, now=later)
         assert third["loop"]["integrations"] == 2
 
+    def test_prompt_fit_summary_preserves_legacy_row_population(self, tmp_path):
+        state_dir = tmp_path / "state"
+        rows = [
+            {"phase": "system_prompt", "cycle_id": "legacy", "chars": 27184, "cap": 24000, "dropped": [], "ts": "2026-08-01T00:00:00Z"},
+            {"phase": "system_prompt", "overflow": True, "over_by": 2922, "cap": 24000, "sections": {"identity": 100, "bootstrap": 20000, "skills_catalogue": 3000, "memory": 900}, "dropped": []},
+        ]
+        _write_ledger(state_dir, rows)
+        old = {
+            "source_status": "valid", "rows_considered": 2, "rows_with_drops": 0,
+            "rows_with_trims": 0,
+            "latest": {"cap": 24000, "dropped_count": 0, "chars": None},
+        }
+        from nanobot.runtime.prompt_fit import summarize_prompt_fit_rows
+
+        shared = summarize_prompt_fit_rows(rows, source_status="complete", window_rows=2000)
+        assert shared["rows_considered"] == old["rows_considered"]
+        assert shared["rows_with_drops"] == old["rows_with_drops"]
+        assert shared["rows_with_trims"] == old["rows_with_trims"]
+        assert shared["latest"]["cap"] == old["latest"]["cap"]
+        assert shared["latest"]["dropped_count"] == old["latest"]["dropped_count"]
+        assert shared["latest"]["chars"] == old["latest"]["chars"]
+
+    def test_prompt_fit_summary_is_published_with_bounded_provenance(self, tmp_path):
+        state_dir = tmp_path / "state"
+        rows = [
+            {"phase": "system_prompt", "cycle_id": f"old-{i}", "ts": _iso(minutes_ago=100 - i), "cap": 24000, "chars": 23000, "rung": "full", "dropped": [], "trimmed": []}
+            for i in range(30)
+        ]
+        rows[-1]["rung"] = "uniform_trim"
+        rows[-1]["trimmed"] = [{"section": "bootstrap", "chars": 12, "how": "uniform-trim"}]
+        rows[-2]["dropped"] = [{"section": "skills_catalogue", "chars": 25, "how": "declared-droppable"}]
+        _write_ledger(state_dir, rows)
+
+        snapshot = scorecard.compute_scorecard(state_dir, None, force=True, now=NOW)
+        prompt_fit = snapshot["prompt_fit"]
+
+        assert prompt_fit["schema_version"] == "prompt-fit-v1"
+        assert prompt_fit["rows_considered"] == 25
+        assert prompt_fit["window_rows"] == 25
+        assert prompt_fit["rows_with_drops"] == 1
+        assert prompt_fit["rows_with_trims"] == 1
+        assert prompt_fit["latest"]["rung"] == "uniform_trim"
+        assert prompt_fit["latest"]["trimmed"] == {"status": "measured", "count": 1, "chars": 12, "sections": ["bootstrap"]}
+        assert prompt_fit["latest"]["dropped"]["status"] == "empty"
+        assert prompt_fit["prompt_covered_from"] is not None
+        assert prompt_fit["prompt_covered_to"] is not None
+
     def test_history_append_and_latest_overwrite(self, tmp_path):
         state_dir = tmp_path / "state"
         _write_ledger(state_dir, [])

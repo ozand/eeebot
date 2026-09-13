@@ -1684,6 +1684,16 @@ def compute_scorecard(
             ledger_status=ledger_window.status,
         )
         feeds_section = _feeds_section(state_dir, now)
+        from nanobot.runtime.prompt_fit import summarize_prompt_fit_rows
+
+        prompt_fit = summarize_prompt_fit_rows(
+            rows,
+            source_status=ledger_window.status,
+            source_notes=ledger_window.notes,
+            requested_from=ledger_window.requested_from,
+            covered_from=ledger_window.covered_from,
+            covered_to=ledger_window.covered_to,
+        )
         snapshot: dict[str, Any] = {
             "schema_version": SCORECARD_SCHEMA,
             "computed_at_utc": _iso(now),
@@ -1698,6 +1708,7 @@ def compute_scorecard(
             "heldout": _heldout_section(state_dir),
             "integrity": _integrity_section(rows),
             "feeds": feeds_section,
+            "prompt_fit": prompt_fit,
             # #1197: bridge exit streak — reporting only, no fitness target.
             "bridge": _bridge_section(state_dir, rows),
             # #1093: reporting-only knowledge lift A/B summary (no fitness target)
@@ -1791,6 +1802,23 @@ def compute_scorecard(
             "gaps": [],
             "gaps_status": "unavailable",
             "feeds": {},
+            "prompt_fit": {
+                "schema_version": "prompt-fit-v1",
+                "source_status": "unavailable",
+                "latest": None,
+                "rows_considered": 0,
+                "rows_with_drops": 0,
+                "rows_with_trims": 0,
+                "window_rows": 25,
+                "window_kind": "newest_system_prompt_rows",
+                "window_days": 7,
+                "requested_from": None,
+                "covered_from": None,
+                "covered_to": None,
+                "prompt_covered_from": None,
+                "prompt_covered_to": None,
+                "notes": ["scorecard_error"],
+            },
             "reader_status": {"ledger": {"status": "unavailable", "covered_from": None, "covered_to": None, "files_skipped": 0, "notes": ["scorecard_error"]}},
             "control_plane": _control_plane_snapshot(state_dir),
         }
