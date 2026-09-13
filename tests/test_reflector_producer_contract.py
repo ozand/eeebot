@@ -163,10 +163,23 @@ def test_other_kinds_remain_declined():
     ) is None
 
 
+def test_incident_lead_is_removed_from_title_but_not_condition() -> None:
+    card = curator._reflector_card(
+        card_id="incident-title",
+        detail="Record the pre-refresh verdict separately from the post-refresh result",
+        problem="In turn 9, a composite gate returned its pre-refresh verdict",
+        cycles=["cycle-incident-title"], days=["2026-09-01"],
+        first_seen="2026-09-01", last_seen="2026-09-01",
+    )
+    assert card is not None
+    assert card["title"] == "a composite gate returned its pre-refresh verdict"
+    assert card["problem"] == "In turn 9, a composite gate returned its pre-refresh verdict"
+
+
 def test_constant_title_mutation_is_caught_on_an_isolated_copy(tmp_path):
     source = Path(curator.__file__).read_text(encoding="utf-8")
     mutated = source.replace(
-        'title = problem.strip()',
+        'title = _reflector_condition(problem)',
         'title = "Reusable corrective approach"',
         1,
     )

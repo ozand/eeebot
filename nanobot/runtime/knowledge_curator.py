@@ -1410,6 +1410,10 @@ _REFLECTOR_POOL_SLUG = "reflector_pool.json"
 _REFLECTOR_POOL_SCHEMA = "curator-reflector-pool-v1"
 _REFLECTOR_CARD_EVIDENCE_CAP = 8
 _REFLECTOR_KINDS = frozenset({"error_pattern", "approach_hint"})
+_REFLECTOR_INCIDENT_PREFIX_RE = re.compile(
+    r"^\s*in\s+(?:(?:reflection|cycle)-[A-Za-z0-9._-]+|turn\s+\d+)\s*(?:[,;:\-—]\s*|$)",
+    re.IGNORECASE,
+)
 _REFLECTOR_TOPIC_TERMS: tuple[tuple[str, str], ...] = (
     ("architecture", "architecture"),
     ("config", "config"),
@@ -1512,6 +1516,55 @@ _REFLECTOR_TOPIC_TERMS: tuple[tuple[str, str], ...] = (
     ("deferring", "runtime"),
     ("timeouts", "runtime"),
 )
+
+
+def _reflector_condition(problem: str) -> str:
+    """Return the reusable condition without an incident-id lead-in."""
+    condition = _REFLECTOR_INCIDENT_PREFIX_RE.sub("", str(problem).strip(), count=1)
+    return condition.strip() or str(problem).strip()
+
+
+def queue_bridge_lesson_candidate(
+    state_dir: Path,
+    *,
+    cycle_id: str,
+    condition: str,
+    detail: str,
+    evidence: list[str] | None = None,
+    kind: str = "approach_hint",
+) -> bool:
+    """Append a bridge lesson candidate to the reflector's existing journal.
+
+    The bridge remains responsible for identifying a meaningful integrated
+    cycle, but it does not mint or write ``lessons.yaml``. The existing
+    reflector pool owns recurrence, deduplication, topic validation, and
+    staging. ``condition`` is separate from ``evidence`` so incident IDs stay
+    provenance rather than becoming the selection text.
+    """
+    cycle = str(cycle_id or "").strip()
+    condition_text = _reflector_condition(condition)
+    detail_text = str(detail or "").strip()
+    if not cycle or not condition_text or not detail_text or kind not in _REFLECTOR_KINDS:
+        return False
+    if condition_text.casefold() == detail_text.casefold():
+        return False
+    from nanobot.runtime.reflector import _append_journal
+
+    _append_journal(Path(state_dir), {
+        "cycle_id": cycle,
+        "timestamp": _now(),
+        "source": "bridge",
+        "summary": "bridge lesson candidate queued for reflector recurrence",
+        "findings": [],
+        "recommendations": [{
+            "kind": kind,
+            "detail": detail_text[:1000],
+            "condition": condition_text[:400],
+            "evidence": [str(item)[:200] for item in (evidence or [cycle]) if str(item).strip()][:8],
+        }],
+        "followed_previous": [],
+    })
+    return True
 
 
 def _reflector_topic_tags(problem: str, detail: str) -> list[str]:
@@ -1656,7 +1709,7 @@ def _reflector_rows_after(path: Path, cursor: str, limit: int) -> tuple[list[dic
 def _reflector_card(
     *, card_id: str, detail: str, problem: str, cycles: list[str], days: list[str],
     first_seen: str, last_seen: str, kind: str = "approach_hint",
-    state_dir: Path | None = None,
+    state_dir: Path | None = None, evidence: list[str] | None = None,
 ) -> dict[str, Any] | None:
     # The title is a selection key: derive it from this card's observation and
     # recommendation, never from the recommendation kind. This keeps sibling
@@ -1665,11 +1718,11 @@ def _reflector_card(
         return None
     if kind not in {"approach_hint", "error_pattern"}:
         return None
-    title = problem.strip()
+    title = _reflector_condition(problem)
     if not title:
         return None
     # No generated narrative or cycle-only observation can supply a condition.
-    observed = re.sub(r"\bcycle-[0-9a-f]+\b", "", problem, flags=re.I)
+    observed = re.sub(r"\b(?:cycle|reflection)-[0-9a-f]+\b", "", title, flags=re.I)
     if (problem.startswith("Reflected issue:") or
             " ".join(problem.casefold().split()) == " ".join(detail.casefold().split()) or
             not re.search(r"[a-z0-9]", observed, re.I)):
@@ -1684,9 +1737,17 @@ def _reflector_card(
                 "no_controlled_topic_tag", LESSONS_REL,
             )
         return None
+    card_evidence: list[str] = []
+    for value in [*cycles, *(evidence or [])]:
+        value = str(value).strip()
+        if value and value not in card_evidence:
+            card_evidence.append(value)
+        if len(card_evidence) >= _REFLECTOR_CARD_EVIDENCE_CAP:
+            break
     return {
         "schema_version": 2, "id": card_id,
         "title": title,
+
         # problem = what was observed (the item's `evidence`), solution = the
         # recommendation. The pre-#1171 mint put the cycle NARRATIVE here
         # ("Added a doctest suite to tests/…"), and `find_duplicate` compares
@@ -1702,7 +1763,7 @@ def _reflector_card(
         "source": "reflector",
         "seen_count": max(1, len(cycles)),
         "first_seen": first_seen, "last_seen": last_seen,
-        "evidence": list(cycles[:_REFLECTOR_CARD_EVIDENCE_CAP]),
+        "evidence": card_evidence,
         # How many calendar days the recurrence spans — 1 means an incident
         # echo (#1171); recorded so raising _REFLECTOR_MIN_DAYS/_MIN_CYCLES
         # later is a decision on data.
@@ -1932,8 +1993,12 @@ def promote_reflector_recommendations_to_v2(
             if not detail:
                 continue
             stats["items"] += 1
-            problem = str(item.get("evidence") or "").strip()
+            problem = str(item.get("condition") or item.get("evidence") or "").strip()
             words = keyword_set(detail)
+            item_evidence = [
+                str(value).strip() for value in (item.get("evidence") or [])
+                if str(value).strip()
+            ] if isinstance(item.get("evidence"), list) else []
             if _reflector_card(card_id=cycle_id, detail=detail, problem=problem,
                                cycles=[cycle_id], days=[day], first_seen=day,
                                last_seen=day, kind=str(item.get("kind") or ""),
@@ -1987,7 +2052,8 @@ def promote_reflector_recommendations_to_v2(
                 if max(best_score, best_cluster_score) >= _REFLECTOR_NEAR_MISS_FLOOR:
                     stats["near_misses"] += 1
                 clusters.append({
-                    "detail": detail, "problem": problem, "kind": item.get("kind"),
+                    "detail": detail, "problem": _reflector_condition(problem), "kind": item.get("kind"),
+                    "evidence": item_evidence[:_REFLECTOR_CARD_EVIDENCE_CAP],
                     "cycles": [cycle_id], "days": [day],
                     "first_seen": ts or day, "last_seen": ts or day, "_words": words,
                 })
@@ -1999,6 +2065,10 @@ def promote_reflector_recommendations_to_v2(
             if day not in cluster["days"]:
                 cluster["days"].append(day)
             cluster["last_seen"] = ts or day
+            cluster.setdefault("evidence", [])
+            for value in item_evidence:
+                if value not in cluster["evidence"] and len(cluster["evidence"]) < _REFLECTOR_CARD_EVIDENCE_CAP:
+                    cluster["evidence"].append(value)
             stats["pooled_recurrence"] += 1
 
     # 3) graduate: every cluster that now recurs across enough cycles AND days,
@@ -2026,6 +2096,7 @@ def promote_reflector_recommendations_to_v2(
             cycles=list(cluster["cycles"]), days=list(cluster["days"]),
             first_seen=str(cluster.get("first_seen") or last_day)[:10], last_seen=last_day,
             kind=str(cluster.get("kind") or "approach_hint"), state_dir=state_dir,
+            evidence=list(cluster.get("evidence") or []),
         )
         if card is None:
             _write_decision(state_dir, str(cluster["cycles"][0]), "mint_declined", "insufficient_distinct_condition_and_action", LESSONS_REL)

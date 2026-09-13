@@ -4103,56 +4103,30 @@ async def _main_impl_body():
     except Exception:
         pass
 
-    # Structured lesson recording after a successful integrated commit (#1070)
-    # Only record if the cycle generated genuine lesson/insight content, not plain protocol details
+    # Structured lesson candidates after a successful integrated commit (#1070,
+    # #1565). The bridge identifies meaningful delta evidence, then queues the
+    # candidate in the reflector journal. Recurrence, deduplication, topic
+    # validation, staging, and the eventual lessons.yaml write belong to the
+    # existing curator pool; this path must not mint a one-cycle card.
     if _integrated and _has_meaningful_lesson(_artifact_data) and _has_delta_evidence(
         _artifact_data, repo_root=_selfevo_repo, backlog_title=backlog_title,
     ):
         try:
-            _written_lesson = _write_structured_lesson(
-                repo_root=_selfevo_repo,
-                cycle_id=req.get('cycle_id') or '',
-                backlog_title=backlog_title,
-                files_changed=files_changed,
-                commits_pushed=commits_pushed,
-                artifact_data=_artifact_data,
+            from nanobot.runtime.knowledge_curator import queue_bridge_lesson_candidate
+
+            _lesson_condition, _lesson_detail, _lesson_evidence = _lesson_candidate_parts(
+                _artifact_data, backlog_title=backlog_title, cycle_id=_cycle_id,
             )
-            if _written_lesson:
-                _git4 = _git_cmd(_selfevo_repo)
-                _sp.run(_git4 + ['add', 'lessons/lessons.yaml', 'lessons/archive/'], capture_output=True)
-                _sp.run(
-                    _git4 + ['commit', '-m', f'chore: record structured lesson for [{req.get("cycle_id","")[:12]}]'],
-                    capture_output=True,
+            if _lesson_condition and _lesson_detail:
+                queue_bridge_lesson_candidate(
+                    STATE_DIR,
+                    cycle_id=req.get('cycle_id') or '',
+                    condition=_lesson_condition,
+                    detail=_lesson_detail,
+                    evidence=_lesson_evidence,
                 )
-                # #678 F6 / #985: defense-in-depth — refuse to push if the
-                # commit's diff touches anything beyond lessons/lessons.yaml
-                # or lessons/archive/ (rotation archives added in #985).
-                _lesson_allowed: set[str] = {'lessons/lessons.yaml'}
-                # Dynamically include any archive paths staged in this commit.
-                try:
-                    import subprocess as _sp_diff985
-                    _diff_out = _sp_diff985.run(
-                        _git4 + ['diff', '--name-only', 'origin/main...HEAD'],  # #1381: ours only
-                        capture_output=True, text=True,
-                    )
-                    for _f in _diff_out.stdout.splitlines():
-                        _f = _f.strip()
-                        if _f.startswith('lessons/archive/'):
-                            _lesson_allowed.add(_f)
-                except Exception:
-                    pass
-                if _diff_against_remote_touches_only(
-                    _selfevo_repo, 'origin/main', _lesson_allowed,
-                ):
-                    if _push_main_or_report(_git4, 'bridge-lesson', STATE_DIR):
-                        print('bridge-lesson: recorded structured lesson to lessons/lessons.yaml')
-                else:
-                    print(
-                        'bridge-lesson: lesson diff touched more than lessons/lessons.yaml '
-                        '— skipping ungated push (#678 F6)'
-                    )
         except Exception:
-            pass  # never block on lesson recording failure
+            pass  # never block on lesson-candidate recording failure
     elif _rollback_reason:
         # #1041 Part 2: record structured error on gate rejection/rollback into lessons/errors.yaml
         try:
@@ -5058,6 +5032,55 @@ def _extract_meaningful_insight(artifact_data: dict | None) -> str | None:
 def _has_meaningful_lesson(artifact_data: dict | None) -> bool:
     """Check if artifact_data contains a genuine, explicit insight (#1070)."""
     return _extract_meaningful_insight(artifact_data) is not None
+
+
+def _lesson_candidate_parts(
+    artifact_data: dict | None,
+    *,
+    backlog_title: str = "",
+    cycle_id: str = "",
+) -> tuple[str, str, list[str]]:
+    """Extract a condition/action pair for the reflector recurrence pool.
+
+    The bridge may decide that an integrated cycle has meaningful delta
+    evidence, but the condition and recommendation must remain separate. Read
+    the same nested lesson containers as the existing insight/delta helpers;
+    never substitute a generic improvement statement for the condition.
+    """
+    if not isinstance(artifact_data, dict):
+        return "", "", [cycle_id] if cycle_id else []
+    containers: list[dict] = [artifact_data]
+    for key in ("lesson", "structured_lesson"):
+        value = artifact_data.get(key)
+        if isinstance(value, dict):
+            containers.append(value)
+
+    condition = ""
+    for container in containers:
+        for key in ("problem", "condition", "observation"):
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                condition = value.strip()
+                break
+        if condition:
+            break
+    if not condition:
+        for container in containers:
+            value = container.get("hypothesis")
+            if isinstance(value, str) and value.strip():
+                condition = value.strip()
+                break
+
+    detail = str(
+        _extract_reflector_solution(artifact_data)
+        or _extract_meaningful_insight(artifact_data)
+        or ""
+    ).strip()
+    raw_evidence = artifact_data.get("evidence") or [cycle_id]
+    if isinstance(raw_evidence, str):
+        raw_evidence = [raw_evidence]
+    evidence = [str(item) for item in raw_evidence if isinstance(item, (str, int, float)) and str(item).strip()]
+    return condition, detail, evidence[:8] or ([cycle_id] if cycle_id else [])
 
 
 def _extract_reflector_solution(artifact_data: dict | None) -> str | None:
