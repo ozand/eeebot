@@ -335,6 +335,36 @@ def test_curator_decision_writers_share_one_path(tmp_path: Path, monkeypatch) ->
     assert calls == ["mint_gate_passed", "staged"]
 
 
+def test_curator_decision_structural_guard_rejects_third_writer(tmp_path: Path) -> None:
+    import ast
+
+    import nanobot.runtime.knowledge_curator as curator
+
+    source = Path(curator.__file__).read_text(encoding="utf-8")
+    def count_direct_writers(text: str) -> int:
+        tree = ast.parse(text)
+        return sum(
+            1 for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "open"
+            and any(
+                isinstance(value, ast.Constant) and value.value == "decisions.jsonl"
+                for value in ast.walk(node)
+            )
+        )
+
+    baseline = count_direct_writers(source)
+    mutated = source.replace(
+        "def _entry_id(entry: dict[str, Any]) -> str:",
+        'def _third_writer(state):\n    (state / "curator" / "decisions.jsonl").open("a")\n\n\ndef _entry_id(entry: dict[str, Any]) -> str:',
+        1,
+    )
+    isolated = tmp_path / "knowledge_curator.py"
+    isolated.write_text(mutated, encoding="utf-8")
+    assert count_direct_writers(isolated.read_text(encoding="utf-8")) == baseline + 1
+
+
 def test_citation_scan_rotation_and_beyond_retention(tmp_path: Path) -> None:
     from datetime import datetime, timedelta, timezone
 
