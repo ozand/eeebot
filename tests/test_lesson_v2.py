@@ -137,6 +137,51 @@ def test_executor_result_citation_boundary_distinguishes_hit_zero_and_absent(tmp
     assert zero_row["scanned_chars"] == len("Done without a citation")
 
 
+def test_scan_row_records_bounded_selector_provenance(tmp_path: Path) -> None:
+    context = {
+        "relevant_error": {"id": "ERR-1"},
+        "relevant_lesson": {"id": "LESS-1"},
+    }
+    assert record_citations(
+        tmp_path, "cycle-selection", executor_result="A substantive answer", lessons_context=context
+    ) == []
+    row = read_citation_scans(tmp_path)["rows"][-1]
+    assert row["selection_provenance"]["offered_lesson_ids"] == ["ERR-1", "LESS-1"]
+    assert row["selection_provenance"]["selected_lesson_ids"] == ["ERR-1", "LESS-1"]
+    assert row["selection_provenance"]["offered_lesson_count"] == 2
+
+
+def test_empty_selector_provenance_is_explicit(tmp_path: Path) -> None:
+    record_citations(tmp_path, "cycle-no-selection", executor_result="A substantive answer")
+    row = read_citation_scans(tmp_path)["rows"][-1]
+    assert row["selection_provenance"]["status"] == "empty"
+    assert row["selection_provenance"]["candidate_ids"] == []
+    assert row["selection_provenance"]["selected_ids"] == []
+
+
+def test_short_successful_zero_is_not_a_confident_zero(tmp_path: Path) -> None:
+    record_citations(tmp_path, "cycle-short", executor_result="too short")
+    row = read_citation_scans(tmp_path)["rows"][-1]
+    assert row["status"] == "complete"
+    assert row["marker_count"] == 0
+    assert row["notes"] == ["short_result_not_confident_zero"]
+
+
+def test_long_successful_zero_remains_a_genuine_zero(tmp_path: Path) -> None:
+    record_citations(tmp_path, "cycle-long", executor_result="A" * 128)
+    row = read_citation_scans(tmp_path)["rows"][-1]
+    assert row["status"] == "complete"
+    assert row["marker_count"] == 0
+    assert row["notes"] == []
+
+
+def test_short_hit_is_not_marked_as_short_zero(tmp_path: Path) -> None:
+    record_citations(tmp_path, "cycle-short-hit", executor_result="[Lesson LESS-1]")
+    row = read_citation_scans(tmp_path)["rows"][-1]
+    assert row["marker_count"] == 1
+    assert row["notes"] == []
+
+
 def test_executor_result_records_length_when_scanned(tmp_path: Path) -> None:
     """#1546: a reader must not have to open the subagent file to tell a
     substantive scan from a near-empty one behind the same status/marker_count.
