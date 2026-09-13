@@ -11,11 +11,13 @@ import yaml
 from nanobot.runtime.bridge import _write_structured_lesson, build_task
 from nanobot.runtime.knowledge_curator import promote_reflector_recommendations_to_v2
 from nanobot.runtime.lesson_v2 import (
+    append_curator_decision,
     bounded_load_yaml,
     find_duplicate,
     keyword_jaccard,
     normalize_problem,
     read_citation_scans,
+    read_curator_decisions,
     read_executor_result,
     record_citations,
     solution_is_meaningful,
@@ -259,6 +261,140 @@ def test_citation_writer_failure_is_recorded_fail_open(tmp_path: Path, monkeypat
     assert row["marker_count"] == 1
     assert row["status"] == "unavailable"
     assert "citation_write_failed" in row["notes"]
+
+
+def test_curator_decisions_under_bound_do_not_rotate(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 12, tzinfo=timezone.utc)
+    for index in range(3):
+        append_curator_decision(
+            tmp_path, {"lesson_id": f"L{index}", "decision": "staged"}, now=now
+        )
+    assert not list((tmp_path / "curator" / "archive").glob("decisions-*.jsonl.gz"))
+    assert len((tmp_path / "curator" / "decisions.jsonl").read_text().splitlines()) == 3
+
+
+def test_curator_decisions_rotate_and_read_beyond_retention_is_unavailable(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    first = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    path = tmp_path / "curator" / "decisions.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "".join(json.dumps({
+            "timestamp": (first if index == 0 else first + timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+            "lesson_id": "old" if index == 0 else f"new-{index}",
+            "decision": "staged", "reason": "x" * 220,
+        }) + "\n" for index in range(2_001)),
+        encoding="utf-8",
+    )
+    append_curator_decision(
+        tmp_path, {"lesson_id": "new-final", "decision": "promoted"}, now=first + timedelta(days=1)
+    )
+    archives = list((tmp_path / "curator" / "archive").glob("decisions-*.jsonl.gz"))
+    assert len(archives) == 1
+    assert read_curator_decisions(tmp_path, now=first + timedelta(days=1))["status"] == "present"
+    beyond = read_curator_decisions(
+        tmp_path, since=first, now=first + timedelta(days=31)
+    )
+    assert beyond["status"] == "unavailable"
+    assert beyond["notes"] == ["beyond_retention"]
+
+
+def test_curator_decisions_bound_real_shaped_copy(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    path = tmp_path / "curator" / "decisions.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "".join(json.dumps({
+            "timestamp": f"2026-08-{index % 12 + 20:02d}T12:00:00Z",
+            "lesson_id": f"LIVE-{index}", "decision": "unimportant",
+            "reason": "x" * 220,
+        }) + "\n" for index in range(1_018)),
+        encoding="utf-8",
+    )
+    append_curator_decision(
+        tmp_path, {"lesson_id": "LIVE-final", "decision": "staged"},
+        now=datetime(2026, 9, 12, tzinfo=timezone.utc),
+    )
+    active_rows = path.read_text(encoding="utf-8").splitlines()
+    import gzip
+    archive_rows = sum(
+        1 for archive in (path.parent / "archive").glob("decisions-*.jsonl.gz")
+        for _ in gzip.open(archive, "rt", encoding="utf-8")
+    )
+    assert len(active_rows) < 1_018
+    assert archive_rows > 0
+
+
+def test_curator_decision_writers_share_one_path(tmp_path: Path, monkeypatch) -> None:
+    import nanobot.runtime.knowledge_curator as curator
+    import nanobot.runtime.lesson_v2 as lesson
+
+    calls = []
+    original = lesson.append_curator_decision
+    def spy(state_dir, row, **kwargs):
+        calls.append(row["decision"])
+        return original(state_dir, row, **kwargs)
+    monkeypatch.setattr(lesson, "append_curator_decision", spy)
+    monkeypatch.setattr(curator, "append_curator_decision", spy)
+    lesson.allow_mint(_base_artifact(), [], tmp_path)
+    curator._write_decision(tmp_path, "L1", "staged", "test")
+    assert calls == ["mint_gate_passed", "staged"]
+
+
+def test_curator_decision_structural_guard_rejects_third_writer(tmp_path: Path) -> None:
+    import ast
+
+    import pytest
+
+    root = Path(__file__).parents[1]
+    runtime_paths = [
+        root / "nanobot" / "runtime" / "lesson_v2.py",
+        root / "nanobot" / "runtime" / "knowledge_curator.py",
+    ]
+
+    def decision_path_violations(paths: list[Path]) -> list[str]:
+        violations = []
+        for path in paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Constant) or node.value != "decisions.jsonl":
+                    continue
+                parent = next(
+                    (candidate for candidate in ast.walk(tree)
+                     if isinstance(candidate, (ast.Assign, ast.AnnAssign))
+                     and candidate.value is node),
+                    None,
+                )
+                allowed = (
+                    path.name == "lesson_v2.py"
+                    and isinstance(parent, ast.Assign)
+                    and any(
+                        isinstance(target, ast.Name) and target.id == "_DECISIONS_FILE"
+                        for target in parent.targets
+                    )
+                )
+                if not allowed:
+                    violations.append(f"{path.name}:{node.lineno}")
+        return violations
+
+    assert decision_path_violations(runtime_paths) == []
+    curator_source = runtime_paths[1].read_text(encoding="utf-8")
+    mutated = curator_source.replace(
+        "def _entry_id(entry: dict[str, Any]) -> str:",
+        'def _rogue_decision_writer(state, row):\n'
+        '    _append_jsonl(state / "curator" / "decisions.jsonl", row)\n\n\n'
+        'def _entry_id(entry: dict[str, Any]) -> str:',
+        1,
+    )
+    assert mutated != curator_source
+    isolated = tmp_path / "knowledge_curator.py"
+    isolated.write_text(mutated, encoding="utf-8")
+    with pytest.raises(AssertionError):
+        assert decision_path_violations([runtime_paths[0], isolated]) == []
 
 
 def test_citation_scan_rotation_and_beyond_retention(tmp_path: Path) -> None:
