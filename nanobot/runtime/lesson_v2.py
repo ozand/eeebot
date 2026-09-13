@@ -912,7 +912,14 @@ def record_citations(
     A successful zero-marker scan is evidence; an absent ledger is not.
     """
     current = _citation_now(now)
-    pattern = re.compile(r"\[Lesson\s+([A-Za-z0-9_-]+)\]", re.IGNORECASE)
+    # Store IDs are either simple slugs (LESS-123) or safe relative path-like
+    # IDs (lessons/example.md).  Slash and dot are separators between non-empty
+    # safe components; whitespace, traversal, URLs, and arbitrary punctuation
+    # remain outside the marker grammar (#1570).
+    pattern = re.compile(
+        r"\[Lesson\s+([A-Za-z0-9_-]+(?:[/.][A-Za-z0-9_-]+)*)\]",
+        re.IGNORECASE,
+    )
     timestamp = current.isoformat().replace("+00:00", "Z")
     directory = Path(state_dir) / "lesson_usage"
     selector = (
@@ -963,26 +970,29 @@ def record_citations(
         scan_texts = [str(text or "") for text in (texts or [])]
     else:
         scan_texts = [str(executor_result)]
+    scanned_texts = [text[:max_chars] for text in scan_texts]
+    truncated_chars = sum(len(text) - len(scanned) for text, scanned in zip(scan_texts, scanned_texts))
     matches: list[str] = []
-    for text in scan_texts:
-        matches.extend(pattern.findall(text[:max_chars]))
+    for text in scanned_texts:
+        matches.extend(pattern.findall(text))
     ids = sorted(set(matches))
     scan: dict[str, object] = {
         "scan_ran": True,
         "cycle_id": str(cycle_id),
         "marker_count": len(matches),
         "lesson_ids": ids,
-        "status": "complete",
-        "notes": [],
+        "status": "partial" if truncated_chars else "complete",
+        "notes": ["scan_truncated"] if truncated_chars else [],
         **selector,
-        # #1546: what was actually scanned, so a reader does not have to
-        # cross-check the ledger by hand to tell a substantive answer from
-        # a near-empty one behind the same status/marker_count pair.
-        "scanned_chars": sum(len(text) for text in scan_texts),
+        # #1546/#1570: report the characters actually scanned, separately
+        # from a bounded tail that was not inspected.  A partial prefix is
+        # lower-bound evidence and must never be labelled complete.
+        "scanned_chars": sum(len(text) for text in scanned_texts),
+        **({"truncated_chars": truncated_chars} if truncated_chars else {}),
         "ts": timestamp,
     }
     if scan["marker_count"] == 0 and scan["scanned_chars"] < _CITATION_SHORT_RESULT_CHARS:
-        scan["notes"] = ["short_result_not_confident_zero"]
+        scan["notes"].append("short_result_not_confident_zero")
     citation_failed = False
     try:
         if ids:
