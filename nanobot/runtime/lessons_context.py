@@ -73,6 +73,7 @@ _TEXT_CAP = 400
 _QUOTED_HYPOTHESIS_RE = re.compile(r'"([^"\n]+)"')
 # Related hint cap: at most this many slugs rendered in a card (#1095).
 _RELATED_HINT_CAP = 3
+_CANDIDATE_PROVENANCE_CAP = 3
 
 _WORD_RE = re.compile(r"[A-Za-z]{4,}")
 
@@ -215,6 +216,43 @@ def _best_card(
     return best
 
 
+def _best_card_with_provenance(
+    entries: list[dict[str, Any]], task_words: set[str], secondary_field: str
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Run the unchanged selector logic while collecting bounded evidence."""
+    if not task_words:
+        return None, {"status": "empty_corpus", "candidates": [], "selected_id": None, "tie_count": 0}
+    candidates: list[dict[str, Any]] = []
+    best: dict[str, Any] | None = None
+    best_score = -1
+    for position, entry in enumerate(entries):
+        score, shared_count = _score_entry(task_words, entry, secondary_field)
+        if shared_count < _MIN_SHARED_WORDS:
+            continue
+        card_id = str(entry.get("id") or "").strip()
+        if card_id:
+            candidates.append({"id": card_id, "score": score, "shared_words": shared_count})
+        if score > best_score:
+            best_score = score
+            best = entry
+    if not entries:
+        status = "empty_corpus"
+    elif not candidates:
+        status = "below_threshold"
+    else:
+        status = "present"
+    peers = [item for item in candidates if item["score"] == best_score]
+    selected_id = str(best.get("id") or "").strip() if best else None
+    return best, {
+        "status": status,
+        "candidates": candidates[:_CANDIDATE_PROVENANCE_CAP],
+        "candidate_count": len(candidates),
+        "selected_id": selected_id,
+        "tie_count": len(peers),
+        "tie_discarded": len(peers) > 1,
+    }
+
+
 def selection_provenance(
     selfevo_repo: Path | None, task_title: str, target_path: str = ""
 ) -> dict[str, Any]:
@@ -225,16 +263,30 @@ def selection_provenance(
         words = _extract_words(f"{task_title} {target_path}")
         lessons_dir = Path(selfevo_repo) / "lessons"
         error_entries = _capped_entries(lessons_dir / "errors.yaml")
-        lesson_entries = _capped_entries(lessons_dir / "lessons.yaml")
-        selected = [
-            _best_card(error_entries, words, "root_cause"),
-            _best_card(lesson_entries, words, "approach"),
-        ]
-        ids = [str(card.get("id")) for card in selected if card and card.get("id")]
+        error, error_data = _best_card_with_provenance(error_entries, words, "root_cause")
+        from nanobot.runtime.lesson_index import find_index_matches, read_index
+        index_path = lessons_dir / "index.md"
+        live_index_entries = read_index(index_path)
+        live_best = _best_card(live_index_entries, words, "approach")
+        archive_entries = []
+        if not live_best:
+            archive_entries = find_index_matches(
+                index_path,
+                predicate=lambda entry: bool(
+                    _score_entry(words, entry, "approach")[1] >= _MIN_SHARED_WORDS
+                ),
+            )
+        lesson_entries = _capped_entries(lessons_dir / "lessons.yaml") + live_index_entries + archive_entries
+        lesson, lesson_data = _best_card_with_provenance(lesson_entries, words, "approach")
         return {
             "source": "reconstructed",
-            "status": "present" if ids else "empty",
-            "selected_ids": ids[:3],
+            "status": "present" if error or lesson else "empty",
+            "selected_ids": [
+                str(card.get("id")) for card in (error, lesson)
+                if card and card.get("id")
+            ][:3],
+            "errors": error_data,
+            "lessons": lesson_data,
         }
     except Exception:
         return {"source": "reconstructed", "status": "unavailable", "selected_ids": []}
@@ -266,7 +318,10 @@ def build_lessons_context(
 
         result: dict[str, Any] = {}
 
-        err = _best_card(_capped_entries(lessons_dir / "errors.yaml"), task_words, "root_cause")
+        error_entries = _capped_entries(lessons_dir / "errors.yaml")
+        err, error_provenance = _best_card_with_provenance(
+            error_entries, task_words, "root_cause"
+        )
         if err:
             err_card: dict[str, Any] = {
                 "id": err.get("id"),
@@ -296,7 +351,10 @@ def build_lessons_context(
                 ),
             )
         index_entries = live_index_entries + archive_entries
-        less = _best_card(_capped_entries(lessons_dir / "lessons.yaml") + index_entries, task_words, "approach")
+        lesson_entries = _capped_entries(lessons_dir / "lessons.yaml") + index_entries
+        less, lesson_provenance = _best_card_with_provenance(
+            lesson_entries, task_words, "approach"
+        )
         if less:
             less_card: dict[str, Any] = {
                 "id": less.get("id"),
