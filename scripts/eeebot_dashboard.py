@@ -1321,8 +1321,8 @@ def escape_html_text(value: Any) -> str:
 # state files. Every source goes through artifact_status/artifact_metadata
 # (never a parallel status vocabulary); every read is bounded and fail-open.
 
-_MAX_PROMPT_FIT_LEDGER_LINES = 2000  # bounded-tail discipline: deque(maxlen) over the ledger, never a full read
-_PROMPT_FIT_DROPPED_SECTIONS_CAP = 20  # bound the section-name list even if a single row lists many
+_MAX_PROMPT_FIT_LEDGER_LINES = 2000  # compatibility alias for callers/tests
+_PROMPT_FIT_DROPPED_SECTIONS_CAP = 20  # compatibility alias for callers/tests
 
 
 def _selfevo_repo_dir(state_dir: Path) -> Path:
@@ -1333,102 +1333,10 @@ def _selfevo_repo_dir(state_dir: Path) -> Path:
 
 
 def scan_prompt_fit_ledger(state_dir: Path, limit: int = _MAX_PROMPT_FIT_LEDGER_LINES) -> dict[str, Any]:
-    """Bounded tail read of ledger/cycles.jsonl's phase=system_prompt rows
-    (#1300's ledger row, journaled once per subagent spawn).
+    """Read prompt-fit telemetry through the shared runtime aggregation."""
+    from nanobot.runtime.prompt_fit import read_prompt_fit_summary
 
-    Streams the last *limit* lines into a bounded deque (same discipline as
-    a bounded deque(maxlen=_MAX_PROMPT_FIT_LEDGER_LINES) tail, not a full-file
-    read+slice) so an unexpectedly large ledger cannot blow up dashboard
-    memory. Returns a dict with the latest row's chars/cap/dropped (section
-    names, capped), plus how many of the tailed system_prompt rows carried
-    at least one drop -- the count the issue calls for ("how many of the
-    last N ledger rows carried drops"), not just the latest row's own state.
-
-    Fail-open: a missing/unreadable/malformed ledger reports its real status
-    (never a fabricated healthy-looking zero) and an empty rows list.
-    """
-    from collections import deque
-
-    path = Path(state_dir) / "ledger" / "cycles.jsonl"
-    if not path.is_file():
-        return {"source_status": "missing", "latest": None, "rows_considered": 0, "rows_with_drops": 0, "rows_with_trims": 0}
-    try:
-        tail: "deque[str]" = deque(maxlen=limit)
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                tail.append(line)
-    except PermissionError:
-        return {"source_status": "permission", "latest": None, "rows_considered": 0, "rows_with_drops": 0, "rows_with_trims": 0}
-    except OSError:
-        return {"source_status": "unreadable", "latest": None, "rows_considered": 0, "rows_with_drops": 0, "rows_with_trims": 0}
-
-    system_prompt_rows: list[dict[str, Any]] = []
-    any_malformed = False
-    for line in tail:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except Exception:
-            any_malformed = True
-            continue
-        if isinstance(rec, dict) and rec.get("phase") == "system_prompt":
-            system_prompt_rows.append(rec)
-
-    if not system_prompt_rows:
-        # A ledger with rows but none of this phase yet, or a ledger that is
-        # only ever malformed JSON, must never fabricate a healthy-looking
-        # zero. If we saw malformed content, say so; otherwise the phase has
-        # simply not emitted any rows in the window yet.
-        status = "malformed" if any_malformed else "valid-empty"
-        return {"source_status": status, "latest": None, "rows_considered": 0, "rows_with_drops": 0, "rows_with_trims": 0}
-
-    latest = system_prompt_rows[-1]
-    overflow = bool(latest.get("overflow"))
-    dropped = latest.get("dropped")
-    dropped_list = dropped if isinstance(dropped, list) else []
-    section_names = [str(d.get("section")) for d in dropped_list if isinstance(d, dict) and d.get("section")]
-    overflow_sections = latest.get("sections") if isinstance(latest.get("sections"), dict) else {}
-    rows_with_drops = sum(
-        1 for row in system_prompt_rows
-        if isinstance(row.get("dropped"), list) and len(row["dropped"]) > 0
-    )
-    rows_with_trims = sum(
-        1 for row in system_prompt_rows
-        if isinstance(row.get("trimmed"), list) and len(row["trimmed"]) > 0
-    )
-    trimmed = latest.get("trimmed")
-    trimmed_list = [item for item in trimmed if isinstance(item, dict)] if isinstance(trimmed, list) else []
-    trimmed_sections = [
-        str(item.get("section"))
-        for item in trimmed_list
-        if item.get("section")
-    ]
-    return {
-        "source_status": "valid",
-        "latest": {
-            "chars": latest.get("chars"),
-            "cap": latest.get("cap"),
-            "overflow": overflow,
-            "over_by": latest.get("over_by"),
-            "rung": latest.get("rung"),
-            "sections": overflow_sections,
-            "dropped_count": len(dropped_list),
-            "dropped_chars": sum(
-                int(d.get("chars") or 0) for d in dropped_list if isinstance(d, dict)
-            ),
-            "dropped_sections": section_names[:_PROMPT_FIT_DROPPED_SECTIONS_CAP],
-            "trimmed_count": len(trimmed_list),
-            "trimmed_chars": sum(int(item.get("chars") or 0) for item in trimmed_list),
-            "trimmed_sections": trimmed_sections[:_PROMPT_FIT_DROPPED_SECTIONS_CAP],
-            "cycle_id": latest.get("cycle_id"),
-            "ts": latest.get("ts"),
-        },
-        "rows_considered": len(system_prompt_rows),
-        "rows_with_drops": rows_with_drops,
-        "rows_with_trims": rows_with_trims,
-    }
+    return read_prompt_fit_summary(state_dir, window_rows=limit)
 
 
 def scan_skill_fitness(state_dir: Path) -> dict[str, Any]:
@@ -1619,6 +1527,45 @@ def scan_hypotheses_sources(state_dir: Path) -> dict[str, Any]:
     return {"sources": sources, "lifecycle_counts": lifecycle_counts}
 
 
+def _format_prompt_fit_metric_value(metric: dict[str, Any] | None, key: str) -> str:
+    if not isinstance(metric, dict):
+        return "unavailable"
+    status = metric.get("status")
+    if status == "missing":
+        return "unavailable"
+    value = metric.get(key)
+    if status == "empty" and value == 0:
+        return "0"
+    if status == "measured" and value is not None:
+        return str(value)
+    return str(status or "unavailable")
+
+
+def _format_prompt_fit_window(fit: dict[str, Any]) -> str:
+    rows = fit.get("rows_considered")
+    limit = fit.get("window_rows")
+    start = fit.get("prompt_covered_from") or fit.get("covered_from")
+    end = fit.get("prompt_covered_to") or fit.get("covered_to")
+    if not isinstance(rows, int) or not isinstance(limit, int):
+        return "unavailable"
+    period = f"{start} → {end}" if start and end else "timestamps unavailable"
+    return f"{rows}/{limit} rows ({period})"
+
+
+def _format_prompt_fit_sections(metric: dict[str, Any] | None) -> str:
+    if not isinstance(metric, dict):
+        return "unavailable"
+    status = metric.get("status")
+    if status == "missing":
+        return "unavailable"
+    sections = metric.get("sections")
+    if status == "empty" and sections == []:
+        return "none"
+    if status == "measured" and isinstance(sections, list):
+        return "; ".join(str(section) for section in sections) if sections else "none"
+    return str(status or "unavailable")
+
+
 def format_prompt_fit_tile(fit: dict[str, Any], resolved_status: str = "unavailable") -> dict[str, Any]:
     """Bounded display fields for the prompt-fit tile; never the raw ledger row.
 
@@ -1642,22 +1589,24 @@ def format_prompt_fit_tile(fit: dict[str, Any], resolved_status: str = "unavaila
             "prompt_fit_rows_with_drops": "unavailable",
             "prompt_fit_rows_with_trims": "unavailable",
         }
+    dropped = latest.get("dropped") if isinstance(latest.get("dropped"), dict) else None
+    trimmed = latest.get("trimmed") if isinstance(latest.get("trimmed"), dict) else None
     if latest.get("overflow"):
         sections = latest.get("sections") or {}
         return {
             "prompt_fit_status": resolved_status,
             "prompt_fit_chars": "overflow",
             "prompt_fit_headroom": f"-{latest.get('over_by')} chars" if latest.get("over_by") is not None else "overflow",
-            "prompt_fit_dropped_count": "0",
-            "prompt_fit_dropped_chars": "0",
+            "prompt_fit_dropped_count": str(latest.get("dropped_count", 0)),
+            "prompt_fit_dropped_chars": str(latest.get("dropped_chars", 0)),
             "prompt_fit_rung": str(latest.get("rung") or "unavailable"),
             # #1471: a row with no ``rung`` predates #1476 and never recorded
             # uniform-trim losses, so 0 would be a fabricated zero. ``rung``
             # present implies ``trimmed`` present -- #1476 writes it on both
             # the fit and the strict-overflow path.
-            "prompt_fit_trimmed_count": "0" if latest.get("rung") else "unavailable",
-            "prompt_fit_trimmed_chars": "0" if latest.get("rung") else "unavailable",
-            "prompt_fit_trimmed_sections": "none" if latest.get("rung") else "unavailable",
+            "prompt_fit_trimmed_count": _format_prompt_fit_metric_value(trimmed, "count"),
+            "prompt_fit_trimmed_chars": _format_prompt_fit_metric_value(trimmed, "chars"),
+            "prompt_fit_trimmed_sections": _format_prompt_fit_sections(trimmed),
             "prompt_fit_dropped_sections": "none",
             "prompt_fit_rows_with_drops": f"{fit.get('rows_with_drops', 0)}/{fit.get('rows_considered', 0)} recent system_prompt rows dropped content",
             "prompt_fit_rows_with_trims": f"{fit.get('rows_with_trims', 0)}/{fit.get('rows_considered', 0)} recent system_prompt rows trimmed content",
@@ -1683,9 +1632,9 @@ def format_prompt_fit_tile(fit: dict[str, Any], resolved_status: str = "unavaila
         "prompt_fit_dropped_sections": "; ".join(sections) if sections else "none",
         # #1471: see the overflow branch -- no ``rung`` means the row predates
         # trim accounting, and "0 trimmed" would read as a measurement.
-        "prompt_fit_trimmed_count": str(latest.get("trimmed_count", 0)) if latest.get("rung") else "unavailable",
-        "prompt_fit_trimmed_chars": str(latest.get("trimmed_chars", 0)) if latest.get("rung") else "unavailable",
-        "prompt_fit_trimmed_sections": ("; ".join(trimmed_sections) if trimmed_sections else "none") if latest.get("rung") else "unavailable",
+        "prompt_fit_trimmed_count": _format_prompt_fit_metric_value(trimmed, "count") if trimmed is not None else (str(latest.get("trimmed_count", 0)) if latest.get("rung") else "unavailable"),
+        "prompt_fit_trimmed_chars": _format_prompt_fit_metric_value(trimmed, "chars") if trimmed is not None else (str(latest.get("trimmed_chars", 0)) if latest.get("rung") else "unavailable"),
+        "prompt_fit_trimmed_sections": _format_prompt_fit_sections(trimmed) if trimmed is not None else (("; ".join(trimmed_sections) if trimmed_sections else "none") if latest.get("rung") else "unavailable"),
         "prompt_fit_rows_with_drops": f"{rows_with_drops}/{rows_considered} recent system_prompt rows dropped content",
         "prompt_fit_rows_with_trims": f"{fit.get('rows_with_trims', 0)}/{rows_considered} recent system_prompt rows trimmed content",
     }
@@ -1973,7 +1922,12 @@ def collect_metrics_uncached() -> dict[str, Any]:
         ],
         now_utc,
     )
-    _prompt_fit_resolved_status = artifact_status(_prompt_fit_age, prompt_fit.get("source_status", "missing"))
+    _prompt_fit_status = prompt_fit.get("source_status", "unavailable")
+    _prompt_fit_resolved_status = (
+        artifact_status(_prompt_fit_age, "valid")
+        if _prompt_fit_status in {"valid", "valid-empty"}
+        else _prompt_fit_status
+    )
     _skills_resolved_status = artifact_status(_skills_age, skill_fitness_scan.get("source_status", "missing"))
     _lessons_resolved_status = artifact_status(_lessons_age, lessons_scan.get("source_status", "missing"))
     _lessons_index_resolved_status = artifact_status(_lessons_index_age, lessons_scan.get("index_status", "missing"))
@@ -2181,7 +2135,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "disk_pct": disk_pct,
         "cycle_progress": cycle_progress,
         # Knowledge plane (#1347)
-        "prompt_fit_source": artifact_metadata(_prompt_fit_age, prompt_fit.get("source_status", "missing")),
+        "prompt_fit_source": artifact_metadata(_prompt_fit_age, "valid" if _prompt_fit_status in {"valid", "valid-empty"} else _prompt_fit_status),
         **format_prompt_fit_tile(prompt_fit, _prompt_fit_resolved_status),
         "skills_source": artifact_metadata(_skills_age, skill_fitness_scan.get("source_status", "missing")),
         **format_skills_tile(skill_fitness_scan, _skills_resolved_status),

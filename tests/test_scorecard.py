@@ -873,6 +873,31 @@ class TestWatermarkAndPersistence:
         third = scorecard.compute_scorecard(state_dir, None, now=later)
         assert third["loop"]["integrations"] == 2
 
+    def test_prompt_fit_summary_is_published_with_bounded_provenance(self, tmp_path):
+        state_dir = tmp_path / "state"
+        rows = [
+            {"phase": "system_prompt", "cycle_id": f"old-{i}", "ts": _iso(minutes_ago=100 - i), "cap": 24000, "chars": 23000, "rung": "full", "dropped": [], "trimmed": []}
+            for i in range(30)
+        ]
+        rows[-1]["rung"] = "uniform_trim"
+        rows[-1]["trimmed"] = [{"section": "bootstrap", "chars": 12, "how": "uniform-trim"}]
+        rows[-2]["dropped"] = [{"section": "skills_catalogue", "chars": 25, "how": "declared-droppable"}]
+        _write_ledger(state_dir, rows)
+
+        snapshot = scorecard.compute_scorecard(state_dir, None, force=True, now=NOW)
+        prompt_fit = snapshot["prompt_fit"]
+
+        assert prompt_fit["schema_version"] == "prompt-fit-v1"
+        assert prompt_fit["rows_considered"] == 25
+        assert prompt_fit["window_rows"] == 25
+        assert prompt_fit["rows_with_drops"] == 1
+        assert prompt_fit["rows_with_trims"] == 1
+        assert prompt_fit["latest"]["rung"] == "uniform_trim"
+        assert prompt_fit["latest"]["trimmed"] == {"status": "measured", "count": 1, "chars": 12, "sections": ["bootstrap"]}
+        assert prompt_fit["latest"]["dropped"]["status"] == "empty"
+        assert prompt_fit["prompt_covered_from"] is not None
+        assert prompt_fit["prompt_covered_to"] is not None
+
     def test_history_append_and_latest_overwrite(self, tmp_path):
         state_dir = tmp_path / "state"
         _write_ledger(state_dir, [])

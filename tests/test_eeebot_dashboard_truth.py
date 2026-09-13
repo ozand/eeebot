@@ -1035,6 +1035,15 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
             fh.write(json.dumps(row) + "\n")
 
 
+def test_prompt_fit_dashboard_uses_shared_runtime_reader(tmp_path: Path, monkeypatch) -> None:
+    published = {"schema_version": "prompt-fit-v1", "source_status": "valid"}
+    from nanobot.runtime import prompt_fit
+
+    monkeypatch.setattr(prompt_fit, "read_prompt_fit_summary", lambda *_args, **_kwargs: published)
+    result = DASHBOARD.scan_prompt_fit_ledger(tmp_path)
+    assert result is published
+
+
 def test_prompt_fit_ledger_missing_reports_missing_not_zero(tmp_path: Path) -> None:
     """No ledger/cycles.jsonl at all: the tile must say `missing`, never a
     fabricated `0 dropped` that looks like a healthy, fully-fitting prompt."""
