@@ -30,3 +30,6 @@ Conventions:
 | [ADR-012](ADR-012-vector-1-scoped-to-the-mutation-surface.md) | Vector 1 names only what the loop is permitted to change | proposed |
 | [ADR-013](ADR-013-capability-tiers-probe-and-cost.md) | A capability has a probe, a tier, and a measured cost on this host | proposed |
 | [ADR-014](ADR-014-the-avatar-is-an-instrument.md) | A displayed avatar is an instrument, and attention is invited rather than captured | proposed |
+| [ADR-015](ADR-015-the-channel-is-an-instrument.md) | The channel is an instrument — the cat may feel anything, and claim nothing the journal does not carry | proposed |
+| [ADR-016](ADR-016-work-is-chosen-by-the-journal.md) | Work is chosen by the journal and never by the channel | proposed |
+| [ADR-017](ADR-017-long-work-runs-outside-the-cycle.md) | Work too long for a cycle runs in its own unit, checkpointed, and shortens rather than skips | proposed |
