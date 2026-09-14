@@ -5130,6 +5130,47 @@ def _has_delta_evidence(
     ))
 
 
+def _error_condition_title(
+    *,
+    reason: str,
+    violated_check: str = "",
+    backlog_title: str = "",
+) -> str:
+    """Build a matchable condition title for a structured error card.
+
+    Rollback reasons are machine-readable categories, not useful primary
+    selection keys. Prefer the concrete check detail, then the task title, and
+    finally a stable human-readable condition for reason-only failures.
+    """
+    check = str(violated_check or "").strip()
+    task = str(backlog_title or "").strip()
+    reason_labels = {
+        "executor_llm_error": "Executor LLM call failed before cycle execution",
+        "mutation_surface_violation": "Mutation-surface policy rejected a change outside the allowed files",
+        "test_weakening": "Test-weakening guard rejected a change that weakened coverage",
+        "gate_failed": "Verification gate rejected the proposed change",
+        "blocked_file_present": "Blocked-file policy prevented cycle integration",
+        "fitness_sidecar_tamper": "Fitness input changed during executor spawn",
+        "out_of_band_main_detected": "Out-of-band origin/main movement prevented integration",
+        "system_prompt_overflow": "System prompt exceeded the executor context budget",
+        "internal_error": "Bridge internal error stopped cycle processing",
+        "switch_base_gate_error": "Switch-base gate could not classify the candidate tree",
+        "switch_base_gate_blocked": "Switch-base gate rejected the candidate tree",
+    }
+    normalized_reason = str(reason or "gate_error").strip()
+    human_reason = reason_labels.get(
+        normalized_reason,
+        f"{normalized_reason.replace('_', ' ').capitalize()} prevented cycle integration",
+    )
+    if ":" in check:
+        detail = check.split(":", 1)[1].strip()
+        if detail:
+            return f"{human_reason}: {detail}"[:200]
+    if task:
+        return f"{human_reason} while attempting: {task}"[:200]
+    return human_reason[:200]
+
+
 def _write_structured_error(
     repo_root: Path,
     cycle_id: str,
@@ -5204,11 +5245,18 @@ def _write_structured_error(
     elapsed = int(b_used.get('elapsed_seconds', 0))
 
     check_str = violated_check or reason or "gate_check"
+    condition_title = _error_condition_title(
+        reason=reason,
+        violated_check=violated_check,
+        backlog_title=backlog_title,
+    )
     error_entry: dict = {
         'id': error_id,
         'date': date_str,
         'cycle_id': cycle_id,
         'task_id': backlog_title[:80] if backlog_title else 'unknown',
+        'title': condition_title,
+        'category': reason or 'unknown',
         'hypothesis': f'Cycle failed due to {reason or "gate error"}.',
         'result': f'Failed/rejected: {check_str}',
         'reason': reason or 'unknown',
