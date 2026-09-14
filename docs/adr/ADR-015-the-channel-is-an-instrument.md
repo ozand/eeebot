@@ -19,7 +19,7 @@ The operator has decided to extend the same surface to a public channel: a video
 
 Two properties of that decision matter architecturally.
 
-**The video is a recording of the instrument, not a second production.** The surface #1607 builds already draws the cat, the state, and the cost of its own render. A demoscene is that surface running. Composition cost beyond ADR-014's is therefore zero, and everything ADR-014 forbids the surface to say, it forbids the video to say — automatically, because it is the same picture.
+**The instrument reaches the video unchanged.** The surface #1607 builds already draws the cat, the state, and the cost of its own render. Capturing it adds no composition cost, and everything ADR-014 forbids the surface to say it forbids the video to say — automatically, because it is the same picture. (Written before the operator corrected what "demoscene" meant: generated content sits beside the captured instrument and its composition is the whole work. See the demo/instrument addendum below, which is where that division is settled.)
 
 **The register is narrative and emotional, by decision.** The cat tells a story in words a non-engineer follows, even about hard work. This is the correct product call and it is also where lying happens, because a story wants a shape that a day of 96 cycles rarely has.
 
@@ -53,7 +53,7 @@ refused   "I got it working!"        when the cycle failed
 refused   "it got faster"            when no before/after measurement exists
 ```
 
-"The palette expansion cost 259 ms per frame and blew the budget" and "the picture came out so slowly I could not keep up" are the same claim at different resolutions. "But I learned something" is a different claim and needs its own row.
+"The palette expansion cost 107.5 ms per frame and blew the budget" and "the picture came out so slowly I could not keep up" are the same claim at different resolutions. "But I learned something" is a different claim and needs its own row.
 
 ## 2. The covered-story test
 

@@ -39,7 +39,9 @@ They are recorded, displayed, and never optimised — the ADR-011 rule 3 shape, 
 
 ## 3. The admissible optimisation targets are about telling and about cost, never about subject
 
-Three, all local, all available on day one, none dependent on anyone watching:
+Three, all local, all available on day one, none dependent on anyone watching.
+
+**None of them becomes a `_TARGETS` row.** They are the ADR-011 rule 3 shape — reported numbers, displayed and tracked, that the craft is aimed at while the scorecard does not gate on them. "Target" here means what the work is pointed at, not an entry in the scorecard; the consequences section below says `_TARGETS` and the scorecard are unchanged and it means it literally. Promoting any of these into the scorecard later is a separate decision needing its own record and a replay against recorded history first (#1597).
 
 - **Citation density** — distinct journal-backed beats per minute of finished video. Three beats in five minutes is padding; the only way to raise it is to have done more that is worth citing. It cannot be gamed by drama, because a beat without a row does not count (ADR-015 rule 2).
 - **Cost per finished minute** — CPU-seconds, peak RSS, and degrees, per minute of published video. This is the charter's before/after requirement made routine, and it is the lever the operator actually named: the toolchain getting better is the achievement. The first reading is 15.5 minutes of wall time per 5 minutes of video, 69% of it in composition rather than in the encoder.
@@ -113,7 +115,9 @@ That metric is better than anything I proposed on four counts, and it is added t
 - It is **the one metric that forces composition.** Nothing fits in 4 kilobytes as a leaf artifact. A synth, a packer, a generator and a font must exist and be reused, or the target is unreachable. Composition depth is about 1 across 154 artifacts today (#1599); a size category is the first constraint this project has encountered that makes depth mandatory rather than virtuous.
 - It **is the Factorio ladder, already built by someone else.** The category is the product; the tools are the prerequisites; the tools only pay off when reused.
 
-So rule 3 gains a fourth admissible target: **output per declared byte budget**, in a stated category, with the budget fixed before the work rather than fitted afterwards. A demo that misses its category is reported as missing it — the same visible-degradation discipline as a truncated render.
+So rule 3 gains a fourth admissible target: **output per declared byte budget**, in a stated category, with the budget fixed before the work rather than fitted afterwards. A demo that misses its category is reported as missing it — the same visible-degradation discipline as a truncated render. It is a reported number like the other three and does not become a `_TARGETS` row.
+
+**What the budget measures is the generator, not the video.** The category counts the demo program plus every byte it needs to run — code, tile data, palettes, the module, the font — after packing. It does not count the published file. That distinction is the whole point: a five-minute h264 is 15–30 MB and its size is a property of the codec, saying nothing about craft, whereas the generator's size is exactly the thing that forces a synth, a packer and a generator to exist and be reused. The published file has a separate and unrelated constraint — upload time on the host's link — which is tracked as a cost, never as a category.
 
 One measurement from the same day shows what this pressure is worth. The dominant per-frame cost is the palette expansion, and three implementations of exactly the same operation were timed against each other:
 
