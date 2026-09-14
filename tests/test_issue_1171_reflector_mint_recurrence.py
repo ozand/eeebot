@@ -21,6 +21,8 @@ import yaml
 from nanobot.runtime import knowledge_curator as kc
 from nanobot.runtime.knowledge_curator import (
     _LESSONS_PAYLOAD_SLUG,
+    _reflector_card,
+    queue_bridge_lesson_candidate,
     _STAGED_DIR,
     LESSONS_REL,
     apply_staged_lesson_cards,
@@ -92,6 +94,57 @@ def _card(card_id: str, solution: str, problem: str, *, seen: int = 1, evidence:
 # ─── the rule ────────────────────────────────────────────────────────────────
 
 
+def test_bridge_candidate_survives_boundary_and_curator_reads_state_journal(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    workspace = _workspace(tmp_path)
+    assert queue_bridge_lesson_candidate(
+        state, cycle_id="cycle-boundary", condition="A bridge gate returns its pre-refresh verdict",
+        detail="Record the pre-refresh verdict separately from the post-refresh result.",
+        evidence=["reflection-boundary"],
+    )
+    journal = state / "reflector" / "reflections.jsonl"
+    assert journal.is_file()
+    before = journal.read_bytes()
+
+    # A cycle boundary resets the instance checkout, not the durable state
+    # journal. Keep the state tree and replace only the workspace copy.
+    (workspace / "lessons").mkdir(parents=True, exist_ok=True)
+    (workspace / "lessons" / "lessons.yaml").write_text("lessons: []\n", encoding="utf-8")
+    assert journal.read_bytes() == before
+    assert promote_reflector_recommendations_to_v2(workspace, state) == 0
+    pool = load_reflector_pool(state)
+    assert pool["last_run"]["pooled_new"] == 1
+
+
+def test_bridge_candidate_uses_reflector_pool_and_waits_for_recurrence(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    workspace = _workspace(tmp_path)
+    assert queue_bridge_lesson_candidate(
+        state,
+        cycle_id="cycle-bridge-first",
+        condition="In reflection-45a8d4511e3e, a composite preflight gate returns its pre-refresh verdict",
+        detail="Record the post-refresh verdict separately from the pre-refresh detection pass.",
+        evidence=["reflection-45a8d4511e3e"],
+    )
+    assert promote_reflector_recommendations_to_v2(workspace, state) == 0
+    assert _staged_cards(state) == []
+    pool = load_reflector_pool(state)
+    assert pool["last_run"]["pooled_new"] == 1
+    assert pool["clusters"][0]["cycles"] == ["cycle-bridge-first"]
+
+    assert queue_bridge_lesson_candidate(
+        state,
+        cycle_id="cycle-bridge-second",
+        condition="In reflection-45a8d4511e3e, a composite preflight gate returns its pre-refresh verdict",
+        detail="Record the post-refresh verdict separately from the pre-refresh detection pass.",
+        evidence=["reflection-45a8d4511e3e"],
+    )
+    # Same-day recurrence remains in the pool; the existing two-day rule still
+    # owns graduation and no bridge-side gate is added.
+    assert promote_reflector_recommendations_to_v2(workspace, state) == 0
+    assert load_reflector_pool(state)["last_run"]["same_day_only_waiting"] == 1
+
+
 def test_first_sighting_waits_in_the_pool_and_is_not_minted(tmp_path: Path) -> None:
     """Pre-#1171 this staged one card from one sighting (and would have staged
     ~70 a day at the live rate)."""
@@ -105,6 +158,48 @@ def test_first_sighting_waits_in_the_pool_and_is_not_minted(tmp_path: Path) -> N
     pool = load_reflector_pool(state)
     assert pool["last_run"]["items"] == 1 and pool["last_run"]["pooled_new"] == 1 and pool["last_run"]["staged"] == 0
     assert [c["cycles"] for c in pool["clusters"]] == [["cycle-aaaaaaaaaaa1"]]
+
+
+def test_reflector_title_strips_incident_lead_but_keeps_condition_and_evidence() -> None:
+    card = _reflector_card(
+        card_id="cycle-bridge-title",
+        detail="Record the post-refresh verdict separately from the pre-refresh detection pass.",
+        problem="In reflection-45a8d4511e3e, a composite preflight gate returns its pre-refresh verdict",
+        cycles=["cycle-bridge-title"],
+        days=["2026-09-01"],
+        first_seen="2026-09-01",
+        last_seen="2026-09-01",
+    )
+    assert card is not None
+    assert card["title"] == "a composite preflight gate returns its pre-refresh verdict"
+    assert "reflection-45a8d4511e3e" not in card["title"]
+    assert card["evidence"] == ["cycle-bridge-title"]
+
+
+def test_bridge_candidate_keeps_incident_evidence_when_graduated(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    workspace = _workspace(tmp_path)
+    for cycle, ts in (("cycle-bridge-a", "2026-09-01T10:00:00Z"), ("cycle-bridge-b", "2026-09-02T10:00:00Z")):
+        assert queue_bridge_lesson_candidate(
+            state,
+            cycle_id=cycle,
+            condition="A composite preflight gate returns its pre-refresh verdict",
+            detail="Record the post-refresh verdict separately from the pre-refresh detection pass.",
+            evidence=[f"reflection-{cycle[-1]}"] ,
+            # Distinct timestamps are supplied by the journal row itself.
+        )
+    # The helper appends current-time rows; make the recurrence span two days
+    # by using the existing journal fixture path instead of manufacturing a
+    # host event.
+    journal = state / "reflector" / "reflections.jsonl"
+    rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    rows[0]["timestamp"] = "2026-09-01T10:00:00Z"
+    rows[1]["timestamp"] = "2026-09-02T10:00:00Z"
+    journal.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    assert promote_reflector_recommendations_to_v2(workspace, state) == 1
+    card = _staged_cards(state)[0]
+    assert card["title"] == "A composite preflight gate returns its pre-refresh verdict"
+    assert card["evidence"] == ["cycle-bridge-a", "cycle-bridge-b", "reflection-a", "reflection-b"]
 
 
 def test_two_cycles_on_two_days_graduate_one_card_with_the_observation_as_problem(tmp_path: Path) -> None:

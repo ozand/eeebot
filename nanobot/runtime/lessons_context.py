@@ -24,10 +24,12 @@ handful of YAML cards instead of a git log.
 
 On-disk shapes handled (#912 review): ``errors.yaml`` legacy/manual cards
 are a bare top-level YAML list with ``title``/``root_cause``/``prevention``
-fields directly. The LIVE per-cycle writer, ``bridge._write_structured_lesson``
-(bridge.py ~3807-3882), instead writes ``lessons.yaml`` as a top-level
-DICT — ``{'lessons': [...]}`` — and its entries carry NO ``title``/
-``category``/``approach``/``reusable_insight`` at all, only
+fields directly. Reflector-promoted v2 cards instead arrive in
+``lessons.yaml`` through the curator staging path as a top-level DICT —
+``{'lessons': [...]}`` — and their entries carry the canonical selection
+fields alongside provenance. The bridge now queues candidates in the
+reflector journal; it does not write this file directly. The entries carry
+NO legacy ``category`` field, while
 ``hypothesis``/``result``/``generalized_insight``/``task_id`` (see
 ``_normalize_entry``, which maps those onto the canonical fields so
 scoring/rendering can treat every card uniformly). Both writers prepend
@@ -104,7 +106,7 @@ def _safe_load_yaml(path: Path) -> list[dict[str, Any]]:
     Accepts three on-disk shapes: a bare top-level list (legacy manual
     cards, e.g. today's ``errors.yaml``); a top-level dict wrapping the
     list under a ``'lessons'`` key or an ``'errors'`` key (the LIVE
-    ``bridge._write_structured_lesson`` shape for ``lessons.yaml``, and a
+    reflector-promoted v2 shape for ``lessons.yaml``, and a
     defensive match for any future errors-side writer using the same
     convention). Any other dict shape, or anything that isn't a list once
     unwrapped, is treated as unrecognized -> ``[]``.
@@ -144,7 +146,7 @@ def _normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """Fill canonical title/approach/reusable_insight/id fields from the
     LIVE bridge writer's shape when they're absent.
 
-    ``bridge._write_structured_lesson`` entries carry
+    reflector-promoted v2 entries carry
     ``hypothesis``/``result``/``generalized_insight``/``task_id`` and NO
     ``title``/``category``/``approach``/``reusable_insight`` at all.
     Legacy ``LessonsDB``-authored cards (today's ``errors.yaml``, and any
