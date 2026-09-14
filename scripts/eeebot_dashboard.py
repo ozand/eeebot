@@ -196,35 +196,38 @@ def refresh_host_capabilities(*, trigger: str = "dashboard_refresh") -> dict[str
         caps["camera"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
 
     # Bluetooth. Prefer kernel sysfs: the service sandbox may not expose
-    # lsusb in PATH, while these paths identify the adapter and its state.
+    # lsusb, while rfkill gives the adapter's usable/blocked state.
     try:
         bluetooth_devices = sorted(Path("/sys/class/bluetooth").glob("hci*"))
         if bluetooth_devices:
-            states = [
-                (path / "operstate").read_text(encoding="utf-8").strip().lower()
-                for path in bluetooth_devices
-            ]
-            details = f"Detected {', '.join(path.name for path in bluetooth_devices)}"
-            active = any(state == "up" for state in states)
-            caps["bluetooth"] = result(
-                "present" if active else "present_uninitialized",
-                details if active else f"{details} (hci down)",
-            )
-        else:
-            usb_matches: list[str] = []
-            for device in sorted(Path("/sys/bus/usb/devices").glob("*")):
-                try:
-                    descriptor = " ".join(
-                        (device / name).read_text(encoding="utf-8").strip()
-                        for name in ("manufacturer", "product", "idVendor", "idProduct")
+            states: list[tuple[str, str, str]] = []
+            for device in bluetooth_devices:
+                rfkill_paths = sorted(device.glob("rfkill*"))
+                if not rfkill_paths:
+                    caps["bluetooth"] = result("present_uninitialized", f"{device.name} (no rfkill state)")
+                    break
+                rfkill = rfkill_paths[0]
+                soft = (rfkill / "soft").read_text(encoding="utf-8").strip()
+                hard = (rfkill / "hard").read_text(encoding="utf-8").strip()
+                states.append((device.name, soft, hard))
+            else:
+                if any(soft == "0" and hard == "0" for _, soft, hard in states):
+                    details = f"Detected {', '.join(name for name, _, _ in states)} via rfkill"
+                    caps["bluetooth"] = result("present", details)
+                else:
+                    blocked = ", ".join(
+                        f"{name} ({'soft' if soft == '1' else ''}{'+' if soft == '1' and hard == '1' else ''}{'hard' if hard == '1' else ''} blocked)"
+                        for name, soft, hard in states
                     )
-                except FileNotFoundError:
-                    continue
-                if "bluetooth" in descriptor.casefold():
-                    usb_matches.append(descriptor)
+                    caps["bluetooth"] = result("present_uninitialized", f"{blocked} via rfkill")
+        elif not caps.get("bluetooth"):
+            rfkill_devices = []
+            for path in sorted(Path("/sys/class/rfkill").glob("rfkill*")):
+                if (path / "type").read_text(encoding="utf-8").strip().lower() == "bluetooth":
+                    rfkill_devices.append(path.name)
             caps["bluetooth"] = result(
-                "present_uninitialized" if usb_matches else "absent",
-                f"Detected USB adapter: {usb_matches[0]} (hci unavailable)" if usb_matches else "not detected",
+                "present_uninitialized" if rfkill_devices else "absent",
+                f"Detected Bluetooth rfkill: {', '.join(rfkill_devices)} (hci unavailable)" if rfkill_devices else "not detected",
             )
     except OSError as exc:
         caps["bluetooth"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
@@ -300,7 +303,7 @@ def refresh_host_capabilities(*, trigger: str = "dashboard_refresh") -> dict[str
         caps["screen"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
 
     caps["_scan_timestamp"] = datetime.now(timezone.utc).isoformat()
-    caps["_probe_source"] = "systemd" if trigger == "systemd_timer" else "manual"
+    caps["_probe_source"] = "manual"
     caps["_probe_trigger"] = trigger
 
     # Write to state file

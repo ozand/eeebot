@@ -110,6 +110,7 @@ def test_refresh_host_capabilities_records_explicit_trigger(tmp_path: Path, monk
 
     caps = DASHBOARD.refresh_host_capabilities(trigger="systemd_timer")
 
+    assert caps["_probe_source"] == "manual"
     assert caps["_probe_trigger"] == "systemd_timer"
 
 
@@ -193,11 +194,9 @@ def test_refresh_host_capabilities_preserves_proc_probe_unavailable(tmp_path: Pa
     assert caps["_probe_trigger"] == "dashboard_refresh"
 
 
-def test_refresh_host_capabilities_marks_bluetooth_adapter_down_as_uninitialized(tmp_path: Path, monkeypatch) -> None:
+def test_refresh_host_capabilities_marks_unblocked_bluetooth_present(tmp_path: Path, monkeypatch) -> None:
     class Probe:
         def __call__(self, command, **kwargs):
-            if command == ["lsusb"]:
-                return b""
             if command == ["ip", "-o", "link", "show"]:
                 return b""
             if command == ["df", "-h", "/"]:
@@ -209,22 +208,61 @@ def test_refresh_host_capabilities_marks_bluetooth_adapter_down_as_uninitialized
             raise AssertionError(command)
 
     def glob(self, pattern):
-        if str(self).replace("\\", "/") == "/sys/class/bluetooth" and pattern == "hci*":
+        path = str(self).replace("\\", "/")
+        if path == "/sys/class/bluetooth" and pattern == "hci*":
+            return [Path("/sys/class/bluetooth/hci0")]
+        if path == "/sys/class/bluetooth/hci0" and pattern == "rfkill*":
+            return [Path("/sys/class/bluetooth/hci0/rfkill3")]
+        return []
+
+    monkeypatch.setattr(DASHBOARD, "STATE_DIR", tmp_path)
+    monkeypatch.setattr("subprocess.check_output", Probe())
+    monkeypatch.setattr(DASHBOARD.Path, "glob", glob)
+    monkeypatch.setattr(DASHBOARD.Path, "read_text", lambda self, *args, **kwargs: {
+        "/sys/class/bluetooth/hci0/rfkill3/soft": "0\n",
+        "/sys/class/bluetooth/hci0/rfkill3/hard": "0\n",
+        "/proc/asound/cards": " 0 [Intel]: HDA-Intel - HDA Intel\n",
+        "/proc/cpuinfo": "model name : test-cpu\n",
+        "/proc/meminfo": "MemTotal: 1 kB\n",
+    }.get(str(self).replace("\\", "/"), ""))
+    monkeypatch.setattr(DASHBOARD.Path, "exists", lambda self: False)
+
+    caps = DASHBOARD.refresh_host_capabilities()
+
+    assert caps["bluetooth"] == {
+        "state": "present",
+        "available": True,
+        "details": "Detected hci0 via rfkill",
+    }
+
+
+def test_refresh_host_capabilities_marks_bluetooth_without_rfkill_as_uninitialized(tmp_path: Path, monkeypatch) -> None:
+    class Probe:
+        def __call__(self, command, **kwargs):
+            if command == ["ip", "-o", "link", "show"]:
+                return b""
+            if command == ["df", "-h", "/"]:
+                return b"Filesystem  Size  Used Avail Use% Mounted on\n/dev/sda1  1G  1M  999M  1% /\n"
+            if command == ["uname", "-r"]:
+                return b"test-kernel\n"
+            if command == ["uptime", "-p"]:
+                return b"up 1 minute\n"
+            raise AssertionError(command)
+
+    def glob(self, pattern):
+        path = str(self).replace("\\", "/")
+        if path == "/sys/class/bluetooth" and pattern == "hci*":
             return [Path("/sys/class/bluetooth/hci0")]
         return []
 
     monkeypatch.setattr(DASHBOARD, "STATE_DIR", tmp_path)
     monkeypatch.setattr("subprocess.check_output", Probe())
     monkeypatch.setattr(DASHBOARD.Path, "glob", glob)
-    def read_probe(self, *args, **kwargs):
-        return {
-            "/sys/class/bluetooth/hci0/operstate": "down\n",
-            "/proc/asound/cards": " 0 [Intel]: HDA-Intel - HDA Intel\n",
-            "/proc/cpuinfo": "model name : test-cpu\n",
-            "/proc/meminfo": "MemTotal: 1 kB\n",
-        }.get(str(self).replace("\\", "/"), "")
-
-    monkeypatch.setattr(DASHBOARD.Path, "read_text", read_probe)
+    monkeypatch.setattr(DASHBOARD.Path, "read_text", lambda self, *args, **kwargs: {
+        "/proc/asound/cards": " 0 [Intel]: HDA-Intel - HDA Intel\n",
+        "/proc/cpuinfo": "model name : test-cpu\n",
+        "/proc/meminfo": "MemTotal: 1 kB\n",
+    }.get(str(self).replace("\\", "/"), ""))
     monkeypatch.setattr(DASHBOARD.Path, "exists", lambda self: False)
 
     caps = DASHBOARD.refresh_host_capabilities()
@@ -232,7 +270,7 @@ def test_refresh_host_capabilities_marks_bluetooth_adapter_down_as_uninitialized
     assert caps["bluetooth"] == {
         "state": "present_uninitialized",
         "available": False,
-        "details": "Detected hci0 (hci down)",
+        "details": "hci0 (no rfkill state)",
     }
     assert caps["microphone"]["state"] == "present"
 
