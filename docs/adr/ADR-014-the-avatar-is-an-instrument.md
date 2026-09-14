@@ -77,7 +77,7 @@ The charter is not amended by this record. The pixel-art clause already exists; 
 
 - **Measure attention as dwell time or gaze.** Rejected on two counts. Camera-based gaze on this hardware is unreliable, and dwell is the metric whose optimisation produces the dark-pattern local maximum rule 4 forbids. Returns are cheaper to measure and cannot be manufactured by the surface.
 
-- **Render smoothly with a conventional framebuffer path and drop the tile discipline.** Rejected. A full 1024×600×24bpp surface is 1 843 200 bytes per update against 19 200 for a tilemap — about 96× — while the model is using the CPU. The tile discipline is what makes the surface affordable; the look is its consequence, and rule 5 makes that visible rather than merely true.
+- **Render smoothly with a conventional framebuffer path and drop the tile discipline.** Rejected. A full 1024×600×32bpp surface is 2 457 600 bytes per update against 19 200 for a tilemap — about 128× — while the model is using the CPU (the format is measured, not assumed; see the addendum). The tile discipline is what makes the surface affordable; the look is its consequence, and rule 5 makes that visible rather than merely true.
 
 - **Put the cat in `goals.md`.** Rejected. Two charter clauses naming capabilities with no probe and no tier have produced nothing in 2 288 commits. A third would not behave differently.
 
@@ -102,3 +102,21 @@ The charter is not amended by this record. The pixel-art clause already exists; 
 - #1482 — the sibling dashboard's separate role; this surface is not that.
 - `goals.md` Vector 2 — the existing pixel-art clause.
 - `images/eeebot.png` — the intended design, already drawn.
+
+# Addendum — first live readings (2026-09-14)
+
+The screen probe this record depends on was run against the host after the record merged. Two facts change the arithmetic above; none changes a rule.
+
+```text
+/sys/class/graphics/fb0/virtual_size        1024,600
+/sys/class/graphics/fb0/bits_per_pixel      32
+/dev/fb0                                    crw-rw---- root video 29,0
+```
+
+**The surface is 32 bpp, not 24.** A full frame is 2 457 600 bytes, not 1 843 200, and the tilemap advantage is about 128× rather than 96×. The alternatives section has been corrected in place: this is an error, not history, and a record whose thesis is measured cost cannot carry an assumed pixel format. The correction strengthens the rejected alternative it appears in.
+
+**The screen was `present_uninitialized`, and the prerequisite was one operator action.** The service account held no supplementary groups, so it could not open `/dev/fb0`; the failure was confirmed as `eeepc-agent` rather than inferred from the mode bits. A probe that collapsed that permission error into `absent` would have recorded "this machine has no screen" about a machine with a working 1024×600 surface — which is the distinction rule 1 of ADR-013 exists to hold, observed on its first real use. The membership was granted and pinned in `host/eeepc/scripts/install.sh` by #1609, verified under the bridge's own hardening (`ProtectSystem=strict`, `PrivateTmp=true`). Tier 3 has no unmet hardware prerequisite.
+
+**One strengthening of rule 2, adopted here.** The cover test must run against a **recorded** state span, not a live one. Covered against a healthy machine it passes trivially, and the machine is healthy most of the time. The span must contain at least a throttle event and a dead cycle, and the assertion includes that the unknown posture appears wherever the harness had no signal. A cover test that has never seen a degraded state has not been tested.
+
+What is still unmeasured: the cost of a full-surface push and of a dirty-tile push on this host. The byte arithmetic above is geometry. Rule 5 is not satisfied by geometry.

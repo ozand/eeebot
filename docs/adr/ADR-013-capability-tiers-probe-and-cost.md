@@ -115,3 +115,25 @@ Rule 2 is enforceable only as well as the call graph is accurate. #1599 already 
 - #1208 / #1335 / #1599 — dead-script evidence, enhancement-shaped cycles, and the call-graph measurement.
 - #1457 — the boundary none of this crosses.
 - `nanobot/runtime/tech_tree.py`, `scripts/eeebot_dashboard.py`.
+
+# Addendum — first live readings (2026-09-14)
+
+The probes this record calls for were run against the host, read-only, after the record merged. Three of four unknowns in the Context section are now answered. No rule changes; two pieces of planned work change shape, and one claim in the Context is superseded.
+
+```text
+cc / gcc / g++   12.2.0 (Debian 12.2.0-14+deb12u1)      clang ABSENT
+rustc 1.63.0     cargo 1.65.0      make 4.3             libc headers present
+/sys/class/thermal/thermal_zone0   type=acpitz   temp=62000
+/sys/class/power_supply/AC0        type=Mains    (no BAT* device)
+/sys/class/graphics/fb0            1024,600  32 bpp     /dev/fb0 root:video
+```
+
+**The toolchain is present, and it was never the blocker.** The Context above says no one had established whether a compiler exists; one does, along with a Rust toolchain. So the native-code clause's 0 files across 2 288 commits was a mutation-surface problem, not a capability problem — which is what ADR-012 and #1598 addressed. The probe worth writing is therefore not "does `cc` exist" but the **cost**: peak RSS of a build on 2 GB, and whether a `cargo build` finishes inside the cycle's time budget on an N270. Discovery is done; measurement is not. This is rule 3 doing the work rule 1 was expected to do, and it is the cheaper half that was missing.
+
+**Battery is permanently unavailable on this host.** There is no `BAT*` device, only the mains adapter. Battery draw is a `probe_unavailable` with a fixed reason, recorded once — not a gap to be re-opened later by anyone reading the body family and finding a hole. The four-state vocabulary handles this correctly, which is the point; what it must not become is an unexplained blank.
+
+**The screen was `present_uninitialized`, and its prerequisite was an operator action.** The framebuffer existed at full geometry while the service account, holding no supplementary groups, could not open it. Collapsing that permission error into `absent` would have recorded "no screen" about a working screen. The membership was granted and pinned in `host/eeepc/scripts/install.sh` (#1609) under the bridge's own hardening. This is rule 4 exercised for the first time: the node was ineligible, the unmet prerequisite was nameable, and naming it was the whole fix. The distance between "this machine has no screen" and "one group membership away" was a probe nobody had written.
+
+**What this says about the frontier.** Its first real entry resolved in a single operator action. That is the argument for reporting blocked nodes rather than hiding them — an unmet prerequisite is often cheap once named, and invisible forever while it is not.
+
+Still unmeasured: every cost figure. Own-process CPU seconds and peak RSS per cycle, thermal under the loop's own load rather than the 62 °C idle baseline above, build RSS, and the µs of a full-surface push. Rule 3 remains unsatisfied by all of the above; presence was the easy half.
