@@ -83,6 +83,7 @@ class ContextBuilder:
         #: "droppable_reserve_chars"}``. Callers record it.
         self.last_fit: dict[str, Any] | None = None
         self._skills_catalogue_observation: dict[str, Any] | None = None
+        self._skills_catalogue_usage: dict[str, Any] = {}
 
     def build_system_prompt(
         self,
@@ -132,6 +133,7 @@ class ContextBuilder:
         skills_summary = self.skills.build_skills_summary(
             excluded_names=excluded_skill_names,
         )
+        self._skills_catalogue_usage = dict(getattr(self.skills, "last_catalogue_usage", {}))
         skills_section = (f"""# Skills
 
 The following skills extend your capabilities. To use a skill, read the skill's SKILL.md file using the read_file tool.
@@ -522,6 +524,7 @@ Skills with available="false" need dependencies installed first - you can try in
         fit["memory_index"] = dict(memory_fit) if isinstance(memory_fit, dict) else None
         if isinstance(getattr(self, "_skills_catalogue_observation", None), dict):
             fit["skills_catalogue"] = dict(self._skills_catalogue_observation)
+            fit["skills_catalogue"]["usage"] = dict(getattr(self, "_skills_catalogue_usage", {}))
         joined = self._record_fit(fit, section_names, sections)
         if isinstance(getattr(self, "_skills_catalogue_observation", None), dict):
             fit["skills_catalogue"]["retained_chars"] = fit["sections"].get("skills_catalogue", 0)

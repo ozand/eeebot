@@ -19,6 +19,10 @@ BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
 # loop inject arbitrary content into every future subagent context.  Only
 # builtin and operator-installed skills may carry always=true.
 _WORKSPACE_SOURCE = "workspace"
+# #1585: classify only the declared 30-day confirmed-read window. This is a
+# safety ordering signal, not a relevance rank; unavailable input never becomes
+# a valid zero-read result.
+_SKILL_USAGE_WINDOW_DAYS = 30
 
 
 class SkillsLoader:
@@ -33,6 +37,11 @@ class SkillsLoader:
         self.workspace = workspace
         self.workspace_skills = workspace / "skills"
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
+        self.last_catalogue_usage: dict[str, object] = {
+            "status": "not_run",
+            "window_days": _SKILL_USAGE_WINDOW_DAYS,
+            "zero_read_names": [],
+        }
 
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         """
@@ -147,6 +156,54 @@ class SkillsLoader:
         rel = f"skills/{skill['name']}/SKILL.md"
         return rel in retired_paths or not Path(skill["path"]).is_file()
 
+    def _workspace_usage_order(self, skills: list[dict[str, str]]) -> tuple[list[dict[str, str]], dict[str, object]]:
+        """Move only valid-window zero-read workspace skills after used ones.
+
+        Alphabetical order is preserved within both groups. A missing or
+        malformed fitness sidecar leaves the original order unchanged rather
+        than treating unavailable usage as zero.
+        """
+        workspace = [skill for skill in skills if skill.get("source") == _WORKSPACE_SOURCE]
+        others = [skill for skill in skills if skill.get("source") != _WORKSPACE_SOURCE]
+        try:
+            from nanobot.runtime.skill_fitness import census
+            from nanobot.runtime.state import resolve_runtime_state_root
+            result = census(
+                resolve_runtime_state_root(self.workspace),
+                self.workspace,
+            )
+            if result.get("ok") is not True:
+                return skills, {
+                    "status": "unavailable",
+                    "window_days": _SKILL_USAGE_WINDOW_DAYS,
+                    "skills_total": len(workspace),
+                    "used_count": None,
+                    "zero_read_names": [],
+                }
+            zero = sorted(
+                str(row.get("skill") or "").strip()
+                for row in result.get("zero_read", [])
+                if isinstance(row, dict) and str(row.get("skill") or "").strip()
+            )
+            zero_set = set(zero)
+            ordered = [skill for skill in workspace if skill["name"] not in zero_set]
+            ordered.extend(skill for skill in workspace if skill["name"] in zero_set)
+            return ordered + others, {
+                "status": "complete",
+                "window_days": _SKILL_USAGE_WINDOW_DAYS,
+                "skills_total": len(workspace),
+                "used_count": len(workspace) - len(zero_set),
+                "zero_read_names": zero,
+            }
+        except Exception:
+            return skills, {
+                "status": "unavailable",
+                "window_days": _SKILL_USAGE_WINDOW_DAYS,
+                "skills_total": len(workspace),
+                "used_count": None,
+                "zero_read_names": [],
+            }
+
     def build_skills_summary(self, excluded_names: "list[str] | None" = None) -> str:
         """
         Build a summary of all skills (name, description, path, availability).
@@ -168,6 +225,15 @@ class SkillsLoader:
         all_skills = self.list_skills(filter_unavailable=False)
         if not all_skills:
             return ""
+
+        usage_observation: dict[str, object] = {
+            "status": "not_run",
+            "window_days": _SKILL_USAGE_WINDOW_DAYS,
+            "zero_read_names": [],
+        }
+        if excluded_names is not None:
+            all_skills, usage_observation = self._workspace_usage_order(all_skills)
+        self.last_catalogue_usage = usage_observation
 
         excluded_set = set(excluded_names or [])
         retired_paths = self._retired_skill_paths()
@@ -208,6 +274,7 @@ class SkillsLoader:
 
             lines.append("  </skill>")
         lines.append("</skills>")
+        self.last_catalogue_usage = usage_observation
 
         return "\n".join(lines)
 
