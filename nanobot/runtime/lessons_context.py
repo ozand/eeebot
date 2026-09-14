@@ -178,42 +178,75 @@ def _capped_entries(path: Path) -> list[dict[str, Any]]:
     return [_normalize_entry(e) for e in entries]
 
 
-def _score_entry(task_words: set[str], entry: dict[str, Any], secondary_field: str) -> tuple[int, int]:
-    """Return ``(score, shared_word_count)`` for one candidate card.
+def _recurrence_bonus(entry: dict[str, Any]) -> int:
+    """Return a small bounded bonus for independently repeated evidence.
+
+    ``seen_count`` records sightings and ``distinct_days`` prevents repeated
+    observations on one day from looking like durable proof. Missing or
+    malformed metadata contributes no bonus; the lexical selector remains
+    usable for legacy cards. The cap keeps recurrence from becoming a new
+    retrieval engine or overwhelming task-word relevance.
+    """
+    seen = entry.get("seen_count")
+    days = entry.get("distinct_days")
+    if (
+        isinstance(seen, bool)
+        or isinstance(days, bool)
+        or not isinstance(seen, int)
+        or not isinstance(days, int)
+        or days < 2
+        or seen < 1
+    ):
+        return 0
+    independent_days = days - 1
+    extra_sightings = max(0, seen - days)
+    return min(2, independent_days + extra_sightings)
+
+
+def _score_entry(
+    task_words: set[str], entry: dict[str, Any], secondary_field: str
+) -> tuple[int, int, int]:
+    """Return ``(lexical_score, shared_word_count, recurrence_bonus)``.
 
     ``title`` + ``category`` count double; ``secondary_field``
     (``root_cause`` for errors, ``approach`` for lessons, already
     normalized onto the entry by ``_normalize_entry``) counts once.
+    Recurrence is returned separately so callers can use it only to break an
+    exact lexical tie. Both the live selector and selector-provenance path call
+    this function, so they cannot disagree about recurrence weighting.
     """
     primary_words = _extract_words(f"{entry.get('title', '')} {entry.get('category', '')}")
     secondary_words = _extract_words(entry.get(secondary_field, ""))
     primary_shared = task_words & primary_words
     secondary_shared = task_words & secondary_words
     shared_count = len(primary_shared | secondary_shared)
-    score = 2 * len(primary_shared) + len(secondary_shared)
-    return score, shared_count
+    lexical_score = 2 * len(primary_shared) + len(secondary_shared)
+    return lexical_score, shared_count, _recurrence_bonus(entry)
 
 
 def _best_card(
     entries: list[dict[str, Any]], task_words: set[str], secondary_field: str
 ) -> dict[str, Any] | None:
-    """Highest-scoring card at/above the minimum shared-word threshold.
+    """Select the best lexical match, using recurrence only as a tie-breaker.
 
-    ``entries`` is newest-first (see ``_capped_entries``). Ties resolve to
-    the EARLIEST matching entry, i.e. the newest card, via a strict ``>``
-    comparison that never lets a later (older) same-score entry replace an
-    earlier (newer) one.
+    ``entries`` is newest-first (see ``_capped_entries``). Recurrence is
+    consulted only after both lexical score and shared-word count tie; it
+    cannot crowd out a materially stronger or more specific lexical match
+    merely because it has a larger proof count. Exact rank ties still resolve
+    to the earliest (newest) entry. A recurrent card is never preferred over
+    a card with a more specific lexical match.
     """
     if not task_words:
         return None
     best: dict[str, Any] | None = None
-    best_score = -1
+    best_rank = (-1, -1, -1)
     for entry in entries:
-        score, shared_count = _score_entry(task_words, entry, secondary_field)
+        score, shared_count, recurrence = _score_entry(task_words, entry, secondary_field)
         if shared_count < _MIN_SHARED_WORDS:
             continue
-        if score > best_score:
-            best_score = score
+        rank = (score, shared_count, recurrence)
+        if rank > best_rank:
+            best_rank = rank
             best = entry
     return best
 
@@ -221,37 +254,41 @@ def _best_card(
 def _best_card_with_provenance(
     entries: list[dict[str, Any]], task_words: set[str], secondary_field: str
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """Run the unchanged selector logic while collecting bounded evidence."""
+    """Run the same ranking as ``_best_card`` while collecting bounded evidence."""
     if not task_words:
         return None, {"status": "empty_corpus", "candidates": [], "selected_id": None, "tie_count": 0}
     candidates: list[dict[str, Any]] = []
     best: dict[str, Any] | None = None
-    best_score = -1
-    for position, entry in enumerate(entries):
-        score, shared_count = _score_entry(task_words, entry, secondary_field)
+    best_rank = (-1, -1, -1)
+    tie_count = 0
+    for entry in entries:
+        score, shared_count, recurrence = _score_entry(task_words, entry, secondary_field)
         if shared_count < _MIN_SHARED_WORDS:
             continue
         card_id = str(entry.get("id") or "").strip()
         if card_id:
             candidates.append({"id": card_id, "score": score, "shared_words": shared_count})
-        if score > best_score:
-            best_score = score
+        rank = (score, shared_count, recurrence)
+        if rank > best_rank:
+            best_rank = rank
             best = entry
+            tie_count = 1 if card_id else 0
+        elif rank == best_rank and card_id:
+            tie_count += 1
     if not entries:
         status = "empty_corpus"
     elif not candidates:
         status = "below_threshold"
     else:
         status = "present"
-    peers = [item for item in candidates if item["score"] == best_score]
     selected_id = str(best.get("id") or "").strip() if best else None
     return best, {
         "status": status,
         "candidates": candidates[:_CANDIDATE_PROVENANCE_CAP],
         "candidate_count": len(candidates),
         "selected_id": selected_id,
-        "tie_count": len(peers),
-        "tie_discarded": len(peers) > 1,
+        "tie_count": tie_count,
+        "tie_discarded": tie_count > 1,
     }
 
 
