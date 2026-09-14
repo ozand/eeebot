@@ -1,3 +1,4 @@
+- 2026-09-14: Add four-state capability probes, preference-only prerequisites, cycle detection, and a visible tech-tree frontier under ADR-013 (#1606).
 - 2026-09-14: Extend reflector incident lead-in stripping for data-derived `seq N` qualifiers and verify survivors independently by literal prefix shape (#1580).
 - 2026-09-14: Fix citation scan truthfulness (#1570): accept bounded path-like lesson IDs used by the live corpus and report results truncated at the 64,000-character scan cap as partial while preserving unavailable non-final executor rows.
 - 2026-09-06: Fix flaky test isolation across UTC midnight boundaries (#1370, PR #1371). Threaded optional now: datetime parameter through demand._load_ledger_rows, demand.collect_demand, and llm_proposer streaks to eliminate date rollover skew when test fixtures import at day D but run across midnight at day D+1; pinned test_class_a_windows.py reference time and added midnight boundary crossing regression test.

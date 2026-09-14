@@ -210,6 +210,10 @@ _STOPWORDS = frozenset({
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
+# Reused four-state capability vocabulary from scripts/eeebot_dashboard.py.
+# Keep this literal in sync; dashboard tests pin the same published states.
+PROBE_STATES = frozenset({"present", "absent", "present_uninitialized", "probe_unavailable"})
+
 
 # ─── small shared helpers (same shapes as demand.py / scorecard.py) ─────────
 
@@ -516,6 +520,95 @@ def _cooldown_active(node: dict[str, Any], now: datetime) -> bool:
     return until is not None and now < until
 
 
+def _probe_result(node: dict[str, Any]) -> 'dict[str, str] | None':
+    """Normalized configured probe result; no probe preserves legacy behavior."""
+    probe = node.get("probe")
+    if probe is None:
+        return None
+    if not isinstance(probe, dict):
+        return {"state": "probe_unavailable", "details": "invalid probe result"}
+    state = str(probe.get("state") or "")
+    details = str(probe.get("details") or "")
+    if state not in PROBE_STATES:
+        return {"state": "probe_unavailable", "details": details or "invalid probe state"}
+    return {"state": state, "details": details}
+
+
+def _prerequisites(node: dict[str, Any]) -> list[str]:
+    raw = node.get("prerequisites")
+    if not isinstance(raw, list):
+        return []
+    return list(dict.fromkeys(str(value).strip() for value in raw if str(value).strip()))
+
+
+def _prerequisite_cycles(nodes: dict[str, Any]) -> dict[str, list[str]]:
+    """Map every node in a prerequisite cycle to one canonical cycle path."""
+    found: dict[str, list[str]] = {}
+
+    def visit(name: str, path: list[str]) -> None:
+        if name in path:
+            cycle = path[path.index(name):] + [name]
+            canonical = min(tuple(cycle[i:-1] + cycle[:i] + [cycle[i]]) for i in range(len(cycle) - 1))
+            normalized = list(canonical)
+            for member in normalized[:-1]:
+                found[member] = normalized
+            return
+        node = nodes.get(name)
+        if not isinstance(node, dict):
+            return
+        for prerequisite in _prerequisites(node):
+            if prerequisite in nodes:
+                visit(prerequisite, path + [name])
+
+    for name in sorted(nodes):
+        visit(name, [])
+    return found
+
+
+def _eligibility(nodes: dict[str, Any]) -> tuple[set[str], list[dict[str, Any]]]:
+    """Preference eligibility and visible frontier; never a permission decision."""
+    cycles = _prerequisite_cycles(nodes)
+    eligible: set[str] = set()
+    frontier: list[dict[str, Any]] = []
+    for name in sorted(nodes):
+        node = nodes[name]
+        cycle = cycles.get(name)
+        if cycle:
+            frontier.append({"name": name, "reason": "prerequisite_cycle", "cycle": cycle})
+            continue
+        probe = _probe_result(node)
+        if probe is not None and probe["state"] != "present":
+            frontier.append({
+                "name": name,
+                "reason": probe["state"],
+                "probe_state": probe["state"],
+                "details": probe["details"],
+            })
+            continue
+        unmet = None
+        unmet_state = None
+        for prerequisite in _prerequisites(node):
+            prerequisite_node = nodes.get(prerequisite)
+            if not isinstance(prerequisite_node, dict):
+                unmet, unmet_state = prerequisite, "absent"
+                break
+            prerequisite_probe = _probe_result(prerequisite_node)
+            prerequisite_state = prerequisite_probe["state"] if prerequisite_probe is not None else "absent"
+            if prerequisite_state != "present":
+                unmet, unmet_state = prerequisite, prerequisite_state
+                break
+        if unmet is not None:
+            frontier.append({
+                "name": name,
+                "reason": "unmet_prerequisite",
+                "prerequisite": unmet,
+                "prerequisite_state": unmet_state,
+            })
+            continue
+        eligible.add(name)
+    return eligible, frontier
+
+
 def select_current_direction(
     state_dir: Any,
     *,
@@ -568,7 +661,11 @@ def select_current_direction(
                 node["status"] = "active"
                 node["cooldown_until_ts"] = None
 
-        eligible = sorted(name for name, node in nodes.items() if node.get("status") == "active")
+        preference_eligible, _frontier = _eligibility(nodes)
+        eligible = sorted(
+            name for name, node in nodes.items()
+            if node.get("status") == "active" and name in preference_eligible
+        )
         if not eligible:
             portfolio["current"] = None
             portfolio["nodes"] = nodes
@@ -780,24 +877,37 @@ def maybe_mint_node(state_dir: Any, supported: 'list[dict[str, Any]] | None') ->
 
 
 def portfolio_snapshot(state_dir: Any) -> dict[str, Any]:
-    """``{current, nodes: {name: {status, mean_gain, attempts,
-    lever_metric}}, switches: count}`` — read by
+    """``{current, nodes, switches, frontier}`` visibility for preference state.
+
+    Legacy portfolios with no probe/prerequisite fields keep the previous node
+    payload byte-for-byte; only ``frontier: []`` is additive at the envelope.
+    Read by
     ``scorecard._control_plane_snapshot``-style visibility wiring. Fail-open
     to ``{}``."""
     try:
         portfolio = read_portfolio(state_dir)
+        nodes = portfolio.get("nodes") or {}
+        _eligible, frontier = _eligibility(nodes)
         nodes_out: dict[str, Any] = {}
-        for name, node in (portfolio.get("nodes") or {}).items():
-            nodes_out[name] = {
+        for name, node in nodes.items():
+            payload = {
                 "status": node.get("status"),
                 "mean_gain": round(node_mean_gain(node), 6),
                 "attempts": len(node.get("gain_history") or []),
                 "lever_metric": node.get("lever_metric"),
             }
+            probe = _probe_result(node)
+            if probe is not None:
+                payload["probe"] = probe
+            prerequisites = _prerequisites(node)
+            if prerequisites:
+                payload["prerequisites"] = prerequisites
+            nodes_out[name] = payload
         return {
             "current": portfolio.get("current"),
             "nodes": nodes_out,
             "switches": len(portfolio.get("switches") or []),
+            "frontier": frontier,
         }
     except Exception:
         return {}
