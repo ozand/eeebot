@@ -3749,6 +3749,7 @@ Examples:
 
         signal.signal(signal.SIGINT, _handle_interrupt)
         signal.signal(signal.SIGTERM, _handle_interrupt)
+        _prev_watch_metrics: dict[str, Any] | None = None
 
         while _watch_running:
             # Clear screen (ANSI escape)
