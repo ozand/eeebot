@@ -230,8 +230,11 @@ def test_rotation_preserves_custom_mode(tmp_path, monkeypatch):
 
 
 def _write_live_format(path: Path, count: int) -> None:
-    """Mirror the REAL bridge._write_structured_lesson output: 'lessons:'
-    header, entries at 0-indent, nested 2-indent files_changed lists (#991)."""
+    """Mirror the REAL on-disk lessons.yaml shape: 'lessons:' header, entries
+    at 0-indent, nested 2-indent files_changed lists (#991).
+
+    #1565 retired bridge._write_structured_lesson; the curator's staging path
+    now writes this shape, and the fixture is about the shape either way."""
     lines = ["lessons:\n"]
     for i in range(count):
         lines.extend([
