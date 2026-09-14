@@ -26,3 +26,5 @@ Conventions:
 | [ADR-008](ADR-008-lesson-corpus-selection-keys.md) | The live lesson corpus is a retrieval surface; titles are its selection key and tags are being prepared to become one | accepted |
 | [ADR-009](ADR-009-hypothesis-loop-yield-observability.md) | Report the hypothesis loop's verdict yield, and separate unverdictable from undecided | accepted |
 | [ADR-010](ADR-010-memory-remainder-is-retrieved-not-resident.md) | The loop retrieves non-resident memory through one bounded FTS5 tool | proposed |
+| [ADR-011](ADR-011-charter-voice-after-thresholds.md) | The charter keeps a voice after every threshold is met | proposed |
+| [ADR-012](ADR-012-vector-1-scoped-to-the-mutation-surface.md) | Vector 1 names only what the loop is permitted to change | proposed |
