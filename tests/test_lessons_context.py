@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from nanobot.runtime.bridge import build_task
+from nanobot.runtime.bridge import _error_condition_title, _write_structured_error, build_task
 from nanobot.runtime.lessons_context import (
     _MAX_FILE_BYTES,
     _best_card,
@@ -319,6 +319,42 @@ class TestOnDiskShapes:
     def test_normalize_entry_id_falls_back_to_task_id(self):
         normalized = _normalize_entry({"task_id": "some-task", "hypothesis": "x"})
         assert normalized["id"] == "some-task"
+
+
+def test_error_condition_title_prefers_check_detail_over_machine_reason():
+    title = _error_condition_title(
+        reason="mutation_surface_violation",
+        violated_check="mutation_surface_violation: touched scripts/unsafe.py",
+        backlog_title="Unrelated task wording",
+    )
+    assert title == "Mutation-surface policy rejected a change outside the allowed files: touched scripts/unsafe.py"
+    assert "mutation_surface_violation" not in title
+
+
+def test_error_condition_title_uses_task_when_check_has_no_detail():
+    title = _error_condition_title(
+        reason="gate_failed",
+        violated_check="gate_failed",
+        backlog_title="Add bounded import validation",
+    )
+    assert title == "Verification gate rejected the proposed change while attempting: Add bounded import validation"
+
+
+def test_write_structured_error_records_matchable_title_and_category(tmp_path):
+    repo = tmp_path / "instance_repo"
+    repo.mkdir()
+    wrote = _write_structured_error(
+        repo_root=repo,
+        cycle_id="cycle-title123456789",
+        reason="gate_failed",
+        violated_check="gate_failed",
+        backlog_title="Add bounded import validation",
+    )
+    assert wrote is True
+    written = yaml.safe_load((repo / "lessons" / "errors.yaml").read_text(encoding="utf-8"))[0]
+    assert written["title"] == "Verification gate rejected the proposed change while attempting: Add bounded import validation"
+    assert written["category"] == "gate_failed"
+    assert written["hypothesis"] == "Cycle failed due to gate_failed."
 
 
 def test_selector_provenance_reports_candidates_and_tie_break(tmp_path, monkeypatch):
