@@ -3006,6 +3006,9 @@ async def _main_impl_body():
                     # absent memory section is never mistaken for a failed
                     # read. ``None`` only when the builder recorded nothing.
                     'memory_index': _prompt_fit.get('memory_index'),
+                    # #1563: catalogue loading/bounding evidence is retained
+                    # alongside the global fit record, including named omissions.
+                    'skills_catalogue': _prompt_fit.get('skills_catalogue'),
                     'dropped': list(_prompt_fit.get('dropped') or []),
                     'trimmed': list(_prompt_fit.get('trimmed') or []),
                     # #1313: how many chars of declared-droppable AGENTS.md
@@ -3782,6 +3785,13 @@ async def _main_impl_body():
                 # declared-droppable section is already gone by the time the
                 # cap gives up) — recorded explicitly, not omitted.
                 'droppable_reserve_chars': exc.droppable_reserve_chars,
+                # Preserve catalogue load/bound evidence if the final global
+                # cap still refuses the prompt; None means no build evidence.
+                'skills_catalogue': (
+                    getattr(mgr, 'last_prompt_fit', {}).get('skills_catalogue')
+                    if isinstance(getattr(mgr, 'last_prompt_fit', None), dict)
+                    else None
+                ),
             })
         except Exception as exc:
             print(f'bridge: unexpected error during cycle {cycle_branch}: {exc}')

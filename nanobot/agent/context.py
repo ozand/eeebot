@@ -4,6 +4,7 @@ import base64
 import mimetypes
 import os
 import platform
+import re
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,12 @@ class ContextBuilder:
     #: section is critical and is never dropped in the strict (loop) profile.
     DROPPABLE_MARKER = "<!-- prompt-fit: droppable -->"
     MAX_MEDIA_BYTES = 2 * 1024 * 1024
+    # The loop derives this section budget from the other sections at build
+    # time. The marker is part of the bounded section, so omission cannot read
+    # like a catalogue that was never loaded (#1563).
+    SKILLS_CATALOGUE_TRUNCATION_MARKER = (
+        "[skills catalogue truncated: omitted {count} skill(s) / {chars} chars]"
+    )
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
@@ -75,6 +82,7 @@ class ContextBuilder:
         #: and ``"trimmed": [{"section", "chars", "how"}]`` for uniform degradation.
         #: "droppable_reserve_chars"}``. Callers record it.
         self.last_fit: dict[str, Any] | None = None
+        self._skills_catalogue_observation: dict[str, Any] | None = None
 
     def build_system_prompt(
         self,
@@ -124,15 +132,30 @@ class ContextBuilder:
         skills_summary = self.skills.build_skills_summary(
             excluded_names=excluded_skill_names,
         )
-        sections.append(("skills_catalogue", f"""# Skills
+        skills_section = (f"""# Skills
 
 The following skills extend your capabilities. To use a skill, read the skill's SKILL.md file using the read_file tool.
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
-{skills_summary}""" if skills_summary else ""))
+{skills_summary}""" if skills_summary else "")
 
         memory = self.memory.get_memory_context(loop=loop_profile)
-        sections.append(("memory", f"# Memory\n\n{memory}" if memory else ""))
+        memory_section = f"# Memory\n\n{memory}" if memory else ""
+
+        self._skills_catalogue_observation = None
+        if loop_profile and skills_section:
+            # Derive the catalogue budget from the exact fixed sections built
+            # above. Memory is deliberately included at its current size: the
+            # floor is not a frozen measurement from one day (#1563).
+            fixed_sections = [sections[0][1], sections[1][1], sections[2][1], memory_section]
+            nonempty_fixed = [content for content in fixed_sections if content]
+            fixed_floor = sum(len(content) for content in nonempty_fixed) + len(nonempty_fixed) * len(self.SECTION_SEPARATOR)
+            catalogue_budget = max(0, self._cap() - fixed_floor)
+            skills_section, self._skills_catalogue_observation = self._bound_skills_catalogue(
+                skills_section, catalogue_budget,
+            )
+        sections.append(("skills_catalogue", skills_section))
+        sections.append(("memory", memory_section))
         return self._fit_system_prompt(
             sections, strict=strict, degrade_on_overflow=degrade_on_overflow,
             memory_fit=self.memory.last_index_fit,
@@ -147,6 +170,107 @@ Skills with available="false" need dependencies installed first - you can try in
         separator per gap between non-empty sections == ``chars`` — can be
         pinned against the real value)."""
         return cls.SECTION_SEPARATOR.join(content for _, content in sections if content)
+
+    def _bound_skills_catalogue(
+        self, section: str, budget: int,
+    ) -> tuple[str, dict[str, Any]]:
+        """Bound the loop catalogue without splitting a skill entry.
+
+        The complete rendered section is loaded first, then a deterministic
+        prefix of complete ``<skill>...</skill>`` entries is retained. Every
+        omission is named in the returned fit evidence and in the prompt
+        marker; the global prompt-fit ladder remains the final safety net.
+        """
+        matches = list(re.finditer(r"<skill\b[^>]*>.*?</skill>", section, re.DOTALL))
+        source_chars = len(section)
+        if not matches:
+            observation = {
+                "status": "empty" if not section else "unavailable",
+                "source_chars": source_chars,
+                "retained_chars": source_chars,
+                "budget": budget,
+                "total_count": 0,
+                "retained_count": 0,
+                "omitted_count": 0,
+                "omitted_chars": 0,
+                "omitted_names": [],
+                "truncated": False,
+                "load": {"status": "empty" if not section else "unavailable", "source_chars": source_chars, "total_count": 0},
+                "start": {"budget": budget, "source_chars": source_chars, "total_count": 0},
+                "sweep": {"status": "not_run", "retained_count": 0, "omitted_count": 0},
+            }
+            return section, observation
+
+        prefix = section[:matches[0].start()]
+        suffix = section[matches[-1].end():]
+        blocks = [match.group(0) for match in matches]
+        names = []
+        for block in blocks:
+            name_match = re.search(r"<name>(.*?)</name>", block, re.DOTALL)
+            names.append(re.sub(r"<[^>]+>", "", name_match.group(1)).strip() if name_match else "")
+        block_chars = [len(block) for block in blocks]
+
+        full_candidate = section
+        if len(full_candidate) <= budget:
+            return full_candidate, {
+                "status": "full",
+                "source_chars": source_chars,
+                "retained_chars": len(full_candidate),
+                "budget": budget,
+                "total_count": len(blocks),
+                "retained_count": len(blocks),
+                "omitted_count": 0,
+                "omitted_chars": 0,
+                "omitted_names": [],
+                "truncated": False,
+                "load": {"status": "complete", "source_chars": source_chars, "total_count": len(blocks)},
+                "start": {"budget": budget, "source_chars": source_chars, "total_count": len(blocks)},
+                "sweep": {"status": "not_needed", "retained_count": len(blocks), "omitted_count": 0},
+            }
+
+        retained_count = 0
+        for index, block in enumerate(blocks):
+            omitted_names = names[index + 1:]
+            omitted_chars = sum(block_chars[index + 1:])
+            marker = self.SKILLS_CATALOGUE_TRUNCATION_MARKER.format(
+                count=len(omitted_names), chars=omitted_chars,
+            )
+            candidate = section[:matches[index].end()] + marker + suffix
+            if len(candidate) > budget:
+                break
+            retained_count = index + 1
+
+        omitted_names = names[retained_count:]
+        omitted_chars = sum(block_chars[retained_count:])
+        marker = self.SKILLS_CATALOGUE_TRUNCATION_MARKER.format(
+            count=len(omitted_names), chars=omitted_chars,
+        )
+        candidate = (
+            section[:matches[retained_count - 1].end()] + marker + suffix
+            if retained_count else prefix + marker + suffix
+        )
+        if len(candidate) > budget:
+            # The derived floor should leave room for the marker. If a future
+            # floor consumes that room, keep the marker visible rather than
+            # pretending the catalogue was complete; the global ladder then
+            # reports the remaining failure honestly.
+            candidate = prefix + marker + suffix
+        observation = {
+            "status": "bounded",
+            "source_chars": source_chars,
+            "retained_chars": len(candidate),
+            "budget": budget,
+            "total_count": len(blocks),
+            "retained_count": retained_count,
+            "omitted_count": len(omitted_names),
+            "omitted_chars": omitted_chars,
+            "omitted_names": omitted_names,
+            "truncated": True,
+            "load": {"status": "complete", "source_chars": source_chars, "total_count": len(blocks)},
+            "start": {"budget": budget, "source_chars": source_chars, "total_count": len(blocks)},
+            "sweep": {"status": "bounded", "retained_count": retained_count, "omitted_count": len(omitted_names)},
+        }
+        return candidate, observation
 
     @staticmethod
     def _section_sizes(names: list[str], sections: list[tuple[str, str]]) -> dict[str, int]:
@@ -396,7 +520,15 @@ Skills with available="false" need dependencies installed first - you can try in
         # A ``None`` here means the builder recorded nothing, which is
         # distinct from a recorded ``status`` of missing/empty/unavailable.
         fit["memory_index"] = dict(memory_fit) if isinstance(memory_fit, dict) else None
+        if isinstance(getattr(self, "_skills_catalogue_observation", None), dict):
+            fit["skills_catalogue"] = dict(self._skills_catalogue_observation)
         joined = self._record_fit(fit, section_names, sections)
+        if isinstance(getattr(self, "_skills_catalogue_observation", None), dict):
+            fit["skills_catalogue"]["retained_chars"] = fit["sections"].get("skills_catalogue", 0)
+            fit["skills_catalogue"]["source_chars"] = max(
+                fit["skills_catalogue"]["source_chars"],
+                fit["skills_catalogue"]["retained_chars"],
+            )
         if len(joined) <= cap:
             occupancy = len(joined) / cap if cap else 1.0
             fit.update(

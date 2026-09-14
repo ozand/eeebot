@@ -277,6 +277,7 @@ class _HealthySectionsManager(_FakeSubagentManager):
             "cap": 24_000, "chars": 23_500, "strict": True,
             "dropped": [{"section": "## Optional appendix", "chars": 900, "how": "declared-droppable"}],
             "droppable_reserve_chars": 1_200, "sections": HEALTHY_SECTIONS,
+            "skills_catalogue": getattr(self, "_catalogue_observation", None),
         }
         return "system prompt"
 
@@ -326,6 +327,24 @@ def test_bridge_healthy_row_carries_sections_and_chars(tmp_path, monkeypatch):
     assert fit_rows[0]["sections"] == HEALTHY_SECTIONS
     assert fit_rows[0]["chars"] == 23_500
     _assert_reconciles(fit_rows[0])
+
+
+def test_bridge_healthy_row_carries_catalogue_observation(tmp_path, monkeypatch):
+    state_dir = _wire(tmp_path, monkeypatch, _HealthySectionsManager)
+    _seed_bridge_request(state_dir, "req-fit", "cycle-fit", task_title="Extend a skill")
+    _HealthySectionsManager._catalogue_observation = {
+        "status": "bounded", "source_chars": 20_000, "retained_chars": 12_000,
+        "budget": 12_500, "total_count": 40, "retained_count": 24,
+        "omitted_count": 16, "omitted_chars": 8_000,
+        "omitted_names": ["skill-25"], "truncated": True,
+    }
+
+    rc = asyncio.run(bridge._main_impl())
+
+    assert rc == 0
+    row = [r for r in _read_ledger(state_dir) if r["phase"] == "system_prompt"][0]
+    assert row["skills_catalogue"]["status"] == "bounded"
+    assert row["skills_catalogue"]["omitted_names"] == ["skill-25"]
 
 
 def test_bridge_overflow_row_carries_sections_with_a_zero_entry_and_reconciles_to_cap_plus_over_by(tmp_path, monkeypatch):
