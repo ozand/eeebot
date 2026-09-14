@@ -128,6 +128,55 @@ def test_retirement_filter_is_non_vacuous_against_isolated_unfiltered_copy(tmp_p
     assert "<name>retired</name>" in loader.build_skills_summary()
 
 
+def test_usage_order_moves_only_zero_read_skills_last_and_keeps_alphabetical_groups(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / "skills"
+    for name in ("alpha", "middle", "zulu"):
+        _skill(workspace, name)
+    state = tmp_path / "state"
+    reads = {
+        "schema_version": "skill-fitness-v1",
+        "reads": [{
+            "skill": "zulu", "ts": "2026-09-10T00:00:00Z", "confirmed": True,
+        }],
+    }
+    path = state / "skill_fitness" / "reads.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(reads), encoding="utf-8")
+    monkeypatch.setenv("NANOBOT_RUNTIME_STATE_ROOT", str(state))
+
+    loader = SkillsLoader(tmp_path, builtin_skills_dir=tmp_path / "builtins")
+    summary = loader.build_skills_summary(excluded_names=[])
+    names = [line.split("<name>", 1)[1].split("</name>", 1)[0] for line in summary.splitlines() if "<name>" in line]
+    assert names == ["zulu", "alpha", "middle"]
+    assert loader.last_catalogue_usage["status"] == "complete"
+    assert loader.last_catalogue_usage["window_days"] == 30
+    assert loader.last_catalogue_usage["zero_read_names"] == ["alpha", "middle"]
+
+
+def test_unavailable_usage_does_not_become_zero_read_ordering(tmp_path: Path, monkeypatch):
+    for name in ("alpha", "zulu"):
+        _skill(tmp_path / "skills", name)
+    monkeypatch.setenv("NANOBOT_RUNTIME_STATE_ROOT", str(tmp_path / "missing-state"))
+    loader = SkillsLoader(tmp_path, builtin_skills_dir=tmp_path / "builtins")
+    summary = loader.build_skills_summary(excluded_names=[])
+    names = [line.split("<name>", 1)[1].split("</name>", 1)[0] for line in summary.splitlines() if "<name>" in line]
+    assert names == ["alpha", "zulu"]
+    assert loader.last_catalogue_usage["status"] == "unavailable"
+
+
+def test_empty_usage_sidecar_is_valid_zero_read_evidence(tmp_path: Path, monkeypatch):
+    for name in ("alpha", "zulu"):
+        _skill(tmp_path / "skills", name)
+    path = tmp_path / "state" / "skill_fitness" / "reads.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"schema_version": "skill-fitness-v1", "reads": []}), encoding="utf-8")
+    monkeypatch.setenv("NANOBOT_RUNTIME_STATE_ROOT", str(tmp_path / "state"))
+    loader = SkillsLoader(tmp_path, builtin_skills_dir=tmp_path / "builtins")
+    loader.build_skills_summary(excluded_names=[])
+    assert loader.last_catalogue_usage["status"] == "complete"
+    assert loader.last_catalogue_usage["zero_read_names"] == ["alpha", "zulu"]
+
+
 def test_skill_order_is_stable_regardless_of_directory_order(tmp_path: Path, monkeypatch):
     """#1421: the enumeration order reaches the skills catalogue verbatim.
 
