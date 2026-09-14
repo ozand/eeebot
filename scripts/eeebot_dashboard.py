@@ -163,6 +163,12 @@ def refresh_host_capabilities() -> dict[str, Any]:
             "details": details,
         }
 
+    def read_probe(path: Path, parse: Any) -> dict[str, Any]:
+        try:
+            return result(*parse(path.read_text()))
+        except Exception as exc:
+            return result("probe_unavailable", f"probe failed: {type(exc).__name__}")
+
     def command_probe(command: list[str], parse: Any) -> dict[str, Any]:
         try:
             output = subprocess.check_output(command, stderr=subprocess.DEVNULL).decode()
@@ -190,14 +196,23 @@ def refresh_host_capabilities() -> dict[str, Any]:
         caps["camera"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
 
     # Bluetooth
-    caps["bluetooth"] = command_probe(
-        ["lsusb"],
-        lambda output: (
-            ("present", next(line.strip() for line in output.splitlines() if "bluetooth" in line.lower()))
-            if any("bluetooth" in line.lower() for line in output.splitlines())
-            else ("absent", "not detected")
-        ),
-    )
+    def parse_bluetooth(output: str) -> tuple[str, str]:
+        adapter = next((line.strip() for line in output.splitlines() if "bluetooth" in line.lower()), "")
+        if not adapter:
+            return "absent", "not detected"
+        hci_paths = sorted(Path("/sys/class/bluetooth").glob("hci*"))
+        if not hci_paths:
+            return "present", adapter
+        try:
+            operstates = [path / "operstate" for path in hci_paths]
+            states = [path.read_text(encoding="utf-8").strip().lower() for path in operstates]
+        except OSError as exc:
+            return "probe_unavailable", f"probe failed: {type(exc).__name__}"
+        if any(state == "up" for state in states):
+            return "present", adapter
+        return "present_uninitialized", f"{adapter} (hci down)"
+
+    caps["bluetooth"] = command_probe(["lsusb"], parse_bluetooth)
 
     # WiFi
     def parse_wifi(output: str) -> tuple[str, str]:
@@ -210,23 +225,19 @@ def refresh_host_capabilities() -> dict[str, Any]:
 
     caps["wifi"] = command_probe(["ip", "-o", "link", "show"], parse_wifi)
 
-    # Microphone
-    caps["microphone"] = command_probe(
-        ["arecord", "-l"],
-        lambda output: (
-            ("present", output.strip().split("\n")[0])
-            if "card" in output.lower()
+    # Microphone. Read the kernel's ALSA card inventory directly; this does
+    # not depend on the optional alsa-utils/arecord package.
+    def parse_microphone(text: str) -> tuple[str, str]:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return (
+            ("present", lines[0])
+            if lines and any("[" in line for line in lines)
             else ("absent", "not detected")
-        ),
-    )
+        )
+
+    caps["microphone"] = read_probe(Path("/proc/asound/cards"), parse_microphone)
 
     # CPU
-    def read_probe(path: Path, parse: Any) -> dict[str, Any]:
-        try:
-            return result(*parse(path.read_text()))
-        except Exception as exc:
-            return result("probe_unavailable", f"probe failed: {type(exc).__name__}")
-
     caps["cpu"] = read_probe(
         Path("/proc/cpuinfo"),
         lambda text: (
@@ -1308,7 +1319,7 @@ def _capability_state(info: Any) -> str:
     if not isinstance(info, dict):
         return "probe_unavailable"
     state = info.get("state")
-    if state in {"present", "absent", "probe_unavailable", "stale"}:
+    if state in {"present", "present_uninitialized", "absent", "probe_unavailable", "stale"}:
         return state
     # Pre-#1557 inventories had only ``available``. Their false value means
     # confirmed absence only if the old probe completed; preserve compatibility
@@ -1347,7 +1358,7 @@ def scan_host_capabilities(
     available_caps.sort()
     capability_details.sort(key=lambda item: item[0])
 
-    symbols = {"present": "✓", "absent": "✗", "probe_unavailable": "?", "stale": "~"}
+    symbols = {"present": "✓", "present_uninitialized": "!", "absent": "✗", "probe_unavailable": "?", "stale": "~"}
     for name in focus_order:
         info = host_caps.get(name, {})
         state = _capability_state(info)
@@ -1362,7 +1373,7 @@ def scan_host_capabilities(
         focus_details.append((name, f"{state}: {details}"))
         if state == "absent":
             missing_focus_devices.append(name)
-        elif state == "probe_unavailable":
+        elif state in {"probe_unavailable", "present_uninitialized"}:
             unavailable_focus_devices.append(name)
 
     focus_status = ", ".join(focus_status_parts)

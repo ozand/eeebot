@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh eeebot host capability inventory daily (#1557)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1d
+Persistent=true
+Unit=eeebot-host-capabilities.service
+
+[Install]
+WantedBy=timers.target
