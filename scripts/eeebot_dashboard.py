@@ -25,12 +25,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from scripts.cycle_cost_probe import (
-    PERMANENT_BATTERY_REASON,
-    battery_probe,
-    framebuffer_surface_probe,
-    toolchain_measurement_placeholders,
-)
+try:
+    from scripts.cycle_cost_probe import (
+        PERMANENT_BATTERY_REASON,
+        battery_probe,
+        framebuffer_surface_probe,
+        toolchain_measurement_placeholders,
+    )
+except ModuleNotFoundError:
+    from cycle_cost_probe import (
+        PERMANENT_BATTERY_REASON,
+        battery_probe,
+        framebuffer_surface_probe,
+        toolchain_measurement_placeholders,
+    )
 
 # Live-refresh TUI state
 _watch_running = True
