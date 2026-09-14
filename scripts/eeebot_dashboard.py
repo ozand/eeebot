@@ -200,31 +200,37 @@ def refresh_host_capabilities(*, trigger: str = "dashboard_refresh") -> dict[str
     try:
         bluetooth_devices = sorted(Path("/sys/class/bluetooth").glob("hci*"))
         if bluetooth_devices:
-            states: list[tuple[str, str, str]] = []
+            states: list[tuple[str, str, str | None]] = []
             for device in bluetooth_devices:
                 rfkill_paths = sorted(device.glob("rfkill*"))
                 if not rfkill_paths:
-                    caps["bluetooth"] = result("present_uninitialized", f"{device.name} (no rfkill state)")
-                    break
+                    states.append((device.name, "", None))
+                    continue
                 rfkill = rfkill_paths[0]
                 soft = (rfkill / "soft").read_text(encoding="utf-8").strip()
                 hard = (rfkill / "hard").read_text(encoding="utf-8").strip()
                 states.append((device.name, soft, hard))
+            if any(soft == "0" and hard == "0" for _, soft, hard in states):
+                details = f"Detected {', '.join(name for name, _, _ in states)} via rfkill"
+                caps["bluetooth"] = result("present", details)
             else:
-                if any(soft == "0" and hard == "0" for _, soft, hard in states):
-                    details = f"Detected {', '.join(name for name, _, _ in states)} via rfkill"
-                    caps["bluetooth"] = result("present", details)
-                else:
-                    blocked = ", ".join(
-                        f"{name} ({'soft' if soft == '1' else ''}{'+' if soft == '1' and hard == '1' else ''}{'hard' if hard == '1' else ''} blocked)"
-                        for name, soft, hard in states
-                    )
-                    caps["bluetooth"] = result("present_uninitialized", f"{blocked} via rfkill")
-        elif not caps.get("bluetooth"):
+                blocked_parts = []
+                for name, soft, hard in states:
+                    if hard is None:
+                        reason = "no rfkill state"
+                    else:
+                        flags = ("soft" if soft == "1" else "") + ("+" if soft == "1" and hard == "1" else "") + ("hard" if hard == "1" else "")
+                        reason = f"{flags} blocked"
+                    blocked_parts.append(f"{name} ({reason})")
+                caps["bluetooth"] = result("present_uninitialized", f"{', '.join(blocked_parts)} via rfkill")
+        else:
             rfkill_devices = []
             for path in sorted(Path("/sys/class/rfkill").glob("rfkill*")):
-                if (path / "type").read_text(encoding="utf-8").strip().lower() == "bluetooth":
-                    rfkill_devices.append(path.name)
+                try:
+                    if (path / "type").read_text(encoding="utf-8").strip().lower() == "bluetooth":
+                        rfkill_devices.append(path.name)
+                except (FileNotFoundError, OSError):
+                    continue
             caps["bluetooth"] = result(
                 "present_uninitialized" if rfkill_devices else "absent",
                 f"Detected Bluetooth rfkill: {', '.join(rfkill_devices)} (hci unavailable)" if rfkill_devices else "not detected",
@@ -303,7 +309,6 @@ def refresh_host_capabilities(*, trigger: str = "dashboard_refresh") -> dict[str
         caps["screen"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
 
     caps["_scan_timestamp"] = datetime.now(timezone.utc).isoformat()
-    caps["_probe_source"] = "manual"
     caps["_probe_trigger"] = trigger
 
     # Write to state file
@@ -1055,15 +1060,13 @@ def format_host_capability_probe_attention(age_hours: float | None, status: str)
 
 
 def format_host_capability_probe_source(host_caps: dict[str, Any]) -> str:
-    source = host_caps.get("_probe_source") if isinstance(host_caps, dict) else None
     trigger = host_caps.get("_probe_trigger") if isinstance(host_caps, dict) else None
-    if source and trigger:
+    if trigger:
+        source = "systemd" if trigger == "systemd_timer" else "manual"
         return f"{source} ({trigger})"
-    if source:
-        return str(source)
-    # Before #1557 the only writer was the dashboard refresh action/CLI and
-    # there was no autonomous capability timer. Make that manual-only fact
-    # visible for legacy inventories instead of presenting it as unknown.
+    legacy_source = host_caps.get("_probe_source") if isinstance(host_caps, dict) else None
+    if legacy_source:
+        return str(legacy_source)
     return "manual-only (legacy; no autonomous trigger)"
 
 
