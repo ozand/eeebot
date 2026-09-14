@@ -3702,7 +3702,7 @@ Examples:
             if name.startswith("_"):
                 continue
             state = info.get("state", "present" if info.get("available") else "absent")
-            status = {"present": "✓", "absent": "✗", "probe_unavailable": "?"}.get(state, "?")
+            status = {"present": "✓", "present_uninitialized": "!", "absent": "✗", "probe_unavailable": "?"}.get(state, "?")
             print(f"  {status} {name} [{state}]: {info.get('details', 'unknown')}")
         print(f"\nScan timestamp: {caps.get('_scan_timestamp', 'unknown')}")
         return
