@@ -130,3 +130,24 @@ The charter. `MUTATION_POLICY` and the commit surface — a publish is not a com
 - #1197 — three observers, all green, over a nine-hour crash loop.
 - #1173 — empty is not unavailable.
 - #1455 — the experiment ledger's noise floor; why an external metric is not automatically a good one.
+
+# Addendum — the demo is not the instrument (2026-09-15)
+
+Written the same day, before merge, after the operator corrected what "demoscene" meant here. I had read it as *capture*: a recording of the resident surface running. It means *generation*: the demoscene tradition of producing the maximum of image and sound from the minimum of bytes on hardware that should not manage it, and showing the working.
+
+That correction matters to this record because a generated demo makes **no factual claim at all**, and rules 1 and 2 as written are about claims. Applied naively to a plasma effect they would demand a ledger citation for a colour cycle, which is nonsense, and the likely result would be that the art gets blocked by an honesty rule aimed at something else.
+
+So the boundary is stated rather than left to judgement. A published artifact has **two classes of content**:
+
+- **The instrument** — the cat, the HUD, the status readings, and every narrated sentence. ADR-014 governs it and rules 1 to 5 above bind it completely. It reports and it must not lie.
+- **The demo** — effects, transitions, music, typography, generated imagery. It asserts nothing, so there is nothing for it to misreport. It is bound only by rule 4 of ADR-014, which forbids sound, focus theft and brightness used to capture attention, and it may never be composed so as to imply a state the instrument is not reporting.
+
+The separating question is not "is this decorative" but **"does a viewer come away believing something about this machine that they could check?"** If yes it is instrument and needs a row; if no it is demo and needs only to be good.
+
+This division protects rule 1 rather than weakening it. An honesty rule that also polices art gets negotiated away the first time it blocks something worth making; one with a stated edge survives.
+
+Two consequences carried into the implementing issues:
+
+**The claim surface stays small and dense.** Narration and HUD are where citations live, so the citation set stays checkable no matter how elaborate the visuals become.
+
+**The machine's demoscene era is 1993, not 2003.** The host is an Intel 945GSE with the i915 driver: no hardware vertex shaders, and a fragment path too limited for the shader-centred style the modern scene is built on. The techniques that fit are the ones the constraint originally produced — CPU rasterisation, palette animation, tunnels, rotozoomers, plasma, blitting — which is the same indexed-colour tile path this project already measured and already prefers. The hardware does not permit an imitation of a modern demo, which is the most useful thing about it.

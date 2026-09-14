@@ -99,3 +99,30 @@ Citation density is a proxy, and like every proxy it can be pushed toward the tr
 - #1599 — the call graph the barrier test is asserted on, and composition depth.
 - #879 / #1457 — the ranking-input constraint and the boundary none of this crosses.
 - #1596 — how the charter reaches demand when every target is satisfied; the channel is not a shortcut around it.
+
+# Addendum — size is the craft metric this record was missing (2026-09-15)
+
+Written the same day, before merge, after the operator identified the demoscene proper — 4k and 64k intros, tracker music, packers, minifiers — as the tradition being joined.
+
+Rule 3 above names citation density, cost per finished minute, and deadline hit rate. They are sound and they stay. But the demoscene already solved the problem rule 3 was reaching for, more sharply than I did: it judges work by **what it achieves per byte**, in fixed size categories, with the size declared up front.
+
+That metric is better than anything I proposed on four counts, and it is added to rule 3 rather than replacing anything:
+
+- It is **local, immediate and exact.** A byte count needs no audience, no algorithm and no window to stabilise.
+- It **cannot be gamed by drama**, which is rule 4's whole concern. There is no narrative shortcut to a smaller file.
+- It is **the one metric that forces composition.** Nothing fits in 4 kilobytes as a leaf artifact. A synth, a packer, a generator and a font must exist and be reused, or the target is unreachable. Composition depth is about 1 across 154 artifacts today (#1599); a size category is the first constraint this project has encountered that makes depth mandatory rather than virtuous.
+- It **is the Factorio ladder, already built by someone else.** The category is the product; the tools are the prerequisites; the tools only pay off when reused.
+
+So rule 3 gains a fourth admissible target: **output per declared byte budget**, in a stated category, with the budget fixed before the work rather than fitted afterwards. A demo that misses its category is reported as missing it — the same visible-degradation discipline as a truncated render.
+
+One measurement from the same day shows what this pressure is worth. The dominant per-frame cost is the palette expansion, and three implementations of exactly the same operation were timed against each other:
+
+```text
+fancy index into (16,3) -> rgb24   107.5 ms   <- what was written first
+uint32 LUT -> rgba32                36.3 ms   <- 3x, no new dependency
+raw indexed bytes, no expansion      3.5 ms   <- the floor, if the palette moves into the encoder
+```
+
+A 3× improvement in the dominant cost, available today, found by measuring rather than by reasoning. That is the shape of work this metric rewards, and none of it needs a single viewer.
+
+**A caveat that applies to every figure in these three records.** The host runs its own loop while being measured, so absolute timings move with what the loop happens to be doing — the same operation read 259 ms in one run and 107.5 ms in another. Ratios measured within a single run are sound; absolute numbers are not comparable across runs unless the concurrent load is stated. This is an argument for ADR-017 rule 2, and for making every future measurement declare what else was running.
