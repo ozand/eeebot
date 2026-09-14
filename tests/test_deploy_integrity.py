@@ -34,6 +34,25 @@ def test_systemd_resource_limits_bridge_and_verifier() -> None:
         assert "IOSchedulingPriority=5" in content, f"{name} must define IOSchedulingPriority=5"
 
 
+def test_host_capabilities_probe_runs_daily_as_eeepc_agent() -> None:
+    systemd_dir = REPO_ROOT / "host" / "eeepc" / "systemd"
+    service = (systemd_dir / "eeebot-host-capabilities.service").read_text(encoding="utf-8")
+    timer = (systemd_dir / "eeebot-host-capabilities.timer").read_text(encoding="utf-8")
+    install = (REPO_ROOT / "host" / "eeepc" / "scripts" / "install.sh").read_text(encoding="utf-8")
+    deploy = (REPO_ROOT / "host" / "eeepc" / "scripts" / "deploy_release.sh").read_text(encoding="utf-8")
+
+    assert "User=eeepc-agent" in service
+    assert "Group=eeepc-agent" in service
+    assert "eeebot_dashboard.py --refresh-host-caps" in service
+    assert "ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state" in service
+    assert "OnCalendar=*-*-* 01:00:00" in timer
+    assert "OnUnitActiveSec=" not in timer
+    assert "Persistent=true" in timer
+    assert "Unit=eeebot-host-capabilities.service" in timer
+    assert "eeebot-host-capabilities.timer" in install
+    assert "sync_timer eeebot-host-capabilities.timer required" in deploy
+
+
 def test_host_metrics_schedule_is_enabled_and_writable() -> None:
     systemd_dir = REPO_ROOT / "host" / "eeepc" / "systemd"
     service = (systemd_dir / "eeebot-host-metrics.service").read_text(encoding="utf-8")

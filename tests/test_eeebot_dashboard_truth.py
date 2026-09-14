@@ -91,11 +91,49 @@ def test_format_rate_preserves_unavailable_zero_and_percentage() -> None:
     assert DASHBOARD.format_rate(0.01602) == "1.6%"
 
 
-def test_refresh_host_capabilities_distinguishes_probe_failure_and_empty_result(tmp_path: Path, monkeypatch) -> None:
-    class MissingArecord:
+def test_refresh_host_capabilities_uses_proc_asound_cards_without_arecord(tmp_path: Path, monkeypatch) -> None:
+    class Probe:
         def __call__(self, command, **kwargs):
+            if command == ["lsusb"]:
+                return b""
+            if command == ["ip", "-o", "link", "show"]:
+                return b""
+            if command == ["df", "-h", "/"]:
+                return b"Filesystem  Size  Used Avail Use% Mounted on\n/dev/sda1  1G  1M  999M  1% /\n"
+            if command == ["uname", "-r"]:
+                return b"test-kernel\n"
+            if command == ["uptime", "-p"]:
+                return b"up 1 minute\n"
             if command == ["arecord", "-l"]:
-                raise FileNotFoundError("arecord")
+                raise AssertionError("arecord must not be invoked")
+            raise AssertionError(command)
+
+    monkeypatch.setattr(DASHBOARD, "STATE_DIR", tmp_path)
+    monkeypatch.setattr("subprocess.check_output", Probe())
+    def read_probe(self, *args, **kwargs):
+        return {
+            "/proc/asound/cards": " 0 [Intel]: HDA-Intel - HDA Intel\n",
+            "/proc/cpuinfo": "model name : test-cpu\n",
+            "/proc/meminfo": "MemTotal: 1 kB\n",
+        }.get(str(self).replace("\\", "/"), "")
+
+    monkeypatch.setattr(DASHBOARD.Path, "read_text", read_probe)
+    monkeypatch.setattr(DASHBOARD.Path, "exists", lambda self: False)
+    monkeypatch.setattr(DASHBOARD.Path, "glob", lambda self, pattern: [])
+
+    caps = DASHBOARD.refresh_host_capabilities()
+
+    assert caps["camera"]["state"] == "absent"
+    assert caps["microphone"] == {
+        "state": "present",
+        "available": True,
+        "details": "0 [Intel]: HDA-Intel - HDA Intel",
+    }
+
+
+def test_refresh_host_capabilities_preserves_proc_probe_unavailable(tmp_path: Path, monkeypatch) -> None:
+    class Probe:
+        def __call__(self, command, **kwargs):
             if command == ["lsusb"]:
                 return b""
             if command == ["ip", "-o", "link", "show"]:
@@ -109,8 +147,14 @@ def test_refresh_host_capabilities_distinguishes_probe_failure_and_empty_result(
             raise AssertionError(command)
 
     monkeypatch.setattr(DASHBOARD, "STATE_DIR", tmp_path)
-    monkeypatch.setattr("subprocess.check_output", MissingArecord())
-    monkeypatch.setattr(DASHBOARD.Path, "read_text", lambda self, *args, **kwargs: "model name : test-cpu\n" if str(self) == "/proc/cpuinfo" else "MemTotal: 1 kB\n")
+    monkeypatch.setattr("subprocess.check_output", Probe())
+
+    def read_probe(self, *args, **kwargs):
+        if str(self).replace("\\", "/") == "/proc/asound/cards":
+            raise FileNotFoundError("/proc/asound/cards")
+        return "model name : test-cpu\n" if str(self) == "/proc/cpuinfo" else "MemTotal: 1 kB\n"
+
+    monkeypatch.setattr(DASHBOARD.Path, "read_text", read_probe)
     monkeypatch.setattr(DASHBOARD.Path, "exists", lambda self: False)
     monkeypatch.setattr(DASHBOARD.Path, "glob", lambda self, pattern: [])
 
@@ -127,20 +171,65 @@ def test_refresh_host_capabilities_distinguishes_probe_failure_and_empty_result(
     assert caps["_probe_trigger"] == "dashboard_refresh"
 
 
+def test_refresh_host_capabilities_marks_bluetooth_adapter_down_as_uninitialized(tmp_path: Path, monkeypatch) -> None:
+    class Probe:
+        def __call__(self, command, **kwargs):
+            if command == ["lsusb"]:
+                return b"Bus 005 Device 002: ID 0b05:b700 Broadcom Bluetooth 2.1\n"
+            if command == ["ip", "-o", "link", "show"]:
+                return b""
+            if command == ["df", "-h", "/"]:
+                return b"Filesystem  Size  Used Avail Use% Mounted on\n/dev/sda1  1G  1M  999M  1% /\n"
+            if command == ["uname", "-r"]:
+                return b"test-kernel\n"
+            if command == ["uptime", "-p"]:
+                return b"up 1 minute\n"
+            raise AssertionError(command)
+
+    def glob(self, pattern):
+        if str(self).replace("\\", "/") == "/sys/class/bluetooth" and pattern == "hci*":
+            return [Path("/sys/class/bluetooth/hci0")]
+        return []
+
+    monkeypatch.setattr(DASHBOARD, "STATE_DIR", tmp_path)
+    monkeypatch.setattr("subprocess.check_output", Probe())
+    monkeypatch.setattr(DASHBOARD.Path, "glob", glob)
+    def read_probe(self, *args, **kwargs):
+        return {
+            "/sys/class/bluetooth/hci0/operstate": "down\n",
+            "/proc/asound/cards": " 0 [Intel]: HDA-Intel - HDA Intel\n",
+            "/proc/cpuinfo": "model name : test-cpu\n",
+            "/proc/meminfo": "MemTotal: 1 kB\n",
+        }.get(str(self).replace("\\", "/"), "")
+
+    monkeypatch.setattr(DASHBOARD.Path, "read_text", read_probe)
+    monkeypatch.setattr(DASHBOARD.Path, "exists", lambda self: False)
+
+    caps = DASHBOARD.refresh_host_capabilities()
+
+    assert caps["bluetooth"] == {
+        "state": "present_uninitialized",
+        "available": False,
+        "details": "Bus 005 Device 002: ID 0b05:b700 Broadcom Bluetooth 2.1 (hci down)",
+    }
+    assert caps["microphone"]["state"] == "present"
+
+
 def test_scan_host_capabilities_renders_absent_and_unavailable_differently() -> None:
     host_caps = {
         "camera": {"state": "absent", "available": False, "details": "not detected"},
-        "bluetooth": {"state": "present", "available": True, "details": "adapter"},
+        "bluetooth": {"state": "present_uninitialized", "available": False, "details": "adapter (hci down)"},
         "wifi": {"state": "probe_unavailable", "available": False, "details": "probe failed"},
         "microphone": {"state": "absent", "available": False, "details": "not detected"},
     }
     result = DASHBOARD.scan_host_capabilities(host_caps)
 
-    assert result[2] == "camera:✗, bluetooth:✓, wifi:?, microphone:✗"
-    assert result[4] == "1/4 focus devices available"
+    assert result[2] == "camera:✗, bluetooth:!, wifi:?, microphone:✗"
+    assert result[4] == "0/4 focus devices available"
     assert result[5] == "camera, microphone"
-    assert result[6] == "wifi"
+    assert result[6] == "bluetooth, wifi"
     assert "absent: not detected" in dict(result[3])["camera"]
+    assert "present_uninitialized: adapter (hci down)" in dict(result[3])["bluetooth"]
     assert "probe_unavailable: probe failed" in dict(result[3])["wifi"]
 
 

@@ -264,6 +264,7 @@ enable_timers() {
     eeebot-archive-subagent-requests.timer
     eeebot-validator-harness.timer
     eeebot-host-metrics.timer
+    eeebot-host-capabilities.timer
     eeebot-knowledge-curator.timer
     eeebot-action-index.timer
     eeebot-reflector.timer
