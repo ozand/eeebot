@@ -280,6 +280,73 @@ class TestIsPlateaued:
 
 
 class TestSelectCurrentDirection:
+    def test_unconfigured_nodes_preserve_selection_and_persisted_shape(self, tmp_path):
+        """#1606: legacy nodes with no probe/prerequisites are byte-compatible."""
+        tech_tree.ensure_seeded(tmp_path, now=NOW)
+        before = (tmp_path / "tech_tree" / "portfolio.json").read_bytes()
+        picked = tech_tree.select_current_direction(tmp_path, now=NOW, rng=_FakeRng(1.0))
+        assert picked == "compile-health"
+        portfolio = tech_tree.read_portfolio(tmp_path)
+        portfolio["current"] = None
+        tech_tree._write_portfolio(tmp_path, portfolio)
+        assert (tmp_path / "tech_tree" / "portfolio.json").read_bytes() == before
+
+    def test_unmet_prerequisite_is_excluded_and_reported_in_frontier(self, tmp_path):
+        tech_tree.ensure_seeded(tmp_path, now=NOW)
+        _set_node(tmp_path, "proposer-quality", probe={"state": "absent", "details": "not installed"})
+        _set_node(tmp_path, "compile-health", prerequisites=["proposer-quality"], gain_history=[0.9])
+
+        picked = tech_tree.select_current_direction(tmp_path, now=NOW, rng=_FakeRng(1.0))
+        assert picked != "compile-health"
+        frontier = tech_tree.portfolio_snapshot(tmp_path)["frontier"]
+        assert frontier == [
+            {
+                "name": "compile-health",
+                "reason": "unmet_prerequisite",
+                "prerequisite": "proposer-quality",
+                "prerequisite_state": "absent",
+            },
+            {
+                "name": "proposer-quality",
+                "reason": "absent",
+                "probe_state": "absent",
+                "details": "not installed",
+            },
+        ]
+
+    def test_probe_unavailable_is_ineligible_and_never_absent_or_met(self, tmp_path):
+        tech_tree.ensure_seeded(tmp_path, now=NOW)
+        _set_node(
+            tmp_path, "compile-health",
+            probe={"state": "probe_unavailable", "details": "permission denied"},
+            gain_history=[0.9],
+        )
+        picked = tech_tree.select_current_direction(tmp_path, now=NOW, rng=_FakeRng(1.0))
+        assert picked != "compile-health"
+        snap = tech_tree.portfolio_snapshot(tmp_path)
+        assert snap["nodes"]["compile-health"]["probe"] == {
+            "state": "probe_unavailable", "details": "permission denied",
+        }
+        assert snap["frontier"] == [{
+            "name": "compile-health",
+            "reason": "probe_unavailable",
+            "probe_state": "probe_unavailable",
+            "details": "permission denied",
+        }]
+
+    def test_prerequisite_cycle_is_reported_without_emptying_eligible_set(self, tmp_path):
+        tech_tree.ensure_seeded(tmp_path, now=NOW)
+        _set_node(tmp_path, "compile-health", prerequisites=["tool-reuse"])
+        _set_node(tmp_path, "tool-reuse", prerequisites=["compile-health"])
+
+        picked = tech_tree.select_current_direction(tmp_path, now=NOW, rng=_FakeRng(1.0))
+        assert picked in {"proposer-quality", "cycle-cost", "heldout-robustness"}
+        cycles = [row for row in tech_tree.portfolio_snapshot(tmp_path)["frontier"] if row["reason"] == "prerequisite_cycle"]
+        assert cycles == [
+            {"name": "compile-health", "reason": "prerequisite_cycle", "cycle": ["compile-health", "tool-reuse", "compile-health"]},
+            {"name": "tool-reuse", "reason": "prerequisite_cycle", "cycle": ["compile-health", "tool-reuse", "compile-health"]},
+        ]
+
     def test_exploit_picks_highest_mean_gain(self, tmp_path):
         tech_tree.ensure_seeded(tmp_path, now=NOW)
         _set_node(tmp_path, "compile-health", gain_history=[0.5, 0.5])
@@ -485,7 +552,8 @@ class TestPortfolioSnapshot:
     def test_shape(self, tmp_path):
         tech_tree.ensure_seeded(tmp_path, now=NOW)
         snap = tech_tree.portfolio_snapshot(tmp_path)
-        assert set(snap.keys()) == {"current", "nodes", "switches"}
+        assert set(snap.keys()) == {"current", "nodes", "switches", "frontier"}
+        assert snap["frontier"] == []
         assert set(snap["nodes"].keys()) == {s["name"] for s in tech_tree.SEED_NODES}
         for node in snap["nodes"].values():
             assert set(node.keys()) == {"status", "mean_gain", "attempts", "lever_metric"}
@@ -497,7 +565,9 @@ class TestPortfolioSnapshot:
         path = tmp_path / "tech_tree" / "portfolio.json"
         path.parent.mkdir(parents=True)
         path.write_text("{not json", encoding="utf-8")
-        assert tech_tree.portfolio_snapshot(tmp_path) == {"current": None, "nodes": {}, "switches": 0}
+        assert tech_tree.portfolio_snapshot(tmp_path) == {
+            "current": None, "nodes": {}, "switches": 0, "frontier": [],
+        }
 
 
 class TestCurrentDirection:
@@ -547,6 +617,15 @@ class TestMatchesDirection:
 
 
 class TestDenySetAndFitnessSidecar:
+    def test_prerequisite_evaluation_has_no_gate_demand_or_fitness_call_path(self):
+        """#1606/#879/#1457: eligibility is preference-only, never permission."""
+        import inspect
+
+        source = inspect.getsource(tech_tree._eligibility)
+        forbidden = ("runtime.gate", "collect_demand", "compute_scorecard", "record_gate_decision")
+        assert all(token not in source for token in forbidden)
+        assert "eligible" in inspect.getsource(tech_tree.select_current_direction)
+
     def test_tech_tree_module_is_deny_set(self):
         from nanobot.runtime import runtime_deny
 
