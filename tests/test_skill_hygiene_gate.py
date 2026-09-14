@@ -49,13 +49,20 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     )
 
 
-def _skill_md(name: str, description: str, *, fm_name: str | None = None) -> str:
+def _skill_md(
+    name: str,
+    description: str,
+    *,
+    fm_name: str | None = None,
+    body: str = "# Skill\n\n## Usage\n\nPerform the bounded workflow described for this skill.\n",
+) -> str:
     return (
         "---\n"
         f"name: {name if fm_name is None else fm_name}\n"
         f"description: {description}\n"
         'version: "1.0.0"\n'
-        "---\n\n# Skill\n\nBody.\n"
+        "---\n\n"
+        f"{body}"
     )
 
 
@@ -156,10 +163,36 @@ def test_empty_name_or_description_is_rejected(tmp_path):
     ]
 
 
+def test_body_below_minimum_content_floor_is_rejected(tmp_path):
+    repo, base = _repo_with_skills(tmp_path, {})
+    changed = _cycle_commit(repo, base, {
+        "skills/jsonl-stream-filter/SKILL.md": _skill_md(
+            "jsonl-stream-filter",
+            "Stream-filter bounded JSONL records by one field predicate",
+            body="# JSONL Stream Filter\n",
+        ),
+    })
+    assert _violations(repo, base, changed) == [
+        "skill body: fewer than 3 non-blank lines: skills/jsonl-stream-filter/SKILL.md"
+    ]
+
+
+def test_body_at_minimum_content_floor_is_allowed(tmp_path):
+    repo, base = _repo_with_skills(tmp_path, {})
+    changed = _cycle_commit(repo, base, {
+        "skills/jsonl-stream-filter/SKILL.md": _skill_md(
+            "jsonl-stream-filter",
+            "Stream-filter bounded JSONL records by one field predicate",
+            body="# JSONL Stream Filter\n## Usage\nFilter one bounded stream.\n",
+        ),
+    })
+    assert _violations(repo, base, changed) == []
+
+
 def test_description_over_policy_limit_is_rejected(tmp_path):
     repo, base = _repo_with_skills(tmp_path, {})
     changed = _cycle_commit(repo, base, {
-        "skills/memory-lookup/SKILL.md": "---\nname: memory-lookup\ndescription: " + ("x" * 121) + "\n---\n\nbody\n",
+        "skills/memory-lookup/SKILL.md": _skill_md("memory-lookup", "x" * 121),
     })
     violations = _violations(repo, base, changed)
     assert violations == [
@@ -170,7 +203,7 @@ def test_description_over_policy_limit_is_rejected(tmp_path):
 def test_description_at_policy_limit_is_allowed(tmp_path):
     repo, base = _repo_with_skills(tmp_path, {})
     changed = _cycle_commit(repo, base, {
-        "skills/memory-lookup/SKILL.md": "---\nname: memory-lookup\ndescription: " + ("x" * 120) + "\n---\n\nbody\n",
+        "skills/memory-lookup/SKILL.md": _skill_md("memory-lookup", "x" * 120),
     })
     assert _violations(repo, base, changed) == []
 
@@ -238,7 +271,8 @@ def test_folded_description_scalar_is_accepted(tmp_path):
     changed = _cycle_commit(repo, base, {
         "skills/memory-lookup/SKILL.md": (
             "---\nname: memory-lookup\ndescription: >-\n  Find a specific fact or history entry\n"
-            "  with one targeted read_file call\nversion: \"1.0.0\"\n---\n\nbody\n"
+            "  with one targeted read_file call\nversion: \"1.0.0\"\n---\n\n"
+            "# Memory lookup\n\n## Usage\n\nRead one targeted fact.\n"
         ),
     })
     assert _violations(repo, base, changed) == []
@@ -329,6 +363,33 @@ def test_quoted_non_ascii_path_is_already_a_surface_violation():
 
 
 # ─── duplicates ──────────────────────────────────────────────────────────────
+
+
+def test_same_commit_exact_duplicate_descriptions_are_rejected(tmp_path):
+    repo, base = _repo_with_skills(tmp_path, {})
+    description = "Trigger: Use this skill for the documented operation."
+    changed = _cycle_commit(repo, base, {
+        "skills/jsonl-stream-filter/SKILL.md": _skill_md("jsonl-stream-filter", description),
+        "skills/batch-grep/SKILL.md": _skill_md("batch-grep", description),
+    })
+    out = _violations(repo, base, changed)
+    assert out == [
+        "skill duplicate batch: exact description shared by changed skills "
+        "'batch-grep' and 'jsonl-stream-filter'"
+    ]
+
+
+def test_editing_two_preexisting_equal_descriptions_without_changing_them_passes(tmp_path):
+    description = "The same pre-existing description for two maintained skills"
+    repo, base = _repo_with_skills(tmp_path, {
+        "first-skill": description,
+        "second-skill": description,
+    })
+    changed = _cycle_commit(repo, base, {
+        "skills/first-skill/SKILL.md": _skill_md("first-skill", description) + "\nMore body.\n",
+        "skills/second-skill/SKILL.md": _skill_md("second-skill", description) + "\nMore body.\n",
+    })
+    assert _violations(repo, base, changed) == []
 
 
 def test_new_skill_duplicating_existing_description_is_rejected_naming_the_original(tmp_path):
