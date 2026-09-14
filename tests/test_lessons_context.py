@@ -91,12 +91,56 @@ class TestRecurrenceRanking:
         assert _recurrence_bonus({"seen_count": 100, "distinct_days": 100}) == 2
         assert _recurrence_bonus({"seen_count": "bad", "distinct_days": None}) == 0
 
-    def test_recurrence_breaks_close_lexical_match(self):
+    def test_recurrence_breaks_equal_lexical_match(self):
         task_words = _extract_words("Fix timeout guard")
         one_off = {"id": "one", "title": "Timeout guard", "root_cause": "", "seen_count": 1, "distinct_days": 1}
         repeated = {"id": "repeated", "title": "Timeout guard", "root_cause": "", "seen_count": 2, "distinct_days": 2}
 
         assert _best_card([one_off, repeated], task_words, "root_cause") is repeated
+
+    def test_recurrence_cannot_crowd_out_stronger_lexical_match(self):
+        task_words = _extract_words("Add skill markdown test validation")
+        specific = {
+            "id": "specific", "title": "Skill test validation", "root_cause": "markdown",
+            "seen_count": 1, "distinct_days": 1,
+        }
+        recurrent = {
+            "id": "recurrent", "title": "Document verification process", "root_cause": "",
+            "seen_count": 3, "distinct_days": 3,
+        }
+
+        assert _best_card([specific, recurrent], task_words, "root_cause") is specific
+
+    def test_recurrence_cannot_break_shared_word_specificity_tie(self):
+        task_words = _extract_words("Document cycle test verification proposals")
+        specific = {
+            "id": "specific", "title": "Cycle test duplicate proposals", "approach": "verification",
+            "seen_count": 1, "distinct_days": 1,
+        }
+        recurrent = {
+            "id": "recurrent", "title": "Document test verification", "approach": "verification",
+            "seen_count": 3, "distinct_days": 3,
+        }
+
+        # Both cards score 7, but the specific card shares four distinct words
+        # versus three. Recurrence must not overturn that more-specific match.
+        assert _best_card([specific, recurrent], task_words, "approach") is specific
+
+    def test_recurrence_does_not_break_lexical_score_tie_with_more_shared_words(self):
+        task_words = _extract_words("Alpha beta gamma")
+        specific = {
+            "id": "specific", "title": "Alpha", "approach": "beta gamma",
+            "seen_count": 1, "distinct_days": 1,
+        }
+        recurrent = {
+            "id": "recurrent", "title": "Beta gamma", "approach": "",
+            "seen_count": 3, "distinct_days": 3,
+        }
+
+        # Both lexical scores are 4, but the specific card shares three
+        # distinct words versus two. Recurrence is only consulted after
+        # shared-word specificity, so it cannot win.
+        assert _best_card([specific, recurrent], task_words, "approach") is specific
 
     def test_provenance_selection_matches_live_selector_with_recurrence(self):
         entries = [
