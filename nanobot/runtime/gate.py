@@ -207,6 +207,10 @@ _SKILL_DUP_THRESHOLD = 0.40
 _SKILL_DUP_MIN_SHARED = 3
 _SKILL_DESC_SCORING_CAP = 400  # scoring window, not write policy
 _SKILL_DESC_POLICY_CAP = 120  # maximum discovery description length at write time
+# Historical replay on all 47 origin/main commits touching skills/ found that a
+# floor of 3 non-blank body lines blocks only the two jsonl-stream-filter
+# placeholder-producing commits; 7 would also block a normal six-line skill.
+_SKILL_BODY_MIN_NONBLANK = 3
 _SKILL_SCAN_CAP = 200       # existing skills compared against a new one
 _SKILL_GIT_TIMEOUT = 30     # seconds per git call; expiry is fail-closed
 
@@ -286,6 +290,15 @@ def _parse_skill_frontmatter(text: str) -> 'dict[str, str] | None':
             pending = key.strip()  # a bare ``key:`` may continue as an indented block
         fields[key.strip()] = str(value)
     return None  # opened but never closed
+
+
+def _skill_body(text: str) -> str:
+    """Return content after the closing frontmatter delimiter, or empty."""
+    lines = text.replace('\r\n', '\n').split('\n')
+    if not lines or lines[0].strip() != '---':
+        return ''
+    end = next((i for i, line in enumerate(lines[1:], 1) if line.strip() == '---'), None)
+    return '' if end is None else '\n'.join(lines[end + 1:])
 
 
 def _skill_description_overlap(a: str, b: str) -> 'tuple[float, int]':
@@ -387,6 +400,8 @@ def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: '
       closed, or a malformed scalar (unterminated quote)
     - ``skill frontmatter: empty``       — ``name`` or ``description`` blank
     - ``skill frontmatter: name``        — ``name`` differs from the directory
+    - ``skill body``                     — fewer than three non-blank body lines
+    - ``skill duplicate batch``          — changed skills share an exact description
     - ``skill duplicate``                — a NEW skill's description overlaps an
       existing one (>= _SKILL_DUP_THRESHOLD); names the original and says to
       extend it. Editing an existing skill in place, or renaming one (git
@@ -435,6 +450,14 @@ def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: '
         if p.endswith('/SKILL.md') and p.count('/') == 2 and p in head_paths
     )[:_SKILL_SCAN_CAP]
     existing_texts: 'dict[str, str | None] | None' = None
+    changed_descriptions: dict[str, str] = {}
+    base_changed_texts = _git_show_many(
+        repo_root, base_sha,
+        sorted(
+            f'skills/{name}/SKILL.md' for name in dirs_touched
+            if f'skills/{name}/SKILL.md' in base_paths
+        ),
+    )
     for name in sorted(dirs_touched):
         if not any(p.startswith(f'skills/{name}/') for p in head_paths):
             continue  # directory gone at HEAD (rename source) — nothing to check
@@ -468,6 +491,16 @@ def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: '
                 f'skill frontmatter: name {fm_name!r} does not match directory {name!r}: {skill_md}'
             )
             continue
+        body_nonblank = sum(bool(line.strip()) for line in _skill_body(text).splitlines())
+        if body_nonblank < _SKILL_BODY_MIN_NONBLANK:
+            violations.append(
+                f'skill body: fewer than {_SKILL_BODY_MIN_NONBLANK} non-blank lines: {skill_md}'
+            )
+        base_text = base_changed_texts.get(skill_md)
+        base_fm = _parse_skill_frontmatter(base_text) if base_text is not None else None
+        base_desc = (base_fm or {}).get('description', '').strip()
+        if fm_desc != base_desc:
+            changed_descriptions[name] = fm_desc
         if skill_md in base_paths or renames.get(skill_md, '').endswith('/SKILL.md'):
             continue  # extending or renaming an existing skill — never a duplicate
         if existing_texts is None:
@@ -499,6 +532,19 @@ def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: '
         elif len(fm_desc) > _SKILL_DESC_POLICY_CAP:
             violations.append(
                 f'skill frontmatter: description exceeds {_SKILL_DESC_POLICY_CAP} chars: {skill_md}'
+            )
+    # #1595: compare the changed batch with itself. Exact equality is enough to
+    # catch the proven bulk-placeholder incident without adding another fuzzy
+    # threshold that historical replay has not calibrated.
+    first_by_description: dict[str, str] = {}
+    for name, description in sorted(changed_descriptions.items()):
+        first = first_by_description.get(description)
+        if first is None:
+            first_by_description[description] = name
+        else:
+            violations.append(
+                f'skill duplicate batch: exact description shared by changed skills '
+                f'{first!r} and {name!r}'
             )
     return violations
 

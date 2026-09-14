@@ -103,6 +103,19 @@ class TestTypedHelpers:
         assert rows[1]["allowed"] is False
         assert rows[1]["violations"] == ["nanobot/x.py"]
 
+    def test_skill_hygiene_rule_name_survives_in_gate_journal(self, tmp_path):
+        violation = (
+            "skill duplicate batch: exact description shared by changed skills "
+            "'first-skill' and 'second-skill'"
+        )
+        cycle_ledger.record_gate_decision(
+            tmp_path, "cycle-skill", False, "mutation_surface_violation", [violation]
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert row["phase"] == "gate"
+        assert row["violations"] == [violation]
+        assert row["violations"][0].startswith("skill duplicate batch:")
+
     def test_record_cycle_outcome_lesson_candidate_is_additive(self, tmp_path):
         cycle_ledger.record_cycle_outcome(
             tmp_path, "c1", "success", None, ["a.py"], "selfevo/cycle-1",
@@ -360,6 +373,30 @@ def _seed_bridge_request(state_dir: Path, request_id: str, cycle_id: str, **extr
     )
 
 
+class _FakeSkillHygieneSubagentManager:
+    """Commit the proven same-batch duplicate-description incident shape."""
+
+    def __init__(self, *, workspace, **_kwargs):
+        self.workspace = workspace
+        self._running_tasks: dict = {}
+
+    async def spawn(self, **_kwargs):
+        description = "The same structurally valid description for both changed skills"
+        for name in ("first-skill", "second-skill"):
+            path = self.workspace / "skills" / name / "SKILL.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "---\n"
+                f"name: {name}\n"
+                f"description: {description}\n"
+                "---\n\n# Skill\n## Usage\nPerform the bounded workflow.\n",
+                encoding="utf-8",
+            )
+        _run(self.workspace, "add", "skills")
+        _run(self.workspace, "commit", "-m", "feat: add duplicate skill batch")
+        return "fake skill subagent spawned"
+
+
 class _FakeSubagentManager:
     """Stand-in for nanobot.agent.subagent.SubagentManager: simulates a
     subagent that commits one real change directly to the (already
@@ -387,6 +424,30 @@ def _core_smoke_set_matches_fixture_repo(monkeypatch):
 
 
 class TestBridgeIntegrationLedgerRows:
+    def test_skill_hygiene_violation_reaches_production_gate_journal(self, tmp_path, monkeypatch):
+        base = tmp_path
+        state_dir = base / "state"
+        state_dir.mkdir()
+        _init_selfevo_repo(base)
+
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+        monkeypatch.setattr(bridge, "SubagentManager", _FakeSkillHygieneSubagentManager)
+        monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        monkeypatch.setenv("SUBAGENT_BRIDGE_MAX_REVISIONS", "0")
+
+        _seed_bridge_request(state_dir, "req-skill", "cycle-skill")
+        assert asyncio.run(bridge._main_impl()) == 0
+
+        gate_rows = [row for row in _read_ledger(state_dir) if row["phase"] == "gate"]
+        assert gate_rows[-1]["allowed"] is False
+        assert gate_rows[-1]["reason"] == "mutation_surface_violation"
+        assert any(
+            violation.startswith("skill duplicate batch:")
+            for violation in gate_rows[-1]["violations"]
+        )
+
     def test_full_green_cycle_writes_started_gate_success(self, tmp_path, monkeypatch):
         base = tmp_path
         state_dir = base / "state"
