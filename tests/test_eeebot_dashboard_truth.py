@@ -91,6 +91,29 @@ def test_format_rate_preserves_unavailable_zero_and_percentage() -> None:
     assert DASHBOARD.format_rate(0.01602) == "1.6%"
 
 
+def test_refresh_host_capabilities_records_explicit_trigger(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(DASHBOARD, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(DASHBOARD.Path, "glob", lambda self, pattern: [])
+    monkeypatch.setattr(DASHBOARD.Path, "exists", lambda self: False)
+    monkeypatch.setattr(DASHBOARD.Path, "read_text", lambda self, *args, **kwargs: {
+        "/proc/cpuinfo": "model name : test-cpu\n",
+        "/proc/meminfo": "MemTotal: 1 kB\n",
+        "/proc/asound/cards": "",
+    }.get(str(self).replace("\\", "/"), ""))
+    monkeypatch.setattr("subprocess.check_output", lambda command, **kwargs: {
+        ("lsusb",): b"",
+        ("ip", "-o", "link", "show"): b"",
+        ("df", "-h", "/"): b"Filesystem  Size  Used Avail Use% Mounted on\n/dev/sda1  1G  1M  999M  1% /\n",
+        ("uname", "-r"): b"test-kernel\n",
+        ("uptime", "-p"): b"up 1 minute\n",
+    }[tuple(command)])
+
+    caps = DASHBOARD.refresh_host_capabilities(trigger="systemd_timer")
+
+    assert "_probe_source" not in caps
+    assert caps["_probe_trigger"] == "systemd_timer"
+
+
 def test_refresh_host_capabilities_uses_proc_asound_cards_without_arecord(tmp_path: Path, monkeypatch) -> None:
     class Probe:
         def __call__(self, command, **kwargs):
@@ -167,15 +190,13 @@ def test_refresh_host_capabilities_preserves_proc_probe_unavailable(tmp_path: Pa
     }
     assert caps["bluetooth"]["state"] == "absent"
     assert caps["wifi"]["state"] == "absent"
-    assert caps["_probe_source"] == "manual"
+    assert "_probe_source" not in caps
     assert caps["_probe_trigger"] == "dashboard_refresh"
 
 
-def test_refresh_host_capabilities_marks_bluetooth_adapter_down_as_uninitialized(tmp_path: Path, monkeypatch) -> None:
+def test_refresh_host_capabilities_collects_all_bluetooth_devices(tmp_path: Path, monkeypatch) -> None:
     class Probe:
         def __call__(self, command, **kwargs):
-            if command == ["lsusb"]:
-                return b"Bus 005 Device 002: ID 0b05:b700 Broadcom Bluetooth 2.1\n"
             if command == ["ip", "-o", "link", "show"]:
                 return b""
             if command == ["df", "-h", "/"]:
@@ -187,22 +208,106 @@ def test_refresh_host_capabilities_marks_bluetooth_adapter_down_as_uninitialized
             raise AssertionError(command)
 
     def glob(self, pattern):
-        if str(self).replace("\\", "/") == "/sys/class/bluetooth" and pattern == "hci*":
+        path = str(self).replace("\\", "/")
+        if path == "/sys/class/bluetooth" and pattern == "hci*":
+            return [Path("/sys/class/bluetooth/hci0"), Path("/sys/class/bluetooth/hci1")]
+        if path == "/sys/class/bluetooth/hci0" and pattern == "rfkill*":
+            return []
+        if path == "/sys/class/bluetooth/hci1" and pattern == "rfkill*":
+            return [Path("/sys/class/bluetooth/hci1/rfkill4")]
+        return []
+
+    monkeypatch.setattr(DASHBOARD, "STATE_DIR", tmp_path)
+    monkeypatch.setattr("subprocess.check_output", Probe())
+    monkeypatch.setattr(DASHBOARD.Path, "glob", glob)
+    monkeypatch.setattr(DASHBOARD.Path, "read_text", lambda self, *args, **kwargs: {
+        "/sys/class/bluetooth/hci1/rfkill4/soft": "0\n",
+        "/sys/class/bluetooth/hci1/rfkill4/hard": "0\n",
+        "/proc/asound/cards": "",
+        "/proc/cpuinfo": "model name : test-cpu\n",
+        "/proc/meminfo": "MemTotal: 1 kB\n",
+    }.get(str(self).replace("\\", "/"), ""))
+    monkeypatch.setattr(DASHBOARD.Path, "exists", lambda self: False)
+
+    caps = DASHBOARD.refresh_host_capabilities()
+
+    assert caps["bluetooth"] == {
+        "state": "present",
+        "available": True,
+        "details": "Detected hci0, hci1 via rfkill",
+    }
+    assert "hci0" in caps["bluetooth"]["details"]
+
+
+def test_refresh_host_capabilities_marks_unblocked_bluetooth_present(tmp_path: Path, monkeypatch) -> None:
+    class Probe:
+        def __call__(self, command, **kwargs):
+            if command == ["ip", "-o", "link", "show"]:
+                return b""
+            if command == ["df", "-h", "/"]:
+                return b"Filesystem  Size  Used Avail Use% Mounted on\n/dev/sda1  1G  1M  999M  1% /\n"
+            if command == ["uname", "-r"]:
+                return b"test-kernel\n"
+            if command == ["uptime", "-p"]:
+                return b"up 1 minute\n"
+            raise AssertionError(command)
+
+    def glob(self, pattern):
+        path = str(self).replace("\\", "/")
+        if path == "/sys/class/bluetooth" and pattern == "hci*":
+            return [Path("/sys/class/bluetooth/hci0")]
+        if path == "/sys/class/bluetooth/hci0" and pattern == "rfkill*":
+            return [Path("/sys/class/bluetooth/hci0/rfkill3")]
+        return []
+
+    monkeypatch.setattr(DASHBOARD, "STATE_DIR", tmp_path)
+    monkeypatch.setattr("subprocess.check_output", Probe())
+    monkeypatch.setattr(DASHBOARD.Path, "glob", glob)
+    monkeypatch.setattr(DASHBOARD.Path, "read_text", lambda self, *args, **kwargs: {
+        "/sys/class/bluetooth/hci0/rfkill3/soft": "0\n",
+        "/sys/class/bluetooth/hci0/rfkill3/hard": "0\n",
+        "/proc/asound/cards": " 0 [Intel]: HDA-Intel - HDA Intel\n",
+        "/proc/cpuinfo": "model name : test-cpu\n",
+        "/proc/meminfo": "MemTotal: 1 kB\n",
+    }.get(str(self).replace("\\", "/"), ""))
+    monkeypatch.setattr(DASHBOARD.Path, "exists", lambda self: False)
+
+    caps = DASHBOARD.refresh_host_capabilities()
+
+    assert caps["bluetooth"] == {
+        "state": "present",
+        "available": True,
+        "details": "Detected hci0 via rfkill",
+    }
+
+
+def test_refresh_host_capabilities_marks_bluetooth_without_rfkill_as_uninitialized(tmp_path: Path, monkeypatch) -> None:
+    class Probe:
+        def __call__(self, command, **kwargs):
+            if command == ["ip", "-o", "link", "show"]:
+                return b""
+            if command == ["df", "-h", "/"]:
+                return b"Filesystem  Size  Used Avail Use% Mounted on\n/dev/sda1  1G  1M  999M  1% /\n"
+            if command == ["uname", "-r"]:
+                return b"test-kernel\n"
+            if command == ["uptime", "-p"]:
+                return b"up 1 minute\n"
+            raise AssertionError(command)
+
+    def glob(self, pattern):
+        path = str(self).replace("\\", "/")
+        if path == "/sys/class/bluetooth" and pattern == "hci*":
             return [Path("/sys/class/bluetooth/hci0")]
         return []
 
     monkeypatch.setattr(DASHBOARD, "STATE_DIR", tmp_path)
     monkeypatch.setattr("subprocess.check_output", Probe())
     monkeypatch.setattr(DASHBOARD.Path, "glob", glob)
-    def read_probe(self, *args, **kwargs):
-        return {
-            "/sys/class/bluetooth/hci0/operstate": "down\n",
-            "/proc/asound/cards": " 0 [Intel]: HDA-Intel - HDA Intel\n",
-            "/proc/cpuinfo": "model name : test-cpu\n",
-            "/proc/meminfo": "MemTotal: 1 kB\n",
-        }.get(str(self).replace("\\", "/"), "")
-
-    monkeypatch.setattr(DASHBOARD.Path, "read_text", read_probe)
+    monkeypatch.setattr(DASHBOARD.Path, "read_text", lambda self, *args, **kwargs: {
+        "/proc/asound/cards": " 0 [Intel]: HDA-Intel - HDA Intel\n",
+        "/proc/cpuinfo": "model name : test-cpu\n",
+        "/proc/meminfo": "MemTotal: 1 kB\n",
+    }.get(str(self).replace("\\", "/"), ""))
     monkeypatch.setattr(DASHBOARD.Path, "exists", lambda self: False)
 
     caps = DASHBOARD.refresh_host_capabilities()
@@ -210,7 +315,7 @@ def test_refresh_host_capabilities_marks_bluetooth_adapter_down_as_uninitialized
     assert caps["bluetooth"] == {
         "state": "present_uninitialized",
         "available": False,
-        "details": "Bus 005 Device 002: ID 0b05:b700 Broadcom Bluetooth 2.1 (hci down)",
+        "details": "hci0 (no rfkill state) via rfkill",
     }
     assert caps["microphone"]["state"] == "present"
 
@@ -266,6 +371,9 @@ def test_legacy_inventory_source_is_explicitly_manual_only() -> None:
     assert DASHBOARD.format_host_capability_probe_source({}) == "manual-only (legacy; no autonomous trigger)"
     assert DASHBOARD.format_host_capability_probe_source({"_probe_source": "manual"}) == "manual"
     assert DASHBOARD.format_host_capability_probe_source({"_probe_source": "manual", "_probe_trigger": "dashboard_refresh"}) == "manual (dashboard_refresh)"
+    assert DASHBOARD.format_host_capability_probe_source({"_probe_trigger": "systemd_timer"}) == "systemd (systemd_timer)"
+    assert DASHBOARD.format_host_capability_probe_source({"_probe_trigger": "http_refresh"}) == "manual (http_refresh)"
+    assert DASHBOARD.format_host_capability_probe_source({"_probe_trigger": "cli_refresh"}) == "manual (cli_refresh)"
 
 
 def test_host_coverage_health_keeps_stale_inventory_non_ok() -> None:
@@ -952,7 +1060,7 @@ def test_post_cleanup_parses_previously_dead_hours_and_dry_run_parameters(monkey
 def test_post_refresh_host_caps_and_unknown_path_behave(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        DASHBOARD, "refresh_host_capabilities", lambda: calls.append("refresh") or {}
+        DASHBOARD, "refresh_host_capabilities", lambda **_: calls.append("refresh") or {}
     )
     request_cls = _mutation_test_request_class()
 

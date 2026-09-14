@@ -145,8 +145,8 @@ _REPORT_SCAN_CACHE: dict[str, Any] = {"loaded_at": 0.0, "limit": None, "root_mti
 _MATERIALIZED_CACHE: dict[str, Any] = {"loaded_at": 0.0, "limit": None, "root_mtime_ns": None, "result": None, "source_status": "missing"}
 
 
-def refresh_host_capabilities() -> dict[str, Any]:
-    """Re-scan host hardware and write a manually-triggered inventory.
+def refresh_host_capabilities(*, trigger: str = "dashboard_refresh") -> dict[str, Any]:
+    """Re-scan host hardware and write a triggered inventory.
 
     Each probe result keeps command failure distinct from a successful empty
     result.  ``available`` remains as a compatibility field, but consumers
@@ -195,24 +195,48 @@ def refresh_host_capabilities() -> dict[str, Any]:
     except Exception as exc:
         caps["camera"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
 
-    # Bluetooth
-    def parse_bluetooth(output: str) -> tuple[str, str]:
-        adapter = next((line.strip() for line in output.splitlines() if "bluetooth" in line.lower()), "")
-        if not adapter:
-            return "absent", "not detected"
-        hci_paths = sorted(Path("/sys/class/bluetooth").glob("hci*"))
-        if not hci_paths:
-            return "present", adapter
-        try:
-            operstates = [path / "operstate" for path in hci_paths]
-            states = [path.read_text(encoding="utf-8").strip().lower() for path in operstates]
-        except OSError as exc:
-            return "probe_unavailable", f"probe failed: {type(exc).__name__}"
-        if any(state == "up" for state in states):
-            return "present", adapter
-        return "present_uninitialized", f"{adapter} (hci down)"
-
-    caps["bluetooth"] = command_probe(["lsusb"], parse_bluetooth)
+    # Bluetooth. Prefer kernel sysfs: the service sandbox may not expose
+    # lsusb, while rfkill gives the adapter's usable/blocked state.
+    try:
+        bluetooth_devices = sorted(Path("/sys/class/bluetooth").glob("hci*"))
+        if bluetooth_devices:
+            states: list[tuple[str, str, str | None]] = []
+            for device in bluetooth_devices:
+                rfkill_paths = sorted(device.glob("rfkill*"))
+                if not rfkill_paths:
+                    states.append((device.name, "", None))
+                    continue
+                rfkill = rfkill_paths[0]
+                soft = (rfkill / "soft").read_text(encoding="utf-8").strip()
+                hard = (rfkill / "hard").read_text(encoding="utf-8").strip()
+                states.append((device.name, soft, hard))
+            if any(soft == "0" and hard == "0" for _, soft, hard in states):
+                details = f"Detected {', '.join(name for name, _, _ in states)} via rfkill"
+                caps["bluetooth"] = result("present", details)
+            else:
+                blocked_parts = []
+                for name, soft, hard in states:
+                    if hard is None:
+                        reason = "no rfkill state"
+                    else:
+                        flags = ("soft" if soft == "1" else "") + ("+" if soft == "1" and hard == "1" else "") + ("hard" if hard == "1" else "")
+                        reason = f"{flags} blocked"
+                    blocked_parts.append(f"{name} ({reason})")
+                caps["bluetooth"] = result("present_uninitialized", f"{', '.join(blocked_parts)} via rfkill")
+        else:
+            rfkill_devices = []
+            for path in sorted(Path("/sys/class/rfkill").glob("rfkill*")):
+                try:
+                    if (path / "type").read_text(encoding="utf-8").strip().lower() == "bluetooth":
+                        rfkill_devices.append(path.name)
+                except (FileNotFoundError, OSError):
+                    continue
+            caps["bluetooth"] = result(
+                "present_uninitialized" if rfkill_devices else "absent",
+                f"Detected Bluetooth rfkill: {', '.join(rfkill_devices)} (hci unavailable)" if rfkill_devices else "not detected",
+            )
+    except OSError as exc:
+        caps["bluetooth"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
 
     # WiFi
     def parse_wifi(output: str) -> tuple[str, str]:
@@ -285,8 +309,7 @@ def refresh_host_capabilities() -> dict[str, Any]:
         caps["screen"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
 
     caps["_scan_timestamp"] = datetime.now(timezone.utc).isoformat()
-    caps["_probe_source"] = "manual"
-    caps["_probe_trigger"] = "dashboard_refresh"
+    caps["_probe_trigger"] = trigger
 
     # Write to state file
     host_caps_path = STATE_DIR / "host_capabilities.json"
@@ -1037,15 +1060,13 @@ def format_host_capability_probe_attention(age_hours: float | None, status: str)
 
 
 def format_host_capability_probe_source(host_caps: dict[str, Any]) -> str:
-    source = host_caps.get("_probe_source") if isinstance(host_caps, dict) else None
     trigger = host_caps.get("_probe_trigger") if isinstance(host_caps, dict) else None
-    if source and trigger:
+    if trigger:
+        source = "systemd" if trigger == "systemd_timer" else "manual"
         return f"{source} ({trigger})"
-    if source:
-        return str(source)
-    # Before #1557 the only writer was the dashboard refresh action/CLI and
-    # there was no autonomous capability timer. Make that manual-only fact
-    # visible for legacy inventories instead of presenting it as unknown.
+    legacy_source = host_caps.get("_probe_source") if isinstance(host_caps, dict) else None
+    if legacy_source:
+        return str(legacy_source)
     return "manual-only (legacy; no autonomous trigger)"
 
 
@@ -3569,7 +3590,7 @@ class DashboardHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             if url.query:
                 self.send_error(400, "Refresh accepts no query options")
                 return
-            payload = refresh_host_capabilities()
+            payload = refresh_host_capabilities(trigger="http_refresh")
         else:
             self.send_error(404, "Not Found")
             return
@@ -3678,13 +3699,13 @@ Examples:
         return
 
     if "--refresh-host-caps" in _flags or "-R" in _flags:
-        caps = refresh_host_capabilities()
+        caps = refresh_host_capabilities(trigger=os.getenv("EEEBOT_CAPABILITY_PROBE_TRIGGER", "cli_refresh"))
         print("Host capabilities refreshed:")
         for name, info in caps.items():
             if name.startswith("_"):
                 continue
             state = info.get("state", "present" if info.get("available") else "absent")
-            status = {"present": "✓", "absent": "✗", "probe_unavailable": "?"}.get(state, "?")
+            status = {"present": "✓", "present_uninitialized": "!", "absent": "✗", "probe_unavailable": "?"}.get(state, "?")
             print(f"  {status} {name} [{state}]: {info.get('details', 'unknown')}")
         print(f"\nScan timestamp: {caps.get('_scan_timestamp', 'unknown')}")
         return

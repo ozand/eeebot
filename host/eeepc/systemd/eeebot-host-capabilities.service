@@ -8,6 +8,7 @@ User=eeepc-agent
 Group=eeepc-agent
 WorkingDirectory=/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
 Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=EEEBOT_CAPABILITY_PROBE_TRIGGER=systemd_timer
 ExecStart=/opt/eeepc-agent/venv/bin/python /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/eeebot_dashboard.py --refresh-host-caps
 TimeoutStartSec=60
 NoNewPrivileges=true
