@@ -3,7 +3,7 @@ Description=Refresh eeebot host capability inventory daily (#1557)
 
 [Timer]
 OnBootSec=10min
-OnUnitActiveSec=1d
+OnCalendar=*-*-* 01:00:00
 Persistent=true
 Unit=eeebot-host-capabilities.service
 

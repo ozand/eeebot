@@ -45,7 +45,8 @@ def test_host_capabilities_probe_runs_daily_as_eeepc_agent() -> None:
     assert "Group=eeepc-agent" in service
     assert "eeebot_dashboard.py --refresh-host-caps" in service
     assert "ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state" in service
-    assert "OnUnitActiveSec=1d" in timer
+    assert "OnCalendar=*-*-* 01:00:00" in timer
+    assert "OnUnitActiveSec=" not in timer
     assert "Persistent=true" in timer
     assert "Unit=eeebot-host-capabilities.service" in timer
     assert "eeebot-host-capabilities.timer" in install
