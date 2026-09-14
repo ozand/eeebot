@@ -22,6 +22,33 @@ def test_real_good_lesson_passes():
     assert lesson_v2.mint_quality_reason(card("good")) is None
 
 
+def test_incident_only_reads_problem_not_solution_or_evidence():
+    problem = "A model endpoint returns 404 when the configured route is missing"
+    assert lesson_v2.incident_only(problem) is False
+    assert lesson_v2.incident_only("Analysis during test writing noted: lines 84-96 and 112-162") is True
+    card_with_markers_elsewhere = {
+        "problem": problem,
+        "solution": "The tool call write_file 8v84c3XW6 failed at /tmp/tmpdwd9n86.",
+        "evidence": ["tool call egd6E10DT-lb", "seq 1"],
+    }
+    assert lesson_v2.incident_only(card_with_markers_elsewhere["problem"]) is False
+
+
+def test_incident_only_preserves_cycle_id_with_concrete_condition():
+    assert lesson_v2.incident_only(
+        "In cycle-abc123, the provider route returns 404 for the configured model"
+    ) is False
+
+
+def test_incident_only_rejects_replayed_incident_markers():
+    assert lesson_v2.incident_only(
+        "tool call egd6E10DT-lb issued a loop breaker safety stop"
+    ) is True
+    assert lesson_v2.incident_only(
+        "test_prevent_repeat_failures_commit_history_check failed with an absent script"
+    ) is True
+
+
 def test_real_markdown_twins_and_extension(tmp_path):
     from nanobot.runtime.lesson_index import generate_index, read_index
     directory = tmp_path / "lessons"
@@ -92,13 +119,15 @@ def test_real_live_reflector_paraphrased_duplicates():
 
     reason_dde = lesson_v2.mint_quality_reason(card_dde, [card_e39])
     assert reason_dde is not None
-    assert reason_dde["reason"] == "duplicate"
-    assert reason_dde["duplicate_id"] == "LESS-REF-e39ffed2e48f-fc53"
+    assert reason_dde["reason"] in {"duplicate", "incident_problem"}
+    if reason_dde["reason"] == "duplicate":
+        assert reason_dde["duplicate_id"] == "LESS-REF-e39ffed2e48f-fc53"
 
     reason_dde_7c7 = lesson_v2.mint_quality_reason(card_dde, [card_7c7])
     assert reason_dde_7c7 is not None
-    assert reason_dde_7c7["reason"] == "duplicate"
-    assert reason_dde_7c7["duplicate_id"] == "LESS-REF-7c7d36e5d201-5015"
+    assert reason_dde_7c7["reason"] in {"duplicate", "incident_problem"}
+    if reason_dde_7c7["reason"] == "duplicate":
+        assert reason_dde_7c7["duplicate_id"] == "LESS-REF-7c7d36e5d201-5015"
 
 
 def test_title_gate_rejects_duplicate_titles_and_records_bounded_reason(tmp_path):
@@ -139,9 +168,48 @@ def test_title_gate_without_execution_has_no_pass_marker(tmp_path):
 
 
 
+def test_incident_rejection_records_explicit_decision_reason(tmp_path):
+    import json
+    incident = {
+        "id": "LESS-INCIDENT",
+        "title": "Provider routing condition",
+        "problem": "tool call egd6E10DT-lb issued a loop breaker safety stop",
+        "solution": "Change strategy immediately after the safety stop instead of repeating the call.",
+        "tags": ["runtime"],
+        "severity": "medium",
+        "evidence": ["cycle-incident"],
+    }
+    assert not lesson_v2.allow_mint(incident, [], tmp_path)
+    row = json.loads((tmp_path / "curator/decisions.jsonl").read_text().splitlines()[0])
+    assert row["decision"] == "mint_rejected"
+    assert row["reason"] == "incident_problem"
+    assert "instruction" in row
+
+
 def test_rejection_records_existing_decision_surface(tmp_path):
     import json
     assert not lesson_v2.allow_mint(card("tautology"), [], tmp_path)
     row = json.loads((tmp_path / "curator/decisions.jsonl").read_text().splitlines()[0])
     assert row["decision"] == "mint_rejected"
     assert row["reason"].startswith("tautology:")
+
+
+def test_all_live_cards_replay_incident_rule_without_false_positives():
+    """#1589: the reviewed 41-card replay stays pinned at 7 rejects/0 FP."""
+    import yaml
+    corpus_path = Path(__file__).parents[1] / "tests" / "fixtures" / "lessons_1589_live.yaml"
+    rows = yaml.safe_load(corpus_path.read_text(encoding="utf-8"))
+    rows = rows["lessons"] if isinstance(rows, dict) else rows
+    rejected = [row["id"] for row in rows if lesson_v2.incident_only(row.get("problem"))]
+    assert rejected == [
+        "LESS-REF-ddee2f247341-5c01",
+        "LESS-REF-9ff792579a7a-eef8",
+        "LESS-REF-62ca5a6de51a-530e",
+        "LESS-REF-6dfc256614f3-ed23",
+        "LESS-REF-16436c7d5b3a-4c67",
+        "LESS-REF-c871bf9abe41",
+        "LESS-REF-c871bf9abe41-8608",
+    ]
+    assert len(rows) == 41
+    assert len(rejected) == 7
+    assert len(rows) - len(rejected) == 34

@@ -160,6 +160,39 @@ def anecdote_only(problem: Any) -> bool:
     return not (words - narrative)
 
 
+_INCIDENT_TOOL_ID_RE = re.compile(
+    r"\b(?:(?:write_file|read_file|edit_file|exec|grep|bash|python|shell)\s+|tool\s+call\s+)[A-Za-z0-9][A-Za-z0-9_-]{5,}\b",
+    re.I,
+)
+_INCIDENT_TEMP_PATH_RE = re.compile(r"(?:(?:[A-Za-z]:)?/tmp/[A-Za-z0-9._/-]+|/var/tmp/[A-Za-z0-9._/-]+)", re.I)
+_INCIDENT_LINE_RANGE_RE = re.compile(r"\blines?\s+\d+\s*[-–]\s*\d+(?:\s+and\s+\d+\s*[-–]\s*\d+)*", re.I)
+_INCIDENT_SEQ_RE = re.compile(r"\bseq(?:uence)?\s*\d+\b", re.I)
+_INCIDENT_TURN_RE = re.compile(r"\bturn\s+\d+\b", re.I)
+_INCIDENT_CYCLE_RE = re.compile(r"\bcycle-[A-Za-z0-9][A-Za-z0-9_-]+\b", re.I)
+_INCIDENT_LANGUAGE_RE = re.compile(
+    r"\b(?:transcript|tool\s+call|agent\s+issued|analysis\s+during|partial\s+outcome|finish_reason|\bthe\s+agent\b)",
+    re.I,
+)
+_BARE_TEST_SUBJECT_RE = re.compile(r"^\s*(?:the\s+)?test_[A-Za-z0-9_]{8,}\b", re.I)
+
+
+def incident_only(problem: Any) -> bool:
+    """Reject a problem that is an incident report rather than a condition.
+
+    This deliberately examines only the problem/condition text. A hard
+    transcript marker must be paired with incident language; cycle IDs and
+    other provenance alone remain valid alongside a concrete condition.
+    """
+    text = str(problem or "").strip()
+    hard_marker = any(pattern.search(text) for pattern in (
+        _INCIDENT_TOOL_ID_RE, _INCIDENT_TEMP_PATH_RE, _INCIDENT_LINE_RANGE_RE,
+        _INCIDENT_SEQ_RE, _INCIDENT_TURN_RE,
+    ))
+    if hard_marker and _INCIDENT_LANGUAGE_RE.search(text):
+        return True
+    return bool(_BARE_TEST_SUBJECT_RE.search(text))
+
+
 def mint_quality_reason(card: dict[str, Any], existing: list[dict[str, Any]] = (), *, extending: bool = False) -> dict[str, str] | None:
     if extending:
         return None  # existing-card evidence/count updates are not minting
@@ -169,6 +202,8 @@ def mint_quality_reason(card: dict[str, Any], existing: list[dict[str, Any]] = (
             return {"reason": f"tautology:{left}:{right}"}
     if anecdote_only(card.get("problem")):
         return {"reason": "anecdote_problem"}
+    if incident_only(card.get("problem") or card.get("condition")):
+        return {"reason": "incident_problem"}
     condition = keyword_set(card.get("problem") or card.get("root_cause"))
     action = keyword_set(card.get("solution") or card.get("prevention"))
     for entry in existing[:_MAX_ENTRIES]:
