@@ -131,11 +131,9 @@ def test_refresh_host_capabilities_uses_proc_asound_cards_without_arecord(tmp_pa
     }
 
 
-def test_refresh_host_capabilities_distinguishes_probe_failure_and_empty_result(tmp_path: Path, monkeypatch) -> None:
-    class MissingArecord:
+def test_refresh_host_capabilities_preserves_proc_probe_unavailable(tmp_path: Path, monkeypatch) -> None:
+    class Probe:
         def __call__(self, command, **kwargs):
-            if command == ["arecord", "-l"]:
-                raise FileNotFoundError("arecord")
             if command == ["lsusb"]:
                 return b""
             if command == ["ip", "-o", "link", "show"]:
@@ -149,17 +147,23 @@ def test_refresh_host_capabilities_distinguishes_probe_failure_and_empty_result(
             raise AssertionError(command)
 
     monkeypatch.setattr(DASHBOARD, "STATE_DIR", tmp_path)
-    monkeypatch.setattr("subprocess.check_output", MissingArecord())
-    monkeypatch.setattr(DASHBOARD.Path, "read_text", lambda self, *args, **kwargs: "model name : test-cpu\n" if str(self) == "/proc/cpuinfo" else "MemTotal: 1 kB\n")
+    monkeypatch.setattr("subprocess.check_output", Probe())
+
+    def read_probe(self, *args, **kwargs):
+        if str(self).replace("\\", "/") == "/proc/asound/cards":
+            raise FileNotFoundError("/proc/asound/cards")
+        return "model name : test-cpu\n" if str(self) == "/proc/cpuinfo" else "MemTotal: 1 kB\n"
+
+    monkeypatch.setattr(DASHBOARD.Path, "read_text", read_probe)
     monkeypatch.setattr(DASHBOARD.Path, "exists", lambda self: False)
     monkeypatch.setattr(DASHBOARD.Path, "glob", lambda self, pattern: [])
 
     caps = DASHBOARD.refresh_host_capabilities()
 
     assert caps["microphone"] == {
-        "state": "absent",
+        "state": "probe_unavailable",
         "available": False,
-        "details": "not detected",
+        "details": "probe failed: FileNotFoundError",
     }
     assert caps["bluetooth"]["state"] == "absent"
     assert caps["wifi"]["state"] == "absent"
