@@ -604,6 +604,36 @@ def test_diff_hides_stale_reward_and_context_payloads() -> None:
     assert "101.0h" in rendered
 
 
+def test_watch_loop_runs_initial_and_previous_sample_diff(monkeypatch, capsys) -> None:
+    samples = [{"cpu_load": 0.1}, {"cpu_load": 0.2}]
+    calls = iter(samples)
+    rendered_diffs = []
+
+    monkeypatch.setattr(DASHBOARD, "collect_metrics", lambda: next(calls))
+    monkeypatch.setattr(DASHBOARD, "render_tui", lambda metrics: f"tui:{metrics['cpu_load']}")
+    monkeypatch.setattr(DASHBOARD, "diff_metrics", lambda old, new: [("cpu_load", old, new)])
+    monkeypatch.setattr(
+        DASHBOARD,
+        "render_watch_diff",
+        lambda old, new: rendered_diffs.append((old, new)) or "watch diff",
+    )
+    monkeypatch.setattr(DASHBOARD, "compute_adaptive_interval", lambda _base: 0)
+
+    def stop_after_second_round(_interval):
+        if len(rendered_diffs) == 1:
+            setattr(DASHBOARD, "_watch_running", False)
+
+    monkeypatch.setattr(DASHBOARD.time, "sleep", stop_after_second_round)
+    monkeypatch.setattr(DASHBOARD.sys, "argv", ["dashboard", "--watch", "--interval", "1"])
+    monkeypatch.setattr(DASHBOARD, "_watch_running", True)
+    DASHBOARD.main()
+
+    output = capsys.readouterr().out
+    assert "Initial refresh (diff available next cycle)" in output
+    assert "Changes since last refresh" in output
+    assert rendered_diffs == [({"cpu_load": 0.1}, {"cpu_load": 0.2})]
+
+
 def test_watch_diff_path_uses_bounded_renderer(monkeypatch) -> None:
     calls = []
 
