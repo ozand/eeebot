@@ -104,6 +104,39 @@ def test_executor_result_citation_boundary_distinguishes_hit_zero_and_absent(tmp
     assert zero_row["scanned_chars"] == len("Done without a citation")
 
 
+def test_citation_marker_accepts_live_path_id_without_matching_arbitrary_prose(tmp_path: Path) -> None:
+    """#1570: path-like IDs are real store IDs, not test-only inventions."""
+    live_id = "lessons/skill-subdirectory-structure.md"
+    result = (
+        f"Applied [Lesson {live_id}]. "
+        "Ignore [Lesson lessons/not a marker.md] and [Lesson lessons/unsafe?.md]."
+    )
+
+    assert record_citations(tmp_path, "cycle-live-path-id", executor_result=result) == [live_id]
+    row = read_citation_scans(tmp_path)["rows"][-1]
+    assert row["status"] == "complete"
+    assert row["marker_count"] == 1
+    assert row["lesson_ids"] == [live_id]
+
+
+def test_truncated_executor_result_is_partial_not_complete(tmp_path: Path) -> None:
+    """#1570: a bounded prefix is lower-bound evidence, never a complete scan."""
+    in_bound_id = "LESS-IN-BOUND"
+    beyond_bound_id = "LESS-BEYOND-BOUND"
+    prefix = f"[Lesson {in_bound_id}]"
+    result = prefix + ("x" * (64_000 - len(prefix))) + f"[Lesson {beyond_bound_id}]"
+
+    assert record_citations(tmp_path, "cycle-truncated-result", executor_result=result) == [in_bound_id]
+    row = read_citation_scans(tmp_path)["rows"][-1]
+    assert row["scan_ran"] is True
+    assert row["status"] == "partial"
+    assert row["marker_count"] == 1
+    assert row["lesson_ids"] == [in_bound_id]
+    assert row["scanned_chars"] == 64_000
+    assert row["truncated_chars"] == len(f"[Lesson {beyond_bound_id}]")
+    assert row["notes"] == ["scan_truncated"]
+
+
 def test_scan_row_records_bounded_selector_provenance(tmp_path: Path) -> None:
     context = {
         "relevant_error": {"id": "ERR-1"},
