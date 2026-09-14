@@ -271,15 +271,19 @@ def _append_reanchor(state_dir: Path, row: dict[str, Any]) -> None:
         fh.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
-def _append_journal(state_dir: Path, row: dict[str, Any]) -> None:
+def _append_journal(state_dir: Path, row: dict[str, Any]) -> bool:
     path = _journal_path(state_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except Exception:
+        return False
     try:
         _rotate_journal(state_dir)
     except Exception as exc:  # the append succeeded; a rotation problem is reported, not hidden
         print(f"reflector: journal rotation failed: {exc!r}", file=sys.stderr)
+    return True
 
 
 def reflection_files(state_dir: Path | str, *, archives: int = _ARCHIVE_READ_FILES) -> list[Path]:
