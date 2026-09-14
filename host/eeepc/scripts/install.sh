@@ -56,6 +56,18 @@ create_user() {
     run useradd --system --no-create-home --shell /usr/sbin/nologin \
         --home-dir /opt/eeepc-agent eeepc-agent
   fi
+
+  # #1605/#1607: /dev/fb0 is root:video 0660, so without this the framebuffer
+  # probes as unreadable and a naive probe records "this machine has no
+  # screen" about a machine with a working 1024x600 surface. Applied on every
+  # run, not only at creation: the account predates this line on the live
+  # host, and a reinstall must not silently drop the membership again.
+  if getent group video >/dev/null 2>&1; then
+    log "ensuring eeepc-agent is in the video group (framebuffer access)"
+    run usermod -aG video eeepc-agent
+  else
+    log "WARNING: no video group on this host; /dev/fb0 will probe as unavailable"
+  fi
 }
 
 # ---------------------------------------------------------------------------
