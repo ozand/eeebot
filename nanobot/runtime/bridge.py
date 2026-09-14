@@ -4054,8 +4054,49 @@ async def _main_impl_body():
             )
     except Exception:
         pass
+    _lesson_candidate: dict[str, object] | None = None
+    if _integrated:
+        _lesson_candidate = {"condition_met": bool(
+            _has_meaningful_lesson(_artifact_data)
+            and _has_delta_evidence(_artifact_data, repo_root=_selfevo_repo, backlog_title=backlog_title)
+        ), "queued": False}
+    # #1578: resolve and record the bridge-side lesson candidate outcome before
+    # the terminal ledger row is appended. This makes the row self-contained:
+    # an observer can distinguish no qualifying condition, a queued candidate,
+    # and a refusal without joining a later sink.
+    if _integrated and _lesson_candidate and _lesson_candidate["condition_met"]:
+        try:
+            from nanobot.runtime.knowledge_curator import queue_bridge_lesson_candidate
+
+            _lesson_condition, _lesson_detail, _lesson_evidence = _lesson_candidate_parts(
+                _artifact_data, backlog_title=backlog_title, cycle_id=_cycle_id,
+            )
+            if _lesson_condition and _lesson_detail:
+                try:
+                    _refusal: dict[str, str] = {}
+                    _queued = queue_bridge_lesson_candidate(
+                        STATE_DIR,
+                        cycle_id=req.get('cycle_id') or '',
+                        condition=_lesson_condition,
+                        detail=_lesson_detail,
+                        evidence=_lesson_evidence,
+                        refusal=_refusal,
+                    )
+                    _lesson_candidate["queued"] = bool(_queued)
+                    if not _queued:
+                        _lesson_candidate["refusal_reason"] = _refusal.get("reason", "candidate_rejected")
+                    _lesson_candidate["queued"] = False
+                except Exception as _exc:
+                    _lesson_candidate["refusal_reason"] = f"journal_write_failed:{type(_exc).__name__}"
+            else:
+                _lesson_candidate["refusal_reason"] = "condition_or_detail_unavailable"
+                _lesson_candidate["queued"] = False
+        except Exception as _exc:
+            _lesson_candidate["refusal_reason"] = f"candidate_setup_failed:{type(_exc).__name__}"
+
     record_cycle_outcome(
         STATE_DIR, _cycle_id, _cycle_outcome, _rollback_reason, files_changed, cycle_branch,
+        lesson_candidate=_lesson_candidate,
         verdict=_verdict, verdict_reason=_verdict_reason,
         # #1281: also on success — a cycle the auto-commit net carried past a
         # dead executor is countable from this row alone.
@@ -4103,31 +4144,7 @@ async def _main_impl_body():
     except Exception:
         pass
 
-    # Structured lesson candidates after a successful integrated commit (#1070,
-    # #1565). The bridge identifies meaningful delta evidence, then queues the
-    # candidate in the reflector journal. Recurrence, deduplication, topic
-    # validation, staging, and the eventual lessons.yaml write belong to the
-    # existing curator pool; this path must not mint a one-cycle card.
-    if _integrated and _has_meaningful_lesson(_artifact_data) and _has_delta_evidence(
-        _artifact_data, repo_root=_selfevo_repo, backlog_title=backlog_title,
-    ):
-        try:
-            from nanobot.runtime.knowledge_curator import queue_bridge_lesson_candidate
-
-            _lesson_condition, _lesson_detail, _lesson_evidence = _lesson_candidate_parts(
-                _artifact_data, backlog_title=backlog_title, cycle_id=_cycle_id,
-            )
-            if _lesson_condition and _lesson_detail:
-                queue_bridge_lesson_candidate(
-                    STATE_DIR,
-                    cycle_id=req.get('cycle_id') or '',
-                    condition=_lesson_condition,
-                    detail=_lesson_detail,
-                    evidence=_lesson_evidence,
-                )
-        except Exception:
-            pass  # never block on lesson-candidate recording failure
-    elif _rollback_reason:
+    if _rollback_reason:
         # #1041 Part 2: record structured error on gate rejection/rollback into lessons/errors.yaml
         try:
             _written_error = _write_structured_error(

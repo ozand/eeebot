@@ -103,6 +103,18 @@ class TestTypedHelpers:
         assert rows[1]["allowed"] is False
         assert rows[1]["violations"] == ["nanobot/x.py"]
 
+    def test_record_cycle_outcome_lesson_candidate_is_additive(self, tmp_path):
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c1", "success", None, ["a.py"], "selfevo/cycle-1",
+            lesson_candidate={"condition_met": True, "queued": False, "refusal_reason": "condition_equals_detail"},
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert row["lesson_candidate"] == {
+            "condition_met": True,
+            "queued": False,
+            "refusal_reason": "condition_equals_detail",
+        }
+
     def test_record_cycle_outcome_valid_enum(self, tmp_path):
         cycle_ledger.record_cycle_outcome(tmp_path, "c1", "success", None, ["a.py"], "selfevo/cycle-1")
         rows = _read_ledger(tmp_path)
@@ -124,6 +136,14 @@ class TestTypedHelpers:
         assert rows[0]["outcome"] == "failed"
 
     # ─── #1118: verdict is a NEW, purely additive, keyword-only field ─────
+
+    def test_record_cycle_outcome_lesson_candidate_without_refusal_omits_reason(self, tmp_path):
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c1", "success", None, [], None,
+            lesson_candidate={"condition_met": False, "queued": False},
+        )
+        candidate = _read_ledger(tmp_path)[0]["lesson_candidate"]
+        assert candidate == {"condition_met": False, "queued": False}
 
     def test_record_cycle_outcome_without_verdict_omits_the_key_entirely(self, tmp_path):
         """Every pre-#1118 positional call site keeps working byte-identically:

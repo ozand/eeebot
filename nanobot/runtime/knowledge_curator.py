@@ -1532,6 +1532,7 @@ def queue_bridge_lesson_candidate(
     detail: str,
     evidence: list[str] | None = None,
     kind: str = "approach_hint",
+    refusal: dict[str, str] | None = None,
 ) -> bool:
     """Append a bridge lesson candidate to the reflector's existing journal.
 
@@ -1544,13 +1545,21 @@ def queue_bridge_lesson_candidate(
     cycle = str(cycle_id or "").strip()
     condition_text = _reflector_condition(condition)
     detail_text = str(detail or "").strip()
-    if not cycle or not condition_text or not detail_text or kind not in _REFLECTOR_KINDS:
+    if not cycle or not condition_text or not detail_text:
+        if refusal is not None:
+            refusal["reason"] = "empty_condition_or_detail"
+        return False
+    if kind not in _REFLECTOR_KINDS:
+        if refusal is not None:
+            refusal["reason"] = "unsupported_kind"
         return False
     if condition_text.casefold() == detail_text.casefold():
+        if refusal is not None:
+            refusal["reason"] = "condition_equals_detail"
         return False
     from nanobot.runtime.reflector import _append_journal
 
-    _append_journal(Path(state_dir), {
+    queued = _append_journal(Path(state_dir), {
         "cycle_id": cycle,
         "timestamp": _now(),
         "source": "bridge",
@@ -1564,7 +1573,9 @@ def queue_bridge_lesson_candidate(
         }],
         "followed_previous": [],
     })
-    return True
+    if not queued and refusal is not None:
+        refusal["reason"] = "journal_write_failed"
+    return bool(queued)
 
 
 def _reflector_topic_tags(problem: str, detail: str) -> list[str]:

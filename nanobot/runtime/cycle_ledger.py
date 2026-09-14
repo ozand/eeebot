@@ -235,6 +235,7 @@ def record_cycle_outcome(
     files_changed: list[str] | None,
     branch: str | None,
     *,
+    lesson_candidate: dict | None = None,
     verdict: str | None = None,
     verdict_reason: str | None = None,
     executor_llm_error: bool = False,
@@ -284,6 +285,13 @@ def record_cycle_outcome(
         "files_changed": list(files_changed or []),
         "branch": branch or None,
     }
+    if isinstance(lesson_candidate, dict):
+        row["lesson_candidate"] = {
+            "condition_met": bool(lesson_candidate.get("condition_met")),
+            "queued": bool(lesson_candidate.get("queued")),
+            **({"refusal_reason": str(lesson_candidate["refusal_reason"])[:120]}
+               if lesson_candidate.get("refusal_reason") else {}),
+        }
     if verdict in VALID_VERDICTS:
         row["verdict"] = verdict
         if verdict_reason:

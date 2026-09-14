@@ -185,7 +185,7 @@ def test_bridge_candidate_keeps_incident_evidence_when_graduated(tmp_path: Path)
             cycle_id=cycle,
             condition="A composite preflight gate returns its pre-refresh verdict",
             detail="Record the post-refresh verdict separately from the pre-refresh detection pass.",
-            evidence=[f"reflection-{cycle[-1]}"] ,
+            evidence=[f"reflection-{cycle[-1]}"],
             # Distinct timestamps are supplied by the journal row itself.
         )
     # The helper appends current-time rows; make the recurrence span two days
