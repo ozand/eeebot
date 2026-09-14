@@ -1411,7 +1411,8 @@ _REFLECTOR_POOL_SCHEMA = "curator-reflector-pool-v1"
 _REFLECTOR_CARD_EVIDENCE_CAP = 8
 _REFLECTOR_KINDS = frozenset({"error_pattern", "approach_hint"})
 _REFLECTOR_INCIDENT_PREFIX_RE = re.compile(
-    r"^\s*in\s+(?:(?:reflection|cycle)-[A-Za-z0-9._-]+|turn\s+\d+)\s*(?:[,;:\-—]\s*|$)",
+    r"^\s*in\s+(?:(?:reflection|cycle)-[A-Za-z0-9._-]+"
+    r"(?:\s+seq\s+\d+)?|turn\s+\d+)\s*(?:[,;:\-—]\s*|$)",
     re.IGNORECASE,
 )
 _REFLECTOR_TOPIC_TERMS: tuple[tuple[str, str], ...] = (

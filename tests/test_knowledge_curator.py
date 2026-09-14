@@ -8,6 +8,7 @@ from nanobot.runtime.knowledge_curator import (
     _ACTION_INDEX_SEGMENTS,
     _fact_path,
     _messages,
+    _reflector_condition,
     _yaml_entries,
     clear_staged_manifest,
     fit_lessons_to_input_budget,
@@ -51,6 +52,26 @@ def test_yaml_entries_reports_invalid_archive_shape(tmp_path):
     entries, status = _yaml_entries(raw)
     assert entries == []
     assert status == "unavailable"
+
+
+def test_reflector_condition_strips_live_seq_qualifier_without_eating_plain_clause():
+    """#1580: replay the qualifier form present in the live lesson corpus."""
+    live_problem = (
+        "In cycle-f8d2a453853f seq 1, invoking 'an/gemini-3.7-flash-high' "
+        "immediately returned a NotFoundError."
+    )
+    assert _reflector_condition(live_problem) == (
+        "invoking 'an/gemini-3.7-flash-high' immediately returned a NotFoundError."
+    )
+    assert _reflector_condition("In cycle-safe parsing should remain ordinary prose.") == (
+        "In cycle-safe parsing should remain ordinary prose."
+    )
+    assert _reflector_condition("In cycle-safe sequence 1, ordinary prose remains.") == (
+        "In cycle-safe sequence 1, ordinary prose remains."
+    )
+    assert _reflector_condition("In cycle-safe turn 1, ordinary prose remains.") == (
+        "In cycle-safe turn 1, ordinary prose remains."
+    )
 
 
 def test_reflector_tag_drift_reports_clean_and_mutated_isolated_corpus(tmp_path):
