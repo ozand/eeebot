@@ -491,7 +491,27 @@ def test_pool_is_bounded_and_stale_clusters_are_evicted(tmp_path: Path, monkeypa
         {"rule": "idle_age", "cluster": {"cycles": 1, "days": 1, "age_days": 31.083333}},
         {"rule": "capacity", "cluster": {"cycles": 1, "days": 1, "age_days": 0.083333}},
     ]
+    assert pool["last_run"]["evicted_clusters_omitted"] == 0
     assert [c["cycles"][0] for c in pool["clusters"]] == ["cycle-000000000004", "cycle-000000000003"]
+
+
+def test_prune_caps_eviction_metadata_and_reports_omitted_rows(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(kc, "_REFLECTOR_POOL_MAX", 1)
+    monkeypatch.setattr(kc, "_REFLECTOR_EVICTION_EVIDENCE_CAP", 1)
+    state = tmp_path / "state"
+    workspace = _workspace(tmp_path)
+    _write_live(state, [
+        _row("cycle-cap-first", "2026-09-01T10:00:00Z", (DETAIL, "first fallback observation")),
+        _row("cycle-cap-second", "2026-09-01T11:00:00Z", (OTHER, "second test observation")),
+        _row("cycle-cap-other", "2026-09-02T11:00:00Z", ("Validate the deployment manifest before publishing a release.", "third release observation")),
+    ])
+
+    assert promote_reflector_recommendations_to_v2(workspace, state) == 0
+    eviction = load_reflector_pool(state)["last_run"]
+    assert eviction["evicted"] == 2
+    assert eviction["evicted_by_rule"] == {"idle_age": 0, "capacity": 2}
+    assert len(eviction["evicted_clusters"]) == 1
+    assert eviction["evicted_clusters_omitted"] == 1
 
 
 def test_prune_records_eviction_metadata_for_multi_cycle_cluster(tmp_path: Path, monkeypatch) -> None:

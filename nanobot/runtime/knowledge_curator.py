@@ -1409,6 +1409,7 @@ _REFLECTOR_POOL_MAX_AGE_DAYS = 14  # every recurrence in the calibration store s
 _REFLECTOR_POOL_SLUG = "reflector_pool.json"
 _REFLECTOR_POOL_SCHEMA = "curator-reflector-pool-v1"
 _REFLECTOR_CARD_EVIDENCE_CAP = 8
+_REFLECTOR_EVICTION_EVIDENCE_CAP = 32
 _REFLECTOR_KINDS = frozenset({"error_pattern", "approach_hint"})
 _REFLECTOR_INCIDENT_PREFIX_RE = re.compile(
     r"^\s*in\s+(?:(?:reflection|cycle)-[A-Za-z0-9._-]+"
@@ -1825,7 +1826,8 @@ def _prune_pool(clusters: list[dict[str, Any]], newest_ts: str) -> dict[str, Any
     return {"count": len(evicted), "by_rule": {
         "idle_age": sum(1 for item in evicted if item["rule"] == "idle_age"),
         "capacity": sum(1 for item in evicted if item["rule"] == "capacity"),
-    }, "clusters": evicted}
+    }, "clusters": evicted[:_REFLECTOR_EVICTION_EVIDENCE_CAP],
+            "clusters_omitted": max(0, len(evicted) - _REFLECTOR_EVICTION_EVIDENCE_CAP)}
 
 
 def _pool_eviction_evidence(cluster: dict[str, Any], newest_ts: str) -> dict[str, Any]:
@@ -1864,6 +1866,7 @@ def _empty_reflector_run(store: str, pool_size: int = 0) -> dict[str, Any]:
         "evicted": 0,
         "evicted_by_rule": {"idle_age": 0, "capacity": 0},
         "evicted_clusters": [],
+        "evicted_clusters_omitted": 0,
         "unparseable": 0,
         "pool_size": pool_size,
         "at": _now(),
@@ -1981,6 +1984,7 @@ def promote_reflector_recommendations_to_v2(
         "pooled_new": 0, "pooled_recurrence": 0, "same_day_only_waiting": 0,
         "graduated": 0, "deferred_by_cap": 0, "near_misses": 0, "rejected": 0,
         "evicted_by_rule": {"idle_age": 0, "capacity": 0}, "evicted_clusters": [],
+        "evicted_clusters_omitted": 0,
     })
 
     # Read-only baseline: the checkout's current store decides ids and
@@ -2183,6 +2187,7 @@ def promote_reflector_recommendations_to_v2(
     stats["evicted"] = eviction["count"]
     stats["evicted_by_rule"] = eviction["by_rule"]
     stats["evicted_clusters"] = eviction["clusters"]
+    stats["evicted_clusters_omitted"] = eviction["clusters_omitted"]
     for cluster in clusters:
         cluster.pop("_words", None)
     stats["pool_size"] = len(clusters)
