@@ -486,7 +486,32 @@ def test_pool_is_bounded_and_stale_clusters_are_evicted(tmp_path: Path, monkeypa
     pool = load_reflector_pool(state)
     assert pool["last_run"]["pooled_new"] == 4
     assert pool["last_run"]["evicted"] == 2  # one past 14 days, one over the size bound
+    assert pool["last_run"]["evicted_by_rule"] == {"idle_age": 1, "capacity": 1}
+    assert pool["last_run"]["evicted_clusters"] == [
+        {"rule": "idle_age", "cluster": {"cycles": 1, "days": 1, "age_days": 31.083333}},
+        {"rule": "capacity", "cluster": {"cycles": 1, "days": 1, "age_days": 0.083333}},
+    ]
     assert [c["cycles"][0] for c in pool["clusters"]] == ["cycle-000000000004", "cycle-000000000003"]
+
+
+def test_prune_records_eviction_metadata_for_multi_cycle_cluster(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(kc, "_REFLECTOR_POOL_MAX", 1)
+    state = tmp_path / "state"
+    workspace = _workspace(tmp_path)
+    _write_live(state, [
+        _row("cycle-first000001", "2026-09-01T10:00:00Z", (DETAIL, "first fallback observation")),
+        _row("cycle-second00002", "2026-09-01T11:00:00Z", (DETAIL_PARAPHRASE, "second fallback observation")),
+        _row("cycle-other000003", "2026-09-02T11:00:00Z", (OTHER, "third test observation")),
+    ])
+
+    assert promote_reflector_recommendations_to_v2(workspace, state) == 0
+    eviction = load_reflector_pool(state)["last_run"]
+    assert eviction["evicted"] == 1
+    assert eviction["evicted_by_rule"] == {"idle_age": 0, "capacity": 1}
+    assert eviction["evicted_clusters"] == [{
+        "rule": "capacity",
+        "cluster": {"cycles": 2, "days": 1, "age_days": 1.041667},
+    }]
 
 
 def test_error_rows_unparseable_lines_and_other_kinds_are_skipped(tmp_path: Path) -> None:
