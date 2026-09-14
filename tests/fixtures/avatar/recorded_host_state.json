@@ -1,0 +1,46 @@
+{
+  "source": "host state/ledger read as eeepc-agent on 2026-09-14; sanitized fixture",
+  "events": [
+    {
+      "ts": "2026-09-14T10:03:55Z",
+      "cycle_status": "working",
+      "thermal_status": "nominal",
+      "signals": [
+        "cycle_status",
+        "thermal_status"
+      ]
+    },
+    {
+      "ts": "2026-09-14T14:02:32Z",
+      "cycle_status": "working",
+      "thermal_status": "throttled",
+      "signals": [
+        "cycle_status",
+        "thermal_status"
+      ]
+    },
+    {
+      "ts": "2026-09-14T14:03:00Z",
+      "cycle_status": "dead",
+      "thermal_status": "probe_unavailable",
+      "signals": [
+        "cycle_status"
+      ]
+    },
+    {
+      "ts": "2026-09-14T14:04:00Z",
+      "cycle_status": "missing",
+      "thermal_status": "probe_unavailable",
+      "signals": []
+    }
+  ],
+  "source_paths": [
+    "state/ledger/cycles.jsonl",
+    "state/bridge/exits.jsonl"
+  ],
+  "recorded_facts": {
+    "throttle_evidence": "host ledger recorded repeated demand cooling with reason recent_duplicate_failure",
+    "dead_cycle_evidence": "host ledger contains started cycles with no terminal outcome at capture boundaries",
+    "unknown_evidence": "host ledger contains incomplete execution without an observed terminal signal"
+  }
+}
