@@ -23,7 +23,16 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+from scripts.cycle_cost_probe import (
+    CAPABILITY_STATES,
+    PERMANENT_BATTERY_REASON,
+    battery_probe,
+    framebuffer_surface_probe,
+    measure_framebuffer_push,
+    toolchain_measurement_placeholders,
+)
 
 # Live-refresh TUI state
 _watch_running = True
@@ -129,6 +138,13 @@ else:
 METRICS_CACHE_TTL_SECONDS = 3.0
 TREE_SCAN_CACHE_TTL_SECONDS = 3.0
 HOST_CAPS_CACHE_TTL_SECONDS = 30.0
+FRAMEBUFFER_WIDTH = 1024
+FRAMEBUFFER_HEIGHT = 600
+FRAMEBUFFER_BITS_PER_PIXEL = 32
+FRAMEBUFFER_FULL_SURFACE_BYTES = (
+    FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT * FRAMEBUFFER_BITS_PER_PIXEL // 8
+)
+PERMANENTLY_UNAVAILABLE_BATTERY_REASON = PERMANENT_BATTERY_REASON
 REPORT_SCAN_CACHE_TTL_SECONDS = 5.0
 MATERIALIZED_CACHE_TTL_SECONDS = 5.0
 ARTIFACT_STALE_AFTER_HOURS = 24.0
@@ -145,8 +161,18 @@ _REPORT_SCAN_CACHE: dict[str, Any] = {"loaded_at": 0.0, "limit": None, "root_mti
 _MATERIALIZED_CACHE: dict[str, Any] = {"loaded_at": 0.0, "limit": None, "root_mtime_ns": None, "result": None, "source_status": "missing"}
 
 
-def refresh_host_capabilities(*, trigger: str = "dashboard_refresh") -> dict[str, Any]:
+def refresh_host_capabilities(
+    *,
+    trigger: str = "dashboard_refresh",
+    cycle_id: str | None = None,
+    process_probe: Callable[[], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Re-scan host hardware and write a triggered inventory.
+
+    ``cycle_id`` and ``process_probe`` are optional because this daily probe
+    must remain safe outside a running cycle. A live cycle can pass its own
+    process sampler to record attributable CPU/RSS and load-time thermal data;
+    the host-wide metrics feed is intentionally not used for that purpose.
 
     Each probe result keeps command failure distinct from a successful empty
     result.  ``available`` remains as a compatibility field, but consumers
@@ -183,6 +209,31 @@ def refresh_host_capabilities(*, trigger: str = "dashboard_refresh") -> dict[str
         return result(state, details)
 
     caps: dict[str, Any] = {}
+
+    # Own-cycle body cost. The daily inventory can only report that this
+    # measurement is unavailable unless a running cycle supplies a sampler;
+    # this avoids relabelling host-wide metrics as process-attributed cost.
+    if process_probe is None:
+        caps["cycle_body"] = result(
+            "probe_unavailable",
+            "own-process sample requires an active cycle; daily probe is idle",
+        )
+    else:
+        try:
+            body = process_probe()
+            if not isinstance(body, dict):
+                raise TypeError("process probe must return an object")
+            state = str(body.get("state") or "probe_unavailable")
+            if state not in {"present", "absent", "present_uninitialized", "probe_unavailable"}:
+                raise ValueError("invalid process probe state")
+            caps["cycle_body"] = body
+        except Exception as exc:
+            caps["cycle_body"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
+
+    # Battery is a closed host fact, not an absent measurement. There is no
+    # BAT* device on the target host, so preserve the permanent reason and do
+    # not emit a fabricated zero draw value.
+    caps["battery_draw"] = battery_probe()
 
     # Camera. Use pathlib globbing rather than passing the wildcard literally
     # to ``ls`` (subprocess does not perform shell expansion).
@@ -288,7 +339,8 @@ def refresh_host_capabilities(*, trigger: str = "dashboard_refresh") -> dict[str
     caps["kernel"] = command_probe(["uname", "-r"], lambda output: ("present", output.strip()) if output.strip() else ("absent", "not detected"))
     caps["uptime"] = command_probe(["uptime", "-p"], lambda output: ("present", output.strip()) if output.strip() else ("absent", "not detected"))
 
-    # Screen resolution
+    # Screen resolution and one full-surface transfer cost. The geometry and
+    # pixel format are measured host facts; the byte count is deterministic.
     try:
         screen_res = "unknown"
         fb_size_path = Path("/sys/class/graphics/fb0/virtual_size")
@@ -301,13 +353,22 @@ def refresh_host_capabilities(*, trigger: str = "dashboard_refresh") -> dict[str
                     if lines:
                         screen_res = lines[0].strip()
                         break
+        screen_state = "present" if screen_res != "unknown" else "absent"
         caps["screen"] = result(
-            "present" if screen_res != "unknown" else "absent",
+            screen_state,
             f"Physical Resolution: {screen_res}" if screen_res != "unknown" else "not detected",
         )
+        caps["screen_push"] = framebuffer_surface_probe()
     except Exception as exc:
         caps["screen"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
 
+    # Toolchain cost is intentionally a separate measurement from the known
+    # executable inventory. Building is not run by the daily refresh; an
+    # explicitly authorized caller may provide measured values.
+    caps.update(toolchain_measurement_placeholders())
+
+    if cycle_id:
+        caps["_cycle_id"] = cycle_id
     caps["_scan_timestamp"] = datetime.now(timezone.utc).isoformat()
     caps["_probe_trigger"] = trigger
 
