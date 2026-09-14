@@ -1409,6 +1409,7 @@ _REFLECTOR_POOL_MAX_AGE_DAYS = 14  # every recurrence in the calibration store s
 _REFLECTOR_POOL_SLUG = "reflector_pool.json"
 _REFLECTOR_POOL_SCHEMA = "curator-reflector-pool-v1"
 _REFLECTOR_CARD_EVIDENCE_CAP = 8
+_REFLECTOR_EVICTION_EVIDENCE_CAP = 32
 _REFLECTOR_KINDS = frozenset({"error_pattern", "approach_hint"})
 _REFLECTOR_INCIDENT_PREFIX_RE = re.compile(
     r"^\s*in\s+(?:(?:reflection|cycle)-[A-Za-z0-9._-]+"
@@ -1796,25 +1797,52 @@ def _new_card_id(existing_ids: set[str], first_cycle: str, detail: str) -> str:
     return card_id
 
 
-def _prune_pool(clusters: list[dict[str, Any]], newest_ts: str) -> int:
-    """Drop clusters idle past _REFLECTOR_POOL_MAX_AGE_DAYS, then the oldest
-    beyond _REFLECTOR_POOL_MAX. Returns the number evicted."""
-    before = len(clusters)
+def _prune_pool(clusters: list[dict[str, Any]], newest_ts: str) -> dict[str, Any]:
+    """Drop stale/over-cap clusters and return bounded eviction evidence."""
+    evicted: list[dict[str, Any]] = []
     cutoff = ""
     try:
         ref = datetime.fromisoformat(newest_ts.replace("Z", "+00:00")) if newest_ts else datetime.now(timezone.utc)
         cutoff = (ref.timestamp() - _REFLECTOR_POOL_MAX_AGE_DAYS * 86400)
-        clusters[:] = [
-            c for c in clusters
-            if not c.get("last_seen")
-            or datetime.fromisoformat(str(c["last_seen"]).replace("Z", "+00:00")).timestamp() >= cutoff
-        ]
+        retained: list[dict[str, Any]] = []
+        for cluster in clusters:
+            last_seen = str(cluster.get("last_seen") or "")
+            try:
+                is_idle = bool(last_seen) and datetime.fromisoformat(last_seen.replace("Z", "+00:00")).timestamp() < cutoff
+            except (ValueError, TypeError):
+                is_idle = False
+            if is_idle:
+                evicted.append({"rule": "idle_age", "cluster": _pool_eviction_evidence(cluster, newest_ts)})
+            else:
+                retained.append(cluster)
+        clusters[:] = retained
     except (ValueError, TypeError):
         pass
     if len(clusters) > _REFLECTOR_POOL_MAX:
         clusters.sort(key=lambda c: str(c.get("last_seen") or ""), reverse=True)
+        overflow = clusters[_REFLECTOR_POOL_MAX:]
+        evicted.extend({"rule": "capacity", "cluster": _pool_eviction_evidence(c, newest_ts)} for c in overflow)
         del clusters[_REFLECTOR_POOL_MAX:]
-    return before - len(clusters)
+    return {"count": len(evicted), "by_rule": {
+        "idle_age": sum(1 for item in evicted if item["rule"] == "idle_age"),
+        "capacity": sum(1 for item in evicted if item["rule"] == "capacity"),
+    }, "clusters": evicted[:_REFLECTOR_EVICTION_EVIDENCE_CAP],
+            "clusters_omitted": max(0, len(evicted) - _REFLECTOR_EVICTION_EVIDENCE_CAP)}
+
+
+def _pool_eviction_evidence(cluster: dict[str, Any], newest_ts: str) -> dict[str, Any]:
+    """Return bounded metadata for a cluster removed by ``_prune_pool``."""
+    reference = datetime.fromisoformat(newest_ts.replace("Z", "+00:00")) if newest_ts else datetime.now(timezone.utc)
+    first_seen = str(cluster.get("first_seen") or "")
+    try:
+        age_days = (reference - datetime.fromisoformat(first_seen.replace("Z", "+00:00"))).total_seconds() / 86400
+    except (ValueError, TypeError):
+        age_days = None
+    return {
+        "cycles": len(cluster.get("cycles") or []),
+        "days": len(cluster.get("days") or []),
+        "age_days": round(age_days, 6) if age_days is not None else None,
+    }
 
 
 def _empty_reflector_run(store: str, pool_size: int = 0) -> dict[str, Any]:
@@ -1836,6 +1864,9 @@ def _empty_reflector_run(store: str, pool_size: int = 0) -> dict[str, Any]:
         "rejected": 0,
         "staged": 0,
         "evicted": 0,
+        "evicted_by_rule": {"idle_age": 0, "capacity": 0},
+        "evicted_clusters": [],
+        "evicted_clusters_omitted": 0,
         "unparseable": 0,
         "pool_size": pool_size,
         "at": _now(),
@@ -1952,6 +1983,8 @@ def promote_reflector_recommendations_to_v2(
         "rows_processed": len(rows), "items": 0, "folded": 0, "repaired": 0,
         "pooled_new": 0, "pooled_recurrence": 0, "same_day_only_waiting": 0,
         "graduated": 0, "deferred_by_cap": 0, "near_misses": 0, "rejected": 0,
+        "evicted_by_rule": {"idle_age": 0, "capacity": 0}, "evicted_clusters": [],
+        "evicted_clusters_omitted": 0,
     })
 
     # Read-only baseline: the checkout's current store decides ids and
@@ -2150,7 +2183,11 @@ def promote_reflector_recommendations_to_v2(
             )
         pool["last_staged_at"] = _now()
     stats["staged"] = len(minted)
-    stats["evicted"] = _prune_pool(clusters, newest_ts)
+    eviction = _prune_pool(clusters, newest_ts)
+    stats["evicted"] = eviction["count"]
+    stats["evicted_by_rule"] = eviction["by_rule"]
+    stats["evicted_clusters"] = eviction["clusters"]
+    stats["evicted_clusters_omitted"] = eviction["clusters_omitted"]
     for cluster in clusters:
         cluster.pop("_words", None)
     stats["pool_size"] = len(clusters)
