@@ -145,8 +145,8 @@ _REPORT_SCAN_CACHE: dict[str, Any] = {"loaded_at": 0.0, "limit": None, "root_mti
 _MATERIALIZED_CACHE: dict[str, Any] = {"loaded_at": 0.0, "limit": None, "root_mtime_ns": None, "result": None, "source_status": "missing"}
 
 
-def refresh_host_capabilities() -> dict[str, Any]:
-    """Re-scan host hardware and write a manually-triggered inventory.
+def refresh_host_capabilities(*, trigger: str = "dashboard_refresh") -> dict[str, Any]:
+    """Re-scan host hardware and write a triggered inventory.
 
     Each probe result keeps command failure distinct from a successful empty
     result.  ``available`` remains as a compatibility field, but consumers
@@ -212,7 +212,24 @@ def refresh_host_capabilities() -> dict[str, Any]:
             return "present", adapter
         return "present_uninitialized", f"{adapter} (hci down)"
 
-    caps["bluetooth"] = command_probe(["lsusb"], parse_bluetooth)
+    # Prefer sysfs: service sandboxes may not expose lsusb in PATH, while
+    # these kernel-owned paths provide both adapter identity and operstate.
+    bluetooth_devices = sorted(Path("/sys/class/bluetooth").glob("hci*"))
+    if bluetooth_devices:
+        try:
+            states = [
+                (path / "operstate").read_text(encoding="utf-8").strip().lower()
+                for path in bluetooth_devices
+            ]
+            details = f"Detected {', '.join(path.name for path in bluetooth_devices)}"
+            caps["bluetooth"] = result(
+                "present" if any(state == "up" for state in states) else "present_uninitialized",
+                details if any(state == "up" for state in states) else f"{details} (hci down)",
+            )
+        except OSError as exc:
+            caps["bluetooth"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
+    else:
+        caps["bluetooth"] = command_probe(["lsusb"], parse_bluetooth)
 
     # WiFi
     def parse_wifi(output: str) -> tuple[str, str]:
@@ -286,7 +303,7 @@ def refresh_host_capabilities() -> dict[str, Any]:
 
     caps["_scan_timestamp"] = datetime.now(timezone.utc).isoformat()
     caps["_probe_source"] = "manual"
-    caps["_probe_trigger"] = "dashboard_refresh"
+    caps["_probe_trigger"] = trigger
 
     # Write to state file
     host_caps_path = STATE_DIR / "host_capabilities.json"
@@ -3569,7 +3586,7 @@ class DashboardHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             if url.query:
                 self.send_error(400, "Refresh accepts no query options")
                 return
-            payload = refresh_host_capabilities()
+            payload = refresh_host_capabilities(trigger="http_refresh")
         else:
             self.send_error(404, "Not Found")
             return
@@ -3678,13 +3695,13 @@ Examples:
         return
 
     if "--refresh-host-caps" in _flags or "-R" in _flags:
-        caps = refresh_host_capabilities()
+        caps = refresh_host_capabilities(trigger=os.getenv("EEEBOT_CAPABILITY_PROBE_TRIGGER", "cli_refresh"))
         print("Host capabilities refreshed:")
         for name, info in caps.items():
             if name.startswith("_"):
                 continue
             state = info.get("state", "present" if info.get("available") else "absent")
-            status = {"present": "✓", "absent": "✗", "probe_unavailable": "?"}.get(state, "?")
+            status = {"present": "✓", "present_uninitialized": "!", "absent": "✗", "probe_unavailable": "?"}.get(state, "?")
             print(f"  {status} {name} [{state}]: {info.get('details', 'unknown')}")
         print(f"\nScan timestamp: {caps.get('_scan_timestamp', 'unknown')}")
         return

@@ -91,6 +91,28 @@ def test_format_rate_preserves_unavailable_zero_and_percentage() -> None:
     assert DASHBOARD.format_rate(0.01602) == "1.6%"
 
 
+def test_refresh_host_capabilities_records_explicit_trigger(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(DASHBOARD, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(DASHBOARD.Path, "glob", lambda self, pattern: [])
+    monkeypatch.setattr(DASHBOARD.Path, "exists", lambda self: False)
+    monkeypatch.setattr(DASHBOARD.Path, "read_text", lambda self, *args, **kwargs: {
+        "/proc/cpuinfo": "model name : test-cpu\n",
+        "/proc/meminfo": "MemTotal: 1 kB\n",
+        "/proc/asound/cards": "",
+    }.get(str(self).replace("\\", "/"), ""))
+    monkeypatch.setattr("subprocess.check_output", lambda command, **kwargs: {
+        ("lsusb",): b"",
+        ("ip", "-o", "link", "show"): b"",
+        ("df", "-h", "/"): b"Filesystem  Size  Used Avail Use% Mounted on\n/dev/sda1  1G  1M  999M  1% /\n",
+        ("uname", "-r"): b"test-kernel\n",
+        ("uptime", "-p"): b"up 1 minute\n",
+    }[tuple(command)])
+
+    caps = DASHBOARD.refresh_host_capabilities(trigger="systemd_timer")
+
+    assert caps["_probe_trigger"] == "systemd_timer"
+
+
 def test_refresh_host_capabilities_uses_proc_asound_cards_without_arecord(tmp_path: Path, monkeypatch) -> None:
     class Probe:
         def __call__(self, command, **kwargs):
@@ -175,7 +197,7 @@ def test_refresh_host_capabilities_marks_bluetooth_adapter_down_as_uninitialized
     class Probe:
         def __call__(self, command, **kwargs):
             if command == ["lsusb"]:
-                return b"Bus 005 Device 002: ID 0b05:b700 Broadcom Bluetooth 2.1\n"
+                raise AssertionError("lsusb must not be invoked")
             if command == ["ip", "-o", "link", "show"]:
                 return b""
             if command == ["df", "-h", "/"]:
@@ -210,7 +232,7 @@ def test_refresh_host_capabilities_marks_bluetooth_adapter_down_as_uninitialized
     assert caps["bluetooth"] == {
         "state": "present_uninitialized",
         "available": False,
-        "details": "Bus 005 Device 002: ID 0b05:b700 Broadcom Bluetooth 2.1 (hci down)",
+        "details": "Detected hci0 (hci down)",
     }
     assert caps["microphone"]["state"] == "present"
 
