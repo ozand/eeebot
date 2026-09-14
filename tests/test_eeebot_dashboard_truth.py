@@ -974,7 +974,7 @@ def test_post_cleanup_parses_previously_dead_hours_and_dry_run_parameters(monkey
 def test_post_refresh_host_caps_and_unknown_path_behave(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        DASHBOARD, "refresh_host_capabilities", lambda: calls.append("refresh") or {}
+        DASHBOARD, "refresh_host_capabilities", lambda **_: calls.append("refresh") or {}
     )
     request_cls = _mutation_test_request_class()
 
