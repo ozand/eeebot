@@ -28,3 +28,5 @@ Conventions:
 | [ADR-010](ADR-010-memory-remainder-is-retrieved-not-resident.md) | The loop retrieves non-resident memory through one bounded FTS5 tool | proposed |
 | [ADR-011](ADR-011-charter-voice-after-thresholds.md) | The charter keeps a voice after every threshold is met | proposed |
 | [ADR-012](ADR-012-vector-1-scoped-to-the-mutation-surface.md) | Vector 1 names only what the loop is permitted to change | proposed |
+| [ADR-013](ADR-013-capability-tiers-probe-and-cost.md) | A capability has a probe, a tier, and a measured cost on this host | proposed |
+| [ADR-014](ADR-014-the-avatar-is-an-instrument.md) | A displayed avatar is an instrument, and attention is invited rather than captured | proposed |
