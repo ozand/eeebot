@@ -210,19 +210,20 @@ def refresh_host_capabilities(*, trigger: str = "dashboard_refresh") -> dict[str
                 soft = (rfkill / "soft").read_text(encoding="utf-8").strip()
                 hard = (rfkill / "hard").read_text(encoding="utf-8").strip()
                 states.append((device.name, soft, hard))
+            device_details = []
+            for name, soft, hard in states:
+                if hard is None:
+                    device_details.append(f"{name} (no rfkill state)")
+                elif soft == "0" and hard == "0":
+                    device_details.append(f"{name} (rfkill unblocked)")
+                else:
+                    flags = ("soft" if soft == "1" else "") + ("+" if soft == "1" and hard == "1" else "") + ("hard" if hard == "1" else "")
+                    device_details.append(f"{name} ({flags} blocked)")
+            details = ", ".join(device_details)
             if any(soft == "0" and hard == "0" for _, soft, hard in states):
-                details = f"Detected {', '.join(name for name, _, _ in states)} via rfkill"
-                caps["bluetooth"] = result("present", details)
+                caps["bluetooth"] = result("present", f"{details} via rfkill")
             else:
-                blocked_parts = []
-                for name, soft, hard in states:
-                    if hard is None:
-                        reason = "no rfkill state"
-                    else:
-                        flags = ("soft" if soft == "1" else "") + ("+" if soft == "1" and hard == "1" else "") + ("hard" if hard == "1" else "")
-                        reason = f"{flags} blocked"
-                    blocked_parts.append(f"{name} ({reason})")
-                caps["bluetooth"] = result("present_uninitialized", f"{', '.join(blocked_parts)} via rfkill")
+                caps["bluetooth"] = result("present_uninitialized", f"{details} via rfkill")
         else:
             rfkill_devices = []
             for path in sorted(Path("/sys/class/rfkill").glob("rfkill*")):

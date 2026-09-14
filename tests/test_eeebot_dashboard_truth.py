@@ -234,7 +234,7 @@ def test_refresh_host_capabilities_collects_all_bluetooth_devices(tmp_path: Path
     assert caps["bluetooth"] == {
         "state": "present",
         "available": True,
-        "details": "Detected hci0, hci1 via rfkill",
+        "details": "hci0 (no rfkill state), hci1 (rfkill unblocked) via rfkill",
     }
     assert "hci0" in caps["bluetooth"]["details"]
 
@@ -277,7 +277,7 @@ def test_refresh_host_capabilities_marks_unblocked_bluetooth_present(tmp_path: P
     assert caps["bluetooth"] == {
         "state": "present",
         "available": True,
-        "details": "Detected hci0 via rfkill",
+        "details": "hci0 (rfkill unblocked) via rfkill",
     }
 
 
