@@ -26,11 +26,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from scripts.cycle_cost_probe import (
-    CAPABILITY_STATES,
     PERMANENT_BATTERY_REASON,
     battery_probe,
     framebuffer_surface_probe,
-    measure_framebuffer_push,
     toolchain_measurement_placeholders,
 )
 

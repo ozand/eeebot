@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -168,7 +169,7 @@ class CycleCostSampler:
             self._throttle_start = None
 
     def finish(self) -> dict[str, Any]:
-        if self._process_start is None or self.started_at is None:
+        if self.started_at is None:
             raise RuntimeError("cycle sampler was not started")
         finished_at = _now()
         measured: dict[str, Any] = {
@@ -279,6 +280,54 @@ def toolchain_measurement_placeholders() -> dict[str, dict[str, Any]]:
             "cargo measurement not run: requires explicit operator authorization for host load", "seconds"
         ),
     }
+
+
+def measure_toolchain_costs(
+    *,
+    work_dir: Path | None = None,
+    timeout_seconds: float = 120.0,
+    cc: str = "cc",
+    cargo: str = "cargo",
+) -> dict[str, dict[str, Any]]:
+    """Run explicitly authorized hello-world toolchain probes.
+
+    This function is never called by the daily refresh.  The caller opts into
+    host load by calling it, and receives a truthful state/value record for the
+    C build peak RSS and Cargo completion time.
+    """
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    owned = work_dir is None
+    root = Path(work_dir) if work_dir is not None else Path(tempfile.mkdtemp(prefix="eeebot-toolchain-"))
+    root.mkdir(parents=True, exist_ok=True)
+    hello = root / "hello.c"
+    binary = root / "hello"
+    hello.write_text("#include <stdio.h>\nint main(void) { puts(\"hello\"); return 0; }\n", encoding="utf-8")
+    try:
+        build = measure_command_peak_rss(
+            [cc, str(hello), "-o", str(binary)], root, timeout_seconds
+        )
+        cargo_dir = root / "cargo-hello"
+        cargo_dir.mkdir(exist_ok=True)
+        (cargo_dir / "Cargo.toml").write_text(
+            "[package]\nname = \"eeebot_probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            encoding="utf-8",
+        )
+        (cargo_dir / "src").mkdir(exist_ok=True)
+        (cargo_dir / "src" / "main.rs").write_text(
+            "fn main() { println!(\"hello\"); }\n", encoding="utf-8"
+        )
+        cargo_result = measure_command_duration(
+            [cargo, "build", "--offline"], cargo_dir, timeout_seconds
+        )
+        return {
+            "toolchain_build_peak_rss": build,
+            "toolchain_cargo_build": cargo_result,
+        }
+    finally:
+        if owned:
+            import shutil
+            shutil.rmtree(root, ignore_errors=True)
 
 
 def _proc_rss_bytes(pid: int) -> int:
