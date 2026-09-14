@@ -33,3 +33,4 @@ Conventions:
 | [ADR-015](ADR-015-the-channel-is-an-instrument.md) | The channel is an instrument — the cat may feel anything, and claim nothing the journal does not carry | proposed |
 | [ADR-016](ADR-016-work-is-chosen-by-the-journal.md) | Work is chosen by the journal and never by the channel | proposed |
 | [ADR-017](ADR-017-long-work-runs-outside-the-cycle.md) | Work too long for a cycle runs in its own unit, checkpointed, and shortens rather than skips | proposed |
+| [ADR-018](ADR-018-the-harness-judges-the-instance-draws.md) | The harness judges and the instance draws; the seam is a published file, not an import | proposed |
