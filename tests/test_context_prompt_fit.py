@@ -194,6 +194,53 @@ def test_subagent_prompt_is_strict_and_exposes_the_fit(tmp_path, monkeypatch):
     assert mgr.last_prompt_fit["dropped"] == []
 
 
+def test_catalogue_bound_keeps_complete_entries_and_records_named_omissions(tmp_path, monkeypatch):
+    builder = _builder(tmp_path, "", catalogue_lines=4, memory_lines=2)
+    section = "# Skills\n\n" + "\n".join(
+        f'  <skill available="true" source="workspace">\n'
+        f'    <name>skill-{i}</name>\n'
+        f'    <description>description-{i}</description>\n'
+        f'    <location>skills/skill-{i}/SKILL.md</location>\n'
+        "  </skill>"
+        for i in range(4)
+    )
+    matches = list(context_module.re.finditer(r"<skill\b[^>]*>.*?</skill>", section, context_module.re.DOTALL))
+    marker = builder.SKILLS_CATALOGUE_TRUNCATION_MARKER.format(
+        count=3, chars=sum(len(match.group(0)) for match in matches[1:]),
+    )
+    budget = len(section[:matches[0].start()]) + len(matches[0].group(0)) + len(marker)
+    bounded, evidence = builder._bound_skills_catalogue(section, budget)
+    assert evidence["status"] == "bounded"
+    assert evidence["load"]["status"] == "complete"
+    assert evidence["start"]["budget"] == budget
+    assert evidence["total_count"] == 4
+    assert evidence["retained_count"] == 1
+    assert evidence["omitted_count"] == 3
+    assert evidence["omitted_chars"] == sum(len(match.group(0)) for match in matches[1:])
+    assert evidence["omitted_names"] == ["skill-1", "skill-2", "skill-3"]
+    assert evidence["sweep"]["status"] == "bounded"
+    assert "skills catalogue truncated" in bounded
+    assert bounded.count("<skill ") == 1
+    assert bounded.count("</skill>") == 1
+
+
+def test_catalogue_budget_uses_live_fixed_floor(tmp_path, monkeypatch):
+    builder = _builder(tmp_path, "", catalogue_lines=1, memory_lines=1)
+    builder.skills.build_skills_summary = lambda excluded_names=None: (
+        '<skill available="true"><name>catalogue</name></skill>'
+    )
+    monkeypatch.setattr(ContextBuilder, "MAX_SYSTEM_PROMPT_CHARS", 3_000)
+    builder.build_system_prompt(loop_profile=True)
+    first_fit = dict(builder.last_fit)
+    first_budget = first_fit["skills_catalogue"]["budget"]
+    expected_floor = sum(first_fit["sections"][name] for name in ("identity", "bootstrap", "active_skills", "memory"))
+    expected_floor += 3 * len(builder.SECTION_SEPARATOR)
+    assert first_budget == 3_000 - expected_floor
+    builder.memory.get_memory_context = lambda loop=False: "M" * 2000
+    builder.build_system_prompt(loop_profile=True)
+    assert builder.last_fit["skills_catalogue"]["budget"] < first_budget
+
+
 def test_fair_budgets_are_keyed_on_length_not_position():
     """Permuting the entries must permute the budgets identically.
 
