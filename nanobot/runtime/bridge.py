@@ -5130,137 +5130,6 @@ def _has_delta_evidence(
     ))
 
 
-def _write_structured_lesson(
-    *,
-    repo_root: Path,
-    cycle_id: str,
-    backlog_title: str,
-    files_changed: list[str],
-    commits_pushed: int,
-    artifact_data: dict,
-    budget_used: dict | None = None,
-) -> bool:
-    """Write a structured lesson entry to lessons/lessons.yaml in eeebot-self-evolving.
-
-    Returns True if lesson was written.
-    """
-    import datetime as _dt
-
-    insight = _extract_meaningful_insight(artifact_data)
-    if not insight or not _has_delta_evidence(
-        artifact_data, repo_root=repo_root, backlog_title=backlog_title,
-    ):
-        return False
-
-    lessons_path = repo_root / 'lessons' / 'lessons.yaml'
-    lessons_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # #985: rotate before load so the file is within bounds before we append.
-    # Fail-open: rotate_lessons_file() never raises.
-    try:
-        from nanobot.runtime.lessons_rotation import rotate_lessons_directory as _rotate
-        _rotate(lessons_path.parent)
-    except Exception:
-        pass
-
-    # Load existing lessons (supports YAML or JSON fallback)
-    existing: dict = {'lessons': []}
-    if lessons_path.exists():
-        try:
-            raw_text = lessons_path.read_text(encoding='utf-8')
-            try:
-                import yaml as _yaml  # type: ignore[import-untyped]
-                existing = _yaml.safe_load(raw_text) or {'lessons': []}
-            except ImportError:
-                existing = json.loads(raw_text) if raw_text.strip().startswith('{') else {'lessons': []}
-            if not isinstance(existing.get('lessons'), list):
-                existing['lessons'] = []
-        except Exception:
-            existing = {'lessons': []}
-
-    date_str = _dt.date.today().isoformat()
-    short_cycle = (cycle_id or '')[-12:].replace('cycle-', '')
-    lesson_id = f'LESS-{date_str.replace("-", "")}-{short_cycle[:8]}'
-
-    # Skip if already recorded for this cycle
-    if any(e.get('id') == lesson_id for e in existing['lessons']):
-        return False
-
-    hypothesis = (
-        artifact_data.get('hypothesis')
-        or artifact_data.get('concrete_improvement_statement', '')
-        or f'Implementing "{backlog_title}" improves operator value.'
-    )
-    problem = str(artifact_data.get('problem') or hypothesis).strip()
-    reflector_solution = _extract_reflector_solution(artifact_data)
-    solution = str(reflector_solution or artifact_data.get('solution') or insight).strip()
-    raw_tags = artifact_data.get('tags') or ['runtime']
-    tags = [str(tag).lower() for tag in raw_tags] if isinstance(raw_tags, list) else []
-    if not problem or not solution or not tags or any(tag not in CONTROLLED_LESSON_TAGS for tag in tags):
-        return False
-    severity = str(artifact_data.get('severity') or 'medium').lower()
-    if severity not in {'low', 'medium', 'high', 'critical'}:
-        return False
-    evidence = artifact_data.get('evidence') or [cycle_id]
-    if isinstance(evidence, str):
-        evidence = [evidence]
-    if not isinstance(evidence, list) or not all(isinstance(item, (str, dict)) for item in evidence):
-        return False
-    lesson: dict = {
-        'schema_version': 2,
-        'id': lesson_id,
-        'title': str(artifact_data.get('title') or backlog_title)[:200],
-        'problem': problem[:400],
-        'solution': solution[:400],
-        'tags': tags,
-        'severity': severity,
-        'seen_count': 1,
-        'first_seen': date_str,
-        'last_seen': date_str,
-        'evidence': evidence[:20],
-        # Legacy fields retained for fail-open readers.
-        'date': date_str,
-        'cycle_id': cycle_id,
-        'task_id': backlog_title[:80] if backlog_title else 'unknown',
-        'hypothesis': str(hypothesis)[:300],
-        'result': f'Committed {commits_pushed} commit(s): ' + ', '.join(files_changed[:5]),
-        'approach': solution[:400],
-        'generalized_insight': insight,
-        'reusable_insight': insight,
-        'files_changed': files_changed[:10],
-    }
-    if not _validate_lesson_for_mint(lesson):
-        return False
-    duplicate = _find_lesson_duplicate(problem, existing['lessons'])
-    if duplicate is not None:
-        duplicate['seen_count'] = int(duplicate.get('seen_count') or 1) + 1
-        duplicate['last_seen'] = date_str
-    else:
-        from nanobot.runtime.lesson_v2 import allow_mint
-        if not allow_mint(lesson, existing['lessons'], STATE_DIR, workspace=repo_root):
-            return False  # recorded refusal, never a cycle failure
-        existing['lessons'].insert(0, lesson)  # newest-first
-
-    # Fill lateral related links mechanically before writing (#1095).
-    # Fail-open: any error in fill_related_links must never block the write.
-    try:
-        from nanobot.runtime.lesson_v2 import fill_related_links as _fill_related
-        existing['lessons'], _ = _fill_related(existing['lessons'])
-    except Exception:
-        pass
-
-    try:
-        try:
-            import yaml as _yaml  # type: ignore[import-untyped]
-            lessons_path.write_text(_yaml.dump(existing, allow_unicode=True, sort_keys=False), encoding='utf-8')
-        except ImportError:
-            # Fallback to JSON when PyYAML not installed
-            lessons_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding='utf-8')
-        return True
-    except Exception:
-        return False
-
-
 def _write_structured_error(
     repo_root: Path,
     cycle_id: str,
@@ -5271,7 +5140,7 @@ def _write_structured_error(
 ) -> bool:
     """Record a failed cycle / gate rejection into lessons/errors.yaml and rotate (#1041).
 
-    Mirrors _write_structured_lesson, storing errors with cycle_id, reason, and violated check.
+    Mirrors the structured lesson candidate path, storing errors with cycle_id, reason, and violated check.
     Fail-open: failures never raise out of the cycle outcome flow.
     """
     import datetime as _dt

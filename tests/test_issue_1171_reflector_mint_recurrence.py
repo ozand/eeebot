@@ -94,6 +94,28 @@ def _card(card_id: str, solution: str, problem: str, *, seen: int = 1, evidence:
 # ─── the rule ────────────────────────────────────────────────────────────────
 
 
+def test_bridge_candidate_survives_boundary_and_curator_reads_state_journal(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    workspace = _workspace(tmp_path)
+    assert queue_bridge_lesson_candidate(
+        state, cycle_id="cycle-boundary", condition="A bridge gate returns its pre-refresh verdict",
+        detail="Record the pre-refresh verdict separately from the post-refresh result.",
+        evidence=["reflection-boundary"],
+    )
+    journal = state / "reflector" / "reflections.jsonl"
+    assert journal.is_file()
+    before = journal.read_bytes()
+
+    # A cycle boundary resets the instance checkout, not the durable state
+    # journal. Keep the state tree and replace only the workspace copy.
+    (workspace / "lessons").mkdir(parents=True, exist_ok=True)
+    (workspace / "lessons" / "lessons.yaml").write_text("lessons: []\n", encoding="utf-8")
+    assert journal.read_bytes() == before
+    assert promote_reflector_recommendations_to_v2(workspace, state) == 0
+    pool = load_reflector_pool(state)
+    assert pool["last_run"]["pooled_new"] == 1
+
+
 def test_bridge_candidate_uses_reflector_pool_and_waits_for_recurrence(tmp_path: Path) -> None:
     state = tmp_path / "state"
     workspace = _workspace(tmp_path)

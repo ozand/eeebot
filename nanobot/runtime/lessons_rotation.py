@@ -13,7 +13,7 @@ Design constraints (issue #985):
 - Idempotent / collision-safe: archive filename includes today's UTC date; if the
   same archive already exists the new entries are prepended inside it (merged), so
   running twice on the same day is safe.
-- Fail-open: any exception is swallowed; the caller (``_write_structured_lesson``)
+- Fail-open: any exception is swallowed; the curator staging/pickup path
   must never be blocked by a rotation error.
 - The top-level schema is preserved. ``lessons.yaml`` uses a ``{'lessons': [...]}``
   dict wrapper; ``errors.yaml`` is a bare list. Both round-trip correctly.
@@ -32,8 +32,8 @@ _MAX_ACTIVE_ENTRIES: int = 200
 _MAX_ACTIVE_BYTES: int = 2 * 1024 * 1024  # 2 MB
 
 # #1533: an entry's leading field, i.e. its boundary marker. Legacy rows
-# (bridge._write_structured_lesson, and every errors.yaml row) write "id"
-# first. Schema-v2 lessons (#1071 onward — the only thing still minting into
+# (legacy lesson rows, and every errors.yaml row) write "id" first.
+# Schema-v2 lessons (#1071 onward — the only thing still minting into
 # lessons.yaml) write "schema_version" first instead, and lessons.yaml's
 # writers prepend (newest-first), so the file's leading entry has been a v2
 # row, and therefore invisible to a parser that only recognized "- id:",
