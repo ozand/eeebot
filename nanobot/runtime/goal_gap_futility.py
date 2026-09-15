@@ -330,11 +330,22 @@ def _mark_missing_records(records: dict[str, dict[str, Any]], gap_ids: set[str],
     for gap_id, record in records.items():
         if gap_id in gap_ids or not isinstance(record, dict):
             continue
+        until = _parse_ts(record.get("futile_until"))
+        if record.get("futile") and until is not None and now < until:
+            # An active verdict is still an intentional suppression even when
+            # the gap is temporarily absent from the current input set.
+            continue
         record["stale"] = True
         if record.get("futility_status") != "voided_fixed":
             record["futility_status"] = "not_evaluated"
         record.setdefault("last_evaluated_ts", record.get("first_seen_ts"))
         record.setdefault("stale_at", _iso(now))
+        # Preserve the historical record for auditability, but clear numeric
+        # evidence when the row is no longer evaluated (#1635).
+        if record.get("futility_status") == "not_evaluated":
+            record["attempt_count"] = None
+            record["attempt_unit"] = None
+            record["window_status"] = None
 
 
 def _load_scorecard_snapshot(state_dir: Path) -> dict[str, Any] | None:
@@ -465,7 +476,7 @@ def futility_snapshot(state_dir: Path) -> dict[str, Any]:
         _void_fixed_futility(records, _load_scorecard_snapshot(Path(state_dir)))
         _save(state_dir, records)
         return {
-            "futile_gap_ids": sorted(key for key, value in records.items() if value.get("futile")),
+            "futile_gap_ids": sorted(key for key, value in records.items() if value.get("futile") and not value.get("stale")),
             "voided_gap_ids": sorted(key for key, value in records.items() if value.get("futility_status") == "voided_fixed"),
             "total_tracked": len(records),
             "stale_gap_ids": sorted(
