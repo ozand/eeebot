@@ -585,6 +585,68 @@ class TestRetention:
             "direction": "proposer-quality",
         }
 
+    def test_malformed_scorecard_gaps_type_is_unavailable(self, tmp_path, monkeypatch, enabled):
+        _no_llm(monkeypatch)
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        sc_path = state_dir / "scorecard" / "latest.json"
+        sc_path.parent.mkdir(parents=True)
+        sc_path.write_text(json.dumps({"gaps": "not-a-list"}), encoding="utf-8")
+
+        assert goal_review.maybe_goal_review(state_dir, None, now=NOW) == []
+        row = _goal_review_rows(state_dir)[0]
+        assert row["retention_status"] == "unavailable"
+        assert goal_review.goal_review_retention(row)["status"] == "unavailable"
+
+    def test_corrupt_portfolio_is_unavailable_not_absent_direction(self, tmp_path, monkeypatch, enabled):
+        _no_llm(monkeypatch)
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [])
+        port_path = state_dir / "tech_tree" / "portfolio.json"
+        port_path.parent.mkdir(parents=True)
+        port_path.write_text("{corrupt json", encoding="utf-8")
+
+        assert goal_review.maybe_goal_review(state_dir, None, now=NOW) == []
+        row = _goal_review_rows(state_dir)[0]
+        assert row["retention_status"] == "unavailable"
+        assert goal_review.goal_review_retention(row)["status"] == "unavailable"
+
+    def test_corrupt_hypothesis_lifecycle_is_unavailable(self, tmp_path, monkeypatch, enabled):
+        _no_llm(monkeypatch)
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [])
+        hyp_path = state_dir / "hypotheses" / "lifecycle.json"
+        hyp_path.parent.mkdir(parents=True)
+        hyp_path.write_text("{corrupt json", encoding="utf-8")
+
+        assert goal_review.maybe_goal_review(state_dir, None, now=NOW) == []
+        row = _goal_review_rows(state_dir)[0]
+        assert row["retention_status"] == "unavailable"
+        assert goal_review.goal_review_retention(row)["status"] == "unavailable"
+
+    def test_decay_touch_evidence_blocked_is_unavailable(self, tmp_path, monkeypatch, enabled):
+        from nanobot.runtime import usage_evidence
+
+        _no_llm(monkeypatch)
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [])
+        repo = tmp_path / "repo"
+        (repo / "scripts").mkdir(parents=True)
+        (repo / "scripts" / "foo.py").write_text("# script\n", encoding="utf-8")
+        monkeypatch.setattr(
+            usage_evidence,
+            "_touched_from_results_with_status",
+            lambda *args, **kwargs: ({}, "corrupt"),
+        )
+
+        assert goal_review.maybe_goal_review(state_dir, repo, now=NOW) == []
+        row = _goal_review_rows(state_dir)[0]
+        assert row["retention_status"] == "unavailable"
+        assert goal_review.goal_review_retention(row)["status"] == "unavailable"
+
     def test_error_retains_captured_provenance(self, tmp_path, monkeypatch, enabled):
         from nanobot.runtime import tech_tree
 

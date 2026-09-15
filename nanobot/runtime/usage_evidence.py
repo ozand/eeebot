@@ -1359,6 +1359,83 @@ def owner_live_ratio(
         return {"inventory": 0, "live": 0, "ratio": None}
 
 
+def stale_artifacts_status(
+    state_dir: Path,
+    selfevo_repo: Path | None,
+    *,
+    older_than_days: int,
+    now: datetime | None = None,
+    sidecar_data: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, str]], str]:
+    """Return decay candidates plus ``complete`` or ``unavailable`` evidence status.
+
+    This is a read-only companion for decision provenance. It preserves
+    ``stale_artifacts``' existing list-only API and semantics while exposing
+    when its fail-open empty list means blocked evidence rather than a known
+    absence of stale artifacts (#1596).
+    """
+    try:
+        if not selfevo_repo:
+            return [], "unavailable"
+        repo = Path(selfevo_repo)
+        if not repo.is_dir():
+            return [], "unavailable"
+        now_value = now or datetime.now(timezone.utc)
+        cutoff = now_value - timedelta(days=older_than_days)
+        usage_data = dict(sidecar_data) if sidecar_data is not None else _load_usage(Path(state_dir))
+        fresh_touched, fresh_status = _touched_from_results_with_status(
+            Path(state_dir), since=cutoff,
+        )
+        persisted_status = str(usage_data.get("touched_results_status") or "unknown")
+        touch_status = fresh_status if fresh_status != "valid-empty" else persisted_status
+        if fresh_status not in {"complete", "valid-empty"}:
+            touch_status = fresh_status
+        if touch_status in _TOUCH_EVIDENCE_BLOCKING_STATUSES:
+            return [], "unavailable"
+        entries = dict(usage_data.get("entries") or {})
+        for rel, touched in fresh_touched.items():
+            entry = entries.get(rel)
+            entry = dict(entry) if isinstance(entry, dict) else {}
+            prior = str(entry.get("last_touched") or "")
+            if not prior or touched > prior:
+                entry["last_touched"] = touched
+                entries[rel] = entry
+        protected = _decay_protected_paths() | _heldout_contracted_paths()
+        out: list[dict[str, str]] = []
+        scripts_dir = repo / "scripts"
+        script_files = sorted(scripts_dir.glob("*.py")) if scripts_dir.is_dir() else []
+        for script in script_files:
+            rel = f"{script.parent.name}/{script.name}"
+            if rel in protected:
+                continue
+            entry = entries.get(rel)
+            entry = entry if isinstance(entry, dict) else {}
+            if _is_archived_stub(script):
+                continue
+            last_used = _parse_ts(entry.get("last_used"))
+            last_touched = _parse_ts(entry.get("last_touched"))
+            if last_used is None and last_touched is None:
+                last_touched = _parse_ts(_git_last_commit_iso(repo, rel))
+                if last_touched is None:
+                    continue
+            if last_used is not None and last_used >= cutoff:
+                continue
+            if last_touched is not None and last_touched >= cutoff:
+                continue
+            created = _parse_ts(_git_creation_iso(repo, rel, sidecar_data=usage_data))
+            if created is None or created >= _EVIDENCE_EPOCH:
+                if last_used is None or (
+                    created is not None and last_used < created + _BIRTH_USE_GRACE
+                ):
+                    continue
+            newest = max(ts for ts in (last_used, last_touched) if ts is not None)
+            out.append({"path": rel, "stale_since": _iso(newest)})
+        out.sort(key=lambda item: item["stale_since"])
+        return out, "complete"
+    except Exception:
+        return [], "unavailable"
+
+
 def stale_artifacts(
     state_dir: Path,
     selfevo_repo: Path | None,

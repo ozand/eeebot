@@ -432,7 +432,7 @@ def _collect_evidence(
     lines: list[str] = []
     source_starts: dict[str, int] = {}
     scorecard_start = len(lines)
-    scorecard_readable = scorecard_available
+    scorecard_readable = scorecard_available and isinstance(snapshot.get("gaps"), list)
     try:
         for gap in snapshot.get("gaps") or []:
             if not isinstance(gap, dict):
@@ -452,17 +452,19 @@ def _collect_evidence(
     try:
         from nanobot.runtime import usage_evidence
 
-        stale = usage_evidence.stale_artifacts(
-            Path(state_dir), selfevo_repo, older_than_days=_DECAY_DAYS, now=now
-        )
-        for record in stale[:5]:
-            rel = str(record.get("path") or "").strip()
-            since = str(record.get("stale_since") or "").strip()[:10]
-            if rel:
-                lines.append(
-                    f"decay: {rel} has no harness-observed use or modification "
-                    f"since {since or 'unknown'} ({_DECAY_DAYS}+ days; goal vector V2)"
-                )
+        if selfevo_repo:
+            stale, decay_status = usage_evidence.stale_artifacts_status(
+                Path(state_dir), selfevo_repo, older_than_days=_DECAY_DAYS, now=now
+            )
+            decay_available = decay_status == "complete"
+            for record in stale[:5]:
+                rel = str(record.get("path") or "").strip()
+                since = str(record.get("stale_since") or "").strip()[:10]
+                if rel:
+                    lines.append(
+                        f"decay: {rel} has no harness-observed use or modification "
+                        f"since {since or 'unknown'} ({_DECAY_DAYS}+ days; goal vector V2)"
+                    )
     except Exception:
         decay_available = False
     if source_status is not None:
@@ -481,6 +483,8 @@ def _collect_evidence(
     try:
         from nanobot.runtime import hypothesis_backlog
 
+        _lifecycle, lifecycle_status = hypothesis_backlog._load_lifecycle_status(state_dir)
+        hypothesis_available = lifecycle_status != "corrupt"
         for hyp in hypothesis_backlog.supported_hypotheses(state_dir):
             title = str(hyp.get("title") or "").strip()
             if not title:
@@ -862,11 +866,14 @@ def maybe_goal_review(
         try:
             from nanobot.runtime import tech_tree
 
-            candidate_direction = tech_tree.current_direction(state_dir)
-            if candidate_direction is None:
-                direction_available = True
-                current_direction = None
-            elif isinstance(candidate_direction, str) and _DIRECTION_NAME_RE.fullmatch(candidate_direction):
+            candidate_direction, direction_status = tech_tree.current_direction_status(state_dir)
+            if direction_status == "complete" and (
+                candidate_direction is None
+                or (
+                    isinstance(candidate_direction, str)
+                    and _DIRECTION_NAME_RE.fullmatch(candidate_direction)
+                )
+            ):
                 direction_available = True
                 current_direction = candidate_direction
             else:
