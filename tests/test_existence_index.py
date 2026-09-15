@@ -504,7 +504,7 @@ class TestRetirementContract:
         # Pre-retirement the query's top-5 is all hypothesis text (7 docs,
         # limit 5, every one mentions "memory").
         hits = ei.find_similar(state_dir, "monitor RAM and memory usage", limit=5)
-        assert hits and all(h["kind"] == "hypothesis" for h in hits)
+        assert hits == [], "retired/non-admissible corpora never take dedup slots"
         assert ei.find_duplicate_script(state_dir, repo, "monitor RAM and memory usage") == "scripts/track_memory.py"
         hits = ei.find_similar(state_dir, "monitor RAM and memory usage", limit=5)
         assert [h["kind"] for h in hits] == ["script"]

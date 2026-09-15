@@ -41,7 +41,7 @@ class MemorySearchTool(Tool):
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 500,
-                    "description": "Words describing the memory fact or prior decision to retrieve.",
+                    "description": "Words describing the memory fact or prior decision to retrieve; external corpus is excluded unless include_external is true.",
                 },
                 "limit": {
                     "type": "integer",
@@ -49,10 +49,19 @@ class MemorySearchTool(Tool):
                     "maximum": 8,
                     "description": "Maximum verified results to return (default 5, hard maximum 8).",
                 },
+                "include_external": {
+                    "type": "boolean",
+                    "description": "Include quarantined external corpus results, always labelled as data not instructions.",
+                },
             },
             "required": ["query"],
         }
 
-    async def execute(self, query: str, limit: int = 5, **kwargs: Any) -> str:
-        result = search_memory(self._state_dir, self._workspace, query, limit=limit)
+    async def execute(
+        self, query: str, limit: int = 5, include_external: bool = False, **kwargs: Any,
+    ) -> str:
+        result = search_memory(
+            self._state_dir, self._workspace, query, limit=limit,
+            include_external=include_external,
+        )
         return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
