@@ -209,18 +209,6 @@ else
   sudo mkdir -p /etc/eeepc-agent/presets
   sudo cp "$RELEASE_DIR/host/eeepc/etc/presets/"*.env /etc/eeepc-agent/presets/ 2>/dev/null || true
 
-  echo "[remote] migrating goal priorities to derived_priorities.json (#944)"
-  STATE_DIR=/var/lib/eeepc-agent/self-evolving-agent/state
-  sudo mkdir -p "$STATE_DIR/goals"
-  DERIVED="$STATE_DIR/goals/derived_priorities.json"
-  GOAL_TEXT="$STATE_DIR/goals/goal_text.json"
-  if [ -f "$GOAL_TEXT" ]; then
-    sudo python3 "$RELEASE_DIR/host/eeepc/scripts/migrate_goal_priorities.py" "$GOAL_TEXT" "$DERIVED"
-    sudo chown eeepc-agent:eeepc-agent "$DERIVED"
-  elif [ ! -f "$DERIVED" ]; then
-    echo "[remote] no legacy or derived priorities found; goal_review will mint from the charter"
-  fi
-
   echo "[remote] fixing ownership and permissions on release"
   sudo chown -R root:root "$RELEASE_DIR" "$VENV_BASE"
 

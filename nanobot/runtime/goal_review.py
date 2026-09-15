@@ -380,7 +380,13 @@ def merged_goal_text(state_dir: Path, raw_text: str) -> str:
         # since baked into goal_text itself (or that a reseed re-added) —
         # otherwise the merged text would carry the label twice and demand
         # would mint two items for the same work. Operator canon wins.
+        # #1640: also skip by number against the WHOLE text (Current and
+        # Completed) — a stray derived entry can outlive the operator
+        # marking its own number done, and the Completed sentence's prose
+        # rarely matches the derived entry's label verbatim, so the label
+        # check alone would let it resurrect as a new "current" target.
         existing = _existing_priority_labels(raw_text)
+        existing_numbers = _existing_priority_numbers(raw_text)
         entries = [
             {
                 "label": d["label"],
@@ -390,6 +396,7 @@ def merged_goal_text(state_dir: Path, raw_text: str) -> str:
             }
             for d in derived
             if _normalize_label(d["label"]) not in existing
+            and int(d.get("number") or 0) not in existing_numbers
         ]
         if not entries:
             return raw_text
@@ -539,6 +546,22 @@ def _existing_priority_labels(goal_text: str) -> set[str]:
         title = _TRAILING_VECTOR_TAG_RE.sub("", m.group(2))
         labels.add(_normalize_label(title))
     return labels
+
+
+_PRIORITY_NUMBER_RE = re.compile(r"Priority\s+(\d+)\b")
+
+
+def _existing_priority_numbers(goal_text: str) -> set[int]:
+    """Every ``Priority N`` number appearing ANYWHERE in ``goal_text`` — the
+    "Current priority targets:" section and the free-form "Completed (do not
+    repeat):" sentence alike (#1640: a stray derived entry whose number was
+    already used, active or completed, must never be re-appended. The
+    Completed sentence is operator-authored prose with no fixed shape
+    ("Priority N (description, commit X)" vs. this module's own
+    "Priority N — Title;" render), so it cannot be parsed for a label the
+    way :func:`_existing_priority_labels` parses the structured Current
+    section — the number is the only thing both shapes share)."""
+    return {int(n) for n in _PRIORITY_NUMBER_RE.findall(goal_text)}
 
 
 def _record_guard_key_event(
