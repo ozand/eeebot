@@ -33,11 +33,10 @@ def _make_git_repo_with_commit(
 ) -> Path:
     """Create a tmp git repo (playing the role of eeebot-self-evolving) with one commit per message.
 
-    Issue #748: ``create_files`` optionally creates real (empty-ish) files at
-    the given repo-relative paths — needed by tests exercising the
-    artifact+evidence done-detection (``_priority_done_by_artifact``), which
-    requires the target file to actually exist on disk, not just be
-    referenced in a commit message.
+    ``create_files`` optionally creates real (empty-ish) files at the given
+    repo-relative paths for target-bearing priority tests. #1629 makes their
+    existence insufficient completion evidence; tests may populate explicit
+    requested behavior separately.
     """
     repo = tmp_path / "eeebot-self-evolving"
     repo.mkdir()

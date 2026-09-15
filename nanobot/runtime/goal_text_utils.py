@@ -2,7 +2,7 @@
 
 Extracted from the now-deleted `cycle_planning.py` (issue #916): this module
 holds the three functions that survived the coordinator decommission because
-`bridge.py` and `llm_proposer.py` import them directly —
+`bridge.py`, `demand.py`, and `llm_proposer.py` import them directly —
 `filter_completed_priorities_from_goal_text`, `_recent_git_log`, and
 `_title_already_done_in_git_log` — plus their minimal private closure
 (`_priority_done_by_artifact`, `_priority_target_file`,
@@ -44,9 +44,9 @@ def _priority_target_file(entry_text: str) -> str | None:
     single git-log line) produces false positives on the autonomous loop's
     narrow, repetitive commit vocabulary (e.g. "Loop health in dashboard"
     spuriously matched an unrelated "loop health report script" commit).
-    Priorities that name a concrete target file can be judged far more
-    precisely by artifact existence + evidence (see
-    ``_priority_done_by_artifact``); this helper is the first step — pulling
+    Priorities that name a concrete target file must be judged by evidence
+    tied to their requested behavior (see ``_priority_done_by_artifact``);
+    this helper is the first step — pulling
     that path out of the FULL priority entry text (title + description), not
     just the short title, since the file path usually only appears in the
     description ("write scripts/foo.py that ..."). Matches paths rooted under
@@ -63,7 +63,7 @@ def _priority_target_file(entry_text: str) -> str | None:
 def _priority_done_by_artifact(
     entry_text: str, selfevo_repo_root: Path | None, git_log: str
 ) -> bool | None:
-    """Return whether a priority naming a target file is done, by artifact + evidence.
+    """Return whether a priority naming a target file is done, by request evidence.
 
     Issue #748: replaces the word-overlap heuristic as the PRIMARY signal for
     priorities that name a target file (all of ours do) — the word heuristic
@@ -74,9 +74,7 @@ def _priority_done_by_artifact(
       - ``None`` if no target file path is present in ``entry_text`` or
         ``selfevo_repo_root`` is unavailable — caller must fall back to
         ``_title_already_done_in_git_log``.
-      - ``True`` iff the target file exists in ``selfevo_repo_root`` AND some
-        line of ``git_log`` contains the file's exact basename as a
-        case-insensitive substring.
+      - ``True`` iff the entry's verbatim priority label appears in git log.
       - ``False`` otherwise (file absent, or no commit evidence), and on any
         internal error (fail-open toward "not done", matching this module's
         existing convention — a false "done" actively tells the LLM not to do
@@ -87,14 +85,12 @@ def _priority_done_by_artifact(
     1. The entry's verbatim ``Priority N — <title prefix>`` label appears in
        the recent git log (integrated cycles auto-commit the proposal title
        verbatim) → ``True`` regardless of anything else.
-    2. Target file existence + exact-basename-in-log — but ONLY for
-       creation-type entries. For "extend"-type entries this evidence is
-       structurally blind: the residual risk documented in earlier revisions
-       fired live on 2026-07-15 (Priority 14 "extend scripts/
-       eeebot_dashboard.py" read as done because the file pre-existed from
-       Priority 7 and its basename appeared in Priority 11's commits —
-       the R30 wake-up never happened). An extend entry with no label
-       evidence is NOT done.
+    2. A target path, basename, or a named function definition is not enough
+       to prove the whole request: an artifact can predate, belong to a
+       different priority, or implement only part of the request (#1629).
+    3. Every other target-bearing request is retained unless the completed
+       demand sidecar (checked by the caller first) or verbatim label proves
+       it done. There is no honest generic artifact criterion for those forms.
     """
     try:
         target = _priority_target_file(entry_text)
@@ -105,30 +101,9 @@ def _priority_done_by_artifact(
         label = _priority_label_prefix(entry_text)
         if label and git_log and label.lower() in git_log.lower():
             return True
-        basename = target.rsplit("/", 1)[-1]
-        if not basename:
-            return None
-        file_path = selfevo_repo_root / target
-        if not file_path.exists():
-            return False
-        if not git_log:
-            return False
-        if basename.lower() not in git_log.lower():
-            return False
-        # Basename evidence is conclusive only when this entry CREATED the
-        # file; a modify-existing entry's target pre-exists by definition, so
-        # its existence proves nothing about THIS entry's work (#748
-        # follow-up). Modify verbs beyond "extend": live evidence 2026-07-18
-        # — P16 phrased "add ONE function ... to scripts/eeebot_dashboard.py"
-        # slipped past the extend-only check and was falsely filtered as
-        # done (its R30 wake-up never fired).
-        import re as _re
-
-        if _re.search(
-            r"\bextend\b|\bupdate\b|\badd\b[^.]{0,80}?\bto\b", entry_text, _re.IGNORECASE
-        ):
-            return False
-        return True
+        # A target can predate or satisfy only part of this priority. Never
+        # infer request completion from its existence or contents (#1629).
+        return False
     except Exception:
         return False
 
@@ -152,9 +127,10 @@ def filter_completed_priorities_from_goal_text(
 
     Reuses the exact same "Current priority targets:" regex as
     `_parse_backlog_task_from_goal_text` to enumerate priority entries.
-    Issue #748: done-ness is now decided primarily by
-    `_priority_done_by_artifact` (target-file existence + exact-basename
-    commit evidence), since the original word-overlap heuristic
+    Issue #1629: done-ness for a target-bearing priority is decided by
+    completed-demand evidence or a verbatim priority label — never a target
+    file's existence or contents.
+    The original word-overlap heuristic
     (`_title_already_done_in_git_log`) produced confirmed false positives on
     short titles against the autonomous loop's narrow, repetitive commit
     vocabulary (e.g. "Loop health in dashboard" spuriously matched an
@@ -232,9 +208,8 @@ def filter_completed_priorities_from_goal_text(
                 except Exception:
                     done = False
             if not done and git_log:
-                # Issue #748: artifact+evidence first (precise), word
-                # heuristic only as fallback when the entry names no target
-                # file — see _priority_done_by_artifact's docstring.
+                # #1629: request evidence first; the word heuristic remains
+                # a fallback only when the entry names no target file.
                 done = _priority_done_by_artifact(entry_text, selfevo_repo_root, git_log)
                 if done is None:
                     done = _title_already_done_in_git_log(title, git_log)

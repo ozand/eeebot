@@ -21,9 +21,8 @@ from tests.test_goal_backlog_routing import GOAL_TEXT_JSON, _make_git_repo_with_
 RAW_TEXT = json.loads(GOAL_TEXT_JSON)["text"]
 
 
-def test_done_priority_removed_and_moved_to_completed_sentence(tmp_path: Path):
-    """Priority 5's title words all match one commit line → removed from
-    "Current priority targets:" and listed under "Completed (do not repeat)"."""
+def test_target_file_and_basename_log_without_request_evidence_stays_live(tmp_path: Path):
+    """#1629: generic file existence cannot prove this priority's behavior."""
     repo = _make_git_repo_with_commit(
         tmp_path,
         "feat: write scripts/cycle_logger.py — confirmed done for cycle-999",
@@ -32,25 +31,12 @@ def test_done_priority_removed_and_moved_to_completed_sentence(tmp_path: Path):
 
     rewritten = filter_completed_priorities_from_goal_text(RAW_TEXT, repo)
 
-    assert rewritten != RAW_TEXT
-    # Priority 5 no longer listed under "Current priority targets:"
-    targets_section = rewritten.split("Current priority targets:", 1)[1]
-    completed_split = targets_section.split("Completed (do not repeat):")
-    current_targets_text = completed_split[0]
-    assert "Priority 5" not in current_targets_text
-    assert "cycle_logger.py" not in current_targets_text
-    # Priority 6 (not done) is still listed
-    assert "Priority 6" in current_targets_text
-    assert "smoke_test_loop.py" in current_targets_text
-    # Priority 5's title appears in the Completed sentence
-    assert "Completed (do not repeat):" in rewritten
-    completed_sentence = rewritten.split("Completed (do not repeat):", 1)[1]
-    assert "cycle_logger.py" in completed_sentence
+    assert rewritten == RAW_TEXT
+    assert "Completed (do not repeat):" not in rewritten
 
 
-def test_all_done_current_priority_targets_section_empty(tmp_path: Path):
-    """When every listed priority matches the log, "Current priority targets:"
-    has no remaining entries and both titles are moved to Completed."""
+def test_multiple_target_files_without_request_evidence_stay_live(tmp_path: Path):
+    """Several basename matches remain insufficient completion evidence."""
     repo = _make_git_repo_with_commit(
         tmp_path,
         "feat: write scripts/cycle_logger.py finished",
@@ -60,15 +46,8 @@ def test_all_done_current_priority_targets_section_empty(tmp_path: Path):
 
     rewritten = filter_completed_priorities_from_goal_text(RAW_TEXT, repo)
 
-    assert "Completed (do not repeat):" in rewritten
-    targets_section = rewritten.split("Current priority targets:", 1)[1]
-    current_targets_text = targets_section.split("Completed (do not repeat):")[0]
-    assert "Priority 5" not in current_targets_text
-    assert "Priority 6" not in current_targets_text
-
-    completed_sentence = rewritten.split("Completed (do not repeat):", 1)[1]
-    assert "cycle_logger.py" in completed_sentence
-    assert "smoke_test_loop.py" in completed_sentence
+    assert rewritten == RAW_TEXT
+    assert "Completed (do not repeat):" not in rewritten
 
 
 def test_not_done_priority_left_untouched(tmp_path: Path):
@@ -108,7 +87,7 @@ def test_fail_open_non_string_input(tmp_path: Path):
     assert filter_completed_priorities_from_goal_text(None, repo) is None  # type: ignore[arg-type]
 
 
-# ─── #748: artifact+evidence done-detection (P11/P12 confirmed false positives) ───
+# ─── #748/#1629: request-evidence done-detection (P11/P12 false positives) ──
 
 # Mirrors the real P11/P12 shape from host/eeepc/etc/goal_text.json: short
 # titles whose words alone collide with the loop's narrow commit vocabulary.
@@ -127,7 +106,7 @@ def test_p11_style_false_positive_survives_filtering(tmp_path: Path):
     dashboard") word-overlaps a commit about a DIFFERENT artifact
     ("loop health report script"), but the actual target file
     (eeebot_dashboard.py) exists with no commit evidence naming it. With
-    artifact+evidence done-detection, P11 must survive as a live priority."""
+    request-evidence done-detection, P11 must survive as a live priority."""
     repo = _make_git_repo_with_commit(
         tmp_path,
         "feat: implement loop health report script",
@@ -162,9 +141,65 @@ def test_p12_style_false_positive_survives_filtering(tmp_path: Path):
     assert "Priority 12" in targets_section
 
 
-def test_artifact_positive_match_filters_into_completed(tmp_path: Path):
-    """When the target file both exists AND a commit's message contains its
-    exact basename, the priority is correctly recognized as done."""
+def test_existing_target_with_different_requested_function_is_not_folded(tmp_path: Path):
+    """#1629: a shared file cannot stand in for this entry's behavior."""
+    repo = _make_git_repo_with_commit(
+        tmp_path,
+        "feat: create filter_fallback_targets.py with filter_fallback_paths",
+        create_files=("scripts/filter_fallback_targets.py",),
+    )
+    path = repo / "scripts" / "filter_fallback_targets.py"
+    path.write_text("def filter_fallback_paths(paths):\n    return paths\n", encoding="utf-8")
+    text = (
+        "mission statement\n\nCurrent priority targets:\n"
+        "(A) Priority 43 — Filter fallback candidates dedup: write "
+        "scripts/filter_fallback_targets.py with a single function "
+        "filter_candidate_paths(candidates, recent_targets)."
+    )
+
+    rewritten = filter_completed_priorities_from_goal_text(text, repo)
+    assert rewritten == text
+    assert "Priority 43" in rewritten.split("Current priority targets:", 1)[1]
+
+
+def test_false_artifact_fold_reverses_when_requested_function_is_absent(tmp_path: Path):
+    """The filter is recomputed; a former completed sentence is not durable state."""
+    repo = _make_git_repo_with_commit(
+        tmp_path,
+        "feat: create filter_fallback_targets.py with filter_fallback_paths",
+        create_files=("scripts/filter_fallback_targets.py",),
+    )
+    path = repo / "scripts" / "filter_fallback_targets.py"
+    path.write_text("def filter_fallback_paths(paths):\n    return paths\n", encoding="utf-8")
+    text = (
+        "mission statement\n\nCurrent priority targets:\n"
+        "(A) Priority 43 — Filter fallback candidates dedup: write "
+        "scripts/filter_fallback_targets.py with a single function "
+        "filter_candidate_paths(candidates, recent_targets).\n\n"
+        "Completed (do not repeat): Filter fallback candidates dedup."
+    )
+
+    rewritten = filter_completed_priorities_from_goal_text(text, repo)
+    current = rewritten.split("Current priority targets:", 1)[1].split("Completed (do not repeat):", 1)[0]
+    assert "Priority 43" in current
+
+
+def test_named_function_present_without_completion_evidence_stays_live(tmp_path: Path):
+    repo = _make_git_repo_with_commit(
+        tmp_path, "chore: unrelated commit", create_files=("scripts/foo.py",),
+    )
+    (repo / "scripts" / "foo.py").write_text("def requested_behavior(value):\n    return value\n", encoding="utf-8")
+    text = (
+        "mission statement\n\nCurrent priority targets:\n"
+        "(A) Priority 20 — Do the thing: write scripts/foo.py with function requested_behavior(value)."
+    )
+    rewritten = filter_completed_priorities_from_goal_text(text, repo)
+    assert rewritten == text
+    assert "Completed (do not repeat):" not in rewritten
+
+
+def test_generic_artifact_match_without_requested_behavior_stays_live(tmp_path: Path):
+    """A filename/commit match is not a satisfaction claim (#1629)."""
     repo = _make_git_repo_with_commit(
         tmp_path,
         "feat: create foo.py to close the gap",
@@ -179,14 +214,8 @@ def test_artifact_positive_match_filters_into_completed(tmp_path: Path):
 
     rewritten = filter_completed_priorities_from_goal_text(text, repo)
 
-    assert rewritten != text
-    assert "Completed (do not repeat):" in rewritten
-    completed_sentence = rewritten.split("Completed (do not repeat):", 1)[1]
-    assert "Do the thing" in completed_sentence
-    targets_section = rewritten.split("Current priority targets:", 1)[1]
-    current_targets_text = targets_section.split("Completed (do not repeat):")[0]
-    assert "Priority 20" not in current_targets_text
-    assert "Priority 21" in current_targets_text
+    assert rewritten == text
+    assert "Completed (do not repeat):" not in rewritten
 
 
 def test_extend_priority_not_done_by_shared_target_file(tmp_path: Path):
