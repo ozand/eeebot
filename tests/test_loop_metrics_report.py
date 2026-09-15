@@ -154,6 +154,25 @@ def test_group_by_cycle_ignores_rows_without_cycle_id(mod):
 # ─── metrics ───────────────────────────────────────────────────────────────
 
 
+def test_change_shape_distribution_is_explicit_and_legacy_safe(tmp_path, mod):
+    now = datetime.now(timezone.utc)
+    state_dir = tmp_path / "state"
+    ledger = state_dir / "ledger"
+    ledger.mkdir(parents=True)
+    rows = [
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "change_shape": "feature", "ts": now.isoformat()},
+        {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": now.isoformat()},
+    ]
+    (ledger / "cycles.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    report = mod.build_report(state_dir, days=7)
+    shape = report["change_shape"]
+    assert shape["integrated_cycles"] == 2
+    assert shape["distribution"]["feature"] == 1
+    assert shape["distribution"]["unclassified"] == 1
+    assert sum(shape["distribution"].values()) == shape["integrated_cycles"]
+    assert "Integrated change shape distribution:" in mod.render_table(report)
+
+
 def test_full_report_metrics(tmp_path, mod):
     now = datetime.now(timezone.utc)
     state_dir = _make_ledger(tmp_path, now)

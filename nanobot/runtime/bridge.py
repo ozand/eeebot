@@ -99,6 +99,7 @@ from nanobot.runtime.scorecard import (  # noqa: E402
     fitness_sidecar_hashes as _fitness_sidecar_hashes,
 )
 from scripts.cycle_cost_probe import CycleCostSampler  # noqa: E402
+from scripts.change_shape import classify_subject  # noqa: E402
 from nanobot.runtime.stop_guards import REVISION_CAP_DEFAULT, revision_outcome  # noqa: E402
 # #1119: deterministic test-weakening detector — runs BEFORE the smoke gate
 # decides a cycle's fate, same placement discipline as
@@ -3862,7 +3863,7 @@ async def _main_impl_body():
             'system_prompt_overflow': locals().get('_system_prompt_overflow_text', ''),
             'run_stop_reason': locals().get('_run_stop_reason', ''),
             'prompt_fit_rung': locals().get('_prompt_fit_rung'),
-            'origin_main_observed': locals().get('_origin_main_observed', locals().get('main_sha_before', ''))
+            'origin_main_observed': locals().get('_origin_main_observed', locals().get('main_sha_before', '')),
         }
 
 
@@ -4130,6 +4131,18 @@ async def _main_impl_body():
         except Exception as _exc:
             _lesson_candidate["refusal_reason"] = f"candidate_setup_failed:{type(_exc).__name__}"
 
+    change_subject = ""
+    change_shape = None
+    if _integrated and _selfevo_repo.is_dir():
+        try:
+            subject_result = _sp.run(
+                _git_cmd(_selfevo_repo) + ["log", "-1", "--format=%s", cycle_branch],
+                capture_output=True, text=True, check=True,
+            )
+            change_subject = subject_result.stdout.strip()
+            change_shape = classify_subject(change_subject)
+        except Exception:
+            change_shape = "unclassified"
     record_cycle_outcome(
         STATE_DIR, _cycle_id, _cycle_outcome, _rollback_reason, files_changed, cycle_branch,
         lesson_candidate=_lesson_candidate,
@@ -4139,6 +4152,7 @@ async def _main_impl_body():
         executor_llm_error=bool(_executor_llm_error_text),
         lane=req.get('lane') or None,
         prompt_fit_rung=_res.get('prompt_fit_rung'),
+        change_shape=change_shape,
     )
     # #721: post-cycle tag at the terminal HEAD, same outcome value as the
     # ledger row above. Integrated -> main_sha_after (shared checkout stayed on

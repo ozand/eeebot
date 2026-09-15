@@ -785,6 +785,7 @@ def build_report(state_dir: Path, days: int) -> dict[str, Any]:
     computed = compute_metrics(cycles)
     liveness = compute_liveness(cycles, rows, computed["metrics"]["duplicate_rate"]["value"], now=now)
     goal_alignment = _goal_alignment_breakdown(rows)
+    shape_distribution = _shape_distribution(rows)
 
     window_start = (now - timedelta(days=days)).isoformat().replace("+00:00", "Z")
     window_end = now.isoformat().replace("+00:00", "Z")
@@ -806,11 +807,26 @@ def build_report(state_dir: Path, days: int) -> dict[str, Any]:
         "gate_fail_breakdown": computed["gate_fail_breakdown"],
         "dedup_breakdown": computed["dedup_breakdown"],
         "goal_alignment": goal_alignment,
+        "change_shape": shape_distribution,
         "value_verification": _value_verification(state_dir),
         "scorecard": _scorecard_block(state_dir),
         "rsi": _rsi_block(state_dir, now=now),
         "integrity": _integrity_block(rows),
     }
+
+
+def _shape_distribution(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Report integrated-cycle change shapes; legacy rows are unclassified."""
+    names = ("documentation", "feature", "knowledge", "maintenance", "performance", "testing", "unclassified")
+    counts = Counter()
+    integrated = 0
+    for row in rows:
+        if row.get("phase") != "outcome" or row.get("outcome") != "success":
+            continue
+        integrated += 1
+        shape = str(row.get("change_shape") or "unclassified")
+        counts[shape if shape in names else "unclassified"] += 1
+    return {"status": "present", "integrated_cycles": integrated, "distribution": {name: counts.get(name, 0) for name in names}}
 
 
 def _integrity_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -906,6 +922,13 @@ def render_table(report: dict[str, Any]) -> str:
     lines.append("Metrics pending upstream inputs (null, per #705 gap-visibility rule):")
     for name in ("protected_surface_rejections", "cost_per_integrated_change", "harvestable_upstream_ratio", "human_intervention_needed"):
         lines.append(f"  {name}: n/a — {m[name]['note']}")
+    lines.append("")
+
+    shape = report.get("change_shape") or {}
+    lines.append("Integrated change shape distribution:")
+    lines.append(f"  window={shape.get('window', {}).get('start', window['start'])} .. {shape.get('window', {}).get('end', window['end'])}")
+    for name, count in sorted((shape.get("distribution") or {}).items(), key=lambda item: (-item[1], item[0])):
+        lines.append(f"  {name:<16} {count}")
     lines.append("")
 
     goal_alignment = report["goal_alignment"]

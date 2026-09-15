@@ -128,6 +128,20 @@ class TestTypedHelpers:
             "refusal_reason": "condition_equals_detail",
         }
 
+    def test_record_cycle_outcome_accepts_change_shape(self, tmp_path):
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c1", "success", None, ["a.py"], "selfevo/cycle-1",
+            change_shape="feature",
+        )
+        assert _read_ledger(tmp_path)[0]["change_shape"] == "feature"
+
+    def test_record_cycle_outcome_rejects_unknown_change_shape(self, tmp_path):
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c1", "success", None, ["a.py"], "selfevo/cycle-1",
+            change_shape="garbage",
+        )
+        assert "change_shape" not in _read_ledger(tmp_path)[0]
+
     def test_record_cycle_outcome_valid_enum(self, tmp_path):
         cycle_ledger.record_cycle_outcome(tmp_path, "c1", "success", None, ["a.py"], "selfevo/cycle-1")
         rows = _read_ledger(tmp_path)
