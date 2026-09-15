@@ -517,6 +517,60 @@ class TestDerivedPriorities:
         parsed = goal_review._PRIORITY_PATTERN.findall(section)
         assert [int(num) for num, _, _ in parsed] == [11, 16, 17]
 
+    def test_merged_goal_text_skips_derived_entry_already_active(self, tmp_path):
+        """#1640: a stray derived entry duplicating a label the operator
+        already lists as a live current target must never be appended
+        twice — this is what the retired per-deploy migration script used
+        to produce (it re-parsed goal_text.json's own live priorities back
+        into derived_priorities.json on every release)."""
+        state_dir = tmp_path / "state"
+        goal_review._write_derived_priorities(
+            state_dir,
+            [
+                {
+                    "label": "Loop health in dashboard",
+                    "vector": "V1",
+                    "body": "extend scripts/eeebot_dashboard.py with a loop-health section. Commit.",
+                    "number": 11,
+                    "added_utc": "2026-09-14T22:47:10Z",
+                }
+            ],
+        )
+        merged = goal_review.merged_goal_text(state_dir, GOAL_TEXT)
+        assert merged == GOAL_TEXT
+        assert merged.count("Priority 11") == 1
+
+    def test_merged_goal_text_never_resurrects_a_completed_number(self, tmp_path):
+        """#1640: a stray derived entry whose NUMBER already appears in the
+        "Completed (do not repeat):" sentence must never be re-appended as a
+        new current target, even when its label text does not match that
+        sentence's free-form prose ("Priority 14 (demand dashboard, commit
+        1029364)" vs. the derived entry's own stored label) — the Completed
+        sentence has no fixed shape for a label-only check to rely on, so
+        the guard has to key on the number both share.
+
+        Simulates exactly the mechanism found live on host: two writers
+        used to exist (goal_review's own capped mint, and a per-deploy
+        migration script since retired) and could disagree about whether a
+        number was still open."""
+        state_dir = tmp_path / "state"
+        goal_review._write_derived_priorities(
+            state_dir,
+            [
+                {
+                    "label": "Loop health in dashboard",
+                    "vector": "V2",
+                    "body": "extend scripts/eeebot_dashboard.py with a loop-health section. Commit.",
+                    "number": 14,
+                    "added_utc": "2026-09-14T22:47:10Z",
+                }
+            ],
+        )
+        merged = goal_review.merged_goal_text(state_dir, GOAL_TEXT)
+        current_section = merged.split("Completed (do not repeat):", 1)[0]
+        assert "Priority 14" not in current_section
+        assert merged == GOAL_TEXT
+
     def test_deploy_reseed_does_not_erase_derived_priority(
         self, tmp_path, monkeypatch, enabled
     ):
