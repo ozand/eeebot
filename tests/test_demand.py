@@ -86,10 +86,8 @@ class TestPriorityDemand:
         # Stable id: hash of kind+summary.
         assert priorities[0]["id"] == demand.item_id("priority", priorities[0]["summary"])
 
-    def test_completed_priorities_are_not_demand(self, tmp_path):
-        """Done-detection is DELEGATED to cycle_planning's #748 filter, not
-        reimplemented: priorities whose target files exist with commit
-        evidence are filtered out before demand collection sees them."""
+    def test_file_existence_without_request_evidence_does_not_remove_priority_demand(self, tmp_path):
+        """#1629: a shared target file is not proof of its requested work."""
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
         repo = _make_git_repo_with_commit(
@@ -99,7 +97,8 @@ class TestPriorityDemand:
             create_files=("scripts/cycle_logger.py", "scripts/smoke_test_loop.py"),
         )
         items = demand.collect_demand(state_dir, repo)
-        assert [i for i in items if i["kind"] == "priority"] == []
+        priorities = [i for i in items if i["kind"] == "priority"]
+        assert len(priorities) == 2
 
     def test_no_goal_text_no_priority_demand(self, tmp_path):
         state_dir = _state_dir(tmp_path)
@@ -1430,7 +1429,7 @@ class TestCompletedSidecar:
         _append_outcome(state_dir, "c1", "skipped-duplicate", ts=_now_iso(10))
         assert demand._fold_completed(state_dir) == set()
 
-    def test_already_delivered_priority_folds_from_no_commit_evidence(self, tmp_path):
+    def test_target_exists_only_completion_is_reversed_to_live_demand(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
         repo = _git_repo(tmp_path)
@@ -1442,22 +1441,42 @@ class TestCompletedSidecar:
         _commit_all(repo, "deliver existing priority target")
 
         target_item = [i for i in demand.collect_demand(state_dir, repo) if i["kind"] == "priority"][0]
+        # Simulate #1114's legacy path: it persisted completion after seeing
+        # this result because the target existed. #1629 must remove it through
+        # the normal collect_demand read path, not just in a private helper.
         _append_proposed(state_dir, "c-no-commit", target_item["id"], ts=_now_iso(10))
         _write_no_commit_result(state_dir, "c-no-commit", target_path)
         _append_outcome(state_dir, "c-no-commit", "partial", ts=_now_iso(5))
-        # A malformed result must not prevent the valid result from folding.
-        (state_dir / "subagents" / "results" / "malformed.json").write_text("{", encoding="utf-8")
-
+        completed_path = state_dir / "demand" / "completed.json"
+        completed_path.parent.mkdir(parents=True, exist_ok=True)
+        completed_path.write_text(
+            json.dumps({"schema_version": "demand-completed-v1", "entries": {
+                target_item["id"]: {"evidence": {"target_exists_on_main": True}},
+            }}),
+            encoding="utf-8",
+        )
         remaining = demand.collect_demand(state_dir, repo)
-        assert not any(i["id"] == target_item["id"] for i in remaining)
-        entry = _completed_sidecar(state_dir)["entries"][target_item["id"]]
-        assert entry["evidence"] == {
-            "verification_cycle_id": "c-no-commit",
-            "target_path": target_path,
-            "target_exists_on_main": True,
-        }
+        assert any(i["id"] == target_item["id"] for i in remaining)
+        completed = json.loads(completed_path.read_text(encoding="utf-8")) if completed_path.exists() else {}
+        assert target_item["id"] not in completed.get("entries", {})
 
-    def test_already_delivered_fold_requires_missing_target_to_stay_live(self, tmp_path):
+    def test_existing_unverified_no_commit_marker_is_removed_idempotently(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        priority_id = "priority-already-delivered"
+        completed_path = state_dir / "demand" / "completed.json"
+        completed_path.parent.mkdir(parents=True)
+        completed_path.write_text(
+            json.dumps({"schema_version": "demand-completed-v1", "entries": {
+                priority_id: {"evidence": {"target_exists_on_main": True}},
+            }}),
+            encoding="utf-8",
+        )
+
+        assert demand._unfold_unverified_no_commit_priorities(state_dir) == {priority_id}
+        assert demand.completed_demand_ids(state_dir) == set()
+        assert demand._unfold_unverified_no_commit_priorities(state_dir) == set()
+
+    def test_unverified_no_commit_fold_requires_missing_target_to_stay_live(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
         repo = _git_repo(tmp_path)
@@ -1471,7 +1490,7 @@ class TestCompletedSidecar:
         completed = json.loads(completed_path.read_text(encoding="utf-8")) if completed_path.exists() else {}
         assert target_item["id"] not in completed.get("entries", {})
 
-    def test_archived_already_delivered_result_folds(self, tmp_path):
+    def test_archived_unverified_no_commit_result_stays_live(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
         repo = _git_repo(tmp_path)
@@ -1498,10 +1517,12 @@ class TestCompletedSidecar:
         _append_outcome(state_dir, "c-archived", "partial", ts=_now_iso(5))
 
         remaining = demand.collect_demand(state_dir, repo)
-        assert not any(i["id"] == target_item["id"] for i in remaining)
-        assert _completed_sidecar(state_dir)["entries"][target_item["id"]]["evidence"]["target_path"] == target_path
+        assert any(i["id"] == target_item["id"] for i in remaining)
+        completed_path = state_dir / "demand" / "completed.json"
+        completed = json.loads(completed_path.read_text(encoding="utf-8")) if completed_path.exists() else {}
+        assert target_item["id"] not in completed.get("entries", {})
 
-    def test_already_delivered_fold_requires_main_branch(self, tmp_path):
+    def test_unverified_no_commit_fold_requires_main_branch(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
         repo = _git_repo(tmp_path)

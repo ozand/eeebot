@@ -2657,102 +2657,33 @@ def record_escalation(
         return False
 
 
-def _fold_already_delivered_priorities(
-    state_dir: Path,
-    selfevo_repo: Path | None,
-    *,
-    ledger_rows: list[dict[str, Any]] | None = None,
-) -> set[str]:
-    """Fold evidence-backed already-delivered priority no-ops into done state.
+def _unfold_unverified_no_commit_priorities(state_dir: Path) -> set[str]:
+    """Restore priorities completed by the retired target-exists-only fold.
 
-    A ``completed_no_commit`` result must identify the serving cycle and target
-    path; the path is accepted only when it exists in the current checkout and
-    the checkout is on ``main``. The completed entry records the cycle and
-    verification evidence, while leaving usage/fitness signals untouched.
+    #1114 recorded ``target_exists_on_main`` entries after a no-commit result.
+    That establishes neither that the target belongs to the priority nor that
+    the request was satisfied (#1629). This narrow migration removes only
+    those entries; ordinary ledger-chain ``outcome: success`` completions are
+    left intact. The operation is idempotent and fail-open.
     """
-    if not selfevo_repo:
-        return set()
     try:
-        repo = Path(selfevo_repo)
-        branch = subprocess.run(
-            ["git", "-C", str(repo), "branch", "--show-current"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if branch.returncode != 0 or branch.stdout.strip() != "main":
-            return set()
-        rows = ledger_rows if ledger_rows is not None else _load_ledger_rows(state_dir)
-        proposed = {
-            str(row.get("cycle_id") or "").strip(): str(row.get("demand_id") or "").strip()
-            for row in rows
-            if isinstance(row, dict) and row.get("phase") == "proposed"
-            and str(row.get("demand_id") or "").strip()
-        }
         completed = _load_completed(state_dir)
-        entries = completed["entries"]
-        changed = False
-        folded: set[str] = set()
-        result_dirs = [Path(state_dir) / "subagents" / dirname for dirname in _RESULT_DIRS]
-        candidates = [
-            path
-            for result_dir in result_dirs
-            if result_dir.is_dir()
-            for path in result_dir.glob("*.json")
-            if path.is_file()
-        ]
-        terminal_outcomes = {
-            str(row.get("cycle_id") or "").strip(): row
-            for row in rows
-            if isinstance(row, dict)
-            and row.get("phase") == "outcome"
-            and str(row.get("cycle_id") or "").strip()
-            and str(row.get("outcome") or "").strip().lower() in {"partial", "completed_no_commit"}
+        entries: dict[str, Any] = completed["entries"]
+        unsafe_ids = {
+            demand_id
+            for demand_id, entry in entries.items()
+            if demand_id.startswith("priority-")
+            and isinstance(entry, dict)
+            and isinstance(entry.get("evidence"), dict)
+            and entry["evidence"].get("target_exists_on_main") is True
         }
-        for result_path in candidates:
-            try:
-                result = _read_json(result_path, None)
-                if not isinstance(result, dict):
-                    continue
-                classification = str(result.get("learning_classification") or "").strip().lower()
-                result_status = str(result.get("result_status") or result.get("status") or "").strip().lower()
-                if classification != "completed_no_commit" and result_status not in {"completed_no_commit", "no_commit"}:
-                    continue
-                cycle_id = str(result.get("cycle_id") or "").strip()
-                demand_id = proposed.get(cycle_id, "")
-                if not demand_id or not demand_id.startswith("priority-") or demand_id in entries:
-                    continue
-                target = str(result.get("target_path") or "").strip().replace("\\", "/")
-                if not target or Path(target).is_absolute() or ".." in Path(target).parts:
-                    continue
-                if cycle_id not in terminal_outcomes:
-                    continue
-                target_path = repo / target
-                tracked = subprocess.run(
-                    ["git", "-C", str(repo), "ls-tree", "-r", "--name-only", "HEAD", "--", target],
-                    capture_output=True, text=True, timeout=10,
-                )
-                if tracked.returncode != 0 or tracked.stdout.strip() != target or not target_path.is_file():
-                    continue
-                outcome_ts = str(terminal_outcomes[cycle_id].get("ts") or result.get("created_at") or "")
-                entries[demand_id] = {
-                    "cycle_id": cycle_id,
-                    "ts": outcome_ts,
-                    "files_changed": [],
-                    "change_tier": "code-bearing",
-                    "serves": "",
-                    "evidence": {
-                        "verification_cycle_id": cycle_id,
-                        "target_path": target,
-                        "target_exists_on_main": True,
-                    },
-                }
-                folded.add(demand_id)
-                changed = True
-            except Exception:
-                continue
-        if changed:
-            completed["entries"] = entries
-            _write_json(_completed_path(state_dir), completed)
-        return folded
+        if not unsafe_ids:
+            return set()
+        for demand_id in unsafe_ids:
+            del entries[demand_id]
+        completed["entries"] = entries
+        _write_json(_completed_path(state_dir), completed)
+        return unsafe_ids
     except Exception:
         return set()
 
@@ -2932,10 +2863,10 @@ def collect_demand(
         except TypeError:
             ledger_rows = _load_ledger_rows(state_dir)
 
-        # #1114: fold a priority whose no-commit cycle verified that its
-        # target already exists on the current main checkout. This is a
-        # deterministic state check, not a fabricated success event.
-        _fold_already_delivered_priorities(state_dir, selfevo_repo, ledger_rows=ledger_rows)
+        # #1629: undo the retired #1114 target-exists-only completion marker.
+        # It was not evidence that the priority's request was satisfied;
+        # unlike a ledger-chain success it must return to live demand.
+        _unfold_unverified_no_commit_priorities(state_dir)
 
         items: list[dict[str, str]] = []
         seen_ids: set[str] = set()

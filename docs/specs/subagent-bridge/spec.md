@@ -257,9 +257,17 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
   a completed goal_text priority. `filter_completed_priorities_from_goal_text`
   therefore accepts an optional `state_dir` and checks the R39 completed
   sidecar FIRST (the priority's derived demand id — the same kind+summary
-  hash `demand._priority_items` computes); the git-log heuristics remain for
-  pre-demand-era priorities and for callers without a `state_dir`
-  (fail-open, unchanged behavior).
+  hash `demand._priority_items` computes). **#1629:** outside that
+  authoritative sidecar, a target path/basename is never completion evidence:
+  it can exist before or independently of the priority. A target-bearing
+  priority may be retired only by a verbatim priority-label commit;
+  otherwise it remains live. A named function alone cannot establish that the
+  whole request is satisfied. The former target-exists-only no-commit marker
+  is removed from the completed sidecar on demand collection, so previously
+  collapsed priorities return. Entries with no target retain the legacy
+  title-log fallback. The filter is recomputed on every read, so a
+  priority not supported by current evidence returns to demand/prompt without
+  mutating `derived_priorities.json` (fail-open toward live work).
   **#768:** the goal_text "Current priority targets" channel gained a second,
   append-only writer: R45's goal-review appends validated generated
   priorities through this SAME file/section (`<state_dir>/goals/
@@ -473,8 +481,9 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     `{kind, id, summary, evidence, affected_path}` with a stable id (hash of
     kind+summary), in trust order: `priority` — remaining (non-completed)
     goal_text "Current priority targets" entries, done-filtering delegated
-    verbatim to `cycle_planning.filter_completed_priorities_from_goal_text`
-    (#748; preserves R30's operator-seeding wake-up); `defect` — real,
+    verbatim to `goal_text_utils.filter_completed_priorities_from_goal_text`
+    (#748/#1629; preserves R30's operator-seeding wake-up and never equates
+    a target file with satisfaction); `defect` — real,
     recent failures: terminal ledger `outcome` rows with `failed`/`timeout`
     outcomes in the last 48h (`skipped-*` never counts), failed/blocked
     subagent result files with error text (bounded to the 50 most recently
@@ -559,7 +568,7 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     of what text-based git-log evidence says (in demand mode the model
     refines proposal titles, so #748/#769 label/basename evidence
     structurally never fires for these integrations).
-    `cycle_planning.filter_completed_priorities_from_goal_text` consumes
+    `goal_text_utils.filter_completed_priorities_from_goal_text` consumes
     the same sidecar when given a `state_dir` (see R30 note). All
     fail-open: an unreadable sidecar or ledger degrades to prior behavior.
 - R40 (issue #761). Integrated changes SHALL be verified for *consumption*,
