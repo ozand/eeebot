@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 SCHEMA_VERSION = "journal-story-v1"
+PRODUCER = "scripts.journal_story"
 DEFAULT_MAX_BEATS = 8
 _UNKNOWN_MARKERS = frozenset({"probe_unavailable", "unavailable", "unknown"})
 _POSITIVE_WORDS = frozenset({"fixed", "working", "succeeded", "success", "improved", "resolved"})
@@ -200,6 +201,7 @@ def assemble_story_artifact(
     validated = validate_narration(narration, beats, glossary=glossary)
     return {
         "schema_version": SCHEMA_VERSION,
+        "producer": PRODUCER,
         "beats": beats,
         "narration": validated,
         "prompt": prompt,
