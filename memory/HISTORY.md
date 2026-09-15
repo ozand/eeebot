@@ -1,3 +1,4 @@
+- 2026-09-15: Add bounded eeebot-local-ci service/timer and runner (#1593) — runs focused pytest suite (~40s wall time, ~11% cycle cost on Atom N270), logs structured results to state/local_ci/latest.json and current_state.json via nanobot.runtime.local_ci, uses OnCalendar schedule (ERR-2026-06-14-003), and wires optional timer sync in deploy_release.sh.
 - 2026-09-14: Add four-state capability probes, preference-only prerequisites, cycle detection, and a visible tech-tree frontier under ADR-013 (#1606).
 - 2026-09-14: Extend reflector incident lead-in stripping for data-derived `seq N` qualifiers and verify survivors independently by literal prefix shape (#1580).
 - 2026-09-14: Fix citation scan truthfulness (#1570): accept bounded path-like lesson IDs used by the live corpus and report results truncated at the 64,000-character scan cap as partial while preserving unavailable non-final executor rows.

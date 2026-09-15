@@ -1,0 +1,17 @@
+[Unit]
+Description=Run eeebot bounded local CI check (#1593)
+After=network.target
+
+[Service]
+Type=oneshot
+User=eeepc-agent
+Group=eeepc-agent
+WorkingDirectory=/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/eeepc-agent/venv/bin/python /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/run_local_ci.py --workspace /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving --state-dir /var/lib/eeepc-agent/self-evolving-agent/state --pytest-bin /opt/eeepc-agent/venv/bin/python
+TimeoutStartSec=300
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=false
+ProtectSystem=strict
+ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state

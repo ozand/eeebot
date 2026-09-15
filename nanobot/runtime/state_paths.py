@@ -95,6 +95,10 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.observability.llm_telemetry:record_llm_call",
         "nanobot.observability.llm_telemetry:record_llm_prompt",
     ),
+    "local_ci": (
+        "nanobot.runtime.local_ci:write_local_ci_result",
+        "nanobot.runtime.local_ci:write_local_ci_state_summary",
+    ),
     "promotions": (
         "nanobot.runtime.bridge:_record_runtime_slice_candidate",
         "nanobot.runtime.promotions_rotation:rotate_promotions",

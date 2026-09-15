@@ -280,12 +280,14 @@ if [ "$VERIFY_ONLY" -eq 0 ]; then
   sudo mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness \
     /var/lib/eeepc-agent/self-evolving-agent/state/curator \
     /var/lib/eeepc-agent/self-evolving-agent/state/action_index \
-    /var/lib/eeepc-agent/self-evolving-agent/state/reflector
+    /var/lib/eeepc-agent/self-evolving-agent/state/reflector \
+    /var/lib/eeepc-agent/self-evolving-agent/state/local_ci
   sudo chown eeepc-agent:eeepc-agent \
     /var/lib/eeepc-agent/self-evolving-agent/state/validator_harness \
     /var/lib/eeepc-agent/self-evolving-agent/state/curator \
     /var/lib/eeepc-agent/self-evolving-agent/state/action_index \
-    /var/lib/eeepc-agent/self-evolving-agent/state/reflector
+    /var/lib/eeepc-agent/self-evolving-agent/state/reflector \
+    /var/lib/eeepc-agent/self-evolving-agent/state/local_ci
 
   echo "[remote] syncing libexec scripts from release"
   sudo cp "$RELEASE_DIR/host/eeepc/libexec/"*.py /usr/local/libexec/
@@ -443,6 +445,7 @@ sync_timer() {
 sync_timer eeepc-promotion-verifier.timer required
 sync_timer eeebot-host-metrics.timer required
 sync_timer eeebot-host-capabilities.timer required
+sync_timer eeebot-local-ci.timer optional
 sync_timer eeebot-knowledge-curator.timer optional
 sync_timer eeebot-action-index.timer optional
 sync_timer eeebot-reflector.timer optional
