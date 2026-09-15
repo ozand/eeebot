@@ -866,7 +866,16 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
   - **Ledger.** One `phase: "goal_review"` row per review run:
     `inputs_hash`, produced titles, rejections with reasons, and an
     `outcome` ∈ `appended` / `no_gaps` / `no_goal_text` / `invalid_reply` /
-    `no_valid_priorities` / `error` — a review is never silent.
+    `no_valid_priorities` / `error` — a review is never silent. New rows
+    also retain `evidence_sources` (the stable names of sources whose citable
+    lines survived the prompt bound), `direction_at_review` (the current
+    tech-tree Direction, or `null` when absent), and `retention_status`.
+    `retention_status: "complete"` distinguishes known `[]` / `null` facts
+    from `"unavailable"` when the source scan could not run (for example,
+    no goal channel). These are decision-time provenance only: they do not
+    create demand or change ranking, gates, fitness, targets, or gaps. Rows
+    predating these fields are **unavailable**, never interpreted as an empty
+    source set or no Direction.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor

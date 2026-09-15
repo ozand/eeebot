@@ -168,16 +168,44 @@ class TestNoGaps:
         assert len(rows) == 1
         assert rows[0]["outcome"] == "no_gaps"
         assert rows[0]["produced"] == []
+        assert rows[0]["retention_status"] == "complete"
+        assert rows[0]["evidence_sources"] == []
+        assert rows[0]["direction_at_review"] is None
+        assert goal_review.goal_review_retention(rows[0]) == {
+            "status": "complete", "evidence_sources": (), "direction": None,
+        }
         assert (state_dir / "goal_review" / "last_run.json").is_file()
 
-    def test_missing_goal_text_noop_before_llm(self, tmp_path, monkeypatch, enabled):
-        """No R30 channel file — nowhere to append, no LLM call."""
+    def test_no_gaps_records_decision_time_direction(self, tmp_path, monkeypatch, enabled):
+        from nanobot.runtime import tech_tree
+
+        _no_llm(monkeypatch)
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        tech_tree.ensure_seeded(state_dir, now=NOW)
+        portfolio = tech_tree.read_portfolio(state_dir)
+        portfolio["current"] = "cycle-cost"
+        tech_tree._write_portfolio(state_dir, portfolio)
+
+        assert goal_review.maybe_goal_review(state_dir, None, now=NOW) == []
+        row = _goal_review_rows(state_dir)[0]
+        assert row["evidence_sources"] == []
+        assert row["direction_at_review"] == "cycle-cost"
+        assert goal_review.goal_review_retention(row) == {
+            "status": "complete", "evidence_sources": (), "direction": "cycle-cost",
+        }
+
+    def test_missing_goal_text_records_unavailable_sources_before_llm(self, tmp_path, monkeypatch, enabled):
+        """No R30 channel means no source scan, never an empty source set."""
         _no_llm(monkeypatch)
         state_dir = tmp_path / "state"
         _write_snapshot(state_dir, [GAP])
 
         assert goal_review.maybe_goal_review(state_dir, None, now=NOW) == []
-        assert _goal_review_rows(state_dir)[0]["outcome"] == "no_goal_text"
+        row = _goal_review_rows(state_dir)[0]
+        assert row["outcome"] == "no_goal_text"
+        assert row["retention_status"] == "unavailable"
+        assert goal_review.goal_review_retention(row)["status"] == "unavailable"
 
 
 # ─── valid reply → append through the R30 channel ───────────────────────────
@@ -239,6 +267,8 @@ class TestAppend:
         assert rows[0]["produced"] == titles
         assert rows[0]["rejected"] == []
         assert rows[0]["inputs_hash"]
+        assert rows[0]["evidence_sources"] == ["scorecard_gaps"]
+        assert rows[0]["direction_at_review"] is None
 
     def test_dedup_keeps_operator_entries_untouched(self, tmp_path, monkeypatch, enabled):
         """A candidate duplicating an existing operator priority is rejected
@@ -463,6 +493,88 @@ class TestWiring:
 
 
 # ─── #860: derived priorities survive deploy_release.sh's goal_text reseed ──
+
+
+class TestRetention:
+    def test_legacy_row_is_unavailable_not_empty(self):
+        legacy = {"phase": "goal_review", "outcome": "no_gaps", "produced": []}
+        assert goal_review.goal_review_retention(legacy) == {
+            "status": "unavailable", "evidence_sources": None, "direction": None,
+        }
+
+    def test_malformed_new_shape_is_unavailable_not_empty(self):
+        malformed = {
+            "phase": "goal_review", "retention_status": "complete",
+            "evidence_sources": ["invented"], "direction_at_review": "proposer-quality",
+        }
+        duplicated = {
+            "phase": "goal_review", "retention_status": "complete",
+            "evidence_sources": ["decay", "decay"], "direction_at_review": None,
+        }
+        whitespace_direction = {
+            "phase": "goal_review", "retention_status": "complete",
+            "evidence_sources": [], "direction_at_review": " ",
+        }
+        assert goal_review.goal_review_retention(malformed)["status"] == "unavailable"
+        assert goal_review.goal_review_retention(duplicated)["status"] == "unavailable"
+        assert goal_review.goal_review_retention(whitespace_direction)["status"] == "unavailable"
+
+    def test_direction_is_captured_at_decision_time(self, tmp_path, monkeypatch, enabled):
+        from nanobot.runtime import tech_tree
+
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [GAP])
+        tech_tree.ensure_seeded(state_dir, now=NOW)
+        portfolio = tech_tree.read_portfolio(state_dir)
+        portfolio["current"] = "proposer-quality"
+        tech_tree._write_portfolio(state_dir, portfolio)
+        monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY]})
+
+        goal_review.maybe_goal_review(state_dir, None, now=NOW)
+
+        row = _goal_review_rows(state_dir)[0]
+        assert goal_review.goal_review_retention(row) == {
+            "status": "complete",
+            "evidence_sources": ("scorecard_gaps",),
+            "direction": "proposer-quality",
+        }
+
+    def test_error_retains_captured_provenance(self, tmp_path, monkeypatch, enabled):
+        from nanobot.runtime import tech_tree
+
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [GAP])
+        tech_tree.ensure_seeded(state_dir, now=NOW)
+        portfolio = tech_tree.read_portfolio(state_dir)
+        portfolio["current"] = "proposer-quality"
+        tech_tree._write_portfolio(state_dir, portfolio)
+        monkeypatch.setattr(
+            goal_review, "_call_llm", lambda _context: (_ for _ in ()).throw(RuntimeError("provider down"))
+        )
+
+        assert goal_review.maybe_goal_review(state_dir, None, now=NOW) is None
+        row = _goal_review_rows(state_dir)[0]
+        assert row["outcome"] == "error"
+        assert goal_review.goal_review_retention(row) == {
+            "status": "complete",
+            "evidence_sources": ("scorecard_gaps",),
+            "direction": "proposer-quality",
+        }
+
+    def test_source_set_excludes_lines_truncated_before_evidence_window(self, tmp_path, monkeypatch):
+        """Only source lines actually shown to the LLM are retained."""
+        state_dir = tmp_path / "state"
+        snapshot = {"gaps": [{"evidence": f"gap-{i}"} for i in range(goal_review._MAX_EVIDENCE_LINES)]}
+        monkeypatch.setattr(
+            "nanobot.runtime.usage_evidence.stale_artifacts",
+            lambda *_args, **_kwargs: [{"path": "scripts/stale.py", "stale_since": "2026-01-01"}],
+        )
+        sources: set[str] = set()
+        evidence = goal_review._collect_evidence(state_dir, None, snapshot, NOW, sources=sources)
+        assert len(evidence) == goal_review._MAX_EVIDENCE_LINES
+        assert sources == {"scorecard_gaps"}
 
 
 class TestDerivedPriorities:
