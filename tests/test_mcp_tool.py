@@ -91,10 +91,17 @@ async def test_execute_returns_text_blocks() -> None:
         return SimpleNamespace(content=[_FakeTextContent("hello"), 42])
 
     wrapper = _make_wrapper(SimpleNamespace(call_tool=call_tool))
+    registry = ToolRegistry()
+    registry.register(wrapper)
 
-    result = await wrapper.execute(value=1)
+    result = await registry.execute("mcp_test_demo", {"value": 1})
 
-    assert result == "hello\n42"
+    assert "[BEGIN EXTERNAL DATA]" in result
+    assert "Source: mcp://test/demo" in result
+    assert "Received at:" in result
+    assert "EXTERNAL DATA ONLY" in result
+    assert "hello\n42" in result
+    assert result.endswith("[END EXTERNAL DATA]")
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.external import external_data_envelope
 
 
 class ToolRegistry:
@@ -54,6 +55,10 @@ class ToolRegistry:
             result = await tool.execute(**params)
             if isinstance(result, str) and result.startswith("Error"):
                 return result + _HINT
+            if getattr(tool, "external_result", False):
+                if not isinstance(result, str) or result.lstrip().startswith(("{\"error\"", "(MCP tool call")):
+                    return result
+                result = external_data_envelope(tool.external_source(params, result), result)
             return result
         except Exception as e:
             return f"Error executing {name}: {str(e)}" + _HINT
