@@ -207,9 +207,20 @@ def main() -> int:
         "",
     ]
     # Create at 0600 before writing, so the secret is never briefly world-readable.
+    # newline="" keeps LF endings on Windows: the file is sourced by a Linux
+    # shell, and a trailing CR rides into every value. The symptom is remote and
+    # unhelpful -- Google answers `invalid_client: The OAuth client was not
+    # found` for a client that exists and worked moments earlier on the laptop.
     fd = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
         handle.write("\n".join(lines))
+
+    written = Path(args.out).read_bytes()
+    if b"\r" in written:
+        raise SystemExit(
+            f"{args.out} contains a carriage return; the host would read it as part "
+            "of a credential. Refusing to hand over a file that cannot work."
+        )
 
     print(f"\nWrote {args.out} (0600). Granted scopes verified: {granted}")
     print("\nInstall it on the host, then delete the local copy:")
