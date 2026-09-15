@@ -67,6 +67,42 @@ def test_resolve_avatar_state_payload() -> None:
     assert resolved.timestamp_utc == "2026-09-14T12:00:00Z"
 
 
+def test_missing_observation_resolves_to_unknown_before_publication() -> None:
+    resolved = resolve_avatar_state(ObservedState(None, None, frozenset()))
+    assert resolved.pose == UNKNOWN_POSE
+    assert resolved.signal == "observed_signal_availability"
+    assert resolved.status == "unknown"
+
+
+def test_state_writer_rejects_unbound_pose_contract(tmp_path: Path) -> None:
+    """ADR-018: the published seam cannot carry a pose with a false source/status."""
+    out = tmp_path / DEFAULT_AVATAR_STATE_FILENAME
+    invalid = ResolvedAvatarState(
+        version=STATE_FILE_VERSION,
+        pose="idle",
+        signal="thermal_status",
+        status="healthy",
+        timestamp_utc="2026-09-15T12:00:00Z",
+    )
+    with pytest.raises(ValueError, match="pose contract"):
+        write_avatar_state_file(invalid, out)
+    assert not out.exists()
+
+
+def test_state_writer_rejects_unknown_schema_version(tmp_path: Path) -> None:
+    out = tmp_path / DEFAULT_AVATAR_STATE_FILENAME
+    invalid = ResolvedAvatarState(
+        version=STATE_FILE_VERSION + 1,
+        pose=UNKNOWN_POSE,
+        signal="observed_signal_availability",
+        status="unknown",
+        timestamp_utc="2026-09-15T12:00:00Z",
+    )
+    with pytest.raises(ValueError, match="schema version"):
+        write_avatar_state_file(invalid, out)
+    assert not out.exists()
+
+
 def test_write_avatar_state_file_atomic(tmp_path: Path) -> None:
     out = tmp_path / DEFAULT_AVATAR_STATE_FILENAME
     resolved = resolve_avatar_state(
@@ -143,7 +179,7 @@ def test_rule1_no_instance_rendering_artifact_imports_nanobot() -> None:
 
 def test_rule4_pose_contract_and_cover_test_outside_instance_mutation_surface() -> None:
     """Rule 4: Pose contract, fixture, and cover-test are outside the loop's commit surface.
-    
+
     The autonomous cycle runs inside eeebot-self-evolving, where MUTATION_POLICY controls
     which paths the loop is allowed to commit. Code in nanobot/ is structurally outside the
     instance repository and therefore unreachable by the loop's commit surface.

@@ -97,11 +97,22 @@ def resolve_avatar_state(
     )
 
 
+def _validate_published_state(resolved: ResolvedAvatarState) -> None:
+    if resolved.version != STATE_FILE_VERSION:
+        raise ValueError(f"unsupported avatar state schema version: {resolved.version!r}")
+    expected_signal = POSE_SIGNAL.get(resolved.pose)
+    if expected_signal is None or resolved.signal != expected_signal:
+        raise ValueError(f"pose contract signal mismatch for {resolved.pose!r}")
+    if status_for(resolved.pose) != resolved.status:
+        raise ValueError(f"pose contract status mismatch for {resolved.pose!r}")
+
+
 def write_avatar_state_file(
     resolved: ResolvedAvatarState,
     path: Path | str,
 ) -> Path:
-    """Atomically write resolved avatar state file."""
+    """Atomically write a schema- and pose-contract-validated state file."""
+    _validate_published_state(resolved)
     dest = Path(path)
     dest.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(resolved.to_dict(), indent=2, sort_keys=True) + "\n"
