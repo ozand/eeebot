@@ -12,6 +12,14 @@ class Tool(ABC):
     the environment, such as reading files, executing commands, etc.
     """
 
+    # External tool outputs are framed by ToolRegistry before they enter a
+    # model tool-result message. Internal tools retain the default false.
+    external_result = False
+
+    def external_source(self, params: dict[str, Any], result: str) -> str:
+        """Concrete provenance label required when ``external_result`` is true."""
+        raise NotImplementedError("external tools must declare a concrete external_source")
+
     _TYPE_MAP = {
         "string": str,
         "integer": int,
