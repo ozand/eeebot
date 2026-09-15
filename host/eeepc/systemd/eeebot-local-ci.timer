@@ -1,0 +1,13 @@
+[Unit]
+Description=Run eeebot bounded local CI check (#1593)
+
+[Timer]
+# Clock drift adjustments by NTP synchronization cause relative timers
+# (OnUnitActiveSec/OnUnitInactiveSec) to miss activation markers on Atom N270
+# hardware (ERR-2026-06-14-003). Use calendar intervals only.
+OnCalendar=*-*-* 00/4:15:00
+Persistent=true
+Unit=eeebot-local-ci.service
+
+[Install]
+WantedBy=timers.target
