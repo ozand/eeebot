@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -129,8 +130,11 @@ def read_throttle_snapshot() -> dict[str, Any]:
     }
 
 
+SAMPLE_INTERVAL_SECONDS = 1.0
+
+
 class CycleCostSampler:
-    """Capture start/end readings for one active bridge cycle."""
+    """Capture one-second process/thermal samples and emit one cycle summary."""
 
     def __init__(
         self,
@@ -151,6 +155,27 @@ class CycleCostSampler:
         self._process_start: dict[str, int] | None = None
         self._thermal_start: dict[str, Any] | None = None
         self._throttle_start: dict[str, Any] | None = None
+        self._peak_temperature_millicelsius: int | None = None
+        self._thermal_last: dict[str, Any] | None = None
+        self._throttle_last: dict[str, Any] | None = None
+        self._stop_event = threading.Event()
+        self._sampler_thread: threading.Thread | None = None
+
+    def _sample_while_running(self) -> None:
+        while not self._stop_event.wait(SAMPLE_INTERVAL_SECONDS):
+            try:
+                thermal = self.thermal_reader(self.thermal_zone)
+                temperature = int(thermal["temperature_millicelsius"])
+                self._thermal_last = thermal
+                self._peak_temperature_millicelsius = max(
+                    self._peak_temperature_millicelsius or temperature, temperature
+                )
+            except Exception:
+                pass
+            try:
+                self._throttle_last = self.throttle_reader()
+            except Exception:
+                pass
 
     def start(self, cycle_id: str) -> None:
         self.cycle_id = cycle_id
@@ -165,12 +190,24 @@ class CycleCostSampler:
             self._thermal_start = None
         try:
             self._throttle_start = self.throttle_reader()
+            self._throttle_last = self._throttle_start
         except Exception:
             self._throttle_start = None
+        if self._thermal_start is not None:
+            try:
+                self._peak_temperature_millicelsius = int(self._thermal_start["temperature_millicelsius"])
+            except (KeyError, TypeError, ValueError):
+                self._peak_temperature_millicelsius = None
+        self._stop_event.clear()
+        self._sampler_thread = threading.Thread(target=self._sample_while_running, name="cycle-cost-sampler", daemon=True)
+        self._sampler_thread.start()
 
     def finish(self) -> dict[str, Any]:
         if self.started_at is None:
             raise RuntimeError("cycle sampler was not started")
+        self._stop_event.set()
+        if self._sampler_thread is not None:
+            self._sampler_thread.join(timeout=0.2)
         finished_at = _now()
         measured: dict[str, Any] = {
             "cycle_id": self.cycle_id,
@@ -183,44 +220,54 @@ class CycleCostSampler:
                 raise RuntimeError("process baseline unavailable")
             process_end = self.process_reader(self.proc_root)
             ticks = process_end["cpu_ticks"] - self._process_start["cpu_ticks"]
-            measured["cycle_cpu_seconds"] = _result(
+            measured["cpu_seconds"] = _result(
                 "present", max(0.0, ticks / self._process_start["clock_ticks"]), "seconds",
                 "own process user+system CPU time delta",
                 cycle_id=self.cycle_id,
             )
-            measured["cycle_peak_rss"] = _result(
+            measured["peak_rss_bytes"] = _result(
                 "present", process_end["peak_rss_bytes"], "bytes",
                 "own process peak VmHWM", cycle_id=self.cycle_id,
             )
         except Exception as exc:
-            measured["cycle_cpu_seconds"] = unavailable(f"own-process CPU probe failed: {type(exc).__name__}", "seconds")
-            measured["cycle_peak_rss"] = unavailable(f"own-process RSS probe failed: {type(exc).__name__}", "bytes")
+            measured["cpu_seconds"] = unavailable(f"own-process CPU probe failed: {type(exc).__name__}", "seconds")
+            measured["peak_rss_bytes"] = unavailable(f"own-process RSS probe failed: {type(exc).__name__}", "bytes")
 
         try:
             if self._thermal_start is None:
                 raise RuntimeError("thermal baseline unavailable")
-            thermal_end = self.thermal_reader(self.thermal_zone)
-            measured["thermal_under_load"] = _result(
-                "present", thermal_end["temperature_millicelsius"], "millicelsius",
-                f"{thermal_end['type']} sampled between cycle start and finish",
+            try:
+                thermal_end = self.thermal_reader(self.thermal_zone)
+            except Exception:
+                thermal_end = self._thermal_last or self._thermal_start
+            temperature = max(
+                self._peak_temperature_millicelsius or self._thermal_start["temperature_millicelsius"],
+                int(thermal_end["temperature_millicelsius"]),
+            )
+            measured["peak_temperature_millicelsius"] = _result(
+                "present", temperature, "millicelsius",
+                f"{thermal_end['type']} peak sampled during cycle",
                 cycle_id=self.cycle_id, sampled_during_cycle=True,
             )
         except Exception as exc:
-            measured["thermal_under_load"] = unavailable(f"thermal probe failed: {type(exc).__name__}", "millicelsius")
+            measured["peak_temperature_millicelsius"] = unavailable(f"thermal probe failed: {type(exc).__name__}", "millicelsius")
 
         try:
             if self._throttle_start is None:
                 raise RuntimeError("throttle baseline unavailable")
-            throttle_end = self.throttle_reader()
+            try:
+                throttle_end = self.throttle_reader()
+            except Exception:
+                throttle_end = self._throttle_last or self._throttle_start
             delta = max(0, int(throttle_end["count"]) - int(self._throttle_start["count"]))
-            measured["throttle_under_load"] = _result(
+            measured["throttle_events"] = _result(
                 "present", delta, "events",
                 "thermal-throttle counter delta between cycle start and finish",
                 cycle_id=self.cycle_id, sampled_during_cycle=True,
                 total_time_delta_ms=max(0, int(throttle_end["total_time_ms"]) - int(self._throttle_start["total_time_ms"])),
             )
         except Exception as exc:
-            measured["throttle_under_load"] = unavailable(f"thermal-throttle probe failed: {type(exc).__name__}", "events")
+            measured["throttle_events"] = unavailable(f"thermal-throttle probe failed: {type(exc).__name__}", "events")
         measured["sampled_at"] = finished_at
         return measured
 
