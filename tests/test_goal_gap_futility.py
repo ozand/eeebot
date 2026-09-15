@@ -208,6 +208,45 @@ def test_suppressed_terminal_attempts_count_toward_demand_futility(
     assert record["attempt_unit"] == "demand_id"
 
 
+def test_absent_fossil_is_marked_unavailable_instead_of_numeric_zero(tmp_path, monkeypatch):
+    """#1635: a gap can have ledger history yet leave the current input set."""
+    monkeypatch.setenv("SELFEVO_GOAL_GAP_FUTILITY_THRESHOLD", "10")
+    state = tmp_path / "state"
+    gap_id = "goal-gap-stale-history"
+    gap = {**_gap(gap_id=gap_id, current=0.1), "surface": []}
+    first_seen = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    ts = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+    rows = []
+    for index in range(11):
+        cycle_id = f"c-stale-{index}"
+        rows.extend([
+            {"phase": "proposed", "cycle_id": cycle_id, "demand_id": gap_id, "ts": ts},
+            {"phase": "outcome", "cycle_id": cycle_id, "outcome": "skipped-duplicate", "ts": ts},
+        ])
+    _write_active(state, rows)
+    sidecar = state / "demand" / "futility.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(json.dumps({gap_id: {
+        "gap_id": gap_id, "metric": "repeat_failure_rate",
+        "first_seen_ts": first_seen, "first_metric": 0.5, "current_metric": 0.5,
+        "metric_delta": 0.0, "attempt_count": 0, "futile": False,
+        "futility_status": "measured", "last_evaluated_ts": ts,
+    }}), encoding="utf-8")
+
+    # First lifecycle step: the gap is present and the ledger evidence is read.
+    assert futility.futile_gap_ids(state, [gap]) == set()
+    record = json.loads(sidecar.read_text(encoding="utf-8"))[gap_id]
+    assert (record["attempt_count"], record["attempt_unit"]) == (11, "demand_id")
+
+    # Second lifecycle step: scorecard omits the gap. The fossil is explicitly
+    # unavailable rather than a numeric zero, while its ledger history remains.
+    assert futility.futile_gap_ids(state, []) == set()
+    record = json.loads(sidecar.read_text(encoding="utf-8"))[gap_id]
+    assert record["stale"] is True
+    assert record["futility_status"] == "not_evaluated"
+    assert record["attempt_count"] is None
+
+
 def test_gap_absent_from_current_rows_is_marked_stale_and_returns_on_reappearance(tmp_path, monkeypatch):
     state = tmp_path / "state"
     first = _gap("goal-gap-a")
