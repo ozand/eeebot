@@ -34,3 +34,4 @@ Conventions:
 | [ADR-016](ADR-016-work-is-chosen-by-the-journal.md) | Work is chosen by the journal and never by the channel | proposed |
 | [ADR-017](ADR-017-long-work-runs-outside-the-cycle.md) | Work too long for a cycle runs in its own unit, checkpointed, and shortens rather than skips | proposed |
 | [ADR-018](ADR-018-the-harness-judges-the-instance-draws.md) | The harness judges and the instance draws; the seam is a published file, not an import | proposed |
+| [ADR-019](ADR-019-the-baseline-is-the-fastest-thing-this-host-can-do.md) | An optimisation is measured against the fastest implementation this host can run | proposed |
