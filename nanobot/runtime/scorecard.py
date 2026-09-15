@@ -627,6 +627,7 @@ def _loop_section(
     fallback_rejects = 0
     fallback_rejects_by_reason: dict[str, int] = {}
     fallback_target_paths: set[str] = set()
+    change_shape_counts: dict[str, int] = {}
     # #1510 / ADR-009 obligation 3: count terminal cycles whose proposal
     # selected a hypothesis demand. This is visibility-only; it is deliberately
     # absent from _TARGETS and never participates in gaps, fitness, or demand
@@ -701,6 +702,10 @@ def _loop_section(
                 if outcome == "success":
                     fallback_successes += 1
             if outcome == "success":
+                shape = str(row.get("change_shape") or "unclassified")
+                if shape not in {"feature", "maintenance", "documentation", "testing", "performance", "knowledge", "unclassified"}:
+                    shape = "unclassified"
+                change_shape_counts[shape] = change_shape_counts.get(shape, 0) + 1
                 if cycle_id in decay_cycles:
                     decay_integrations += 1
                 else:
@@ -748,6 +753,7 @@ def _loop_section(
         # consumed by the _TARGETS gap analysis. Archival churn is reported
         # separately; cost denominators use integrations_total (all work).
         "integrations": integrations,
+        "change_shape_distribution": change_shape_counts,
         "decay_integrations": decay_integrations,
         "integrations_total": integrations + decay_integrations,
         # #814: confirmed-vs-unconfirmed split of `integrations` — surfaces

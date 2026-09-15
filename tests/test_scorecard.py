@@ -263,6 +263,20 @@ class TestLoopSection:
         # repeat_failures keeps its own #977/#1014 meaning: dup-failure skip + self_dedup.
         assert loop["repeat_failures"] == 2
 
+    def test_change_shape_distribution_defaults_legacy_rows_to_unclassified(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_ledger(state_dir, [
+            {"phase": "outcome", "cycle_id": "c-feature", "outcome": "success", "change_shape": "feature", "ts": _iso(5)},
+            {"phase": "outcome", "cycle_id": "c-legacy", "outcome": "success", "ts": _iso(4)},
+            {"phase": "outcome", "cycle_id": "c-bad", "outcome": "success", "change_shape": "garbage", "ts": _iso(3)},
+        ])
+        loop = scorecard.compute_scorecard(state_dir, None, force=True)["loop"]
+        assert loop["change_shape_distribution"] == {
+            "feature": 1,
+            "unclassified": 2,
+        }
+        assert sum(loop["change_shape_distribution"].values()) == loop["integrations"]
+
     def test_decay_successes_split_from_integrations(self, tmp_path):
         """#800 churn split: a success whose proposed row served a decay
         demand is an archival (bookkeeping churn) — it counts as

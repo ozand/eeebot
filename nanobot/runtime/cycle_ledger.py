@@ -241,6 +241,7 @@ def record_cycle_outcome(
     executor_llm_error: bool = False,
     lane: str | None = None,
     prompt_fit_rung: str | None = None,
+    change_shape: str | None = None,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
 
@@ -305,6 +306,8 @@ def record_cycle_outcome(
         row["lane"] = str(lane)
     if prompt_fit_rung:
         row["prompt_fit_rung"] = str(prompt_fit_rung)[:40]
+    if change_shape in {"feature", "maintenance", "documentation", "testing", "performance", "knowledge", "unclassified"}:
+        row["change_shape"] = change_shape
     if files_changed is not None:
         try:
             from nanobot.runtime.demand import classify_change_tier
