@@ -107,9 +107,12 @@ def test_cover_rule_avatar_never_expresses_unobserved_distinction() -> None:
 
 def test_rule1_no_instance_rendering_artifact_imports_nanobot() -> None:
     """Rule 1: No instance avatar/rendering artifact imports nanobot."""
+    repo_root = Path(__file__).resolve().parents[1]
+    worktree_parent = repo_root.parent if repo_root.parent.name != ".worktrees" else repo_root.parent.parent
     candidates = [
-        Path("T:/Code/.worktrees/inst-1618-draw"),
-        Path("T:/Code/eeebot-self-evolving"),
+        worktree_parent / ".worktrees" / "inst-1618-draw",
+        worktree_parent / "eeebot-self-evolving",
+        repo_root.parent / "eeebot-self-evolving",
     ]
     target_repo = next((c for c in candidates if c.is_dir()), None)
     if target_repo is None:
