@@ -6,13 +6,13 @@ After=network.target
 Type=oneshot
 User=eeepc-agent
 Group=eeepc-agent
-WorkingDirectory=/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
+WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 # Without this the venv's editable .pth wins and `nanobot` resolves to whatever
 # release was installed when the venv was built, not the deployed one. The timer
 # fired at 13:15Z on 2026-09-15 and died with ImportError against a June release.
 Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/opt/eeepc-agent/venv/bin/python /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/run_local_ci.py --workspace /var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving --state-dir /var/lib/eeepc-agent/self-evolving-agent/state --pytest-bin /opt/eeepc-agent/venv/bin/python
+ExecStart=/opt/eeepc-agent/venv/bin/python /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/run_local_ci.py --workspace /opt/eeepc-agent/runtimes/self-evolving-agent/current --state-dir /var/lib/eeepc-agent/self-evolving-agent/state --pytest-bin /opt/eeepc-agent/venv/bin/python
 TimeoutStartSec=300
 NoNewPrivileges=true
 PrivateTmp=true
