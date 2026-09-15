@@ -30,6 +30,7 @@ try:
         PERMANENT_BATTERY_REASON,
         battery_probe,
         framebuffer_surface_probe,
+        service_account_group_membership_probe,
         toolchain_measurement_placeholders,
     )
 except ModuleNotFoundError:
@@ -37,6 +38,7 @@ except ModuleNotFoundError:
         PERMANENT_BATTERY_REASON,
         battery_probe,
         framebuffer_surface_probe,
+        service_account_group_membership_probe,
         toolchain_measurement_placeholders,
     )
 
@@ -236,10 +238,11 @@ def refresh_host_capabilities(
         except Exception as exc:
             caps["cycle_body"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
 
-    # Battery is a closed host fact, not an absent measurement. There is no
-    # BAT* device on the target host, so preserve the permanent reason and do
-    # not emit a fabricated zero draw value.
+    # Battery presence / slot inspection. Distinguishes present vs absent slot vs unanswerable.
     caps["battery_draw"] = battery_probe()
+
+    # Service account group memberships (video, audio permissions).
+    caps["service_account_groups"] = service_account_group_membership_probe()
 
     # Camera. Use pathlib globbing rather than passing the wildcard literally
     # to ``ls`` (subprocess does not perform shell expansion).

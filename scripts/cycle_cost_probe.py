@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 CAPABILITY_STATES = frozenset(
-    {"present", "absent", "present_uninitialized", "probe_unavailable"}
+    {"present", "absent", "present_uninitialized", "probe_unavailable", "unanswerable"}
 )
 THERMAL_ZONE = Path("/sys/class/thermal/thermal_zone0")
 THROTTLE_GLOB = "/sys/devices/system/cpu/cpu*/thermal_throttle/core_throttle_count"
@@ -55,6 +55,11 @@ def _result(state: str, value: int | float | None, unit: str, details: str, **ex
 def unavailable(reason: str, unit: str = "") -> dict[str, Any]:
     """Return a truthful unavailable result; ``value`` is never fabricated."""
     return _result("probe_unavailable", None, unit, reason)
+
+
+def unanswerable(reason: str, unit: str = "") -> dict[str, Any]:
+    """Return an unanswerable result for questions fundamentally unresolvable by sensors."""
+    return _result("unanswerable", None, unit, reason)
 
 
 def _read_text(path: Path) -> str:
@@ -312,9 +317,146 @@ def measure_framebuffer_push(
         return unavailable(f"framebuffer push probe failed: {type(exc).__name__}", "microseconds")
 
 
-def battery_probe() -> dict[str, Any]:
-    """Permanent host fact: battery draw is not measurable on this machine."""
+def _inspect_battery_supplies(sys_power: Path) -> dict[str, Any] | None:
+    """Inspect /sys/class/power_supply for battery devices."""
+    if not sys_power.exists():
+        return None
+    bat_dirs = [p for p in sys_power.glob("BAT*") if p.is_dir() or p.is_symlink()]
+    if not bat_dirs:
+        for p in sys_power.glob("*"):
+            type_file = p / "type"
+            if type_file.is_file():
+                try:
+                    if type_file.read_text(encoding="utf-8").strip() == "Battery":
+                        bat_dirs.append(p)
+                except Exception:
+                    pass
+    if not bat_dirs:
+        return None
+    bat_dir = bat_dirs[0]
+    present_file = bat_dir / "present"
+    if present_file.is_file():
+        try:
+            if present_file.read_text(encoding="utf-8").strip() == "0":
+                return _result("absent", None, "watts", f"battery device {bat_dir.name} present=0 (disconnected)")
+        except Exception:
+            pass
+    status_file = bat_dir / "status"
+    status = "present"
+    if status_file.is_file():
+        try:
+            status = status_file.read_text(encoding="utf-8").strip().lower()
+        except Exception:
+            pass
+    return _result("present", 0, "watts", f"battery device {bat_dir.name} ({status})")
+
+
+def battery_probe(
+    *,
+    power_supply_path: Path | None = None,
+    acpi_devices_path: Path | None = None,
+    chassis_path: Path | None = None,
+) -> dict[str, Any]:
+    """Inspect battery power supply and ACPI slot to determine battery presence.
+
+    Distinguishes:
+    - 'present': battery device exists in /sys/class/power_supply and is present.
+    - 'absent': battery slot exists (e.g. ACPI PNP0C0A) but battery is disconnected/empty,
+      or chassis is desktop/server where battery is not designed into the hardware.
+    - 'unanswerable': portable host chassis where no battery device or slot is visible,
+      making it fundamentally unresolvable by software whether absence is permanent or temporary.
+    """
+    sys_power = power_supply_path or Path("/sys/class/power_supply")
+    bat_res = _inspect_battery_supplies(sys_power)
+    if bat_res is not None:
+        return bat_res
+
+    # Check if motherboard has an ACPI battery slot (e.g. PNP0C0A:00 -> \_SB_.PCI0.BAT0)
+    acpi_devs = acpi_devices_path or Path("/sys/bus/acpi/devices")
+    if acpi_devs.exists():
+        slots = [p for p in acpi_devs.iterdir() if p.name.startswith("PNP0C0A")]
+        if slots:
+            slot_names = ", ".join(s.name for s in slots)
+            return _result(
+                "absent",
+                None,
+                "watts",
+                f"battery slot {slot_names} empty / disconnected (host running on AC mains)",
+            )
+
+    # Check chassis type from DMI to see if hardware is designed to have a battery
+    dmi_chassis = chassis_path or Path("/sys/class/dmi/id/chassis_type")
+    if dmi_chassis.is_file():
+        try:
+            chassis_type = dmi_chassis.read_text(encoding="utf-8").strip()
+            # 8: Portable, 9: Laptop, 10: Notebook, 11: Hand Held, 14: Sub Notebook
+            if chassis_type in {"8", "9", "10", "11", "14"}:
+                return unanswerable(
+                    f"portable chassis type {chassis_type} but no battery supply or ACPI slot exposed",
+                    "watts",
+                )
+            elif chassis_type in {"3", "4", "5", "6", "7", "17", "23"}:
+                return _result(
+                    "absent",
+                    None,
+                    "watts",
+                    f"desktop/server chassis type {chassis_type} has no battery by design",
+                )
+        except Exception:
+            pass
+
     return unavailable(PERMANENT_BATTERY_REASON, "watts")
+
+
+def service_account_group_membership_probe(user: str = "eeepc-agent") -> dict[str, Any]:
+    """Probe whether the service account is in required hardware groups (video, audio).
+
+    Returns a capability record for hardware group memberships and device access.
+    """
+    try:
+        import grp
+    except ImportError:
+        # Non-POSIX systems (e.g. Windows) do not have grp
+        return unavailable("grp module unavailable on this platform", "groups")
+    try:
+        # Check current process groups or lookup the named user's groups
+        try:
+            import pwd
+            user_entry = pwd.getpwnam(user)
+            user_gids = [g.gr_gid for g in grp.getgrall() if user in g.gr_mem]
+            user_gids.append(user_entry.pw_gid)
+            group_names = {grp.getgrgid(gid).gr_name for gid in user_gids}
+        except Exception:
+            group_names = {grp.getgrgid(gid).gr_name for gid in os.getgroups()}
+
+        video_member = "video" in group_names
+        audio_member = "audio" in group_names
+
+        # Also check device node permissions if available
+        fb_accessible = os.access("/dev/fb0", os.R_OK | os.W_OK) if os.path.exists("/dev/fb0") else None
+        snd_accessible = any(os.access(p, os.R_OK | os.W_OK) for p in Path("/dev/snd").glob("*")) if os.path.exists("/dev/snd") else None
+
+        missing = []
+        if not video_member:
+            missing.append("video")
+        if not audio_member:
+            missing.append("audio")
+
+        if not missing:
+            return _result(
+                "present",
+                len(group_names),
+                "groups",
+                f"user {user} member of {sorted(group_names)}; video={video_member} (fb_rw={fb_accessible}), audio={audio_member} (snd_rw={snd_accessible})",
+            )
+        return _result(
+            "absent",
+            0,
+            "groups",
+            f"user {user} missing groups: {', '.join(missing)}; current={sorted(group_names)}",
+        )
+    except Exception as exc:
+        return unavailable(f"service group check failed: {type(exc).__name__}: {exc}", "groups")
 
 
 def toolchain_measurement_placeholders() -> dict[str, dict[str, Any]]:

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
 import time
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +12,7 @@ from scripts.cycle_cost_probe import (
     framebuffer_surface_probe,
     full_surface_push_cost,
     read_process_snapshot,
+    service_account_group_membership_probe,
     toolchain_measurement_placeholders,
 )
 
@@ -154,11 +154,53 @@ def test_full_surface_push_reports_microseconds_and_exact_payload_size() -> None
     assert observed == [b"\0" * 16]
 
 
-def test_battery_is_permanently_unavailable_without_zero() -> None:
-    result = battery_probe()
-    assert result["state"] == "probe_unavailable"
-    assert result["value"] is None
-    assert "no BAT* device" in result["details"]
+def test_battery_probe_distinguishes_presence_absence_and_unanswerable(tmp_path: Path) -> None:
+    # 1. Unanswerable: portable chassis type (Notebook = 10), but no power supply or ACPI slot exposed
+    chassis_dir = tmp_path / "chassis"
+    chassis_dir.mkdir(parents=True)
+    chassis_file = chassis_dir / "chassis_type"
+    chassis_file.write_text("10\n", encoding="utf-8")
+    empty_power = tmp_path / "empty_power"
+    empty_power.mkdir(parents=True)
+    empty_acpi = tmp_path / "empty_acpi"
+    empty_acpi.mkdir(parents=True)
+
+    res_unanswerable = battery_probe(
+        power_supply_path=empty_power,
+        acpi_devices_path=empty_acpi,
+        chassis_path=chassis_file,
+    )
+    assert res_unanswerable["state"] == "unanswerable"
+    assert "portable chassis type" in res_unanswerable["details"]
+
+    # 2. Absent: ACPI PNP0C0A slot exists, but no battery power supply device (disconnected battery on notebook)
+    acpi_dir = tmp_path / "acpi"
+    (acpi_dir / "PNP0C0A_00").mkdir(parents=True)
+    res_absent = battery_probe(
+        power_supply_path=empty_power,
+        acpi_devices_path=acpi_dir,
+        chassis_path=chassis_file,
+    )
+    assert res_absent["state"] == "absent"
+    assert "battery slot PNP0C0A_00 empty / disconnected" in res_absent["details"]
+
+    # 3. Present: battery supply exists
+    bat_dir = tmp_path / "bat_power"
+    (bat_dir / "BAT0").mkdir(parents=True)
+    (bat_dir / "BAT0" / "status").write_text("Discharging\n", encoding="utf-8")
+    res_present = battery_probe(
+        power_supply_path=bat_dir,
+        acpi_devices_path=acpi_dir,
+        chassis_path=chassis_file,
+    )
+    assert res_present["state"] == "present"
+    assert "BAT0" in res_present["details"]
+
+
+def test_service_account_group_membership_probe() -> None:
+    res = service_account_group_membership_probe()
+    assert res["state"] in ("present", "absent", "probe_unavailable")
+    assert res["unit"] == "groups"
 
 
 def test_cycle_cost_ledger_record_is_four_numbers_and_not_samples() -> None:
