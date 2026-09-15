@@ -1,10 +1,23 @@
-"""Tier-2 avatar state mapping: observed signals only, including unknown."""
+"""Avatar state contract and published state-file writer.
+
+Per ADR-014 and ADR-018 ("the harness judges, the instance draws"):
+- The harness owns the verdict: which signals exist, whether they are observed,
+  how they resolve into posture, and that the "unknown" state always exists.
+- The seam to the instance is a published state file carrying schema version,
+  resolved pose, signal derived from, and four-state status.
+- No imports cross the boundary in either direction.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping
 
-from .tiles import Palette, TileMap
+STATE_FILE_VERSION = 1
+DEFAULT_AVATAR_STATE_FILENAME = "avatar_state.json"
 
 UNKNOWN_POSE = "unknown"
 POSE_SIGNAL: Mapping[str, str] = {
@@ -14,13 +27,25 @@ POSE_SIGNAL: Mapping[str, str] = {
     "dead": "cycle_status",
     UNKNOWN_POSE: "observed_signal_availability",
 }
-POSE_TILES: Mapping[str, int] = {"idle": 1, "working": 2, "throttled": 3, "dead": 4, UNKNOWN_POSE: 5}
+
 
 @dataclass(frozen=True)
 class ObservedState:
     cycle_status: str | None
     thermal_status: str | None
     signals: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class ResolvedAvatarState:
+    version: int
+    pose: str
+    signal: str
+    status: str
+    timestamp_utc: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def _observed(value: Any, name: str, signals: frozenset[str]) -> bool:
@@ -42,22 +67,45 @@ def pose_for(state: ObservedState) -> str:
     return UNKNOWN_POSE
 
 
-def pose_tile(state: ObservedState) -> int:
-    return POSE_TILES[pose_for(state)]
+def status_for(pose: str) -> str:
+    """Map pose to 4-state status: healthy, degraded, dead, unknown."""
+    if pose == UNKNOWN_POSE:
+        return "unknown"
+    if pose == "throttled":
+        return "degraded"
+    if pose == "dead":
+        return "dead"
+    return "healthy"
 
 
-def select_palette(*, hour: int, cycle_health: str | None, palettes: Mapping[str, Palette]) -> Palette:
-    """Select by observed time and health; unavailable health chooses degraded."""
-    if not 0 <= hour <= 23:
-        raise ValueError("hour must be between 0 and 23")
-    health = cycle_health if cycle_health in {"healthy", "degraded", "dead", "unknown"} else "unknown"
-    period = "night" if hour < 7 or hour >= 19 else "day"
-    key = f"{period}_{health}"
-    return palettes.get(key) or palettes[f"{period}_unknown"]
+def resolve_avatar_state(
+    state: ObservedState,
+    *,
+    version: int = STATE_FILE_VERSION,
+    timestamp_utc: str | None = None,
+) -> ResolvedAvatarState:
+    pose = pose_for(state)
+    signal = POSE_SIGNAL.get(pose, "observed_signal_availability")
+    status = status_for(pose)
+    ts = timestamp_utc or datetime.now(timezone.utc).isoformat()
+    return ResolvedAvatarState(
+        version=version,
+        pose=pose,
+        signal=signal,
+        status=status,
+        timestamp_utc=ts,
+    )
 
 
-def compose_pose_scene(base: TileMap, state: ObservedState) -> TileMap:
-    """Place one avatar tile in a copy of the scene; no rendering side effects."""
-    values = list(base.indices)
-    values[0] = pose_tile(state)
-    return TileMap(tuple(values))
+def write_avatar_state_file(
+    resolved: ResolvedAvatarState,
+    path: Path | str,
+) -> Path:
+    """Atomically write resolved avatar state file."""
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(resolved.to_dict(), indent=2, sort_keys=True) + "\n"
+    tmp = dest.with_suffix(f".tmp.{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}")
+    tmp.write_text(payload, encoding="utf-8")
+    tmp.replace(dest)
+    return dest
