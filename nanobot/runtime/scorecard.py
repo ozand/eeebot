@@ -1704,6 +1704,8 @@ def compute_scorecard(
             "schema_version": SCORECARD_SCHEMA,
             "computed_at_utc": _iso(now),
             "window_days": _WINDOW_DAYS,
+            "window_start_utc": ledger_window.covered_from,
+            "window_end_utc": ledger_window.covered_to,
             "loop": loop,
             # #800: cost per integration reflects ALL work (decay archivals
             # included) — the denominator is integrations_total, explicitly,

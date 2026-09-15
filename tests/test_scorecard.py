@@ -740,6 +740,9 @@ class TestQualityAndValue:
         (repo / "scripts" / "test_good.py").write_text("x = 1\n", encoding="utf-8")
         (repo / "tests" / "test_more.py").write_text("x = 1\n", encoding="utf-8")
         snap = scorecard.compute_scorecard(state_dir, repo, force=True)
+        assert snap["computed_at_utc"] is not None
+        assert "window_start_utc" in snap
+        assert "window_end_utc" in snap
         quality = snap["quality"]
         assert quality["script_count"] == 3
         assert quality["compile_failing"] == 1
