@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -36,6 +37,11 @@ def test_run_and_record_local_ci_executes_default_targets_and_persists_state(tmp
     state_dir = tmp_path / 'state'
     workspace.mkdir()
     state_dir.mkdir()
+    # The runner refuses to start pytest over absent targets, so the fixture has
+    # to produce the files production would be pointed at.
+    (workspace / 'tests').mkdir()
+    for target in DEFAULT_TEST_TARGETS:
+        (workspace / target).write_text('', encoding='utf-8')
 
     mock_proc = MagicMock()
     mock_proc.returncode = 0
@@ -74,6 +80,8 @@ def test_run_and_record_local_ci_handles_failure(tmp_path: Path):
     state_dir = tmp_path / 'state'
     workspace.mkdir()
     state_dir.mkdir()
+    (workspace / 'tests').mkdir()
+    (workspace / 'tests' / 'dummy.py').write_text('', encoding='utf-8')
 
     mock_proc = MagicMock()
     mock_proc.returncode = 1
@@ -93,3 +101,47 @@ def test_run_and_record_local_ci_handles_failure(tmp_path: Path):
     assert latest['ok'] is False
     assert latest['exit_code'] == 1
     assert '1 failed' in latest['summary']
+
+
+def test_absent_targets_are_not_reported_as_a_red_suite(tmp_path):
+    """#1593: the unit pointed at a checkout holding none of its target files.
+
+    pytest exited 4 with "no tests ran", which the result file rendered the same
+    way as an ordinary failing run. A guard that never executed must not be
+    readable as a guard that executed and found problems.
+    """
+    workspace = tmp_path / "workspace"
+    (workspace / "tests").mkdir(parents=True)
+    (workspace / "tests" / "test_present.py").write_text("def test_ok():\n    pass\n", encoding="utf-8")
+
+    result = run_and_record_local_ci(
+        workspace=workspace,
+        state_dir=tmp_path / "state",
+        test_targets=["tests/test_present.py", "tests/test_absent.py"],
+    )
+
+    assert result["state"] == "targets_missing"
+    assert result["ok"] is False
+    assert result["exit_code"] is None
+    assert result["command"] == [], "no pytest process should have been started"
+    assert "tests/test_absent.py" in result["summary"]
+    assert "tests/test_present.py" not in result["summary"]
+
+    written = json.loads((tmp_path / "state" / "local_ci" / "latest.json").read_text(encoding="utf-8"))
+    assert written["state"] == "targets_missing", "the distinction must survive to disk"
+
+
+def test_a_suite_that_actually_ran_is_labelled_ran(tmp_path):
+    workspace = tmp_path / "workspace"
+    (workspace / "tests").mkdir(parents=True)
+    (workspace / "tests" / "test_present.py").write_text("def test_ok():\n    pass\n", encoding="utf-8")
+
+    result = run_and_record_local_ci(
+        workspace=workspace,
+        state_dir=tmp_path / "state",
+        pytest_bin=sys.executable,
+        test_targets=["tests/test_present.py"],
+    )
+
+    assert result["state"] == "ran"
+    assert result["exit_code"] == 0

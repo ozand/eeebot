@@ -32,12 +32,13 @@ def write_local_ci_result(
     workspace: Path | None = None,
     state_dir: Path | None = None,
     command: list[str],
-    exit_code: int,
+    exit_code: int | None,
     output: str,
     summary: str,
     now: datetime | None = None,
     wall_seconds: float | None = None,
     targets: list[str] | None = None,
+    state: str = "ran",
 ) -> dict[str, Any]:
     current = now.astimezone(timezone.utc) if now else datetime.now(timezone.utc)
     stamp = current.isoformat()
@@ -46,6 +47,9 @@ def write_local_ci_result(
         'schema_version': 'local-ci-result-v1',
         'created_at_utc': stamp,
         'ok': exit_code == 0,
+        # "the suite ran and was red" and "the suite never ran" are different
+        # facts; a reader that sees only ok=false cannot tell them apart.
+        'state': state,
         'exit_code': exit_code,
         'command': command,
         'summary': summary,
@@ -85,6 +89,29 @@ def run_and_record_local_ci(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     targets = list(test_targets or DEFAULT_TEST_TARGETS)
+    missing = [t for t in targets if not (workspace / t).exists()]
+    if missing:
+        # "no tests ran" and "tests failed" are different verdicts and must not
+        # share a rendering. The unit shipped pointing at the instance checkout,
+        # where none of the harness invariant tests exist; pytest exited 4 and
+        # the result read as an ordinary red run (#1593).
+        summary = f"targets absent from {workspace}: {', '.join(missing)}"
+        result_payload = write_local_ci_result(
+            workspace=workspace,
+            state_dir=state_dir,
+            command=[],
+            exit_code=None,
+            output=summary,
+            summary=summary,
+            now=now,
+            wall_seconds=0.0,
+            targets=targets,
+            state="targets_missing",
+        )
+        write_local_ci_state_summary(workspace=workspace, state_dir=state_dir)
+        result_payload["success"] = False
+        return result_payload
+
     cmd = [
         pytest_bin,
         "-m",
