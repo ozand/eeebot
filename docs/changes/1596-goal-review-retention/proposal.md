@@ -18,8 +18,9 @@ Each new `phase: "goal_review"` ledger row records:
   survived the bounded evidence projection;
 - `direction_at_review`: the current tech-tree Direction at the same decision
   point, or JSON `null` if none was available;
-- `retention_status`: `"complete"` when the source scan ran, otherwise
-  `"unavailable"` (for example, no readable goal channel).
+- `retention_status`: `"complete"` only when every source reader and
+  Direction validation completed; otherwise `"unavailable"` (for example,
+  no readable goal channel or an unreadable source).
 
 The change is retention only. It does not add an evidence source, a priority,
 a demand kind, a scheduler, a gate, or a fitness input. It does not touch

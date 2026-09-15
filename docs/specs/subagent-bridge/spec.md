@@ -871,8 +871,9 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     lines survived the prompt bound), `direction_at_review` (the current
     tech-tree Direction, or `null` when absent), and `retention_status`.
     `retention_status: "complete"` distinguishes known `[]` / `null` facts
-    from `"unavailable"` when the source scan could not run (for example,
-    no goal channel). These are decision-time provenance only: they do not
+    from `"unavailable"` when any source reader or Direction validation could
+    not complete (for example, no goal channel or unreadable source). These
+    are decision-time provenance only: they do not
     create demand or change ranking, gates, fitness, targets, or gaps. Rows
     predating these fields are **unavailable**, never interpreted as an empty
     source set or no Direction.

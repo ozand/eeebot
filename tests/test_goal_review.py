@@ -161,7 +161,8 @@ class TestNoGaps:
         goal_review ledger row with empty output, watermark advanced."""
         _no_llm(monkeypatch)
         state_dir = tmp_path / "state"
-        _write_goal_text(state_dir)  # no scorecard snapshot, no gaps
+        _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [])  # verified empty scorecard gaps
 
         assert goal_review.maybe_goal_review(state_dir, None, now=NOW) == []
         rows = _goal_review_rows(state_dir)
@@ -182,6 +183,7 @@ class TestNoGaps:
         _no_llm(monkeypatch)
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [])
         tech_tree.ensure_seeded(state_dir, now=NOW)
         portfolio = tech_tree.read_portfolio(state_dir)
         portfolio["current"] = "cycle-cost"
@@ -194,6 +196,32 @@ class TestNoGaps:
         assert goal_review.goal_review_retention(row) == {
             "status": "complete", "evidence_sources": (), "direction": "cycle-cost",
         }
+
+    def test_missing_scorecard_is_unavailable_not_empty(self, tmp_path, monkeypatch, enabled):
+        _no_llm(monkeypatch)
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+
+        assert goal_review.maybe_goal_review(state_dir, None, now=NOW) == []
+        row = _goal_review_rows(state_dir)[0]
+        assert row["outcome"] == "no_gaps"
+        assert row["retention_status"] == "unavailable"
+        assert goal_review.goal_review_retention(row)["status"] == "unavailable"
+
+    def test_failed_evidence_source_is_unavailable_not_empty(self, tmp_path, monkeypatch, enabled):
+        _no_llm(monkeypatch)
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        monkeypatch.setattr(
+            "nanobot.runtime.usage_evidence.stale_artifacts",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("reader failed")),
+        )
+
+        assert goal_review.maybe_goal_review(state_dir, None, now=NOW) == []
+        row = _goal_review_rows(state_dir)[0]
+        assert row["outcome"] == "no_gaps"
+        assert row["retention_status"] == "unavailable"
+        assert goal_review.goal_review_retention(row)["status"] == "unavailable"
 
     def test_missing_goal_text_records_unavailable_sources_before_llm(self, tmp_path, monkeypatch, enabled):
         """No R30 channel means no source scan, never an empty source set."""
@@ -518,6 +546,23 @@ class TestRetention:
         assert goal_review.goal_review_retention(malformed)["status"] == "unavailable"
         assert goal_review.goal_review_retention(duplicated)["status"] == "unavailable"
         assert goal_review.goal_review_retention(whitespace_direction)["status"] == "unavailable"
+
+    def test_whitespace_direction_is_unavailable_end_to_end(self, tmp_path, monkeypatch, enabled):
+        from nanobot.runtime import tech_tree
+
+        _no_llm(monkeypatch)
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [])
+        tech_tree.ensure_seeded(state_dir, now=NOW)
+        portfolio = tech_tree.read_portfolio(state_dir)
+        portfolio["current"] = " "
+        tech_tree._write_portfolio(state_dir, portfolio)
+
+        assert goal_review.maybe_goal_review(state_dir, None, now=NOW) == []
+        row = _goal_review_rows(state_dir)[0]
+        assert row["retention_status"] == "unavailable"
+        assert goal_review.goal_review_retention(row)["status"] == "unavailable"
 
     def test_direction_is_captured_at_decision_time(self, tmp_path, monkeypatch, enabled):
         from nanobot.runtime import tech_tree

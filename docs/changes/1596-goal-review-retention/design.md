@@ -6,8 +6,9 @@
 per review. Before the existing `no_gaps` branch it reads the current
 tech-tree Direction. `_record_review()` receives those facts for every
 outcome and writes them into the existing `phase: "goal_review"` row with a
-`retention_status`: `complete` only after the source scan ran, otherwise
-`unavailable`. The source set is computed from lines that survive `_MAX_EVIDENCE_LINES`, not
+`retention_status`: `complete` only after every source reader and Direction
+validation completed, otherwise `unavailable`. The source set is computed from
+lines that survive `_MAX_EVIDENCE_LINES`, not
 from source functions merely attempted. Thus a later replay observes exactly
 what the review model could have cited.
 
@@ -22,7 +23,7 @@ which changed between the decision and its ledger write.
 | Row shape | status | source set / Direction |
 |---|---|---|
 | New row, source scan ran, valid fields | `complete` | exact retained values, including `[]` / `null` |
-| New row, source scan did not run (`retention_status: unavailable`) | `unavailable` | `None` / `None` |
+| New row, a source reader or Direction validation was unavailable (`retention_status: unavailable`) | `unavailable` | `None` / `None` |
 | Pre-retention row, malformed row, non-review row | `unavailable` | `None` / `None` |
 
 No code writes missing keys into historical ledger entries. `group_by_cycle`,
