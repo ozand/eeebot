@@ -98,6 +98,7 @@ from nanobot.runtime.scorecard import (  # noqa: E402
 from nanobot.runtime.scorecard import (  # noqa: E402
     fitness_sidecar_hashes as _fitness_sidecar_hashes,
 )
+from scripts.cycle_cost_probe import CycleCostSampler  # noqa: E402
 from nanobot.runtime.stop_guards import REVISION_CAP_DEFAULT, revision_outcome  # noqa: E402
 # #1119: deterministic test-weakening detector — runs BEFORE the smoke gate
 # decides a cycle's fate, same placement discipline as
@@ -1981,14 +1982,39 @@ async def main():
     if lock_handle is None:
         print('bridge: another run holds the lock (bridge.lock); exiting cleanly')
         return 0
+    cycle_cost = CycleCostSampler()
+    cycle_cost_started = False
     try:
         try:
             from nanobot import crash_record as _run_record
             _run_record.set_run_metadata({"bridge_enabled": True})
         except Exception:
             pass
+        try:
+            cycle_cost.start("bridge-run")
+            cycle_cost_started = True
+        except Exception:
+            pass
         return await _main_impl()
     finally:
+        if cycle_cost_started:
+            try:
+                measurement = cycle_cost.finish()
+            except Exception as exc:
+                measurement = {
+                    "state": "probe_unavailable",
+                    "value": None,
+                    "unit": "cycle",
+                    "details": f"cycle cost probe failed: {type(exc).__name__}",
+                }
+            try:
+                append_event(STATE_DIR, {
+                    "phase": "cycle_cost",
+                    "cycle_id": cycle_cost.cycle_id or "bridge-run",
+                    "measurement": measurement,
+                })
+            except Exception:
+                pass
         try:
             lock_handle.close()
         except Exception:

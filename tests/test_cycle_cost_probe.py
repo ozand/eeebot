@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import time
 
 import pytest
 
@@ -55,12 +56,40 @@ def test_cycle_sampler_reports_attributable_deltas_and_load_sampling() -> None:
 
     assert result["cycle_id"] == "cycle-cost-1"
     assert result["sampled_during_cycle"] is True
-    assert result["cycle_cpu_seconds"]["value"] == pytest.approx(0.25)
-    assert result["cycle_peak_rss"]["value"] == 250
-    assert result["thermal_under_load"]["value"] == 71000
-    assert result["thermal_under_load"]["sampled_during_cycle"] is True
-    assert result["throttle_under_load"]["value"] == 3
-    assert result["throttle_under_load"]["total_time_delta_ms"] == 18
+    assert result["cpu_seconds"]["value"] == pytest.approx(0.25)
+    assert result["peak_rss_bytes"]["value"] == 250
+    assert result["peak_temperature_millicelsius"]["value"] == 71000
+    assert result["peak_temperature_millicelsius"]["sampled_during_cycle"] is True
+    assert result["throttle_events"]["value"] == 3
+    assert result["throttle_events"]["total_time_delta_ms"] == 18
+
+
+def test_cycle_sampler_uses_peak_temperature_and_one_second_sampling(monkeypatch) -> None:
+    from scripts import cycle_cost_probe as probe
+
+    monkeypatch.setattr(probe, "SAMPLE_INTERVAL_SECONDS", 0.001)
+    process = iter([
+        {"cpu_ticks": 10, "clock_ticks": 100, "peak_rss_bytes": 100},
+        {"cpu_ticks": 11, "clock_ticks": 100, "peak_rss_bytes": 200},
+    ])
+    temperatures = iter([
+        {"type": "acpitz", "temperature_millicelsius": 53000},
+        {"type": "acpitz", "temperature_millicelsius": 62000},
+        {"type": "acpitz", "temperature_millicelsius": 55000},
+    ])
+    throttles = iter([
+        {"count": 2, "total_time_ms": 4},
+        {"count": 2, "total_time_ms": 4},
+    ])
+    sampler = probe.CycleCostSampler(
+        process_reader=lambda _: next(process),
+        thermal_reader=lambda _: next(temperatures),
+        throttle_reader=lambda: next(throttles),
+    )
+    sampler.start("cycle-peak")
+    time.sleep(0.01)
+    result = sampler.finish()
+    assert result["peak_temperature_millicelsius"]["value"] == 62000
 
 
 def test_cycle_sampler_keeps_unavailable_distinct_from_zero() -> None:
@@ -82,10 +111,10 @@ def test_cycle_sampler_keeps_unavailable_distinct_from_zero() -> None:
     )
     sampler.start("cycle-unavailable")
     result = sampler.finish()
-    assert result["cycle_cpu_seconds"]["state"] == "probe_unavailable"
-    assert result["cycle_cpu_seconds"]["value"] is None
-    assert result["cycle_peak_rss"]["state"] == "probe_unavailable"
-    assert result["cycle_peak_rss"]["value"] is None
+    assert result["cpu_seconds"]["state"] == "probe_unavailable"
+    assert result["cpu_seconds"]["value"] is None
+    assert result["peak_rss_bytes"]["state"] == "probe_unavailable"
+    assert result["peak_rss_bytes"]["value"] is None
 
 
 def test_framebuffer_probe_uses_verified_1024x600_32bpp_shape(tmp_path: Path) -> None:
@@ -100,10 +129,12 @@ def test_framebuffer_probe_uses_verified_1024x600_32bpp_shape(tmp_path: Path) ->
     assert result["value"] == FRAMEBUFFER_BYTES
 
 
-def test_framebuffer_push_cost_is_unavailable_when_device_cannot_open(tmp_path: Path) -> None:
+def test_framebuffer_push_cost_can_measure_an_injected_writable_surface(tmp_path: Path) -> None:
     from scripts.cycle_cost_probe import measure_framebuffer_push
 
-    result = measure_framebuffer_push(framebuffer_path=tmp_path / "missing", surface_bytes=16)
+    target = tmp_path / "framebuffer"
+    target.write_bytes(b"")
+    result = measure_framebuffer_push(framebuffer_path=target, surface_bytes=16)
     assert result["state"] == "present"
     assert result["value"] >= 0
 
@@ -128,6 +159,19 @@ def test_battery_is_permanently_unavailable_without_zero() -> None:
     assert result["state"] == "probe_unavailable"
     assert result["value"] is None
     assert "no BAT* device" in result["details"]
+
+
+def test_cycle_cost_ledger_record_is_four_numbers_and_not_samples() -> None:
+    from scripts.cycle_cost_probe import _result
+
+    measurement = {
+        "cpu_seconds": _result("present", 237.97, "seconds", "own process"),
+        "peak_rss_bytes": _result("present", 82530304, "bytes", "own process VmHWM"),
+        "peak_temperature_millicelsius": _result("present", 62000, "millicelsius", "sampled during cycle"),
+        "throttle_events": _result("present", 0, "events", "counter delta during cycle"),
+    }
+    assert len(measurement) == 4
+    assert all("samples" not in item for item in measurement.values())
 
 
 def test_toolchain_measurements_are_explicitly_unavailable_without_host_load() -> None:
