@@ -384,6 +384,35 @@ def _write_derived_priorities(state_dir: Path, priorities: list[dict[str, Any]])
     )
 
 
+def active_derived_priorities(state_dir: Path, raw_text: str) -> list[dict[str, Any]]:
+    """Return the list of derived priorities active against ``raw_text``.
+
+    Skips derived entries whose label or number already exists in ``raw_text``.
+    This exposes the exact derived priorities that :func:`merged_goal_text`
+    would fold in, preserving structural origin for callers that need
+    to distinguish operator charter entries from self-derived entries (#1665).
+    """
+    try:
+        derived = read_derived_priorities(state_dir)
+        if not derived:
+            return []
+        existing = _existing_priority_labels(raw_text)
+        existing_numbers = _existing_priority_numbers(raw_text)
+        return [
+            {
+                "label": d["label"],
+                "body": d["body"],
+                "vector": d["vector"],
+                "number": d["number"],
+            }
+            for d in derived
+            if _normalize_label(d["label"]) not in existing
+            and int(d.get("number") or 0) not in existing_numbers
+        ]
+    except Exception:
+        return []
+
+
 def merged_goal_text(state_dir: Path, raw_text: str) -> str:
     """``raw_text`` (the operator's goal_text) with every derived priority
     (#860) folded in via the SAME :func:`append_priorities` insertion/
@@ -395,31 +424,7 @@ def merged_goal_text(state_dir: Path, raw_text: str) -> str:
     call this before parsing so a deploy's goal_text reseed can never erase
     a derived priority out from under them. Fail-open to ``raw_text``."""
     try:
-        derived = read_derived_priorities(state_dir)
-        if not derived:
-            return raw_text
-        # #860 review: skip derived entries whose label the operator has
-        # since baked into goal_text itself (or that a reseed re-added) —
-        # otherwise the merged text would carry the label twice and demand
-        # would mint two items for the same work. Operator canon wins.
-        # #1640: also skip by number against the WHOLE text (Current and
-        # Completed) — a stray derived entry can outlive the operator
-        # marking its own number done, and the Completed sentence's prose
-        # rarely matches the derived entry's label verbatim, so the label
-        # check alone would let it resurrect as a new "current" target.
-        existing = _existing_priority_labels(raw_text)
-        existing_numbers = _existing_priority_numbers(raw_text)
-        entries = [
-            {
-                "label": d["label"],
-                "body": d["body"],
-                "vector": d["vector"],
-                "number": d["number"],
-            }
-            for d in derived
-            if _normalize_label(d["label"]) not in existing
-            and int(d.get("number") or 0) not in existing_numbers
-        ]
+        entries = active_derived_priorities(state_dir, raw_text)
         if not entries:
             return raw_text
         new_text, _titles = append_priorities(raw_text, entries)

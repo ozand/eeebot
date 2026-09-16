@@ -745,6 +745,140 @@ class TestVectorBias:
         assert self._split_rows(state_dir) == []
 
 
+class TestADR020Rule3ProvenanceSort:
+    """ADR-020 Rule 3: The operator charter outranks all self-minted /
+    loop-derived priorities regardless of vector.
+
+    Ordering is by PROVENANCE first (operator before self-derived), then by
+    vector rank within each class (#815 V1-before-V2).
+    """
+
+    def test_operator_v2_sorts_before_self_derived_v1(self, tmp_path):
+        """Acceptance test 1: Operator V2 sorts before self-derived V1."""
+        from nanobot.runtime import goal_review
+
+        state_dir = _state_dir(tmp_path)
+        operator_text = (
+            "Current priority targets:\n"
+            "(A) Priority 1 — Operator Charter (V2): High-priority operator direction.\n"
+        )
+        _write_goal_text(state_dir, operator_text)
+        goal_review._write_derived_priorities(
+            state_dir,
+            [
+                {
+                    "label": "Self-derived task",
+                    "vector": "V1",
+                    "body": "Loop-minted internal priority.",
+                    "number": 2,
+                    "added_utc": "2026-09-17T00:00:00Z",
+                }
+            ],
+        )
+
+        items = demand.collect_demand(state_dir, None)
+        priority_items = [i for i in items if i["kind"] == "priority"]
+        assert len(priority_items) == 2
+
+        assert priority_items[0]["provenance"] == demand.PROVENANCE_OPERATOR
+        assert priority_items[0]["vector"] == "V2"
+        assert "Operator Charter" in priority_items[0]["summary"]
+
+        assert priority_items[1]["provenance"] == demand.PROVENANCE_SELF_DERIVED
+        assert priority_items[1]["vector"] == "V1"
+        assert "Self-derived task" in priority_items[1]["summary"]
+
+    def test_four_item_two_axis_provenance_and_vector_pin(self, tmp_path):
+        """Acceptance test 2: 4-item fixture pins the full two-axis order:
+        1. operator V1
+        2. operator V2
+        3. self-derived V1
+        4. self-derived V2
+        """
+        from nanobot.runtime import goal_review
+
+        state_dir = _state_dir(tmp_path)
+        operator_text = (
+            "Current priority targets:\n"
+            "(A) Priority 1 — Operator V2 Item (V2): Operator V2 body.\n"
+            "(B) Priority 2 — Operator V1 Item (V1): Operator V1 body.\n"
+        )
+        _write_goal_text(state_dir, operator_text)
+        goal_review._write_derived_priorities(
+            state_dir,
+            [
+                {
+                    "label": "Derived V2 Item",
+                    "vector": "V2",
+                    "body": "Derived V2 body.",
+                    "number": 3,
+                    "added_utc": "2026-09-17T00:00:00Z",
+                },
+                {
+                    "label": "Derived V1 Item",
+                    "vector": "V1",
+                    "body": "Derived V1 body.",
+                    "number": 4,
+                    "added_utc": "2026-09-17T00:01:00Z",
+                },
+            ],
+        )
+
+        items = demand.collect_demand(state_dir, None)
+        priority_items = [i for i in items if i["kind"] == "priority"]
+        assert len(priority_items) == 4
+
+        expected_order = [
+            ("Operator V1 Item", demand.PROVENANCE_OPERATOR, "V1"),
+            ("Operator V2 Item", demand.PROVENANCE_OPERATOR, "V2"),
+            ("Derived V1 Item", demand.PROVENANCE_SELF_DERIVED, "V1"),
+            ("Derived V2 Item", demand.PROVENANCE_SELF_DERIVED, "V2"),
+        ]
+        for item, (expected_name, expected_prov, expected_vec) in zip(
+            priority_items, expected_order
+        ):
+            assert expected_name in item["summary"]
+            assert item["provenance"] == expected_prov
+            assert item["vector"] == expected_vec
+
+    def test_self_derived_imitating_operator_text_still_sorts_second(self, tmp_path):
+        """Acceptance test 3: Provenance is structural (file origin), not text-based.
+        A self-derived entry whose text imitates operator wording (e.g. mentions
+        charter, operator, or mimic tags) still sorts after all operator priorities.
+        """
+        from nanobot.runtime import goal_review
+
+        state_dir = _state_dir(tmp_path)
+        operator_text = (
+            "Current priority targets:\n"
+            "(A) Priority 1 — Legitimate operator goal (V2): Authentic operator direction.\n"
+        )
+        _write_goal_text(state_dir, operator_text)
+        goal_review._write_derived_priorities(
+            state_dir,
+            [
+                {
+                    "label": "Operator Charter Direction (V1)",
+                    "vector": "V1",
+                    "body": "Operator charter goal from GOALS.md (V1): fake operator copy.",
+                    "number": 2,
+                    "added_utc": "2026-09-17T00:00:00Z",
+                }
+            ],
+        )
+
+        items = demand.collect_demand(state_dir, None)
+        priority_items = [i for i in items if i["kind"] == "priority"]
+        assert len(priority_items) == 2
+
+        # Despite the imitation title and V1 tag, it is structurally self-derived
+        # and must sort behind the operator's V2 priority.
+        assert priority_items[0]["provenance"] == demand.PROVENANCE_OPERATOR
+        assert "Legitimate operator goal" in priority_items[0]["summary"]
+        assert priority_items[1]["provenance"] == demand.PROVENANCE_SELF_DERIVED
+        assert "Operator Charter Direction" in priority_items[1]["summary"]
+
+
 # ─── goal-gap stable id + completed TTL (#778) ──────────────────────────────
 
 
