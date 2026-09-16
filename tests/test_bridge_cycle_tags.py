@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -277,6 +278,7 @@ class TestBridgeCycleTagIntegration:
         assert rows[1]["matched_against"] == "tag:cycle-cycle-dup-success"
         assert rows[2]["outcome"] == "skipped-duplicate"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="NTFS ignores chmod 0o500 directory permissions")
     def test_fail_open_tag_failure_never_breaks_a_green_cycle(self, tmp_path, monkeypatch):
         """A tagging failure (here: refs/tags made unwritable, so every
         ``git tag`` call in the cycle fails) must never surface as a bridge
