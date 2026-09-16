@@ -736,6 +736,220 @@ def _priority_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
         return []
 
 
+# ─── #1684: operator-readable derived view ──────────────────────────────────
+
+DERIVED_VIEW_SCHEMA = "derived-view-v1"
+DERIVED_VIEW_SUBPATH = ("public", "derived_view.json")
+DERIVED_STATUS_PRESENT = "present"
+DERIVED_STATUS_ABSENT = "absent"
+DERIVED_STATUS_PROBE_UNAVAILABLE = "probe_unavailable"
+
+# "Priority <n> — <title>" as _priority_items builds every summary; the title
+# keeps its inline "(V1)"/"(V2)" tag, which the view strips into ``vector``.
+_VIEW_SUMMARY_RE = re.compile(r"^Priority\s+(\d+)\s*[—–-]\s*(.+)$", re.DOTALL)
+
+
+def derived_view_path(state_dir: Path) -> Path:
+    return Path(state_dir).joinpath(*DERIVED_VIEW_SUBPATH)
+
+
+def _mtime_utc(path: Path) -> str | None:
+    """ISO-8601 UTC mtime of ``path``, ``None`` when absent or unstatable."""
+    try:
+        if not path.is_file():
+            return None
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+def _probe_derived_status(derived_file: Path) -> str:
+    """Three-state status of ``derived_priorities.json`` (#1684): ``absent``
+    when the file does not exist (an absent self-derived list must never read
+    as an empty one), ``present`` when it exists and parses as a JSON object,
+    ``probe_unavailable`` when it exists but cannot be stat'ed or parsed —
+    i.e. the writer cannot say either way."""
+    try:
+        if not derived_file.is_file():
+            return DERIVED_STATUS_ABSENT
+        data = json.loads(derived_file.read_text(encoding="utf-8"))
+        return DERIVED_STATUS_PRESENT if isinstance(data, dict) else DERIVED_STATUS_PROBE_UNAVAILABLE
+    except Exception:
+        return DERIVED_STATUS_PROBE_UNAVAILABLE
+
+
+def _charter_as_loop_sees_it(state_dir: Path, selfevo_repo: Path | None) -> tuple[str, str, Path | None]:
+    """The operator-origin charter text in the SAME precedence
+    :func:`_priority_items` uses (release ``goals.md`` -> ``goals/goal_text.json``
+    ``text`` -> legacy ``goals.md``), plus which source won and its path.
+    This is the raw operator text, NOT ``goal_review.merged_goal_text`` — the
+    self-derived entries are published separately so the two origins stay
+    apart (ADR-020 Rule 3). Only the ``text`` field of goal_text.json is
+    published; every other key of that file stays private."""
+    if selfevo_repo:
+        try:
+            from nanobot.runtime.goal_review import _GOALS_MD_FILENAME, read_charter_text
+
+            text = read_charter_text(selfevo_repo) or ""
+            if text:
+                return text, "release_goals_md", Path(selfevo_repo) / _GOALS_MD_FILENAME
+        except Exception:
+            pass
+    canon = Path(state_dir) / "goals" / "goal_text.json"
+    data = _read_json(canon, None)
+    if isinstance(data, dict) and str(data.get("text") or ""):
+        return str(data.get("text") or ""), "goal_text_json", canon
+    legacy = Path(state_dir) / "goals.md"
+    if legacy.is_file():
+        try:
+            text = legacy.read_text(encoding="utf-8")
+            if text:
+                return text, "legacy_goals_md", legacy
+        except Exception:
+            pass
+    return "", "none", None
+
+
+def build_derived_view(
+    state_dir: Path,
+    selfevo_repo: Path | None = None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Assemble the #1684 view payload without writing it. Reads only; fail-open
+    per section (a section that cannot be read publishes its explicit
+    unavailable marker, never a silent blank)."""
+    from nanobot.runtime import goal_review
+
+    state_dir = Path(state_dir)
+    charter_text, charter_source, charter_path = _charter_as_loop_sees_it(state_dir, selfevo_repo)
+    derived_file = goal_review._derived_priorities_path(state_dir)
+    derived_status = _probe_derived_status(derived_file)
+
+    derived_entries: list[dict[str, Any]] = []
+    direction_by_number: dict[int, str] = {}
+    if derived_status == DERIVED_STATUS_PRESENT:
+        try:
+            for d in goal_review.read_derived_priorities(state_dir):
+                derived_entries.append(
+                    {
+                        "number": d.get("number"),
+                        "label": d.get("label", ""),
+                        "vector": d.get("vector", ""),
+                        "direction": d.get("direction", ""),
+                        "added_utc": d.get("added_utc", ""),
+                    }
+                )
+                if isinstance(d.get("number"), int):
+                    direction_by_number[d["number"]] = str(d.get("direction") or "")
+        except Exception:
+            derived_status = DERIVED_STATUS_PROBE_UNAVAILABLE
+            derived_entries = []
+
+    # The production ranking, in the order the production sort produced it —
+    # never re-sorted here (#271 renders it byte-for-byte).
+    items = _priority_items(state_dir, selfevo_repo)
+    ranked: list[dict[str, Any]] = []
+    for rank, item in enumerate(items, start=1):
+        summary = str(item.get("summary") or "")
+        m = _VIEW_SUMMARY_RE.match(summary.strip())
+        number: int | None = int(m.group(1)) if m else None
+        title = m.group(2) if m else summary
+        label = _VECTOR_TAG_RE.sub("", title).strip()
+        provenance = str(item.get("provenance") or "")
+        direction = str(item.get("direction") or "")
+        if not direction and provenance == PROVENANCE_SELF_DERIVED and number is not None:
+            direction = direction_by_number.get(number, "")
+        ranked.append(
+            {
+                "rank": rank,
+                "id": item.get("id", ""),
+                "kind": item.get("kind", "priority"),
+                "number": number,
+                "label": label,
+                "vector": item.get("vector", ""),
+                "provenance": provenance,
+                "direction": direction,
+                "summary": summary,
+                "evidence": item.get("evidence", ""),
+            }
+        )
+
+    ts = now or datetime.now(timezone.utc)
+    return {
+        "schema_version": DERIVED_VIEW_SCHEMA,
+        "generated_at_utc": ts.isoformat().replace("+00:00", "Z"),
+        "charter": {
+            "source": charter_source,
+            "merged": False,
+            "text": charter_text,
+        },
+        "derived_status": derived_status,
+        "derived_priorities": derived_entries,
+        "priority_items": ranked,
+        "input_mtimes_utc": {
+            "charter": _mtime_utc(charter_path) if charter_path else None,
+            "goal_text_json": _mtime_utc(state_dir / "goals" / "goal_text.json"),
+            "derived_priorities_json": _mtime_utc(derived_file),
+        },
+        "sort": "provenance(operator<self-derived), then vector(V1<V2), as demand._priority_items",
+    }
+
+
+def publish_derived_view(
+    state_dir: Path,
+    selfevo_repo: Path | None = None,
+) -> dict[str, Any]:
+    """#1684: write the operator-readable derived view of the charter, the
+    self-derived priorities and the ranked priority queue to
+    ``<state_dir>/public/derived_view.json`` (mode 0644, tmp + ``os.replace``
+    via :func:`nanobot.runtime._io.write_json_atomic`), for the
+    ``eeebot-publish`` uid to read. Reads only what the loop already reads;
+    never changes ``goals/goal_text.json`` (0600) or any uid boundary.
+
+    Fail-open: NEVER raises. A build or write failure leaves the previous file
+    intact, is recorded in the cycle ledger as a ``derived_view`` /
+    ``write_failed`` event, and is reported in the returned dict
+    (``ok``, ``path``, ``items``, ``derived_status``, ``error``)."""
+    out_path: Path | None = None
+    try:
+        out_path = derived_view_path(state_dir)
+        payload = build_derived_view(state_dir, selfevo_repo)
+        from nanobot.runtime._io import write_json_atomic
+
+        write_json_atomic(out_path, payload)
+        return {
+            "ok": True,
+            "path": str(out_path),
+            "items": len(payload["priority_items"]),
+            "derived_status": payload["derived_status"],
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001 — fail-open by contract
+        error = f"{type(exc).__name__}: {exc}"[:300]
+        try:
+            from nanobot.runtime.cycle_ledger import append_event
+
+            append_event(
+                Path(state_dir),
+                {
+                    "phase": "derived_view",
+                    "outcome": "write_failed",
+                    "path": str(out_path or ""),
+                    "error": error,
+                },
+            )
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "path": str(out_path or ""),
+            "items": 0,
+            "derived_status": None,
+            "error": error,
+        }
+
+
 # ─── kind: defect ───────────────────────────────────────────────────────────
 
 

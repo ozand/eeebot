@@ -3885,3 +3885,141 @@ class TestIssue1238DocBudgetRowVolume:
             "ledger_blind", "doc_budget_exceeded", "items_considered",
         } <= set(row)
         assert row["passes"] == 1
+
+
+class TestPublishDerivedView:
+    """#1684: state/public/derived_view.json — the loop's world-readable view
+    of the charter, the self-derived priorities and the ranked priority queue,
+    for the eeebot-publish uid that must never read goals/goal_text.json."""
+
+    CHARTER = (
+        "# EEEPC AUTONOMOUS AGENT CHARTER\n"
+        "We build a self-improving system.\n\n"
+        "Current priority targets:\n"
+        "(A) Priority 11 — Loop health in dashboard (V2): improve dashboard\n"
+    )
+
+    @staticmethod
+    def _write_derived(state_dir: Path, entries: list[dict]) -> None:
+        (state_dir / "goals" / "derived_priorities.json").write_text(
+            json.dumps({"schema_version": "derived-priorities-v1", "priorities": entries}),
+            encoding="utf-8",
+        )
+
+    def test_operator_v2_outranks_self_derived_v1_with_provenance_and_direction(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, self.CHARTER)
+        self._write_derived(state_dir, [{
+            "label": "Night reflections batch (V1)", "vector": "V1",
+            "body": "run overnight", "number": 19,
+            "direction": "reflection", "added_utc": "2026-09-15T21:36:00Z",
+        }])
+
+        result = demand.publish_derived_view(state_dir, None)
+
+        assert result["ok"] is True and result["error"] is None
+        out = Path(result["path"])
+        assert out == state_dir / "public" / "derived_view.json"
+        view = json.loads(out.read_text(encoding="utf-8"))
+        assert view["schema_version"] == "derived-view-v1"
+        assert view["generated_at_utc"].endswith("Z")
+        assert view["derived_status"] == "present"
+        assert view["charter"] == {"source": "goal_text_json", "merged": False, "text": self.CHARTER}
+        assert view["input_mtimes_utc"]["goal_text_json"] is not None
+        assert view["input_mtimes_utc"]["derived_priorities_json"] is not None
+        # Two origins stay apart: the self-derived list is its own array.
+        assert view["derived_priorities"] == [{
+            "number": 19, "label": "Night reflections batch (V1)", "vector": "V1",
+            "direction": "reflection", "added_utc": "2026-09-15T21:36:00Z",
+        }]
+        # The ranked list IS the production sort: operator (V2) before self-derived (V1).
+        items = view["priority_items"]
+        assert [(i["rank"], i["number"], i["provenance"], i["vector"]) for i in items] == [
+            (1, 11, "operator", "V2"),
+            (2, 19, "self-derived", "V1"),
+        ]
+        assert items[0]["label"] == "Loop health in dashboard"
+        assert items[0]["direction"] == ""
+        assert items[1]["label"] == "Night reflections batch"
+        assert items[1]["direction"] == "reflection"
+        assert items[1]["kind"] == "priority"
+        # Same rows, same order as the production ranking — not re-derived.
+        prod = demand._priority_items(state_dir, None)
+        assert [i["id"] for i in items] == [p["id"] for p in prod]
+        if os.name != "nt":
+            assert (out.stat().st_mode & 0o777) == 0o644
+
+    def test_missing_derived_file_is_absent_not_an_empty_list(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, self.CHARTER)
+
+        result = demand.publish_derived_view(state_dir, None)
+        view = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
+
+        assert result["derived_status"] == "absent"
+        assert view["derived_status"] == "absent"
+        assert view["derived_priorities"] == []
+        assert view["input_mtimes_utc"]["derived_priorities_json"] is None
+        assert [i["provenance"] for i in view["priority_items"]] == ["operator"]
+
+    def test_unparseable_derived_file_is_probe_unavailable(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, self.CHARTER)
+        (state_dir / "goals" / "derived_priorities.json").write_text("{not json", encoding="utf-8")
+
+        view = demand.build_derived_view(state_dir, None)
+
+        assert view["derived_status"] == "probe_unavailable"
+        assert view["derived_priorities"] == []
+
+    def test_no_charter_anywhere_publishes_explicit_none_source(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+
+        result = demand.publish_derived_view(state_dir, None)
+        view = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
+
+        assert result["ok"] is True
+        assert view["charter"] == {"source": "none", "merged": False, "text": ""}
+        assert view["priority_items"] == []
+
+    def test_write_failure_never_raises_keeps_previous_file_and_records_ledger_event(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, self.CHARTER)
+        first = demand.publish_derived_view(state_dir, None)
+        assert first["ok"] is True
+        before = Path(first["path"]).read_bytes()
+
+        from nanobot.runtime import _io
+
+        def _boom(path, payload, **kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(_io, "write_json_atomic", _boom)
+        result = demand.publish_derived_view(state_dir, None)
+
+        assert result["ok"] is False
+        assert result["error"].startswith("OSError: disk full")
+        assert Path(first["path"]).read_bytes() == before
+        rows = [json.loads(line) for line in
+                (state_dir / "ledger" / "cycles.jsonl").read_text(encoding="utf-8").splitlines()]
+        events = [r for r in rows if r.get("phase") == "derived_view"]
+        assert len(events) == 1
+        assert events[0]["outcome"] == "write_failed"
+        assert events[0]["path"] == first["path"]
+        assert "disk full" in events[0]["error"]
+
+    def test_build_failure_is_also_fail_open(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        monkeypatch.setattr(demand, "build_derived_view", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+        result = demand.publish_derived_view(state_dir, None)
+        assert result == {
+            "ok": False, "path": str(state_dir / "public" / "derived_view.json"),
+            "items": 0, "derived_status": None, "error": "RuntimeError: x",
+        }
+
+    def test_writer_is_declared_in_state_paths(self):
+        from nanobot.runtime import state_paths
+
+        assert state_paths.STATE_PATH_WRITERS["public"] == (
+            "nanobot.runtime.demand:publish_derived_view",
+        )

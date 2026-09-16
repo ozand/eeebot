@@ -2326,6 +2326,17 @@ async def _main_impl_body():
     # outbox ever supplied one.
     report_source = ''
 
+    # #1684: publish the operator-readable derived view (charter + self-derived
+    # priorities + ranked priority queue) to state/public/derived_view.json,
+    # 0644, for the eeebot-publish uid. Fail-open by contract: the writer
+    # never raises and records its own write failures in the cycle ledger.
+    try:
+        from nanobot.runtime.demand import publish_derived_view
+
+        publish_derived_view(STATE_DIR, _selfevo_repo_early)
+    except Exception:
+        pass
+
     if not goal_id:
         print('no_active_goal')
         return 0

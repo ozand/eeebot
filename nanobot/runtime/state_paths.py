@@ -107,6 +107,12 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.runtime.local_ci:write_local_ci_result",
         "nanobot.runtime.local_ci:write_local_ci_state_summary",
     ),
+    # #1684: the loop's derived, world-readable (0644) view of the charter,
+    # the self-derived priorities and the ranked priority queue, written once
+    # per bridge run for the eeebot-publish uid, which must never read
+    # goals/goal_text.json (0600) directly. No in-repo reader — the reader is
+    # ozand/eeebot-ops-dashboard (#271).
+    "public": ("nanobot.runtime.demand:publish_derived_view",),
     "promotions": (
         "nanobot.runtime.bridge:_record_runtime_slice_candidate",
         "nanobot.runtime.promotions_rotation:rotate_promotions",
