@@ -892,6 +892,8 @@ _GOOD_BENCHMARK = {
     "new_value": 180,
     "method": "wrk -t2 -c50 -d30s against /health, median of 3 runs",
     "direction": "lower_is_better",
+    "alternative": "installed reference implementation",
+    "alternative_reason": "the benchmark harness supplies the comparison",
 }
 
 # #819: an artifact naming a metric that IS in the harness-verifiable
@@ -903,6 +905,8 @@ _VERIFIABLE_BENCHMARK = {
     "new_value": 400,
     "method": "scorecard cost section, before/after the integration cycle",
     "direction": "lower_is_better",
+    "alternative": "installed reference implementation",
+    "alternative_reason": "the benchmark harness supplies the comparison",
 }
 
 
