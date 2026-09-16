@@ -61,6 +61,17 @@ def retirement_candidates(
             "id": row["skill"],
             "evidence": "zero confirmed reads in the observed window",
             "last_activity": row.get("last_read"),
+            # #1666 phase 3: the raw numbers a retirement citation needs.
+            # reads_in_window is always 0 by construction of skill_fitness's
+            # zero_read list -- that IS the retrieval_count. There is no
+            # skill-side equivalent of a lesson's offered_in_window yet (the
+            # catalogue's presence in every system prompt is not the same as
+            # a per-skill exposure count, and nothing instruments the
+            # latter) -- exposure stays None rather than a fabricated
+            # count, and a retire proposal for a skill is declined for
+            # exactly that reason (see propose_retirement).
+            "retrieval_count": row.get("reads_in_window", 0),
+            "exposure": None,
         })
     for row in lesson_result.get("zero_citation", []):
         candidates.append({
@@ -70,6 +81,8 @@ def retirement_candidates(
                 f"offered {row['offered_in_window']}x, cited 0x in the observed window"
             ),
             "last_activity": row.get("last_cited") or row.get("last_offered"),
+            "retrieval_count": 0,  # cited 0x, by construction of zero_citation
+            "exposure": row["offered_in_window"],
         })
 
     # Never-active (last_activity None -> "") sorts first: the strongest
@@ -86,4 +99,43 @@ def retirement_candidates(
         "max_per_run": max_per_run,
         "bound_hit": total > max_per_run,
         "candidates": candidates[:max_per_run],
+    }
+
+
+def propose_retirement(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Turn ONE :func:`retirement_candidates` row into a staged retire
+    proposal citing the non-use evidence it rests on (ADR-021 rule 3,
+    first checkbox). Pure: no I/O, no gate call, no deletion -- this only
+    shapes the citation; :func:`knowledge_curator.stage_retirement_proposal`
+    is the sole caller and the only place that validates and records one
+    (enforced by ``tests/test_trainer_no_direct_mutation.py``).
+
+    The citation's ``retrieval_count`` is the candidate's confirmed-use
+    count (always 0 -- that is what makes it a retirement candidate at
+    all) and never padded. ``exposure`` is the denominator: for a lesson,
+    ``offered_in_window`` (always >= 1, since the census only lists
+    lessons offered at least once); for a skill, ``None`` -- there is no
+    per-skill offered/exposure count instrumented yet, so a skill retire
+    proposal cites what is actually known (zero confirmed reads) without
+    fabricating a denominator it doesn't have. ``offered_or_shown`` is
+    true only when a real, positive exposure count backs it; for a skill
+    that means the citation itself is invalid (correctly -- #1672's own
+    finding is that a bare zero needs a denominator to mean anything, and
+    skills don't have one yet).
+    """
+    kind = str(candidate.get("kind") or "")
+    target_id = str(candidate.get("id") or "")
+    exposure = candidate.get("exposure")
+    return {
+        "operation": "retire",
+        "kind": kind,
+        "target_id": target_id,
+        "citation": {
+            "kind": kind,
+            "target_id": target_id,
+            "source": f"retirement_candidates.{kind}_census",
+            "retrieval_count": candidate.get("retrieval_count", 0),
+            "exposure": exposure,
+            "offered_or_shown": isinstance(exposure, int) and exposure > 0,
+        },
     }

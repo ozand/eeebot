@@ -31,6 +31,14 @@ modules (their own code, not every module they merely import for reading):
 If a trainer module grows a new writer into ``lessons/``/``skills/``, or an
 existing one gains a second caller, this test fails and names the offending
 function -- the gate stops being the only door the moment either changes.
+
+#1666 phase 3 adds a second, narrower lock: ``retirement_candidates.
+propose_retirement`` (a pure citation-shaping function, no I/O, no
+deletion) must be reachable ONLY through ``knowledge_curator.
+stage_retirement_proposal`` -- the retire-side gate that validates the
+citation and the exposure floor before recording a proposal. A second
+caller of ``propose_retirement`` would be a retire path that can build a
+proposal without ever being validated.
 """
 from __future__ import annotations
 
@@ -56,6 +64,13 @@ GATE_ENTRYPOINT_MODULE = "nanobot.runtime.bridge"
 GATE_ENTRYPOINT_FUNC = "_pickup_staged_promotions"
 GATE_WRITER_MODULE = "nanobot.runtime.knowledge_curator"
 GATE_WRITER_FUNC = "apply_staged_lesson_cards"
+
+# #1666 phase 3: the retire-side gate and the proposal builder it alone
+# may call.
+RETIRE_GATE_MODULE = "nanobot.runtime.knowledge_curator"
+RETIRE_GATE_FUNC = "stage_retirement_proposal"
+RETIRE_PROPOSAL_BUILDER_MODULE = "nanobot.runtime.retirement_candidates"
+RETIRE_PROPOSAL_BUILDER_FUNC = "propose_retirement"
 
 _GIT_MUTATING_VERBS = frozenset({
     "commit", "push", "add", "checkout", "reset", "merge", "rm", "mv", "tag",
@@ -275,4 +290,50 @@ def test_trainer_evidence_validator_is_wired_into_the_gate() -> None:
     }
     assert "validate_trainer_citation" in called_names, (
         f"{GATE_WRITER_MODULE} must call trainer_evidence.validate_trainer_citation"
+    )
+
+
+def test_retire_proposal_builder_has_exactly_one_caller_the_retire_gate() -> None:
+    """#1666 phase 3: propose_retirement (pure, no I/O) must be reachable
+    only through stage_retirement_proposal -- a second caller could build
+    a retire proposal that is never validated or floor-checked."""
+    sites = _all_call_sites(RETIRE_PROPOSAL_BUILDER_FUNC)
+    gate_path = _module_path(RETIRE_GATE_MODULE)
+    assert gate_path is not None
+    gate_rel = str(gate_path.relative_to(REPO_ROOT)).replace("\\", "/")
+    outside = [s for s in sites if s.split(":")[0].replace("\\", "/") != gate_rel]
+    assert not outside, (
+        f"{RETIRE_PROPOSAL_BUILDER_FUNC} must be called only from {gate_rel} "
+        f"(the retire gate); found calls elsewhere:\n" + "\n".join(outside)
+    )
+    assert sites, f"{RETIRE_PROPOSAL_BUILDER_FUNC} has no callers at all -- the retire gate wiring may have been removed"
+
+
+def test_retire_gate_validates_citation_and_exposure_floor() -> None:
+    """stage_retirement_proposal must actually call the citation validator
+    (same check as the add path) AND reference the exposure floor --
+    a retire path that skips either is not a gate."""
+    path = _module_path(RETIRE_GATE_MODULE)
+    assert path is not None
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    func = next(
+        (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == RETIRE_GATE_FUNC),
+        None,
+    )
+    assert func is not None, f"{RETIRE_GATE_FUNC} not found in {RETIRE_GATE_MODULE}"
+    segment = ast.get_source_segment(source, func) or ""
+    called_names = {
+        (n.func.attr if isinstance(n.func, ast.Attribute) else
+         n.func.id if isinstance(n.func, ast.Name) else "")
+        for n in ast.walk(func) if isinstance(n, ast.Call)
+    }
+    assert RETIRE_PROPOSAL_BUILDER_FUNC in called_names, (
+        f"{RETIRE_GATE_FUNC} must call {RETIRE_PROPOSAL_BUILDER_FUNC}"
+    )
+    assert "validate_trainer_citation" in called_names, (
+        f"{RETIRE_GATE_FUNC} must call trainer_evidence.validate_trainer_citation"
+    )
+    assert "MIN_RETIREMENT_EXPOSURE" in segment, (
+        f"{RETIRE_GATE_FUNC} must enforce the named exposure floor MIN_RETIREMENT_EXPOSURE"
     )
