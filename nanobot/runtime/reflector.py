@@ -585,13 +585,25 @@ def run_reflector(
                 "status": "cursor_orphaned",
                 "lost_cursor": watermark,
             }
+            _append_reanchor(state_dir, {
+                "status": "cursor_orphaned",
+                "timestamp": _now(),
+                "lost_cursor": watermark,
+            })
             _append_journal(state_dir, {
                 "timestamp": _now(),
                 "status": "cursor_orphaned",
                 "lost_cursor": watermark,
             })
             return result
-    candidates = _completed_cycles(rows, "" if reanchor else watermark)[:max(1, int(max_cycles))]
+    # When watermark is present in the ledger, normal progression resumes from it.
+    # When watermark is NOT in the ledger, normal progression starts from the beginning ("").
+    # However, when reanchoring from an aged-out cursor that is behind the active ledger,
+    # candidates must start at the active ledger horizon, NOT ancient archives from index 0.
+    if reanchor:
+        candidates = _completed_cycles(active_rows, "")[:max(1, int(max_cycles))]
+    else:
+        candidates = _completed_cycles(rows, watermark if watermark in known_watermarks else "")[:max(1, int(max_cycles))]
     if reanchor:
         reanchor["replacement"] = str(candidates[0].get("cycle_id") or "") if candidates else ""
         reanchor["cycles_covered"] = len(candidates)

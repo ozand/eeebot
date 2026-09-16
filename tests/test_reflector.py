@@ -49,6 +49,10 @@ def test_missing_watermark_does_not_advance_or_persist(tmp_path: Path):
     assert json.loads((tmp_path / "reflector/watermark.json").read_text())["last_processed"] == "lost"
     row = json.loads((tmp_path / "reflector/reflections.jsonl").read_text().splitlines()[-1])
     assert row["status"] == "cursor_orphaned"
+    reanchor_rows = [json.loads(line) for line in (tmp_path / "reflector/reanchors.jsonl").read_text().splitlines()]
+    assert len(reanchor_rows) == 1
+    assert reanchor_rows[0]["status"] == "cursor_orphaned"
+    assert reanchor_rows[0]["lost_cursor"] == "lost"
 
 
 def test_archive_cursor_reanchors_and_records_coverage(tmp_path: Path):
@@ -70,6 +74,48 @@ def test_archive_cursor_reanchors_and_records_coverage(tmp_path: Path):
     reanchors = [row for row in rows if row.get("status") == "cursor_aged_out"]
     assert reanchors[-1]["lost_cursor"] == "lost"
     assert reanchors[-1]["cursor_archive"] == "cycles-2026-08-25.jsonl.gz"
+
+
+def test_aged_out_reanchor_is_single_advance_no_consecutive_duplicates(tmp_path: Path):
+    # Setup initial archive with lost cursor and active ledger
+    archive = tmp_path / "ledger/cycles-2026-08-24.jsonl.gz"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(archive, "wt", encoding="utf-8") as fh:
+        fh.write(json.dumps({"phase": "outcome", "cycle_id": "ancient-lost", "outcome": "success"}) + "\n")
+    _write(tmp_path / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "active-1", "outcome": "success", "ts": "2026-08-25T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "active-2", "outcome": "success", "ts": "2026-08-25T00:01:00Z"},
+    ])
+    (tmp_path / "reflector").mkdir(parents=True)
+    (tmp_path / "reflector/watermark.json").write_text(json.dumps({"last_processed": "ancient-lost"}))
+
+    # First run: aged-out cursor detected, advances to active ledger and reflects
+    res1 = reflector.run_reflector(tmp_path, llm=lambda *_: _answer("active-1"))
+    assert res1.get("reanchor", {}).get("lost_cursor") == "ancient-lost"
+    assert json.loads((tmp_path / "reflector/watermark.json").read_text())["last_processed"] == "active-2"
+
+    # Ledger rotates: active cycles moved to archive, new active cycle added
+    rotated_archive = tmp_path / "ledger/cycles-2026-08-25.jsonl.gz"
+    with gzip.open(rotated_archive, "wt", encoding="utf-8") as fh:
+        fh.write(json.dumps({"phase": "outcome", "cycle_id": "active-1", "outcome": "success", "ts": "2026-08-25T00:00:00Z"}) + "\n")
+        fh.write(json.dumps({"phase": "outcome", "cycle_id": "active-2", "outcome": "success", "ts": "2026-08-25T00:01:00Z"}) + "\n")
+    _write(tmp_path / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "active-3", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
+    ])
+
+    # Second run after rotation: watermark 'active-2' is in rotated archive, so it reanchors to active ledger 'active-3'
+    res2 = reflector.run_reflector(tmp_path, llm=lambda *_: _answer("active-3"))
+    assert res2.get("reanchor", {}).get("lost_cursor") == "active-2"
+    assert json.loads((tmp_path / "reflector/watermark.json").read_text())["last_processed"] == "active-3"
+
+    # Third run: watermark 'active-3' is in active ledger, NO reanchor occurs!
+    res3 = reflector.run_reflector(tmp_path, llm=lambda *_: _answer("active-3"))
+    assert "reanchor" not in res3
+
+    # Verify reanchors log: exactly 2 distinct reanchors happened, not repeated looping on the same cursor
+    rows = [json.loads(line) for line in (tmp_path / "reflector/reanchors.jsonl").read_text().splitlines()]
+    lost_cursors = [r["lost_cursor"] for r in rows if r.get("status") == "cursor_aged_out"]
+    assert lost_cursors == ["ancient-lost", "active-2"]
 
 
 def test_reflector_journal_watermark_and_prior_tail(tmp_path: Path):
