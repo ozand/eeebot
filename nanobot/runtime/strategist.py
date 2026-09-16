@@ -19,6 +19,7 @@ LOG = logging.getLogger(__name__)
 SCHEMA = "strategist-hadi-v1"
 DEFAULT_H = 3
 DEFAULT_F = 2
+DEFAULT_MAX_RETRIES = 3
 _MAX_SECTION = 8_000
 _MAX_PROMPT_CHARS = 48_000
 # Size guards for the small point-in-time files this module reads itself
@@ -318,7 +319,8 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> str:
     if not base_url or not api_key:
         raise RuntimeError("litellm credentials not configured; check the unit EnvironmentFile chain")
     started = time.monotonic()
-    response = OpenAI(base_url=base_url, api_key=api_key, timeout=120).chat.completions.create(
+    max_retries = _env_int("SELFEVO_STRATEGIST_MAX_RETRIES", DEFAULT_MAX_RETRIES)
+    response = OpenAI(base_url=base_url, api_key=api_key, timeout=120, max_retries=max_retries).chat.completions.create(
         model=model, messages=messages, max_tokens=2_000, temperature=0.2
     )
     choice = response.choices[0]

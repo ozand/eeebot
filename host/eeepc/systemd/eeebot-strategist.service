@@ -2,6 +2,8 @@
 Description=Run the eeebot strategist periodic archive review (#999)
 After=network-online.target
 ConditionPathExists=/var/lib/eeepc-agent/self-evolving-agent/state
+StartLimitIntervalSec=300s
+StartLimitBurst=3
 
 [Service]
 Type=oneshot
@@ -26,3 +28,5 @@ ProtectHome=false
 ProtectSystem=strict
 # State-only write discipline: NEVER grant write access to repo checkout (#1001)
 ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state
+Restart=on-failure
+RestartSec=60s
