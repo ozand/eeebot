@@ -715,16 +715,45 @@ def select_current_direction(
         return None
 
 
+def current_direction_status(state_dir: Any) -> tuple['str | None', str]:
+    """Read current Direction plus ``complete``/``unavailable`` provenance.
+
+    Existing rank-only consumers use :func:`current_direction` and retain its
+    fail-open ``None`` behavior. Provenance consumers need the missing
+    distinction: an absent portfolio/current is a known absent Direction,
+    while a corrupt or inconsistent persisted portfolio is unavailable.
+    """
+    try:
+        path = _portfolio_path(state_dir)
+        if not path.is_file():
+            return None, "complete"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return None, "unavailable"
+        current = raw.get("current")
+        if current is None:
+            return None, "complete"
+        nodes = raw.get("nodes")
+        if (
+            not isinstance(current, str)
+            or not current.strip()
+            or not isinstance(nodes, dict)
+            or current not in nodes
+            or not isinstance(nodes[current], dict)
+        ):
+            return None, "unavailable"
+        return current, "complete"
+    except Exception:
+        return None, "unavailable"
+
+
 def current_direction(state_dir: Any) -> 'str | None':
     """Read-only view of the portfolio's current investment direction (or
     ``None``). Never seeds/mutates state — a pure read for
     ``goal_review``/``demand`` wiring, same shape as
     ``hypothesis_backlog.supported_hypotheses``. Fail-open to ``None``."""
-    try:
-        current = read_portfolio(state_dir).get("current")
-        return current if isinstance(current, str) and current else None
-    except Exception:
-        return None
+    current, _status = current_direction_status(state_dir)
+    return current
 
 
 def direction_for_metric(state_dir: Any, metric: str) -> 'str | None':

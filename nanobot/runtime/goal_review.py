@@ -130,6 +130,12 @@ _PRIORITY_PATTERN = re.compile(
 _PRIORITY_NUM_RE = re.compile(r"Priority\s+(\d+)")
 _EVIDENCE_ID_RE = re.compile(r"^[Ee](\d{1,3})$")
 
+# #1596: stable, replayable names for the sources that actually contributed
+# at least one citable line to a review. They are ledger provenance, not
+# demand kinds or priority metadata.
+_EVIDENCE_SOURCES = frozenset({"scorecard_gaps", "decay", "supported_hypotheses"})
+_DIRECTION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 _GOAL_REVIEW_SYSTEM_PROMPT = (
     "You are performing a periodic goal review for a bounded self-evolving "
     "runtime on a very slow host. From the goal vectors and the measured "
@@ -407,14 +413,26 @@ def merged_goal_text(state_dir: Path, raw_text: str) -> str:
 
 
 def _collect_evidence(
-    state_dir: Path, selfevo_repo: Path | None, snapshot: dict[str, Any], now: datetime
+    state_dir: Path,
+    selfevo_repo: Path | None,
+    snapshot: dict[str, Any],
+    now: datetime,
+    *,
+    sources: set[str] | None = None,
+    source_status: dict[str, str] | None = None,
+    scorecard_available: bool = True,
 ) -> dict[str, str]:
-    """Evidence lines keyed ``E1``.. — the citable ground truth. Sources:
-    the scorecard snapshot's ``gaps`` (the open goal-gap demand, #765),
-    usage/decay evidence (#761), and (#878) harness-verdict-supported
-    hypotheses. Bounded to :data:`_MAX_EVIDENCE_LINES`; fail-open per
-    source."""
+    """Evidence lines keyed ``E1``.. — the citable ground truth.
+
+    When ``sources`` is supplied, it is populated only with a stable source
+    name that contributed at least one line. This preserves the decision-time
+    source set in new goal-review ledger rows (#1596) without changing the
+    evidence lines, their order, or any demand behavior.
+    """
     lines: list[str] = []
+    source_starts: dict[str, int] = {}
+    scorecard_start = len(lines)
+    scorecard_readable = scorecard_available and isinstance(snapshot.get("gaps"), list)
     try:
         for gap in snapshot.get("gaps") or []:
             if not isinstance(gap, dict):
@@ -423,23 +441,39 @@ def _collect_evidence(
             if evidence:
                 lines.append(evidence)
     except Exception:
-        pass
+        scorecard_readable = False
+    if source_status is not None:
+        source_status["scorecard_gaps"] = "complete" if scorecard_readable else "unavailable"
+    if sources is not None and len(lines) > scorecard_start:
+        sources.add("scorecard_gaps")
+        source_starts["scorecard_gaps"] = scorecard_start
+    decay_start = len(lines)
+    decay_available = True
     try:
         from nanobot.runtime import usage_evidence
 
-        stale = usage_evidence.stale_artifacts(
-            Path(state_dir), selfevo_repo, older_than_days=_DECAY_DAYS, now=now
-        )
-        for record in stale[:5]:
-            rel = str(record.get("path") or "").strip()
-            since = str(record.get("stale_since") or "").strip()[:10]
-            if rel:
-                lines.append(
-                    f"decay: {rel} has no harness-observed use or modification "
-                    f"since {since or 'unknown'} ({_DECAY_DAYS}+ days; goal vector V2)"
-                )
+        if selfevo_repo:
+            stale, decay_status = usage_evidence.stale_artifacts_status(
+                Path(state_dir), selfevo_repo, older_than_days=_DECAY_DAYS, now=now
+            )
+            decay_available = decay_status == "complete"
+            for record in stale[:5]:
+                rel = str(record.get("path") or "").strip()
+                since = str(record.get("stale_since") or "").strip()[:10]
+                if rel:
+                    lines.append(
+                        f"decay: {rel} has no harness-observed use or modification "
+                        f"since {since or 'unknown'} ({_DECAY_DAYS}+ days; goal vector V2)"
+                    )
     except Exception:
-        pass
+        decay_available = False
+    if source_status is not None:
+        source_status["decay"] = "complete" if decay_available else "unavailable"
+    if sources is not None and len(lines) > decay_start:
+        sources.add("decay")
+        source_starts["decay"] = decay_start
+    hypothesis_start = len(lines)
+    hypothesis_available = True
     # #878: a hypothesis the harness-computed verdict marked "supported"
     # (measured evidence only — never the instance's own claim, see
     # ``hypothesis_verdict``'s trust-boundary note) surfaces here exactly
@@ -449,6 +483,8 @@ def _collect_evidence(
     try:
         from nanobot.runtime import hypothesis_backlog
 
+        _lifecycle, lifecycle_status = hypothesis_backlog._load_lifecycle_status(state_dir)
+        hypothesis_available = lifecycle_status != "corrupt"
         for hyp in hypothesis_backlog.supported_hypotheses(state_dir):
             title = str(hyp.get("title") or "").strip()
             if not title:
@@ -459,8 +495,20 @@ def _collect_evidence(
                 f"source: {source}; goal vector V1)"
             )
     except Exception:
-        pass
-    return {f"E{i}": line for i, line in enumerate(lines[:_MAX_EVIDENCE_LINES], start=1)}
+        hypothesis_available = False
+    if source_status is not None:
+        source_status["supported_hypotheses"] = (
+            "complete" if hypothesis_available else "unavailable"
+        )
+    if sources is not None and len(lines) > hypothesis_start:
+        sources.add("supported_hypotheses")
+        source_starts["supported_hypotheses"] = hypothesis_start
+    limited_lines = lines[:_MAX_EVIDENCE_LINES]
+    if sources is not None:
+        sources.intersection_update(
+            source for source, start in source_starts.items() if start < len(limited_lines)
+        )
+    return {f"E{i}": line for i, line in enumerate(limited_lines, start=1)}
 
 
 def _integration_history(state_dir: Path, now: datetime) -> list[str]:
@@ -693,6 +741,42 @@ def _call_llm(context: str) -> dict[str, Any] | None:
 # ─── ledger ─────────────────────────────────────────────────────────────────
 
 
+def goal_review_retention(row: Any) -> dict[str, Any]:
+    """Read retained review provenance without confusing legacy with empty.
+
+    New #1596 rows contain both keys, including ``[]`` and ``None`` for a
+    known-empty source set or known-absent Direction. Older rows omit them,
+    and therefore return ``status="unavailable"`` rather than fabricated
+    empty facts. This is the sole reader contract for #1642's future replay.
+    """
+    if not isinstance(row, dict) or row.get("phase") != "goal_review":
+        return {"status": "unavailable", "evidence_sources": None, "direction": None}
+    raw_sources = row.get("evidence_sources")
+    if (
+        row.get("retention_status") != "complete"
+        or "evidence_sources" not in row
+        or "direction_at_review" not in row
+    ):
+        return {"status": "unavailable", "evidence_sources": None, "direction": None}
+    if (
+        not isinstance(raw_sources, list)
+        or len(set(raw_sources)) != len(raw_sources)
+        or any(not isinstance(source, str) or source not in _EVIDENCE_SOURCES for source in raw_sources)
+    ):
+        return {"status": "unavailable", "evidence_sources": None, "direction": None}
+    raw_direction = row.get("direction_at_review")
+    if raw_direction is not None and (
+        not isinstance(raw_direction, str)
+        or not _DIRECTION_NAME_RE.fullmatch(raw_direction)
+    ):
+        return {"status": "unavailable", "evidence_sources": None, "direction": None}
+    return {
+        "status": "complete",
+        "evidence_sources": tuple(raw_sources),
+        "direction": raw_direction,
+    }
+
+
 def _record_review(
     state_dir: Path,
     outcome: str,
@@ -700,9 +784,19 @@ def _record_review(
     inputs_hash: str = "",
     produced: list[str] | None = None,
     rejected: list[dict[str, str]] | None = None,
+    evidence_sources: set[str] | None = None,
+    evidence_available: bool = False,
+    direction_at_review: str | None = None,
+    direction_available: bool = False,
 ) -> None:
-    """One ``phase: "goal_review"`` ledger row per review run — inputs hash,
-    produced titles, rejections with reasons. Best-effort, never raises."""
+    """One ``phase: "goal_review"`` ledger row per review run.
+
+    New rows retain the citable-source set and selected Direction as they were
+    at the decision point. ``None`` means no Direction was present then. The
+    record is complete only when all source reads and Direction validation
+    completed; otherwise it explicitly remains unavailable. Legacy rows omit
+    the fields and also read as unavailable via :func:`goal_review_retention`.
+    """
     with contextlib.suppress(Exception):
         append_event(
             state_dir,
@@ -712,6 +806,13 @@ def _record_review(
                 "inputs_hash": inputs_hash,
                 "produced": list(produced or []),
                 "rejected": list(rejected or []),
+                # Explicitly distinguish a captured empty source set from an
+                # unavailable capture. Legacy rows lack this status entirely.
+                "retention_status": (
+                    "complete" if evidence_available and direction_available else "unavailable"
+                ),
+                "evidence_sources": sorted(evidence_sources) if evidence_sources is not None else None,
+                "direction_at_review": direction_at_review,
             },
         )
 
@@ -741,6 +842,12 @@ def maybe_goal_review(
     ``goal_review`` ledger row. Never raises into the caller."""
     if not _enabled():
         return None
+    # Preserve whatever is known if a later review step fails. ``None`` for
+    # sources is distinct from a known-empty set: the source scan never ran.
+    evidence_sources: set[str] | None = None
+    evidence_available = False
+    current_direction: str | None = None
+    direction_available = False
     try:
         state_dir = Path(state_dir)
         now = now or datetime.now(timezone.utc)
@@ -754,10 +861,34 @@ def maybe_goal_review(
         if release_root is None:
             configured_root = os.environ.get("RELEASE_ROOT", "").strip()
             release_root = Path(configured_root) if configured_root else None
+        # Direction is retained even if the goal channel is absent. It is a
+        # read-only fact, not a source of evidence or demand.
+        try:
+            from nanobot.runtime import tech_tree
+
+            candidate_direction, direction_status = tech_tree.current_direction_status(state_dir)
+            if direction_status == "complete" and (
+                candidate_direction is None
+                or (
+                    isinstance(candidate_direction, str)
+                    and _DIRECTION_NAME_RE.fullmatch(candidate_direction)
+                )
+            ):
+                direction_available = True
+                current_direction = candidate_direction
+            else:
+                current_direction = None
+        except Exception:
+            current_direction = None
         goal_data = _load_goal_data(state_dir, release_root)
         if goal_data is None:
-            # No R30 channel file — nowhere to append; no LLM call.
-            _record_review(state_dir, "no_goal_text")
+            # No R30 channel file — no source scan or LLM call. The row says
+            # unavailable rather than fabricating an empty source set.
+            _record_review(
+                state_dir, "no_goal_text", evidence_sources=evidence_sources,
+                evidence_available=evidence_available,
+                direction_at_review=current_direction, direction_available=direction_available,
+            )
             return []
         goal_text = str(goal_data.get("text") or "")
         # #860: dedup/context see goal_text + already-derived priorities
@@ -765,14 +896,32 @@ def maybe_goal_review(
         # derived_priorities.json now) must still block a re-mint today.
         merged_text = merged_goal_text(state_dir, goal_text)
 
-        snapshot = _read_json(state_dir / "scorecard" / "latest.json", None)
-        if not isinstance(snapshot, dict):
+        snapshot_path = state_dir / "scorecard" / "latest.json"
+        snapshot = _read_json(snapshot_path, None)
+        scorecard_available = isinstance(snapshot, dict)
+        if not scorecard_available:
             snapshot = {}
-        evidence = _collect_evidence(state_dir, selfevo_repo, snapshot, now)
+
+        # #1596: Direction was captured before goal loading. It remains a
+        # ranking preference only; recording it does not create evidence,
+        # demand, a scheduler, or a gate.
+        evidence_sources = set()
+        source_status: dict[str, str] = {}
+        evidence = _collect_evidence(
+            state_dir, selfevo_repo, snapshot, now, sources=evidence_sources,
+            source_status=source_status, scorecard_available=scorecard_available,
+        )
+        evidence_available = all(
+            source_status.get(source) == "complete" for source in _EVIDENCE_SOURCES
+        )
         if not evidence:
             # No measured gap and no decay evidence — nothing a priority
             # could cite. Honest no-op, zero LLM calls.
-            _record_review(state_dir, "no_gaps")
+            _record_review(
+                state_dir, "no_gaps", evidence_sources=evidence_sources,
+                evidence_available=evidence_available,
+                direction_at_review=current_direction, direction_available=direction_available,
+            )
             return []
 
         context = build_context(
@@ -783,23 +932,16 @@ def maybe_goal_review(
         reply = _call_llm(context)
         candidates = reply.get("priorities") if isinstance(reply, dict) else None
         if not isinstance(candidates, list):
-            _record_review(state_dir, "invalid_reply", inputs_hash=inputs_hash)
+            _record_review(
+                state_dir, "invalid_reply", inputs_hash=inputs_hash,
+                evidence_sources=evidence_sources, evidence_available=evidence_available,
+                direction_at_review=current_direction, direction_available=direction_available,
+            )
             return []
 
-        # #879: consult the tech-tree for the CURRENT investment direction
-        # and softly prefer candidates aimed at it — a stable reorder of
-        # the LLM's own candidate list (nothing dropped here; the
-        # _MAX_PRIORITIES cap below is the only thing that can ever leave
-        # a non-aligned candidate out, exactly like #815's V1-over-V2
-        # demand bias). Fail-open: any tech_tree trouble degrades to "no
-        # preference" (original candidate order, no direction tags).
-        current_direction: str | None = None
-        try:
-            from nanobot.runtime import tech_tree
-
-            current_direction = tech_tree.current_direction(state_dir)
-        except Exception:
-            current_direction = None
+        # #879: use the Direction captured at this review's decision point
+        # to softly reorder candidates. It is still a ranking preference;
+        # nothing is dropped before the existing cap/validation path.
         if current_direction:
             def _direction_rank(cand: Any) -> int:
                 if not isinstance(cand, dict):
@@ -856,7 +998,9 @@ def maybe_goal_review(
 
         if not accepted:
             _record_review(
-                state_dir, "no_valid_priorities", inputs_hash=inputs_hash, rejected=rejected
+                state_dir, "no_valid_priorities", inputs_hash=inputs_hash, rejected=rejected,
+                evidence_sources=evidence_sources, evidence_available=evidence_available,
+                direction_at_review=current_direction, direction_available=direction_available,
             )
             return []
 
@@ -893,10 +1037,16 @@ def maybe_goal_review(
         _write_derived_priorities(state_dir, derived_entries)
 
         _record_review(
-            state_dir, "appended", inputs_hash=inputs_hash, produced=titles, rejected=rejected
+            state_dir, "appended", inputs_hash=inputs_hash, produced=titles, rejected=rejected,
+            evidence_sources=evidence_sources, evidence_available=evidence_available,
+            direction_at_review=current_direction, direction_available=direction_available,
         )
         return titles
     except Exception:
         with contextlib.suppress(Exception):
-            _record_review(Path(state_dir), "error")
+            _record_review(
+                Path(state_dir), "error", evidence_sources=evidence_sources,
+                evidence_available=evidence_available,
+                direction_at_review=current_direction, direction_available=direction_available,
+            )
         return None
