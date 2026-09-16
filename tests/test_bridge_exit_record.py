@@ -291,3 +291,37 @@ def test_scorecard_reports_the_streak_and_distinguishes_absent_from_zero(tmp_pat
     assert stale["reader_status"] == "stale" and stale["consecutive_failures"] == 16
     (state / "bridge" / "exit_streak.json").write_text("{not json", encoding="utf-8")
     assert scorecard._bridge_section(state, [])["reader_status"] == "corrupt"
+
+
+def test_systemd_exit_recording_with_run_marker(tmp_path):
+    """Regression test for #1663: NameError: name 'exit_code' is not defined in _record_run_end."""
+    from nanobot import crash_record
+
+    state = tmp_path / "state"
+    state.mkdir()
+    marker_path = state / crash_record.RUN_MARKER_REL
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text(
+        json.dumps({
+            "run_id": "run-123",
+            "started_at": crash_record._now_iso(NOW - timedelta(seconds=10)),
+            "metadata": {"cycle_id": "c-1"},
+        }),
+        encoding="utf-8",
+    )
+    streak = crash_record.record_exit(
+        state,
+        outcome="success",
+        exit_status=0,
+        source="systemd",
+        service_result="success",
+        exit_code="exited",
+        now=NOW,
+    )
+    assert streak["last_source"] == "systemd"
+    runs_path = state / crash_record.RUNS_REL
+    assert runs_path.exists()
+    runs_data = [json.loads(line) for line in runs_path.read_text().splitlines() if line.strip()]
+    assert len(runs_data) == 1
+    assert runs_data[0]["source"] == "systemd"
+    assert runs_data[0]["classification"] == "completion"
