@@ -1159,6 +1159,10 @@ def read_citation_scans(
         return {"status": "unavailable", "rows": [], "notes": [type(error).__name__]}
 
 
+# Minimum citation count required before any trainer authority may be granted (ADR-021 Rule 1).
+MIN_CITATIONS_FOR_AUTHORITY = 50
+
+
 def correlate_citations_with_outcomes(
     state_dir: Path,
     *,
