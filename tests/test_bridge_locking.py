@@ -22,7 +22,10 @@ angle, plus the abort path via monkeypatching.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from nanobot.runtime import bridge
 
@@ -55,6 +58,7 @@ def _init_repo(tmp_path: Path) -> tuple[Path, Path]:
 
 
 class TestAcquireBridgeLock:
+    @pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only; Windows falls back to NullLock without creating lock file")
     def test_acquires_when_free(self, tmp_path):
         handle = bridge._acquire_bridge_lock(tmp_path)
         try:
@@ -63,6 +67,7 @@ class TestAcquireBridgeLock:
         finally:
             handle.close()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only; flock contention not supported on Windows")
     def test_second_acquire_in_same_process_is_contended(self, tmp_path):
         """flock is per-open-file-description: a second independent open()
         of the same lock file while the first is still held must fail,
@@ -95,6 +100,7 @@ class TestAcquireBridgeLock:
         assert isinstance(handle, bridge._NullLock)
         handle.close()  # must not raise
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="fcntl is POSIX-only; bridge.fcntl is None on Windows")
     def test_contended_lock_via_monkeypatched_flock(self, tmp_path, monkeypatch):
         """Simulate contention without a second process: force flock() to
         raise BlockingIOError, as the OS would for an already-held lock.
