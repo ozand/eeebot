@@ -1044,3 +1044,141 @@ class TestSupportedHypothesisEvidence:
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
         assert titles == ["Priority 17 — Land the widget cache"]
         assert "supported hypothesis: Cache the widget lookup" in captured_context["text"]
+
+
+class TestNightContourCandidates:
+    """ADR-020 Rule 2: The night contour (reflector and curator) proposes
+    candidates with citations (ledger rows, commits, or measurements)
+    into the existing demand/goal review pipeline. A candidate without at
+    least one link is rejected on validation."""
+
+    def test_night_contour_candidates_collected_from_curator_pool(self, tmp_path):
+        state_dir = tmp_path / "state"
+        curator_dir = state_dir / "curator"
+        curator_dir.mkdir(parents=True)
+        pool_file = curator_dir / "reflector_pool.json"
+        pool_data = {
+            "schema": "curator-reflector-pool-v1",
+            "cursor": {},
+            "clusters": [
+                {
+                    "detail": "Stream archive directories instead of globbing all files",
+                    "cycles": ["cycle-eeb3c220d25b"],
+                    "kind": "approach_hint",
+                },
+                {
+                    "detail": "Avoid unbounded subshells",
+                    "cycles": [],
+                    "kind": "approach_hint",
+                },
+            ],
+        }
+        pool_file.write_text(json.dumps(pool_data), encoding="utf-8")
+
+        sources = set()
+        status = {}
+        evidence = goal_review._collect_evidence(
+            state_dir, None, {}, NOW, sources=sources, source_status=status
+        )
+        assert "night_contour_candidates" in sources
+        assert status["night_contour_candidates"] == "complete"
+        lines = list(evidence.values())
+        assert any("Stream archive directories" in line and "cycle-eeb3c220d25b" in line for line in lines)
+        assert any("Avoid unbounded subshells" in line for line in lines)
+
+    def test_candidate_without_link_rejected_on_validation(self):
+        """ADR-020 Rule 2 test contract: candidate citing night contour
+        without at least one link is rejected on validation."""
+        evidence = {
+            "E1": "night contour: Avoid unbounded subshells (reflector/curator recommendation; goal vector V1)",
+        }
+        candidate = {
+            "label": "Avoid unbounded subshells",
+            "body": "Refactor subshell invocations to direct calls. Commit.",
+            "vector": "V1",
+            "evidence": "E1",
+        }
+        normalized, reason = goal_review.validate_priority(candidate, evidence, set())
+        assert normalized is None
+        assert reason == "missing_citation"
+
+    def test_candidate_with_cycle_link_accepted(self):
+        """ADR-020 Rule 2: candidate with a ledger cycle link is accepted."""
+        evidence = {
+            "E1": "night contour: Stream archive directories [cycles: cycle-eeb3c220d25b] (reflector/curator recommendation; goal vector V1)",
+        }
+        candidate = {
+            "label": "Stream archive dirs",
+            "body": "Stream archive directories instead of globbing, citing cycle-eeb3c220d25b. Commit.",
+            "vector": "V1",
+            "evidence": "E1",
+        }
+        normalized, reason = goal_review.validate_priority(candidate, evidence, set())
+        assert normalized is not None
+        assert reason == ""
+        assert normalized["label"] == "Stream archive dirs"
+
+    def test_candidate_with_commit_link_accepted(self):
+        """ADR-020 Rule 2: candidate with a git commit link is accepted."""
+        evidence = {
+            "E1": "night contour: Optimize parse loop in 1a2b3c4d (reflector/curator recommendation; goal vector V1)",
+        }
+        candidate = {
+            "label": "Optimize parse loop",
+            "body": "Apply loop optimization following commit 1a2b3c4d. Commit.",
+            "vector": "V1",
+            "evidence": "E1",
+        }
+        normalized, reason = goal_review.validate_priority(candidate, evidence, set())
+        assert normalized is not None
+        assert reason == ""
+
+    def test_candidate_with_measurement_link_accepted(self):
+        """ADR-020 Rule 2: candidate with a measurement link is accepted."""
+        evidence = {
+            "E1": "night contour: Reduce query time from 450ms to 50ms (reflector/curator recommendation; goal vector V1)",
+        }
+        candidate = {
+            "label": "Reduce query time",
+            "body": "Add index to reduce query time to 50ms. Commit.",
+            "vector": "V1",
+            "evidence": "E1",
+        }
+        normalized, reason = goal_review.validate_priority(candidate, evidence, set())
+        assert normalized is not None
+        assert reason == ""
+
+    def test_night_contour_candidate_end_to_end_acceptance(self, tmp_path, monkeypatch, enabled):
+        """End-to-end: a cited night contour recommendation flows into goal
+        review and appends as a derived priority."""
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [])  # no gaps
+        curator_dir = state_dir / "curator"
+        curator_dir.mkdir(parents=True)
+        pool_file = curator_dir / "reflector_pool.json"
+        pool_data = {
+            "schema": "curator-reflector-pool-v1",
+            "cursor": {},
+            "clusters": [
+                {
+                    "detail": "Stream archive directories instead of globbing all files",
+                    "cycles": ["cycle-eeb3c220d25b"],
+                    "kind": "approach_hint",
+                },
+            ],
+        }
+        pool_file.write_text(json.dumps(pool_data), encoding="utf-8")
+
+        def _fake_llm(context: str):
+            return {"priorities": [{
+                "label": "Stream archive dirs",
+                "body": "Stream archive directories instead of globbing in cycle-eeb3c220d25b. Commit.",
+                "vector": "V1",
+                "evidence": "E1",
+            }]}
+
+        monkeypatch.setattr(goal_review, "_call_llm", _fake_llm)
+        titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
+        assert titles == ["Priority 17 — Stream archive dirs"]
+
