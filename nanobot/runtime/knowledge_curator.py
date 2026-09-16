@@ -1783,18 +1783,24 @@ def _reflector_card(
         # later is a decision on data.
         "distinct_days": max(1, len(days)),
         # ADR-021 rule 4 / #1666 phase 2: "a proposal to add, change or retire
-        # cites retrieval counts and outcomes." #1505's citations.jsonl store
-        # is not yet populated (Phase 1, in progress) so this keys on the
-        # recurrence signal this mint already computes and already gates
-        # graduation on — distinct cycles this pattern was seen in — rather
-        # than coupling to the unstable store shape. Validated at the gate by
-        # trainer_evidence.validate_trainer_citation before a card is applied.
+        # cites retrieval counts and outcomes." This keys on the recurrence
+        # signal this mint already computes and already gates graduation on
+        # (distinct cycles this pattern was seen in) rather than on
+        # lesson_v2's citation-outcome correlator over scans.jsonl (#1688
+        # retired citations.jsonl in favor of that store) -- cross-checking
+        # retrieval_count against scans.jsonl is an owed follow-up, not done
+        # here. Every caller of this function passes a non-empty `cycles`
+        # (a single item, or a cluster graduated at >= _REFLECTOR_MIN_CYCLES,
+        # #1171), but this does not pad an empty one into a fabricated count:
+        # a citation this mint cannot back is exactly what
+        # trainer_evidence.validate_trainer_citation must decline, and it can
+        # only do that if a genuine zero reaches it as a zero.
         "citation": {
             "kind": "lesson",
             "target_id": card_id,
             "source": "reflector.recurrence_v1",
-            "retrieval_count": max(1, len(cycles)),
-            "offered_or_shown": True,
+            "retrieval_count": len(cycles),
+            "offered_or_shown": bool(cycles),
         },
     }
 

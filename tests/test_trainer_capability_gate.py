@@ -20,7 +20,7 @@ from pathlib import Path
 
 import yaml
 
-from nanobot.runtime.knowledge_curator import LESSONS_REL, apply_staged_lesson_cards
+from nanobot.runtime.knowledge_curator import LESSONS_REL, _reflector_card, apply_staged_lesson_cards
 
 _VALID_CITATION = {
     "kind": "lesson",
@@ -87,6 +87,37 @@ def test_card_with_malformed_citation_is_declined(tmp_path: Path) -> None:
     assert applied == []
     decisions = _decisions(state)
     assert any(d["decision"] == "mint_declined" and "citation_invalid" in d["reason"] for d in decisions)
+
+
+def test_reflector_card_with_zero_cycles_is_declined_not_padded(tmp_path: Path) -> None:
+    """_reflector_card must not fabricate a retrieval_count when cycles is
+    empty (every real caller passes a non-empty cycles list, #1171's K=2
+    recurrence or a single origin cycle -- this exercises the degenerate
+    case directly). A genuine zero must reach validate_trainer_citation as
+    a zero and be declined; padding it to 1 would be a citation the mint
+    cannot back."""
+    workspace = _workspace(tmp_path)
+    state = tmp_path / "state"
+    card = _reflector_card(
+        card_id="LESS-REF-zero-0001",
+        detail="Configure a fallback model group for the local model in LiteLLM so server crashes fail over automatically.",
+        problem="LiteLLM server crashed without a fallback route",
+        cycles=[], days=[], first_seen="2026-09-01", last_seen="2026-09-01",
+        kind="approach_hint",
+    )
+    assert card is not None
+    assert card["citation"]["retrieval_count"] == 0
+    assert card["citation"]["offered_or_shown"] is False
+
+    applied = apply_staged_lesson_cards(workspace, {"cards": [card]}, state_dir=state)
+
+    assert applied == []
+    decisions = _decisions(state)
+    assert any(
+        d["lesson_id"] == "LESS-REF-zero-0001" and d["decision"] == "mint_declined"
+        and "citation_invalid" in d["reason"]
+        for d in decisions
+    )
 
 
 def test_card_with_valid_citation_is_applied(tmp_path: Path) -> None:
