@@ -334,6 +334,8 @@ def test_correlate_citations_with_outcomes_splits_cited_from_baseline(tmp_path: 
     # cycle-not-cited and cycle-never-scanned both land in baseline, whether
     # or not a scan ever ran for them.
     assert result["baseline_outcome_counts"] == {"success": 2}
+    assert result["cited_subject_counts"] == {"LESS-A": 2}
+    assert result["cited_subject_outcome_counts"] == {"LESS-A": {"success": 1, "failed": 1}}
 
 
 def test_correlate_citations_with_outcomes_empty_is_not_unavailable(tmp_path: Path) -> None:

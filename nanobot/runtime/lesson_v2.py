@@ -1199,14 +1199,36 @@ def correlate_citations_with_outcomes(
         cited_outcome_counts: dict[str, int] = {}
         baseline_outcome_counts: dict[str, int] = {}
         cited_cycles_matched: set[str] = set()
+        outcome_by_cycle: dict[str, str] = {}
         for row in window.rows:
             cycle_id = str(row.get("cycle_id") or "")
             outcome = str(row.get("outcome") or "unknown")
             if cycle_id and cycle_id in cited_cycle_ids:
+                outcome_by_cycle[cycle_id] = outcome
                 cited_outcome_counts[outcome] = cited_outcome_counts.get(outcome, 0) + 1
                 cited_cycles_matched.add(cycle_id)
             else:
                 baseline_outcome_counts[outcome] = baseline_outcome_counts.get(outcome, 0) + 1
+
+        # Keep the existing aggregate result, and add a bounded subject-level
+        # join for future evidence consumers. A lesson is counted once per
+        # cycle even if duplicate marker rows were emitted; outcomes are taken
+        # only from the harness ledger, never from citation payload fields.
+        cited_subject_cycles: dict[str, set[str]] = {}
+        cited_subject_outcomes: dict[str, dict[str, int]] = {}
+        for row in citation_rows:
+            subject_id = str(row.get("lesson_id") or "")
+            cycle_id = str(row.get("cycle_id") or "")
+            if not subject_id or not cycle_id:
+                continue
+            cycles = cited_subject_cycles.setdefault(subject_id, set())
+            if cycle_id in cycles:
+                continue
+            cycles.add(cycle_id)
+            outcome = outcome_by_cycle.get(cycle_id)
+            if outcome is not None:
+                subject_outcomes = cited_subject_outcomes.setdefault(subject_id, {})
+                subject_outcomes[outcome] = subject_outcomes.get(outcome, 0) + 1
 
         return {
             "status": "present" if citation_rows or window.rows else "empty",
@@ -1217,6 +1239,11 @@ def correlate_citations_with_outcomes(
             "cited_cycles_matched_in_ledger": len(cited_cycles_matched),
             "cited_outcome_counts": cited_outcome_counts,
             "baseline_outcome_counts": baseline_outcome_counts,
+            "cited_subject_counts": {
+                subject: len(cycles)
+                for subject, cycles in cited_subject_cycles.items()
+            },
+            "cited_subject_outcome_counts": cited_subject_outcomes,
         }
     except Exception as error:
         return {"status": "unavailable", "notes": [type(error).__name__]}
