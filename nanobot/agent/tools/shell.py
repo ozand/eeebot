@@ -182,7 +182,7 @@ class ExecTool(Tool):
             normalized_cmd = cmd.replace("\\", "/")
             for p in self.denied_paths:
                 p_fwd = p.as_posix()
-                if p_fwd in normalized_cmd or p.name in normalized_cmd:
+                if p_fwd in normalized_cmd:
                     if self.on_prevent_access:
                         self.on_prevent_access(p)
                     return f"Error: Command blocked by safety guard (access to protected fitness sidecar: {p.name})"

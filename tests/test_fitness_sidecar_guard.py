@@ -80,5 +80,22 @@ async def test_subagent_manager_registers_denied_paths(tmp_path):
     assert mgr.denied_paths == denied
     assert mgr.prevented_access_attempts == []
 
+@pytest.mark.asyncio
+async def test_exec_tool_does_not_block_generic_sidecar_filename_in_workspace(tmp_path):
+    state_dir = tmp_path / "state"
+    workspace = tmp_path / "workspace"
+    state_dir.mkdir()
+    workspace.mkdir()
+
+    denied = { (state_dir / rel).resolve() for rel in FITNESS_SIDECARS }
+    prevented = []
+    tool = ExecTool(denied_paths=denied, on_prevent_access=lambda p: prevented.append(p.name))
+
+    cmd = "cat tests/fixtures/latest.json"
+    res = await tool.execute(command=cmd, working_dir=str(workspace))
+    assert "blocked by safety guard" not in (res or "").lower()
+    assert prevented == []
+
+
 
 
