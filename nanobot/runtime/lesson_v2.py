@@ -1220,3 +1220,104 @@ def correlate_citations_with_outcomes(
         }
     except Exception as error:
         return {"status": "unavailable", "notes": [type(error).__name__]}
+
+
+_LESSON_CENSUS_MAX_LESSONS = 200
+
+
+def lesson_zero_citation_census(
+    state_dir: Path,
+    *,
+    now: datetime | None = None,
+    window_days: int = CITATION_SCAN_RETENTION_DAYS,
+) -> dict[str, object]:
+    """Lessons offered into context at least once, in the retained scan
+    window, with zero citations in that same window — the lesson-side
+    sibling of ``skill_fitness.census`` (ADR-021 rule 3: retirement evidence
+    must be non-use, never a clock; "never offered" is not evidence of "not
+    useful", only "offered and ignored" is, so a lesson that was never
+    offered at all does not appear here — there is no denominator for it).
+
+    Fail-open the same way ``skill_fitness.census`` does: an unavailable or
+    never-scanned source yields ``ok: False`` with an EMPTY census, because
+    "no data" must never be published as "every offered lesson is unused";
+    a real, even if empty, retained window yields ``ok: True``.
+    """
+    try:
+        current = _citation_now(now)
+        # #1516/#1546's own read_citation_scans reports "empty" (not
+        # "missing") for a directory that was never created — its source
+        # list always includes a scan-failures.jsonl candidate whether or
+        # not the file exists (_citation_sources), so an empty result there
+        # does not distinguish "never scanned" from "scanned, found
+        # nothing". Check directory existence directly instead, the same
+        # distinction skill_fitness.census makes for a missing reads.json.
+        if not (Path(state_dir) / "lesson_usage").is_dir():
+            return {"ok": False, "reason": "missing", "lessons_offered": 0, "zero_citation": []}
+        scans = read_citation_scans(state_dir, now=current)
+        if scans["status"] == "unavailable":
+            return {
+                "ok": False,
+                "reason": scans["status"],
+                "lessons_offered": 0,
+                "zero_citation": [],
+            }
+
+        offered_count: dict[str, int] = {}
+        last_offered: dict[str, datetime] = {}
+        for row in scans["rows"]:
+            provenance = row.get("selection_provenance")
+            if not isinstance(provenance, dict):
+                continue
+            ids = provenance.get("selected_ids")
+            if not isinstance(ids, list):
+                continue
+            ts = _citation_ts(row.get("ts"))
+            for raw_id in ids:
+                lesson_id = str(raw_id).strip()
+                if not lesson_id:
+                    continue
+                offered_count[lesson_id] = offered_count.get(lesson_id, 0) + 1
+                if ts is not None and (lesson_id not in last_offered or ts > last_offered[lesson_id]):
+                    last_offered[lesson_id] = ts
+
+        directory = Path(state_dir) / "lesson_usage"
+        citation_rows = _read_jsonl(directory / "citations.jsonl", _MAX_ENTRIES)
+        cutoff = current - timedelta(days=window_days)
+        cited_in_window: dict[str, int] = {}
+        last_cited: dict[str, datetime] = {}
+        for row in citation_rows:
+            lesson_id = str(row.get("lesson_id") or "").strip()
+            if not lesson_id:
+                continue
+            ts = _citation_ts(row.get("ts"))
+            if ts is None:
+                continue
+            if lesson_id not in last_cited or ts > last_cited[lesson_id]:
+                last_cited[lesson_id] = ts
+            if ts >= cutoff:
+                cited_in_window[lesson_id] = cited_in_window.get(lesson_id, 0) + 1
+
+        names = sorted(offered_count)[:_LESSON_CENSUS_MAX_LESSONS]
+        return {
+            "ok": True,
+            "lessons_offered": len(names),
+            "zero_citation": [
+                {
+                    "lesson_id": lesson_id,
+                    "offered_in_window": offered_count[lesson_id],
+                    "last_offered": (
+                        last_offered[lesson_id].isoformat().replace("+00:00", "Z")
+                        if lesson_id in last_offered else None
+                    ),
+                    "last_cited": (
+                        last_cited[lesson_id].isoformat().replace("+00:00", "Z")
+                        if lesson_id in last_cited else None
+                    ),
+                }
+                for lesson_id in names
+                if cited_in_window.get(lesson_id, 0) == 0
+            ],
+        }
+    except Exception:
+        return {"ok": False, "reason": "census_error", "lessons_offered": 0, "zero_citation": []}
