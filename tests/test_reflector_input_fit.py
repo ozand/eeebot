@@ -198,3 +198,29 @@ def test_complete_fit_is_recorded_so_absence_is_distinguishable(tmp_path: Path):
     row = json.loads((tmp_path / "reflector/reflections.jsonl").read_text().splitlines()[0])
     assert row["input_fit"]["status"] == "complete"
     assert set(row["input_fit"]) == {"status", "transcript", "ledger", "journal"}
+    assert row["transcript_coverage"] == 1.0
+    assert row["partial_view"] is False
+
+
+def test_truncated_transcript_records_coverage_and_partial_view(tmp_path: Path):
+    # ADR-021 Rule 5: A truncated transcript must record transcript_coverage < 1.0 and partial_view: True
+    _write(tmp_path / "ledger/cycles.jsonl", [{"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:00:00Z"}])
+    _write(
+        tmp_path / "llm_calls/prompts/2026-08-26.jsonl",
+        [{
+            "cycle_id": "c1",
+            "seq": 1,
+            "messages": [{"role": "user", "content": "x" * 1000}],
+            "truncated": True,
+            "truncated_chars": 3000,
+        }],
+    )
+    result = reflector.run_reflector(tmp_path, llm=lambda *_: _answer())
+    assert result["processed"] == 1
+    row = json.loads((tmp_path / "reflector/reflections.jsonl").read_text().splitlines()[0])
+    assert row["partial_view"] is True
+    assert 0.0 < row["transcript_coverage"] < 1.0
+    # kept is approx 1000 chars (plus json overhead), total kept + 3000
+    kept = row["input_fit"]["transcript"]["chars"]
+    assert row["transcript_coverage"] == round(kept / (kept + 3000), 4)
+

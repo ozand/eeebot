@@ -2758,6 +2758,10 @@ def _reflection_items(
                         if m:
                             target_artifact = m.group(0)
                     item = _make_item("reflection", detail, f"cycle {row['cycle_id']}: {evidence}", affected_path=target_artifact)
+                    if row.get("transcript_coverage") is not None:
+                        item["transcript_coverage"] = row["transcript_coverage"]
+                    if row.get("partial_view") is not None:
+                        item["partial_view"] = bool(row["partial_view"])
                     try:
                         from nanobot.runtime import reflector
                         completed = _read_json(Path(state_dir) / "demand" / "completed.json", {})

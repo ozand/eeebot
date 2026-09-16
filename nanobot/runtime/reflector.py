@@ -650,11 +650,27 @@ def run_reflector(
             parsed, parse_reason = _parse_output(response, cycle_id)
             if parsed is None:
                 raise ValueError(f"malformed reflector output: {parse_reason}")
+
+            # ADR-021 Rule 5: measure what fraction of the execution transcript
+            # the reflector actually saw, and mark partial view explicitly.
+            transcript_fit = input_fit.get("transcript") if isinstance(input_fit, dict) else None
+            transcript_coverage: float | None = None
+            if isinstance(transcript_fit, dict) and "chars" in transcript_fit:
+                kept_c = int(transcript_fit.get("chars", 0) or 0)
+                rec_trunc_c = int(transcript_fit.get("recorder_truncated_chars", 0) or 0)
+                drop_c = int(transcript_fit.get("dropped_chars", 0) or 0)
+                total_denom = kept_c + rec_trunc_c + drop_c
+                if total_denom > 0:
+                    transcript_coverage = round(kept_c / total_denom, 4)
+            partial_view: bool = bool(transcript_coverage is not None and transcript_coverage < 1.0)
+
             _append_journal(state_dir, {
                 **parsed,
                 "timestamp": _now(),
                 **({"parse_reason": parse_reason} if parse_reason != "ok" else {}),
                 "input_fit": input_fit,
+                **({"transcript_coverage": transcript_coverage} if transcript_coverage is not None else {}),
+                "partial_view": partial_view,
             })
             _save_watermark(state_dir, cycle_id)
             if reanchor:

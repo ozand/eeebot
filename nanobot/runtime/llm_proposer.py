@@ -2900,6 +2900,14 @@ def write_request(
                 state_dir, demand_id, cycle_id, escalation_model
             ):
                 proposed_event["escalated_model"] = escalation_model
+        if demand_id.startswith("reflection-"):
+            for item in demand._reflection_items(state_dir):
+                if item.get("id") == demand_id:
+                    if item.get("partial_view") is not None:
+                        proposed_event["partial_view"] = bool(item["partial_view"])
+                    if item.get("transcript_coverage") is not None:
+                        proposed_event["transcript_coverage"] = item["transcript_coverage"]
+                    break
     # #1118: carry the frozen claim's TEXT (not the full check dict) into the
     # ledger row — the reflector reads 'proposed' rows as ledger context
     # (nanobot.runtime.reflector._messages), so this is how the claim reaches
