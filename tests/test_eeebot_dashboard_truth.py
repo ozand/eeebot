@@ -2220,3 +2220,45 @@ def test_lessons_index_header_column_rename_does_not_shift_the_count(tmp_path: P
 
     assert result["indexed_count"] == 3
     assert result["index_shape"] == "markdown_table"
+
+
+def test_scan_host_capabilities_renders_cost_and_hardware_probes() -> None:
+    host_caps = {
+        "screen_push": {
+            "state": "present",
+            "value": 2457600,
+            "unit": "bytes",
+            "details": "1024x600 32bpp",
+        },
+        "battery_draw": {
+            "state": "absent",
+            "value": None,
+            "unit": "watts",
+            "details": "slot PNP0C0A:00 status 15",
+        },
+        "toolchain_build_peak_rss": {
+            "state": "present",
+            "value": 25794970,
+            "unit": "bytes",
+            "details": "C build peak RSS 24.6 MB",
+        },
+        "toolchain_cargo_build": {
+            "state": "present",
+            "value": 15.82,
+            "unit": "seconds",
+            "details": "cargo build 15.8s",
+        },
+    }
+    available_caps, details, _, _, _, _, _, _ = DASHBOARD.scan_host_capabilities(host_caps)
+    assert "screen_push" in available_caps
+    assert "toolchain_build_peak_rss" in available_caps
+    assert "toolchain_cargo_build" in available_caps
+    assert "battery_draw" not in available_caps
+
+    badges_html = DASHBOARD.format_host_capability_badges_html(available_caps)
+    assert 'class="cap-tag">screen_push</span>' in badges_html
+    assert 'class="cap-tag">toolchain_build_peak_rss</span>' in badges_html
+
+    details_html = DASHBOARD.format_host_capability_details_html(details)
+    assert "<strong>screen_push</strong>: 1024x600 32bpp" in details_html
+    assert "<strong>toolchain_cargo_build</strong>: cargo build 15.8s" in details_html
