@@ -91,7 +91,9 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.runtime.experiment_ledger:append_experiment_result",
     ),
     "ledger": ("nanobot.runtime.cycle_ledger:append_event",),
-    # scans.jsonl/citations.jsonl/scan-failures.jsonl (#1516/#1546/#1570).
+    # scans.jsonl/scan-failures.jsonl (#1516/#1546/#1570). The separate
+    # citations.jsonl this comment used to also name was retired in #1654 —
+    # it duplicated scans.jsonl's own `lesson_ids` field from the same write.
     # Wrapped in `Path(state_dir) / "lesson_usage"` here, not the bare
     # `state_dir / "..."` form this registry's own scan greps for (#1219's
     # test), which is exactly why this segment carried no entry until now —
@@ -114,6 +116,16 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.runtime.reflector:_save_watermark",
     ),
     "scorecard": ("nanobot.runtime.scorecard:compute_scorecard",),
+    # reads.json (#939), cycle_scans.jsonl (#1666 phase 1 / #1654 -- the
+    # per-cycle zero-skills-read marker; absent means the recorder never
+    # ran, present with skill_count=0 means it ran and found nothing).
+    # Wrapped in `Path(state_dir) / SIDECAR_REL`/`CYCLE_SCAN_REL`, not the
+    # bare form this registry's scan greps for -- same blind spot as
+    # lesson_usage above, not evidence of no writer.
+    "skill_fitness": (
+        "nanobot.runtime.skill_fitness:record_skill_reads",
+        "nanobot.runtime.skill_fitness:record_cycle_skill_scan",
+    ),
     "bridge": (
         "nanobot.crash_record:record_exit",
         "nanobot.crash_record:_start_run_marker",

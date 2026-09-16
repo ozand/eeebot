@@ -249,3 +249,61 @@ async def test_subagent_telemetry_tracks_context_usage(tmp_path):
     assert "context_usage" in data
     assert data["context_usage"]["peak_tokens"] == 1500
     assert data["context_usage"]["iterations"] == [1500]
+
+
+def _fitness_manager(state_dir, *, reads=None):
+    from nanobot.agent.subagent import SubagentManager
+
+    manager = object.__new__(SubagentManager)
+    manager._skill_fitness_state_dir = state_dir
+    manager._skill_fitness_repo = None
+    manager._skill_fitness_cycle_id = "cycle-x"
+    manager._skill_fitness_cycle_base_sha = ""
+    manager._skill_reads_this_cycle = list(reads or [])
+    return manager
+
+
+def test_collect_skill_reads_records_zero_marker_when_nothing_read(tmp_path):
+    """#1666 phase 1 / #1654: a cycle that read no skills still leaves a
+    per-cycle marker row -- present with skill_count=0, not silence."""
+    import json
+
+    from nanobot.runtime import skill_fitness
+
+    state = tmp_path / "state"
+    manager = _fitness_manager(state, reads=[])
+
+    assert manager.collect_skill_reads() == 0
+    rows = (state / skill_fitness.CYCLE_SCAN_REL).read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 1
+    row = json.loads(rows[0])
+    assert row["cycle_id"] == "cycle-x"
+    assert row["skill_count"] == 0
+    # No detailed reads.json write for an empty cycle -- nothing to persist there.
+    assert not (state / skill_fitness.SIDECAR_REL).exists()
+
+
+def test_collect_skill_reads_records_marker_and_detail_when_something_read(tmp_path):
+    import json
+
+    from nanobot.runtime import skill_fitness
+
+    state = tmp_path / "state"
+    manager = _fitness_manager(state, reads=[{"skill": "review", "path": "skills/review/SKILL.md"}])
+
+    assert manager.collect_skill_reads() == 1
+    marker_rows = (state / skill_fitness.CYCLE_SCAN_REL).read_text(encoding="utf-8").splitlines()
+    assert json.loads(marker_rows[0])["skills_read"] == ["review"]
+    detail = json.loads((state / skill_fitness.SIDECAR_REL).read_text(encoding="utf-8"))
+    assert detail["reads"][0]["skill"] == "review"
+    assert manager._skill_reads_this_cycle == []  # cleared after persisting
+
+
+def test_collect_skill_reads_no_op_when_instrumentation_not_configured(tmp_path):
+    """state_dir is None -- instrumentation off for this spawn, not a zero
+    read -- no marker row of any kind should appear."""
+    from nanobot.runtime import skill_fitness
+
+    manager = _fitness_manager(None, reads=[])
+    assert manager.collect_skill_reads() == 0
+    assert not (tmp_path / "state" / skill_fitness.CYCLE_SCAN_REL).exists()

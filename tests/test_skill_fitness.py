@@ -126,3 +126,41 @@ def test_sidecar_is_protected_and_module_denied(tmp_path: Path):
                                 "reads": [{"skill": "forged"}]}))
     after = scorecard.fitness_sidecar_hashes(state)[skill_fitness.SIDECAR_REL]
     assert before != after
+
+
+def test_cycle_skill_scan_records_zero_reads(tmp_path: Path):
+    """#1666 phase 1 / #1654: a cycle that read no skills must still leave a
+    row -- present with skill_count=0 -- distinguishable from a cycle where
+    this was never called at all (no row)."""
+    state = tmp_path / "state"
+    skill_fitness.record_cycle_skill_scan(state, cycle_id="cycle-empty", skills_read=[])
+    rows = [json.loads(l) for l in (state / skill_fitness.CYCLE_SCAN_REL).read_text(encoding="utf-8").splitlines()]
+    assert rows == [{
+        "cycle_id": "cycle-empty", "ts": rows[0]["ts"], "skill_count": 0, "skills_read": [],
+    }]
+
+
+def test_cycle_skill_scan_records_positive_reads(tmp_path: Path):
+    state = tmp_path / "state"
+    skill_fitness.record_cycle_skill_scan(
+        state, cycle_id="cycle-hit", skills_read=["review", "run-tests", "review"],
+    )
+    rows = [json.loads(l) for l in (state / skill_fitness.CYCLE_SCAN_REL).read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["skill_count"] == 3
+    assert rows[0]["skills_read"] == ["review", "run-tests"]  # deduped, sorted
+
+
+def test_cycle_skill_scan_is_bounded(tmp_path: Path):
+    state = tmp_path / "state"
+    for i in range(skill_fitness._MAX_CYCLE_SCANS + 5):
+        skill_fitness.record_cycle_skill_scan(state, cycle_id=f"cycle-{i}", skills_read=[])
+    rows = (state / skill_fitness.CYCLE_SCAN_REL).read_text(encoding="utf-8").splitlines()
+    assert len(rows) == skill_fitness._MAX_CYCLE_SCANS
+
+
+def test_cycle_skill_scan_never_raises(tmp_path: Path, monkeypatch):
+    def broken_mkdir(self, *a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "mkdir", broken_mkdir)
+    skill_fitness.record_cycle_skill_scan(tmp_path / "state", cycle_id="cycle-x", skills_read=["review"])

@@ -205,6 +205,65 @@ def record_skill_reads(
         return 0
 
 
+CYCLE_SCAN_REL = "skill_fitness/cycle_scans.jsonl"  # state_dir-relative path
+_MAX_CYCLE_SCANS = 2000
+
+
+def _read_cycle_scans(state_dir: Path) -> list[dict[str, Any]]:
+    path = Path(state_dir) / CYCLE_SCAN_REL
+    try:
+        if not path.is_file():
+            return []
+        rows: list[dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if isinstance(row, dict):
+                rows.append(row)
+        return rows
+    except Exception:
+        return []
+
+
+def record_cycle_skill_scan(state_dir: Path, *, cycle_id: str, skills_read: list[str]) -> None:
+    """One row per cycle naming which skills were read -- possibly none.
+
+    #1666 phase 1 / #1654: ``record_skill_reads`` (above) is only ever
+    called when a cycle read at least one skill, so a cycle that read zero
+    leaves no trace at all in ``reads.json`` -- indistinguishable from a
+    cycle where the recorder never ran (instrumentation off, an older
+    release, a crash). This is the lesson-side ``scans.jsonl`` shape
+    (``scan_ran``/``marker_count``, including zero) applied to skills: a row
+    always exists once this is called, whether or not anything was read.
+
+    Bounded append, same discipline as ``_write_sidecar_atomic`` above.
+    Fail-open: any error is swallowed, never raised into the caller -- a
+    lost row must not break a cycle, matching every other writer in this
+    module.
+    """
+    try:
+        path = Path(state_dir) / CYCLE_SCAN_REL
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "cycle_id": str(cycle_id),
+            "ts": _utc_now(),
+            "skill_count": len(skills_read),
+            "skills_read": sorted({str(s).strip() for s in skills_read if str(s).strip()}),
+        }
+        rows = _read_cycle_scans(state_dir)
+        rows.append(row)
+        rows = rows[-_MAX_CYCLE_SCANS:]
+        tmp_path = path.with_suffix(".jsonl.tmp")
+        tmp_path.write_text(
+            "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8",
+        )
+        tmp_path.replace(path)
+    except Exception:
+        pass
+
+
 def confirmed_reads_for_cycle(state_dir: Path, cycle_id: str) -> list[dict[str, Any]]:
     """Return the confirmed skill reads for *cycle_id* (audit helper).
 

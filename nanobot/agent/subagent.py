@@ -742,8 +742,29 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
 
         Returns the count of rows persisted (0 when instrumentation is not
         configured or no reads accumulated).  Fail-open.
+
+        #1666 phase 1 / #1654: also records ONE per-cycle marker row
+        (``skill_fitness.record_cycle_skill_scan``) regardless of whether
+        any skill was read this cycle -- a cycle that read zero skills must
+        be distinguishable from a cycle where this method was never called
+        at all (instrumentation off, an older release, a crash). That
+        marker is unconditional; the detailed per-skill rows below remain
+        conditional on there being anything to record.
         """
-        if self._skill_fitness_state_dir is None or not self._skill_reads_this_cycle:
+        if self._skill_fitness_state_dir is None:
+            return 0
+        try:
+            from nanobot.runtime.skill_fitness import record_cycle_skill_scan
+            record_cycle_skill_scan(
+                self._skill_fitness_state_dir,
+                cycle_id=self._skill_fitness_cycle_id,
+                skills_read=[
+                    str(r.get("skill") or "") for r in self._skill_reads_this_cycle if r.get("skill")
+                ],
+            )
+        except Exception:
+            pass
+        if not self._skill_reads_this_cycle:
             return 0
         try:
             from nanobot.runtime.skill_fitness import record_skill_reads
