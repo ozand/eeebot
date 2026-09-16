@@ -272,16 +272,16 @@ class LLMProvider(ABC):
         resolved_model = model or self.get_default_model()
 
         def _record(response: LLMResponse, retries: int, sent_messages: list[dict[str, Any]]) -> LLMResponse:
-            # #1660: prefer the model that actually served the call over the
-            # one requested -- a gateway fallback substitutes a different
-            # deployment, and telemetry recording the request unconditionally
-            # cannot distinguish that from an ordinary call. Falls back to
-            # resolved_model when the response carries none (error path, or
-            # a provider that doesn't report one).
-            telemetry_model = response.served_model or resolved_model
+            # #1660: record BOTH the model this code requested (`model`, as
+            # before #1678 -- every reader groups by it) and the one the
+            # gateway reports having served (`served_model`). A fallback
+            # substitution is then `served_model != model`. served_model is
+            # None when the response carries none (error path, or a provider
+            # that doesn't report one) -- never fabricated from the request.
             try:
                 record_llm_call(
-                    model=telemetry_model,
+                    model=resolved_model,
+                    served_model=response.served_model or None,
                     duration_ms=(time.monotonic() - call_start) * 1000,
                     usage=response.usage,
                     finish_reason=response.finish_reason,
@@ -297,7 +297,7 @@ class LLMProvider(ABC):
                 content=response.content,
                 reasoning_content=response.reasoning_content,
                 finish_reason=response.finish_reason,
-                model=telemetry_model,
+                model=resolved_model,
                 prompt_tokens=response.usage.get("prompt_tokens"),
                 completion_tokens=response.usage.get("completion_tokens"),
             )

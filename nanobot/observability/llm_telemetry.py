@@ -131,11 +131,16 @@ def record_llm_call(
     usage: dict[str, Any] | None,
     finish_reason: str | None,
     retries: int,
+    served_model: str | None = None,
 ) -> None:
     """Append one JSONL line describing an LLM call. Best-effort — never raises.
 
     Reads the ambient (cycle_id, component) context set by the caller's entry
     point (see :func:`call_context`); both default to "" when unset.
+
+    ``model`` is the model the caller REQUESTED. ``served_model`` (#1660) is
+    the one the gateway reported having served, or None when it reported
+    none -- it is never derived from ``model``.
     """
     try:
         ctx = _CALL_CONTEXT.get() or {}
@@ -143,6 +148,7 @@ def record_llm_call(
         record = {
             "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "model": model or "",
+            "served_model": served_model or None,
             "duration_ms": round(duration_ms, 3),
             "prompt_tokens": int(usage.get("prompt_tokens") or 0),
             "completion_tokens": int(usage.get("completion_tokens") or 0),
