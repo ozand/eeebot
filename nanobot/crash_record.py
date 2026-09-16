@@ -195,7 +195,7 @@ def _rotate_runs(root: Path, active: Path, now: datetime) -> None:
             continue
 
 
-def _record_run_end(root: Path, *, outcome: str, exit_status: Any, source: str, service_result: str, stamp: str) -> None:
+def _record_run_end(root: Path, *, outcome: str, exit_status: Any, source: str, service_result: str, stamp: str, exit_code: str = "") -> None:
     """Materialize one run row from the marker, including signal-only exits."""
     marker_path = root / RUN_MARKER_REL
     try:
@@ -285,7 +285,7 @@ def record_exit(
     }
     try:
         _record_run_end(root, outcome=outcome, exit_status=exit_status, source=source,
-                        service_result=service_result, stamp=stamp)
+                        service_result=service_result, stamp=stamp, exit_code=exit_code)
         records_path.parent.mkdir(parents=True, exist_ok=True)
         streak = _load_streak(streak_path)
         last_ts = _parse_iso(streak.get("updated_at"))
