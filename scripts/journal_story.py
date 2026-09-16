@@ -8,15 +8,24 @@ artifact can be assembled.
 """
 from __future__ import annotations
 
+import gzip
 import json
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 SCHEMA_VERSION = "journal-story-v1"
 PRODUCER = "scripts.journal_story"
 DEFAULT_MAX_BEATS = 8
+# The journal source, named once (#1622 comment 2026-09-16): the cycle ledger
+# under ``state/ledger`` — the live ``cycles.jsonl`` plus the dated
+# ``cycles-YYYY-MM-DD.jsonl.gz`` archives the midnight rotation writes. Never
+# ``state/reflector/reflections.jsonl``: that is model-written prose and may
+# not supply a beat's sign or existence (ADR-015 rule 1).
+LEDGER_SOURCE = "state/ledger"
+_LIVE_LEDGER = "cycles.jsonl"
+_MAX_LINE_BYTES = 256 * 1024
 _UNKNOWN_MARKERS = frozenset({"probe_unavailable", "unavailable", "unknown"})
 _POSITIVE_WORDS = frozenset({"fixed", "working", "succeeded", "success", "improved", "resolved"})
 _NEGATIVE_WORDS = frozenset({"failed", "failure", "broken", "regressed", "rejected"})
@@ -68,7 +77,7 @@ def _event_text(row: dict[str, Any]) -> str:
         value = _text(row.get(key))
         if value:
             return value
-    return f"{_text(row.get('phase')) or 'journal'} event"
+    return ""
 
 
 def _source(row: dict[str, Any]) -> dict[str, Any]:
@@ -84,6 +93,80 @@ def _source(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _day_files(ledger_dir: Path, day: date) -> list[Path]:
+    """Files that can hold rows stamped ``day``: neighbouring archives + live file.
+
+    Rotation names an archive after the day the live file was last modified,
+    so a UTC day's rows can sit in the archive named for it, for the day after
+    (late writers), or still in the live file. Reading the bounded neighbour
+    set — never the live file alone — is what keeps a rotation boundary from
+    shrinking the day into a short, confident script.
+    """
+    names = [f"cycles-{(day + timedelta(days=offset)).isoformat()}.jsonl.gz" for offset in (-1, 0, 1)]
+    return [*(ledger_dir / name for name in names), ledger_dir / _LIVE_LEDGER]
+
+
+def load_day_journal(state_dir: str | Path, day: str) -> dict[str, Any]:
+    """Read one UTC day of ledger rows through the rotation-aware path.
+
+    Every returned row carries ``_source_file`` and ``_source_line`` so a beat
+    can cite it. Unreadable lines and unreadable files are reported, not
+    dropped: ``status`` is ``incomplete`` whenever any row of the day may be
+    missing, so a thin day (``complete``, few rows) and a partly unreadable
+    day never look alike (ADR-015 rule 5). No model is involved.
+    """
+    requested = date.fromisoformat(day)
+    ledger_dir = Path(state_dir) / "ledger"
+    rows: list[dict[str, Any]] = []
+    unreadable: list[dict[str, Any]] = []
+    files_read: list[str] = []
+    notes: list[str] = []
+    if not ledger_dir.is_dir():
+        notes.append("ledger_dir_missing")
+    for path in _day_files(ledger_dir, requested) if not notes else []:
+        if not path.is_file():
+            continue
+        opener = gzip.open if path.name.endswith(".gz") else open
+        try:
+            with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+                for line_no, line in enumerate(handle, start=1):
+                    if not line.strip():
+                        continue
+                    if len(line) > _MAX_LINE_BYTES:
+                        unreadable.append({"file": path.name, "line": line_no, "reason": "line_too_long"})
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        unreadable.append({"file": path.name, "line": line_no, "reason": "malformed_json"})
+                        continue
+                    if not isinstance(row, dict):
+                        unreadable.append({"file": path.name, "line": line_no, "reason": "not_an_object"})
+                        continue
+                    stamp = _parse_ts(row.get("ts"))
+                    if stamp is None or stamp.astimezone(timezone.utc).date() != requested:
+                        continue
+                    rows.append({**row, "_source_file": path.name, "_source_line": line_no})
+        except PermissionError:
+            notes.append(f"permission:{path.name}")
+            continue
+        except (OSError, EOFError, gzip.BadGzipFile):
+            notes.append(f"unreadable_file:{path.name}")
+            continue
+        files_read.append(path.name)
+    rows.sort(key=lambda row: (_parse_ts(row.get("ts")) or datetime.min.replace(tzinfo=timezone.utc), row["_source_file"], row["_source_line"]))
+    status = "incomplete" if unreadable or notes else "complete"
+    return {
+        "source": LEDGER_SOURCE,
+        "day": requested.isoformat(),
+        "status": status,
+        "files_read": files_read,
+        "rows": rows,
+        "unreadable": unreadable,
+        "notes": notes,
+    }
+
+
 def select_beats(
     rows: Iterable[dict[str, Any]],
     *,
@@ -92,15 +175,27 @@ def select_beats(
 ) -> list[dict[str, Any]]:
     """Select an ordered, deterministic, ledger-backed beat set.
 
-    Terminal outcome rows are the event source. One row per cycle is retained,
-    sorted by timestamp and source location. A quiet day therefore returns an
-    empty list rather than padding material into a story.
+    Terminal outcome rows are the event source. One row per cycle is retained
+    — the cycle's *last* outcome row, because a retried cycle writes several
+    and the last one is its terminal sign — sorted by timestamp and source
+    location. When an outcome row carries no event text, the same cycle's
+    ``proposed`` row supplies the title; the sign is never read from it. A
+    quiet day therefore returns an empty list rather than padding material
+    into a story.
     """
     if max_beats <= 0:
         raise ValueError("max_beats must be positive")
     candidates: list[tuple[datetime, str, int, dict[str, Any]]] = []
+    titles: dict[str, str] = {}
     for row in rows:
-        if not isinstance(row, dict) or row.get("phase") != "outcome":
+        if not isinstance(row, dict):
+            continue
+        if row.get("phase") == "proposed":
+            cycle_id, title = _text(row.get("cycle_id")), _text(row.get("task_title"))
+            if cycle_id and title:
+                titles.setdefault(cycle_id, title)
+            continue
+        if row.get("phase") != "outcome":
             continue
         timestamp = _parse_ts(row.get("ts"))
         if timestamp is None:
@@ -113,18 +208,21 @@ def select_beats(
             continue
         candidates.append((timestamp, source["file"], source["line"], row))
     candidates.sort(key=lambda item: (item[0], item[1], item[2]))
-    seen_cycles: set[str] = set()
+    last_index: dict[str, int] = {}
+    for index, (_timestamp, _file, _line, row) in enumerate(candidates):
+        cycle_id = _text(row.get("cycle_id"))
+        if cycle_id:
+            last_index[cycle_id] = index
     beats: list[dict[str, Any]] = []
     for index, (_timestamp, _file, _line, row) in enumerate(candidates):
         cycle_id = _text(row.get("cycle_id"))
-        if cycle_id and cycle_id in seen_cycles:
+        if cycle_id and last_index[cycle_id] != index:
             continue
-        if cycle_id:
-            seen_cycles.add(cycle_id)
         source = _source(row)
+        event = _event_text(row) or titles.get(cycle_id) or f"{_text(row.get('phase')) or 'journal'} event"
         beats.append({
             "beat_id": f"beat-{len(beats) + 1:03d}",
-            "event": _event_text(row),
+            "event": event,
             "sign": _sign(row),
             "cost": row.get("duration_ms") if isinstance(row.get("duration_ms"), (int, float)) else None,
             "source": source,
