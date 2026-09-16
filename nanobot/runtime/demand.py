@@ -274,6 +274,25 @@ _PRIORITY_PATTERN = re.compile(
 # NEVER inferred from free-text semantics. Untagged text yields "" (unknown).
 _VECTOR_TAG_RE = re.compile(r"\((V1|V2)\)")
 
+# #1665 (ADR-020 Rule 3): Provenance constants and ranking.
+# Operator charter outranks anything self-derived regardless of vector.
+PROVENANCE_OPERATOR = "operator"
+PROVENANCE_SELF_DERIVED = "self-derived"
+
+
+def _provenance_rank(provenance: str) -> int:
+    """Sort key for provenance tier (#1665, ADR-020 Rule 3).
+
+    Operator charter priorities rank before self-derived loop priorities
+    regardless of vector. Provenance is a separate axis from vector.
+    """
+    if provenance == PROVENANCE_OPERATOR:
+        return 0
+    if provenance == PROVENANCE_SELF_DERIVED:
+        return 1
+    # Untagged or unknown provenance sorts after self-derived
+    return 2
+
 
 def _vector_rank(vector: str) -> int:
     """Sort key for the soft V1-before-V2 demand bias (#815): explicit V1
@@ -476,6 +495,7 @@ def _make_item(
     evidence: str,
     affected_path: str = "",
     vector: str = "",
+    provenance: str = "",
     direction: str = "",
 ) -> dict[str, str]:
     summary = (summary or "").strip()[:_MAX_SUMMARY_CHARS]
@@ -491,6 +511,12 @@ def _make_item(
         # "" (unknown) otherwise. Additive-only: existing callers that omit
         # this arg get "" and are unaffected.
         "vector": (vector or "").strip(),
+        # #1665 (ADR-020 Rule 3): whether the item originated from the operator's
+        # external charter ("operator") or from the self-evolving loop's own
+        # reflection/telemetry pipeline ("self-derived"). Provenance is a separate
+        # axis from vector, sorting operator charter priorities before all
+        # loop-derived priorities regardless of vector.
+        "provenance": (provenance or "").strip(),
         # #879: which tech-tree improvement DOMAIN this item corresponds
         # to (e.g. "proposer-quality"), "" (unknown/unmapped) otherwise —
         # a SEPARATE axis from ``vector`` above. Currently only
@@ -647,14 +673,19 @@ def _priority_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
 
         if not raw_text:
             return []
-        # #860: fold in goal_review's harness-owned derived priorities
-        # (survive deploy_release.sh's goal_text.json reseed) — local import,
-        # goal_review must never be imported at module level here (see its
-        # own docstring: it lazily imports llm_proposer, which imports this
-        # module, so a module-level import here would risk a cycle).
+        # #1665 (ADR-020 Rule 3): Identify which priorities are self-derived from
+        # derived_priorities.json versus operator charter from goal_text / GOALS.md.
+        # Provenance is tracked structurally by file origin (never from tokens in text).
+        derived_numbers: set[int] = set()
         try:
             from nanobot.runtime import goal_review
 
+            active_derived = goal_review.active_derived_priorities(state_dir, raw_text)
+            derived_numbers = {
+                int(d["number"])
+                for d in active_derived
+                if d.get("number") is not None
+            }
             raw_text = goal_review.merged_goal_text(state_dir, raw_text)
         except Exception:
             pass
@@ -676,18 +707,30 @@ def _priority_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
             # misclassify the item; never inferred from wording either way.
             tag = _VECTOR_TAG_RE.search(title)
             vector = tag.group(1) if tag else ""
+            # #1665: structural origin from derived_priorities.json vs operator charter
+            priority_num = int(num) if num.isdigit() else -1
+            provenance = (
+                PROVENANCE_SELF_DERIVED
+                if priority_num in derived_numbers
+                else PROVENANCE_OPERATOR
+            )
             items.append(
                 _make_item(
                     "priority",
                     f"Priority {num} — {title}",
                     instructions,
                     vector=vector,
+                    provenance=provenance,
                 )
             )
-        # #815: soft within-kind bias — V1 priorities before V2 before
-        # untagged, via a stable sort (ties and V2-only sets are unaffected;
-        # nothing is ever dropped).
-        items.sort(key=lambda it: _vector_rank(it.get("vector", "")))
+        # #1665 (ADR-020 Rule 3): Sort by provenance first (operator charter before
+        # self-derived), then by vector rank inside each class (preserving #815 V1-before-V2).
+        items.sort(
+            key=lambda it: (
+                _provenance_rank(it.get("provenance", "")),
+                _vector_rank(it.get("vector", "")),
+            )
+        )
         return items
     except Exception:
         return []
