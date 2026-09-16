@@ -778,6 +778,24 @@ def _write_snapshot(state_dir, gaps: list[dict]) -> None:
     )
 
 
+def _seed_valid_evidence(state_dir) -> None:
+    backlog_dir = state_dir / "hypotheses"
+    backlog_dir.mkdir(parents=True, exist_ok=True)
+    lifecycle = {
+        "schema_version": "hypothesis-lifecycle-v1",
+        "entries": {
+            "hypothesis-h1": {
+                "status": "answered",
+                "verdict": "supported",
+                "verdict_at": "2026-08-01T00:00:00Z",
+                "verdict_evidence": {"source": "microbench", "value": 12.0},
+                "title": "Cut proposer repeat failure rate",
+            }
+        },
+    }
+    (backlog_dir / "lifecycle.json").write_text(json.dumps(lifecycle), encoding="utf-8")
+
+
 ALIGNED_PRIORITY = {
     "label": "Cut proposer repeat failure rate",
     "body": "Add a guard reducing proposer repeat failure rate in scripts/x.py. Commit.",
@@ -794,6 +812,7 @@ class TestGoalReviewWiring:
         monkeypatch.setenv(goal_review.ENABLED_ENV, "1")
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         tech_tree.ensure_seeded(state_dir, now=NOW)
         portfolio = tech_tree.read_portfolio(state_dir)
         portfolio["current"] = "proposer-quality"
@@ -829,6 +848,7 @@ class TestGoalReviewWiring:
         monkeypatch.setenv(goal_review.ENABLED_ENV, "1")
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         tech_tree.ensure_seeded(state_dir, now=NOW)
         portfolio = tech_tree.read_portfolio(state_dir)
         portfolio["current"] = "proposer-quality"
@@ -862,6 +882,7 @@ class TestGoalReviewWiring:
         monkeypatch.setenv(goal_review.ENABLED_ENV, "1")
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [ALIGNED_PRIORITY]})
 
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)

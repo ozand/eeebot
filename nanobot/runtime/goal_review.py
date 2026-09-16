@@ -441,28 +441,26 @@ def _collect_evidence(
     """Evidence lines keyed ``E1``.. — the citable ground truth.
 
     When ``sources`` is supplied, it is populated only with a stable source
-    name that contributed at least one line. This preserves the decision-time
-    source set in new goal-review ledger rows (#1596) without changing the
-    evidence lines, their order, or any demand behavior.
+    name that contributed at least one line.
+
+    ADR-020 Rule 1: Scorecard gaps remain diagnostic metrics and ranking inputs,
+    but cease to be a source of work. They are NOT added as citable evidence lines,
+    preventing metric self-pumping. Scorecard readability is still tracked in
+    ``source_status["scorecard_gaps"]`` for decision provenance (#1596).
     """
     lines: list[str] = []
     source_starts: dict[str, int] = {}
-    scorecard_start = len(lines)
     scorecard_readable = scorecard_available and isinstance(snapshot.get("gaps"), list)
     try:
+        # Validate that gaps structure is readable if present
         for gap in snapshot.get("gaps") or []:
             if not isinstance(gap, dict):
                 continue
-            evidence = str(gap.get("evidence") or "").strip()
-            if evidence:
-                lines.append(evidence)
     except Exception:
         scorecard_readable = False
     if source_status is not None:
         source_status["scorecard_gaps"] = "complete" if scorecard_readable else "unavailable"
-    if sources is not None and len(lines) > scorecard_start:
-        sources.add("scorecard_gaps")
-        source_starts["scorecard_gaps"] = scorecard_start
+    # ADR-020 Rule 1: No gap lines are added to `lines`. Scorecard gaps do not mint priorities.
     decay_start = len(lines)
     decay_available = True
     try:
@@ -1001,7 +999,8 @@ def maybe_goal_review(
             source_status.get(source) == "complete" for source in _EVIDENCE_SOURCES
         )
         if not evidence:
-            # No measured gap and no decay evidence — nothing a priority
+            # ADR-020 Rule 1: With gaps no longer citable evidence, if there is
+            # no decay or supported hypothesis evidence, nothing a priority
             # could cite. Honest no-op, zero LLM calls.
             _record_review(
                 state_dir, "no_gaps", evidence_sources=evidence_sources,
