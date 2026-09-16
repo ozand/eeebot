@@ -379,6 +379,9 @@ class LiteLLMProvider(LLMProvider):
 
         reasoning_content = getattr(message, "reasoning_content", None) or None
         thinking_blocks = getattr(message, "thinking_blocks", None) or None
+        # #1660: the deployment that actually answered -- distinct from the
+        # requested model group whenever a router fallback substitutes one.
+        served_model = getattr(response, "model", None) or None
 
         return LLMResponse(
             content=content,
@@ -387,6 +390,7 @@ class LiteLLMProvider(LLMProvider):
             usage=usage,
             reasoning_content=reasoning_content,
             thinking_blocks=thinking_blocks,
+            served_model=served_model,
         )
 
     def get_default_model(self) -> str:

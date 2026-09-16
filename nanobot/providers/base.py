@@ -48,6 +48,14 @@ class LLMResponse:
     usage: dict[str, int] = field(default_factory=dict)
     reasoning_content: str | None = None  # Kimi, DeepSeek-R1 etc.
     thinking_blocks: list[dict] | None = None  # Anthropic extended thinking
+    # #1660: the model that actually served the call, read from the
+    # provider's own response (e.g. litellm's `response.model`) -- distinct
+    # from the requested model whenever a gateway fallback substitutes a
+    # different deployment. None when the response carries no model (an
+    # error path, or a provider that doesn't report one); callers fall back
+    # to the requested model in that case, mirroring what llm_proposer.py's
+    # own call site already does.
+    served_model: str | None = None
 
     @property
     def has_tool_calls(self) -> bool:
@@ -264,9 +272,16 @@ class LLMProvider(ABC):
         resolved_model = model or self.get_default_model()
 
         def _record(response: LLMResponse, retries: int, sent_messages: list[dict[str, Any]]) -> LLMResponse:
+            # #1660: prefer the model that actually served the call over the
+            # one requested -- a gateway fallback substitutes a different
+            # deployment, and telemetry recording the request unconditionally
+            # cannot distinguish that from an ordinary call. Falls back to
+            # resolved_model when the response carries none (error path, or
+            # a provider that doesn't report one).
+            telemetry_model = response.served_model or resolved_model
             try:
                 record_llm_call(
-                    model=resolved_model,
+                    model=telemetry_model,
                     duration_ms=(time.monotonic() - call_start) * 1000,
                     usage=response.usage,
                     finish_reason=response.finish_reason,
@@ -282,7 +297,7 @@ class LLMProvider(ABC):
                 content=response.content,
                 reasoning_content=response.reasoning_content,
                 finish_reason=response.finish_reason,
-                model=resolved_model,
+                model=telemetry_model,
                 prompt_tokens=response.usage.get("prompt_tokens"),
                 completion_tokens=response.usage.get("completion_tokens"),
             )
