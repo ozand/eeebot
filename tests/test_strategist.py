@@ -295,6 +295,37 @@ def test_run_strategist_end_to_end(mock_state_and_repo, monkeypatch):
     assert hyp_data["entries"][0]["title"] == "Subagent isolation"
 
 
+def test_default_llm_passes_max_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1661: _default_llm must configure max_retries on the client so transient 503s don't cost a full day."""
+    from unittest.mock import MagicMock
+
+    from nanobot.runtime.strategist import _default_llm
+
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://fake-litellm:4000")
+    monkeypatch.setenv("LITELLM_API_KEY", "fake-key")
+    monkeypatch.setenv("SELFEVO_STRATEGIST_MAX_RETRIES", "5")
+
+    captured_kwargs = {}
+
+    class DummyOpenAI:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            self.chat = MagicMock()
+            choice = MagicMock()
+            choice.message.content = "{}"
+            choice.finish_reason = "stop"
+            resp = MagicMock()
+            resp.choices = [choice]
+            resp.usage = MagicMock()
+            self.chat.completions.create.return_value = resp
+
+    with patch("openai.OpenAI", DummyOpenAI):
+        res = _default_llm([{"role": "user", "content": "hi"}], "test-model")
+        assert res == "{}"
+        assert captured_kwargs.get("max_retries") == 5
+        assert captured_kwargs.get("timeout") == 120
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits only")
 def test_strategist_atomic_json_mode_0644_under_restrictive_umask(tmp_path: Path) -> None:
     """#1096: _atomic_json must produce 0644 files even with umask 0077.
