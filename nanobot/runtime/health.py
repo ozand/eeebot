@@ -369,6 +369,17 @@ def read_subagent_queue_depth(state_root: Path) -> int:
     return len(list(_json_files_sorted_by_mtime(False, requests_dir)))
 
 
+def read_derived_priorities_queue(state_root: Path) -> dict[str, int]:
+    """Read depth and limit for derived priorities under state/goals/."""
+    from nanobot.runtime import goal_review
+
+    priorities = goal_review.read_derived_priorities(state_root / "goals")
+    return {
+        "depth": len(priorities),
+        "limit": goal_review._DERIVED_PRIORITIES_MAX,
+    }
+
+
 def build_cycle_health_summary(
     state_root: Path,
     *,
@@ -394,6 +405,7 @@ def build_cycle_health_summary(
     promotion_readiness = _promotion_readiness(runtime)
     autonomous_commits_24h = read_autonomous_commits_24h(state_root, runner=runner)
     subagent_queue_depth = read_subagent_queue_depth(state_root)
+    derived_queue = read_derived_priorities_queue(state_root)
     summary = {
         "schema_version": "cycle-health-summary-v2",
         "runtime_state_source": runtime.get("runtime_state_source"),
@@ -409,6 +421,9 @@ def build_cycle_health_summary(
         "success_signals": {
             "autonomous_commits_24h": autonomous_commits_24h,
             "subagent_queue_depth": subagent_queue_depth,
+            "derived_priorities_queue_depth": derived_queue["depth"],
+            "derived_priorities_queue_limit": derived_queue["limit"],
+            "derived_priorities_queue": derived_queue,
         },
     }
 

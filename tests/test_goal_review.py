@@ -56,6 +56,21 @@ VALID_PRIORITY = {
 }
 
 
+DECAY_EVIDENCE_ITEM = {
+    "path": "scripts/loop_health_report.py",
+    "stale_since": "2026-06-01T00:00:00Z",
+}
+
+
+def _mock_decay(monkeypatch, items=None):
+    if items is None:
+        items = [DECAY_EVIDENCE_ITEM]
+    monkeypatch.setattr(
+        "nanobot.runtime.usage_evidence.stale_artifacts_status",
+        lambda *_args, **_kwargs: (items, "complete"),
+    )
+
+
 def _write_goal_text(state_dir: Path, text: str = GOAL_TEXT) -> None:
     path = state_dir / "goals" / "goal_text.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -244,6 +259,7 @@ class TestAppend:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _mock_decay(monkeypatch)
         second = {
             "label": "Dashboard usage ping",
             "body": "Add one function to scripts/eeebot_dashboard.py that logs "
@@ -295,7 +311,7 @@ class TestAppend:
         assert rows[0]["produced"] == titles
         assert rows[0]["rejected"] == []
         assert rows[0]["inputs_hash"]
-        assert rows[0]["evidence_sources"] == ["scorecard_gaps"]
+        assert rows[0]["evidence_sources"] == ["decay"]
         assert rows[0]["direction_at_review"] is None
 
     def test_dedup_keeps_operator_entries_untouched(self, tmp_path, monkeypatch, enabled):
@@ -304,6 +320,7 @@ class TestAppend:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _mock_decay(monkeypatch)
         duplicate = dict(VALID_PRIORITY, label="Loop health in dashboard")
         monkeypatch.setattr(
             goal_review, "_call_llm", lambda ctx: {"priorities": [duplicate, VALID_PRIORITY]}
@@ -324,6 +341,7 @@ class TestAppend:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _mock_decay(monkeypatch)
         cands = [
             dict(VALID_PRIORITY, label=f"Bounded change number {i}") for i in range(5)
         ]
@@ -345,6 +363,7 @@ class TestValidation:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _mock_decay(monkeypatch)
         no_evidence = dict(VALID_PRIORITY, label="Uncited invention", evidence="")
         unknown_evidence = dict(VALID_PRIORITY, label="Fabricated citation", evidence="E9")
         monkeypatch.setattr(
@@ -386,6 +405,7 @@ class TestValidation:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _mock_decay(monkeypatch)
         bad = dict(VALID_PRIORITY, label="Fix: the loop (v2).")
         monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [bad]})
 
@@ -414,6 +434,7 @@ class TestVectorBias:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _mock_decay(monkeypatch)
         v2_priority = dict(VALID_PRIORITY, label="Dashboard usage ping", vector="V2")
         monkeypatch.setattr(
             goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY, v2_priority]}
@@ -433,6 +454,7 @@ class TestWatermark:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _mock_decay(monkeypatch)
         monkeypatch.setattr(
             goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY]}
         )
@@ -570,6 +592,7 @@ class TestRetention:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _mock_decay(monkeypatch)
         tech_tree.ensure_seeded(state_dir, now=NOW)
         portfolio = tech_tree.read_portfolio(state_dir)
         portfolio["current"] = "proposer-quality"
@@ -581,7 +604,7 @@ class TestRetention:
         row = _goal_review_rows(state_dir)[0]
         assert goal_review.goal_review_retention(row) == {
             "status": "complete",
-            "evidence_sources": ("scorecard_gaps",),
+            "evidence_sources": ("decay",),
             "direction": "proposer-quality",
         }
 
@@ -653,6 +676,7 @@ class TestRetention:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _mock_decay(monkeypatch)
         tech_tree.ensure_seeded(state_dir, now=NOW)
         portfolio = tech_tree.read_portfolio(state_dir)
         portfolio["current"] = "proposer-quality"
@@ -666,7 +690,7 @@ class TestRetention:
         assert row["outcome"] == "error"
         assert goal_review.goal_review_retention(row) == {
             "status": "complete",
-            "evidence_sources": ("scorecard_gaps",),
+            "evidence_sources": ("decay",),
             "direction": "proposer-quality",
         }
 
@@ -676,12 +700,12 @@ class TestRetention:
         snapshot = {"gaps": [{"evidence": f"gap-{i}"} for i in range(goal_review._MAX_EVIDENCE_LINES)]}
         monkeypatch.setattr(
             "nanobot.runtime.usage_evidence.stale_artifacts",
-            lambda *_args, **_kwargs: [{"path": "scripts/stale.py", "stale_since": "2026-01-01"}],
+            lambda *_args, **_kwargs: [{"path": f"scripts/stale_{i}.py", "stale_since": "2026-01-01"} for i in range(goal_review._MAX_EVIDENCE_LINES + 5)],
         )
         sources: set[str] = set()
         evidence = goal_review._collect_evidence(state_dir, None, snapshot, NOW, sources=sources)
         assert len(evidence) == goal_review._MAX_EVIDENCE_LINES
-        assert sources == {"scorecard_gaps"}
+        assert sources == {"decay"}
 
 
 class TestDerivedPriorities:
@@ -691,6 +715,7 @@ class TestDerivedPriorities:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _mock_decay(monkeypatch)
         monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY]})
 
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
@@ -803,6 +828,7 @@ class TestDerivedPriorities:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _mock_decay(monkeypatch)
         monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY]})
         goal_review.maybe_goal_review(state_dir, None, now=NOW)
 
@@ -819,6 +845,7 @@ class TestDerivedPriorities:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _mock_decay(monkeypatch)
         goal_review._write_derived_priorities(
             state_dir,
             [
@@ -946,6 +973,7 @@ class TestDerivedPriorities:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _mock_decay(monkeypatch)
         monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY]})
         goal_review.maybe_goal_review(state_dir, None, now=NOW)
 
