@@ -268,32 +268,13 @@ class AgentLoop:
                     _lb_last_key = _resp_key
                     _lb_count = 1
 
-                if _lb_count >= 2 * _lbk:
+                if _lb_count >= _lbk:
                     _names = ", ".join(tc.name for tc in response.tool_calls)
                     logger.warning(
-                        "Agent loop abort: {} identical response tuples (2K={})",
-                        _lb_count, 2 * _lbk,
+                        "Agent loop abort: {} identical response tuples (K={})",
+                        _lb_count, _lbk,
                     )
                     _lb_aborted = True
-                elif _lb_count == _lbk:
-                    _last_tc = response.tool_calls[-1]
-                    _names = ", ".join(tc.name for tc in response.tool_calls)
-                    logger.info(
-                        "Agent loop warning: {} identical response tuples",
-                        _lb_count,
-                    )
-                    # Inject warning as a synthetic tool result
-                    messages = self.context.add_tool_result(
-                        messages,
-                        _last_tc.id + "-lb",
-                        "loop_breaker",
-                        (
-                            f"Safety stop: this response (tools: [{_names}]) has been "
-                            f"repeated {_lb_count} consecutive times with no change. "
-                            f"Change approach, try a different strategy, or "
-                            f"provide the final answer now."
-                        ),
-                    )
 
                 if _lb_aborted:
                     break

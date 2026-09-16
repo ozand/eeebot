@@ -167,17 +167,15 @@ async def _run_manager(tmp_path, provider, max_iterations=50, monkeypatch=None, 
 
 
 class TestSubagentLoopBreaker:
-    async def test_k_identical_calls_inject_break_message(self, tmp_path, monkeypatch):
-        """After K identical calls a synthetic message is injected; the run continues."""
+    async def test_k_identical_calls_abort_with_stop_reason(self, tmp_path, monkeypatch):
+        """K consecutive identical calls abort with stop_reason=identical_call_loop."""
         monkeypatch.setenv("NANOBOT_LOOP_BREAKER_K", "2")
-        # 2 identical calls → warning injection, then final answer on call 3
-        provider = _RepeatProvider(repeat_count=2, final="finished")
-        telem = await _run_manager(tmp_path, provider, max_iterations=20)
-        # Run must complete without abort
-        assert telem["status"] == "ok"
-        assert telem.get("stop_reason") is None
-        # Provider was called 3 times (2 tool calls + 1 final answer)
-        assert provider.calls == 3
+        # 2+ identical calls → abort at K=2
+        provider = _RepeatProvider(repeat_count=100, final="should not reach")
+        telem = await _run_manager(tmp_path, provider, max_iterations=100)
+        assert telem.get("stop_reason") == "identical_call_loop"
+        assert telem["status"] == "bounded_stop"
+        assert "identical_call_loop" in telem["result"]
 
     async def test_counter_resets_on_differing_call(self, tmp_path, monkeypatch):
         """A different tool call after K-1 identical calls resets the counter."""
@@ -187,16 +185,6 @@ class TestSubagentLoopBreaker:
         telem = await _run_manager(tmp_path, provider, max_iterations=20)
         # Should NOT be an identical_call_loop abort since args changed
         assert telem.get("stop_reason") != "identical_call_loop"
-
-    async def test_2k_identical_calls_abort_with_stop_reason(self, tmp_path, monkeypatch):
-        """2K consecutive identical calls abort with stop_reason=identical_call_loop."""
-        monkeypatch.setenv("NANOBOT_LOOP_BREAKER_K", "2")
-        # 4+ identical calls → abort at 2K=4
-        provider = _RepeatProvider(repeat_count=100, final="should not reach")
-        telem = await _run_manager(tmp_path, provider, max_iterations=100)
-        assert telem.get("stop_reason") == "identical_call_loop"
-        assert telem["status"] == "bounded_stop"
-        assert "identical_call_loop" in telem["result"]
 
     async def test_polling_with_changing_args_never_aborts(self, tmp_path, monkeypatch):
         """Changing arguments (polling) reset the counter and must never abort."""
@@ -255,8 +243,8 @@ class TestSubagentWallClockDeadline:
 # ── AgentLoop integration tests ───────────────────────────────────────────────
 
 class TestAgentLoopBreaker:
-    async def test_agent_loop_2k_identical_calls_abort(self, tmp_path, monkeypatch):
-        """AgentLoop._run_agent_loop aborts at 2K identical tool calls."""
+    async def test_agent_loop_k_identical_calls_abort(self, tmp_path, monkeypatch):
+        """AgentLoop._run_agent_loop aborts at K identical tool calls."""
         monkeypatch.setenv("NANOBOT_LOOP_BREAKER_K", "2")
         from nanobot.agent.loop import AgentLoop
         from nanobot.bus.queue import MessageBus
@@ -405,7 +393,7 @@ class TestMultiToolResponseBreaker:
     must trigger the breaker; alternating [A, B], [C, D] must not."""
 
     async def test_subagent_multi_tool_repeated_aborts(self, tmp_path, monkeypatch):
-        """SubagentManager: response [exec, read] repeated 2K times → abort."""
+        """SubagentManager: response [exec, read] repeated K times → abort."""
         monkeypatch.setenv("NANOBOT_LOOP_BREAKER_K", "2")
 
         class _MultiToolProvider(_Provider):
@@ -427,6 +415,7 @@ class TestMultiToolResponseBreaker:
         telem = await _run_manager(tmp_path, provider, max_iterations=100)
         assert telem.get("stop_reason") == "identical_call_loop"
         assert telem["status"] == "bounded_stop"
+        assert provider.calls == 2
 
     async def test_subagent_alternating_multi_tool_no_abort(self, tmp_path, monkeypatch):
         """SubagentManager: alternating [A, B] / [C, D] must NOT trigger the breaker."""
