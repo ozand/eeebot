@@ -424,34 +424,14 @@ class SubagentManager:
                         _lb_last_key = _resp_key
                         _lb_count = 1
 
-                    if _lb_count >= 2 * _lbk:
-                        # Hard abort: 2K identical response tuples.
+                    if _lb_count >= _lbk:
                         _names = ", ".join(tc.name for tc in response.tool_calls)
                         logger.warning(
-                            "Subagent [{}] abort: {} identical response tuples (2K={})",
-                            task_id, _lb_count, 2 * _lbk,
+                            "Subagent [{}] abort: {} identical response tuples (K={})",
+                            task_id, _lb_count, _lbk,
                         )
                         stop_reason = "identical_call_loop"
                         break
-                    elif _lb_count == _lbk:
-                        # Warning injection at exactly K: add synthetic tool result message.
-                        _last_tc = response.tool_calls[-1]
-                        _names = ", ".join(tc.name for tc in response.tool_calls)
-                        logger.info(
-                            "Subagent [{}] loop-breaker warning: {} identical response tuples",
-                            task_id, _lb_count,
-                        )
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": _last_tc.id + "-lb",
-                            "name": "loop_breaker",
-                            "content": (
-                                f"Safety stop: this response (tools: [{_names}]) has been "
-                                f"repeated {_lb_count} consecutive times with no change. "
-                                f"Change approach, try a different strategy, or "
-                                f"provide the final answer now."
-                            ),
-                        })
                 else:
                     final_result = response.content
                     break
