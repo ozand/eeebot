@@ -41,10 +41,14 @@ class _FsTool(Tool):
         workspace: Path | None = None,
         allowed_dir: Path | None = None,
         extra_allowed_dirs: list[Path] | None = None,
+        denied_paths: set[Path] | None = None,
+        on_prevent_write: Callable[[Path], None] | None = None,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
         self._extra_allowed_dirs = extra_allowed_dirs
+        self._denied_paths = {p.resolve() for p in denied_paths} if denied_paths else set()
+        self._on_prevent_write = on_prevent_write
 
     def _resolve(self, path: str) -> Path:
         return _resolve_path(path, self._workspace, self._allowed_dir, self._extra_allowed_dirs)
@@ -189,6 +193,10 @@ class WriteFileTool(_FsTool):
     async def execute(self, path: str, content: str, **kwargs: Any) -> str:
         try:
             fp = self._resolve(path)
+            if self._denied_paths and fp.resolve() in self._denied_paths:
+                if self._on_prevent_write:
+                    self._on_prevent_write(fp)
+                return f"Error: Write access to protected sidecar is blocked: {path}"
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} bytes to {fp}"
@@ -265,6 +273,10 @@ class EditFileTool(_FsTool):
     ) -> str:
         try:
             fp = self._resolve(path)
+            if self._denied_paths and fp.resolve() in self._denied_paths:
+                if self._on_prevent_write:
+                    self._on_prevent_write(fp)
+                return f"Error: Edit access to protected sidecar is blocked: {path}"
             if not fp.exists():
                 return f"Error: File not found: {path}"
 

@@ -128,6 +128,7 @@ class SubagentManager:
         excluded_skill_names: "list[str] | None" = None,
         telemetry_component: str = "",
         web_tools_enabled: bool = False,
+        denied_paths: "set[Path] | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -147,6 +148,8 @@ class SubagentManager:
         # than the coordinator's budget allows.
         self.max_iterations = int(max_iterations) if max_iterations else 15
         self.restrict_to_workspace = restrict_to_workspace
+        self.denied_paths = {p.resolve() for p in denied_paths} if denied_paths else set()
+        self.prevented_access_attempts: list[str] = []
         self.system_context = system_context.strip()
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
@@ -265,14 +268,29 @@ class SubagentManager:
                 extra_allowed_dirs=extra_read,
                 on_skill_read=_on_skill_read,
             ))
-            tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
-            tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
+            def _record_prevented_access(p: Path) -> None:
+                self.prevented_access_attempts.append(str(p))
+
+            tools.register(WriteFileTool(
+                workspace=self.workspace,
+                allowed_dir=allowed_dir,
+                denied_paths=self.denied_paths,
+                on_prevent_write=_record_prevented_access,
+            ))
+            tools.register(EditFileTool(
+                workspace=self.workspace,
+                allowed_dir=allowed_dir,
+                denied_paths=self.denied_paths,
+                on_prevent_write=_record_prevented_access,
+            ))
             tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(ExecTool(
                 working_dir=str(self.workspace),
                 timeout=self.exec_config.timeout,
                 restrict_to_workspace=self.restrict_to_workspace,
                 path_append=self.exec_config.path_append,
+                denied_paths=self.denied_paths,
+                on_prevent_access=_record_prevented_access,
             ))
             tools.register(MemorySearchTool(
                 workspace=self.workspace,
