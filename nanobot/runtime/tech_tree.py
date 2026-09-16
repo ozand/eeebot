@@ -369,11 +369,52 @@ def _match_existing_node(text: str, nodes: dict[str, Any]) -> 'str | None':
         return None
 
 
-def _slugify(text: str) -> str:
+# The bound was a bare ``[:40]`` from this module's very first commit
+# (#879, a8407ff7) -- never documented, never revisited, and cut mid-word
+# (#1686): the node's dict key, its ``current`` value, and every
+# ``direction_for_metric``/``matches_direction`` comparison read a
+# fragment like ``automated-structural-assertion-for-doc-o``. Raised to 60
+# here -- long enough that two distinct hypothesis titles sharing an
+# identical prefix this long is rarer still, short enough to stay a usable
+# dict key/display fallback for a node whose full text isn't stored (see
+# ``_SLUG_MAX_LEN`` used below). The untruncated text is no longer lost
+# regardless of the exact bound: :func:`maybe_mint_node` stores it in the
+# node's own ``label`` field, so the key's length is a display convenience
+# now, not the only record of the original intent.
+_SLUG_MAX_LEN = 60
+
+
+def _slugify(text: str, max_len: int = _SLUG_MAX_LEN) -> str:
+    """Hyphenated lowercase slug, truncated to *max_len* on a WORD
+    boundary -- never mid-token (#1686). If the text is already short
+    enough, or has no hyphen at all, it is returned whole. If its very
+    first token alone exceeds *max_len* (no hyphen within budget), that
+    whole token is kept rather than split -- a longer key beats a
+    mid-word fragment."""
     try:
-        return re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")[:40]
+        slug = re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")
+        if len(slug) <= max_len:
+            return slug
+        cut = slug.rfind("-", 0, max_len + 1)
+        if cut <= 0:
+            next_hyphen = slug.find("-", max_len)
+            return slug if next_hyphen < 0 else slug[:next_hyphen]
+        return slug[:cut]
     except Exception:
         return ""
+
+
+def _unique_node_name(base_name: str, nodes: dict[str, Any]) -> str:
+    """*base_name* if free, else a numeric-suffixed variant not already in
+    *nodes* (#1686). Two distinct source texts whose slugs collide --
+    trivially possible when both are truncated to the same length prefix
+    -- get distinct keys and distinct gain histories instead of the second
+    one silently merging into the first's node."""
+    name, suffix = base_name, 2
+    while name in nodes:
+        name = f"{base_name}-{suffix}"
+        suffix += 1
+    return name
 
 
 # ─── seeding ─────────────────────────────────────────────────────────────────
@@ -862,10 +903,7 @@ def maybe_mint_node(state_dir: Any, supported: 'list[dict[str, Any]] | None') ->
             name = _slugify(title)
             if not name:
                 continue
-            base_name, suffix = name, 2
-            while name in nodes:
-                name = f"{base_name}-{suffix}"
-                suffix += 1
+            name = _unique_node_name(name, nodes)
 
             lever_metric = metric_hint if metric_hint in _KNOWN_LEVER_DIRECTIONS else DEFAULT_MINT_LEVER
             direction = _KNOWN_LEVER_DIRECTIONS.get(lever_metric, "higher")
@@ -878,6 +916,14 @@ def maybe_mint_node(state_dir: Any, supported: 'list[dict[str, Any]] | None') ->
                 "minted_by": "hypothesis",
                 "created_ts": now_iso,
                 "last_lever_value": None,
+                # #1686: the key is truncated/slugified for storage; the
+                # full original hypothesis title is kept here so the
+                # display label and the identity key can diverge without
+                # losing the source text. Falls back to the key itself in
+                # :func:`portfolio_snapshot` for any node lacking one (the
+                # five hand-named seed nodes, and the two pre-#1686
+                # truncated nodes this fix intentionally leaves as-is).
+                "label": title,
             }
             portfolio["last_mint_ts"] = now_iso
             minted_name = name
@@ -906,13 +952,21 @@ def maybe_mint_node(state_dir: Any, supported: 'list[dict[str, Any]] | None') ->
 
 
 def portfolio_snapshot(state_dir: Any) -> dict[str, Any]:
-    """``{current, nodes, switches, frontier}`` visibility for preference state.
+    """``{current, current_label, nodes, switches, frontier}`` visibility
+    for preference state.
 
-    Legacy portfolios with no probe/prerequisite fields keep the previous node
-    payload byte-for-byte; only ``frontier: []`` is additive at the envelope.
-    Read by
-    ``scorecard._control_plane_snapshot``-style visibility wiring. Fail-open
-    to ``{}``."""
+    Legacy portfolios with no probe/prerequisite fields keep the previous
+    node payload otherwise unchanged; ``frontier: []`` and, as of #1686,
+    ``label``/``current_label`` are additive. ``current``/``nodes`` keys
+    remain the raw (possibly truncated, #1686) identity every other reader
+    of this store compares against -- ``label`` is ONLY a display string,
+    read by the operator dashboard instead of the key. A node minted before
+    #1686, or a seed node, carries no stored label; it falls back to its
+    own key/name, which is exactly what such a reader already prints today
+    -- no worse, and the pre-#1686 truncated identifiers (grandfathered,
+    not migrated -- their source text is not recoverable) look the same as
+    before. Read by ``scorecard._control_plane_snapshot``-style visibility
+    wiring. Fail-open to ``{}``."""
     try:
         portfolio = read_portfolio(state_dir)
         nodes = portfolio.get("nodes") or {}
@@ -924,6 +978,7 @@ def portfolio_snapshot(state_dir: Any) -> dict[str, Any]:
                 "mean_gain": round(node_mean_gain(node), 6),
                 "attempts": len(node.get("gain_history") or []),
                 "lever_metric": node.get("lever_metric"),
+                "label": node.get("label") or name,
             }
             probe = _probe_result(node)
             if probe is not None:
@@ -932,8 +987,12 @@ def portfolio_snapshot(state_dir: Any) -> dict[str, Any]:
             if prerequisites:
                 payload["prerequisites"] = prerequisites
             nodes_out[name] = payload
+        current = portfolio.get("current")
+        current_node = nodes.get(current) if isinstance(current, str) else None
+        current_label = (current_node or {}).get("label") or current
         return {
-            "current": portfolio.get("current"),
+            "current": current,
+            "current_label": current_label,
             "nodes": nodes_out,
             "switches": len(portfolio.get("switches") or []),
             "frontier": frontier,

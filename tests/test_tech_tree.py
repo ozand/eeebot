@@ -12,6 +12,7 @@ injected — no test reaches a provider or real ``random``.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -439,7 +440,55 @@ class TestSelectCurrentDirection:
         assert node["status"] == "plateaued"
 
 
-# ─── minting from a supported hypothesis ────────────────────────────────────
+# ─── slug identity (#1686) ──────────────────────────────────────────────────
+
+
+class TestSlugify:
+    def test_long_text_truncates_on_a_word_boundary(self):
+        # This text's _SLUG_MAX_LEN-character prefix falls inside the word
+        # "documentation" (mirrors the issue's own live example, where the
+        # 40-char cut of #1686 landed inside "doc-only"/"fallback-proposer").
+        text = "Automated structural assertion checking for documentation only sections"
+        slug = tech_tree._slugify(text)
+        assert len(slug) <= tech_tree._SLUG_MAX_LEN
+        assert not slug.endswith("-")
+        # Every character up to the cut is a real prefix of the untruncated
+        # slug -- i.e. the cut landed exactly on a "-" boundary, not mid-word.
+        full = re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")
+        assert full.startswith(slug)
+        assert len(full) > len(slug)
+        assert full[len(slug)] == "-"
+
+    def test_short_text_is_returned_whole(self):
+        assert tech_tree._slugify("Cache widget results") == "cache-widget-results"
+
+    def test_single_token_longer_than_budget_is_kept_whole_not_split(self):
+        # No hyphen anywhere -- there is no boundary to cut at, so the
+        # single overlong token survives rather than being chopped mid-word.
+        text = "a" * 90
+        assert tech_tree._slugify(text, max_len=40) == text
+
+    def test_first_token_alone_exceeds_budget_is_kept_whole(self):
+        # The first token has no hyphen within the budget; the fix keeps it
+        # whole (a longer key) rather than cut inside it.
+        text = "a" * 50 + " short tail"
+        slug = tech_tree._slugify(text, max_len=40)
+        assert slug.split("-")[0] == "a" * 50
+
+    def test_two_distinct_texts_sharing_a_full_length_prefix_get_distinct_slugs_via_dedup(self):
+        # Two source texts identical for the whole slug budget, differing
+        # only after it, collapse to the SAME truncated slug on their own --
+        # #1686's collision case. _unique_node_name is what must keep them
+        # apart once both reach node-name assignment.
+        prefix = "futile surface filtering in fallback " + ("word " * 6)
+        text_a = prefix + "proposer selection path alpha"
+        text_b = prefix + "prospecting engine path beta"
+        slug_a, slug_b = tech_tree._slugify(text_a), tech_tree._slugify(text_b)
+        assert slug_a == slug_b  # confirms the collision premise
+        nodes = {slug_a: {}}
+        unique_b = tech_tree._unique_node_name(slug_b, nodes)
+        assert unique_b != slug_a
+        assert unique_b not in nodes
 
 
 class TestMaybeMintNode:
@@ -521,6 +570,51 @@ class TestMaybeMintNode:
         minted = tech_tree.maybe_mint_node(tmp_path, [{"title": "Widget cache thing", "evidence": {}}])
         assert minted == "widget-cache-thing-2"
 
+    def test_two_titles_sharing_a_full_length_prefix_mint_two_distinct_nodes(self, tmp_path, monkeypatch):
+        """#1686: two distinct hypothesis titles that slugify to the exact
+        same string (sharing the whole slug budget as a prefix) must not
+        silently become one node with merged gain history. Domain-mapping
+        is monkeypatched off (same pattern as test_name_dedup_on_collision)
+        so this isolates the slug-uniqueness mechanism itself rather than
+        the separate, unrelated token-overlap heuristic."""
+        tech_tree.ensure_seeded(tmp_path, now=NOW)
+        monkeypatch.setattr(tech_tree, "_match_existing_node", lambda *a, **k: None)
+        prefix = "futile surface filtering in fallback " + ("word " * 6)
+        title_a = prefix + "proposer selection path alpha"
+        title_b = prefix + "prospecting engine path beta"
+        assert tech_tree._slugify(title_a) == tech_tree._slugify(title_b)  # collision premise
+
+        minted_a = tech_tree.maybe_mint_node(tmp_path, [{"title": title_a, "evidence": {}}])
+        assert minted_a is not None
+
+        portfolio = tech_tree.read_portfolio(tmp_path)
+        portfolio["last_mint_ts"] = _iso(NOW - timedelta(hours=tech_tree.MINT_MIN_INTERVAL_HOURS + 1))
+        tech_tree._write_portfolio(tmp_path, portfolio)
+        minted_b = tech_tree.maybe_mint_node(tmp_path, [{"title": title_b, "evidence": {}}])
+        assert minted_b is not None
+
+        assert minted_a != minted_b
+        nodes = tech_tree.read_portfolio(tmp_path)["nodes"]
+        assert nodes[minted_a]["label"] == title_a
+        assert nodes[minted_b]["label"] == title_b
+        assert nodes[minted_a]["gain_history"] == []
+        assert nodes[minted_b]["gain_history"] == []
+
+    def test_label_round_trips_through_write_and_read(self, tmp_path):
+        """#1686: the full pre-slug title is retained on the node, not just
+        the (possibly truncated) key."""
+        tech_tree.ensure_seeded(tmp_path, now=NOW)
+        title = "Automated structural assertion checking for documentation only sections that never run in CI"
+        minted = tech_tree.maybe_mint_node(tmp_path, [{"title": title, "evidence": {}}])
+        assert minted is not None
+        assert len(minted) <= tech_tree._SLUG_MAX_LEN  # the key stays short/truncated
+
+        node = tech_tree.read_portfolio(tmp_path)["nodes"][minted]
+        assert node["label"] == title  # the label carries the untruncated text
+
+        snap = tech_tree.portfolio_snapshot(tmp_path)
+        assert snap["nodes"][minted]["label"] == title
+
     def test_known_metric_hint_used_for_lever(self, tmp_path):
         tech_tree.ensure_seeded(tmp_path, now=NOW)
         minted = tech_tree.maybe_mint_node(
@@ -552,21 +646,24 @@ class TestPortfolioSnapshot:
     def test_shape(self, tmp_path):
         tech_tree.ensure_seeded(tmp_path, now=NOW)
         snap = tech_tree.portfolio_snapshot(tmp_path)
-        assert set(snap.keys()) == {"current", "nodes", "switches", "frontier"}
+        assert set(snap.keys()) == {"current", "current_label", "nodes", "switches", "frontier"}
         assert snap["frontier"] == []
         assert set(snap["nodes"].keys()) == {s["name"] for s in tech_tree.SEED_NODES}
-        for node in snap["nodes"].values():
-            assert set(node.keys()) == {"status", "mean_gain", "attempts", "lever_metric"}
+        for name, node in snap["nodes"].items():
+            assert set(node.keys()) == {"status", "mean_gain", "attempts", "lever_metric", "label"}
             assert node["status"] == "active"
             assert node["mean_gain"] == 0.0
             assert node["attempts"] == 0
+            # #1686: a seed node stores no explicit label -- falls back to
+            # its own (already clean, hand-chosen) key.
+            assert node["label"] == name
 
     def test_fail_open_on_corrupt_sidecar(self, tmp_path):
         path = tmp_path / "tech_tree" / "portfolio.json"
         path.parent.mkdir(parents=True)
         path.write_text("{not json", encoding="utf-8")
         assert tech_tree.portfolio_snapshot(tmp_path) == {
-            "current": None, "nodes": {}, "switches": 0, "frontier": [],
+            "current": None, "current_label": None, "nodes": {}, "switches": 0, "frontier": [],
         }
 
 
