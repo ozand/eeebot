@@ -61,6 +61,7 @@ from nanobot.runtime.lesson_v2 import (
     validate_lesson_for_mint,
 )
 from nanobot.runtime.model_registry import resolve_model
+from nanobot.runtime.retirement_candidates import propose_retirement
 from nanobot.runtime.schemas import CONTROLLED_LESSON_TAGS
 from nanobot.runtime.state_access import ledger_window
 from nanobot.runtime.trainer_evidence import validate_trainer_citation
@@ -2438,6 +2439,61 @@ def apply_staged_lesson_cards(repo_root: Path, payload: Any, *, state_dir: Path 
         existing, _unknown = fill_related_links(existing)
         atomic_write_yaml(target, {"lessons": existing})
     return applied
+
+
+# #1672 measured that only 4 of 59 zero-cited lessons were offered >= 10
+# times in the retained window; the rest (offered 1-3x) are too thin to
+# say anything about that specific lesson -- an item nobody was ever
+# really shown cannot be evidence that it "doesn't help". Below this
+# floor, stage_retirement_proposal refuses the proposal outright.
+MIN_RETIREMENT_EXPOSURE = 10
+
+
+def stage_retirement_proposal(state_dir: Path, candidate: dict[str, Any]) -> dict[str, Any]:
+    """ADR-021 rule 3, first checkbox: a proposal to retire cites the
+    non-use evidence it rests on -- and this is the gate for it, the
+    retire-side sibling of :func:`apply_staged_lesson_cards`. *candidate*
+    is one row from :func:`retirement_candidates.retirement_candidates`.
+
+    This STAGES a proposal only: it validates the citation
+    (:func:`trainer_evidence.validate_trainer_citation`) and the exposure
+    floor (:data:`MIN_RETIREMENT_EXPOSURE`), then records the outcome as a
+    ``decisions.jsonl`` row (``retirement_proposed`` on acceptance,
+    ``retirement_declined`` with a reason otherwise) -- exactly like a
+    declined lesson-card citation above. It never deletes anything, calls
+    no other gate, and has no caller in the loop yet; an operator or a
+    later phase reads the accepted proposals and applies them.
+
+    :func:`retirement_candidates.propose_retirement` is called ONLY from
+    here (enforced by ``tests/test_trainer_no_direct_mutation.py``) --
+    nothing can turn a candidate into a proposal without also going
+    through this validation.
+
+    Returns ``{"accepted": bool, "reason": str}``.
+    """
+    proposal = propose_retirement(candidate)
+    target_id = str(proposal.get("target_id") or "")
+    kind = str(proposal.get("kind") or "")
+    citation_violations = validate_trainer_citation(proposal.get("citation"))
+    if citation_violations:
+        reason = "citation_invalid: " + "; ".join(citation_violations)
+        _write_decision(Path(state_dir), target_id, "retirement_declined", reason, kind)
+        return {"accepted": False, "reason": reason}
+    citation = proposal["citation"]
+    exposure = citation.get("exposure")
+    if not isinstance(exposure, int) or exposure < MIN_RETIREMENT_EXPOSURE:
+        reason = (
+            f"exposure_below_floor: exposure={exposure!r} is below "
+            f"MIN_RETIREMENT_EXPOSURE={MIN_RETIREMENT_EXPOSURE}"
+        )
+        _write_decision(Path(state_dir), target_id, "retirement_declined", reason, kind)
+        return {"accepted": False, "reason": reason}
+    reason = (
+        f"non-use evidence: retrieval_count={citation.get('retrieval_count')}, "
+        f"exposure={exposure}, source={citation.get('source')}"
+    )
+    _write_decision(Path(state_dir), target_id, "retirement_proposed", reason, kind)
+    return {"accepted": True, "reason": reason}
 
 
 def record_pickup_outcome(
