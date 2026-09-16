@@ -356,6 +356,51 @@ def test_correlate_citations_with_outcomes_fails_open(tmp_path: Path, monkeypatc
     assert result["status"] == "unavailable"
 
 
+def test_lesson_zero_citation_census_flags_offered_never_cited(tmp_path: Path) -> None:
+    """ADR-021 rule 3 evidence: offered repeatedly, cited never. A lesson
+    that was never offered at all must not appear -- no denominator."""
+    from nanobot.runtime.lesson_v2 import lesson_zero_citation_census
+
+    state = tmp_path / "state"
+    offered_a = {"source": "executor_prompt_context", "status": "present",
+                 "selected_ids": ["LESS-A"], "selected_count": 1}
+    offered_b = {"source": "executor_prompt_context", "status": "present",
+                 "selected_ids": ["LESS-B"], "selected_count": 1}
+    record_citations(state, "cycle-1", ["no marker"], selector_provenance=offered_a)
+    record_citations(state, "cycle-2", ["no marker"], selector_provenance=offered_a)
+    record_citations(state, "cycle-3", ["response [Lesson LESS-B]"], selector_provenance=offered_b)
+
+    result = lesson_zero_citation_census(state)
+    assert result["ok"] is True
+    assert result["lessons_offered"] == 2
+    assert result["zero_citation"] == [
+        {
+            "lesson_id": "LESS-A",
+            "offered_in_window": 2,
+            "last_offered": result["zero_citation"][0]["last_offered"],
+            "last_cited": None,
+        }
+    ]
+
+
+def test_lesson_zero_citation_census_no_scans_is_no_data(tmp_path: Path) -> None:
+    from nanobot.runtime.lesson_v2 import lesson_zero_citation_census
+
+    result = lesson_zero_citation_census(tmp_path / "state")
+    assert result == {"ok": False, "reason": "missing", "lessons_offered": 0, "zero_citation": []}
+
+
+def test_lesson_zero_citation_census_empty_offer_set_is_evidence(tmp_path: Path) -> None:
+    """A real scan that offered nothing is a valid ok:True, empty census --
+    not the same as no data at all."""
+    from nanobot.runtime.lesson_v2 import lesson_zero_citation_census
+
+    state = tmp_path / "state"
+    record_citations(state, "cycle-1", ["no marker"])
+    result = lesson_zero_citation_census(state)
+    assert result == {"ok": True, "lessons_offered": 0, "zero_citation": []}
+
+
 def test_curator_decisions_under_bound_do_not_rotate(tmp_path: Path) -> None:
     from datetime import datetime, timezone
 
