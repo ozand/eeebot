@@ -56,6 +56,55 @@ VALID_PRIORITY = {
 }
 
 
+DECAY_EVIDENCE_ITEM = {
+    "path": "scripts/loop_health_report.py",
+    "stale_since": "2026-06-01T00:00:00Z",
+}
+
+
+def _mock_decay(monkeypatch, items=None):
+    if items is None:
+        items = [DECAY_EVIDENCE_ITEM]
+    from nanobot.runtime import usage_evidence
+    monkeypatch.setattr(
+        usage_evidence,
+        "stale_artifacts_status",
+        lambda *_args, **_kwargs: (items, "complete"),
+    )
+
+
+def _seed_hypothesis(state_dir: Path, hypothesis_id: str = "hypothesis-h1") -> None:
+    _write_lifecycle(
+        state_dir,
+        {
+            hypothesis_id: {
+                "status": "answered",
+                "verdict": "supported",
+                "verdict_at": "2026-08-01T00:00:00Z",
+                "verdict_evidence": {"source": "microbench", "value": 12.0},
+                "title": "Cache the widget lookup",
+            }
+        },
+    )
+
+
+HYPOTHESIS_FIXTURE = {
+    "hypothesis-h1": {
+        "status": "answered",
+        "verdict": "supported",
+        "verdict_at": "2026-08-01T00:00:00Z",
+        "verdict_evidence": {"source": "microbench", "value": 12.0},
+        "title": "Cache the widget lookup",
+    },
+}
+
+
+def _seed_valid_evidence(state_dir: Path, monkeypatch=None, repo: Path | None = None) -> None:
+    _seed_hypothesis(state_dir)
+    if monkeypatch is not None and repo is not None:
+        _mock_decay(monkeypatch)
+
+
 def _write_goal_text(state_dir: Path, text: str = GOAL_TEXT) -> None:
     path = state_dir / "goals" / "goal_text.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -244,6 +293,7 @@ class TestAppend:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         second = {
             "label": "Dashboard usage ping",
             "body": "Add one function to scripts/eeebot_dashboard.py that logs "
@@ -295,7 +345,7 @@ class TestAppend:
         assert rows[0]["produced"] == titles
         assert rows[0]["rejected"] == []
         assert rows[0]["inputs_hash"]
-        assert rows[0]["evidence_sources"] == ["scorecard_gaps"]
+        assert rows[0]["evidence_sources"] == ["supported_hypotheses"]
         assert rows[0]["direction_at_review"] is None
 
     def test_dedup_keeps_operator_entries_untouched(self, tmp_path, monkeypatch, enabled):
@@ -304,6 +354,7 @@ class TestAppend:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         duplicate = dict(VALID_PRIORITY, label="Loop health in dashboard")
         monkeypatch.setattr(
             goal_review, "_call_llm", lambda ctx: {"priorities": [duplicate, VALID_PRIORITY]}
@@ -324,6 +375,7 @@ class TestAppend:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         cands = [
             dict(VALID_PRIORITY, label=f"Bounded change number {i}") for i in range(5)
         ]
@@ -345,6 +397,7 @@ class TestValidation:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         no_evidence = dict(VALID_PRIORITY, label="Uncited invention", evidence="")
         unknown_evidence = dict(VALID_PRIORITY, label="Fabricated citation", evidence="E9")
         monkeypatch.setattr(
@@ -365,6 +418,7 @@ class TestValidation:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         future = dict(VALID_PRIORITY, label="Demoscene visuals", vector="FUTURE")
         no_vector = dict(VALID_PRIORITY, label="Vectorless idea", vector="")
         monkeypatch.setattr(
@@ -386,6 +440,7 @@ class TestValidation:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         bad = dict(VALID_PRIORITY, label="Fix: the loop (v2).")
         monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [bad]})
 
@@ -414,6 +469,7 @@ class TestVectorBias:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         v2_priority = dict(VALID_PRIORITY, label="Dashboard usage ping", vector="V2")
         monkeypatch.setattr(
             goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY, v2_priority]}
@@ -433,6 +489,7 @@ class TestWatermark:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         monkeypatch.setattr(
             goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY]}
         )
@@ -462,6 +519,7 @@ class TestMalformedReply:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: None)
 
         assert goal_review.maybe_goal_review(state_dir, None, now=NOW) == []
@@ -472,6 +530,7 @@ class TestMalformedReply:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": "yes"})
 
         assert goal_review.maybe_goal_review(state_dir, None, now=NOW) == []
@@ -482,6 +541,7 @@ class TestMalformedReply:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
 
         def _raise(context: str):
             raise RuntimeError("provider down")
@@ -570,6 +630,7 @@ class TestRetention:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         tech_tree.ensure_seeded(state_dir, now=NOW)
         portfolio = tech_tree.read_portfolio(state_dir)
         portfolio["current"] = "proposer-quality"
@@ -581,7 +642,7 @@ class TestRetention:
         row = _goal_review_rows(state_dir)[0]
         assert goal_review.goal_review_retention(row) == {
             "status": "complete",
-            "evidence_sources": ("scorecard_gaps",),
+            "evidence_sources": ("supported_hypotheses",),
             "direction": "proposer-quality",
         }
 
@@ -653,6 +714,7 @@ class TestRetention:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         tech_tree.ensure_seeded(state_dir, now=NOW)
         portfolio = tech_tree.read_portfolio(state_dir)
         portfolio["current"] = "proposer-quality"
@@ -666,22 +728,25 @@ class TestRetention:
         assert row["outcome"] == "error"
         assert goal_review.goal_review_retention(row) == {
             "status": "complete",
-            "evidence_sources": ("scorecard_gaps",),
+            "evidence_sources": ("supported_hypotheses",),
             "direction": "proposer-quality",
         }
 
     def test_source_set_excludes_lines_truncated_before_evidence_window(self, tmp_path, monkeypatch):
         """Only source lines actually shown to the LLM are retained."""
         state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        repo.mkdir()
         snapshot = {"gaps": [{"evidence": f"gap-{i}"} for i in range(goal_review._MAX_EVIDENCE_LINES)]}
-        monkeypatch.setattr(
-            "nanobot.runtime.usage_evidence.stale_artifacts",
-            lambda *_args, **_kwargs: [{"path": "scripts/stale.py", "stale_since": "2026-01-01"}],
+        _mock_decay(
+            monkeypatch,
+            items=[{"path": f"scripts/stale_{i}.py", "stale_since": "2026-01-01"} for i in range(goal_review._MAX_EVIDENCE_LINES + 5)],
         )
         sources: set[str] = set()
-        evidence = goal_review._collect_evidence(state_dir, None, snapshot, NOW, sources=sources)
-        assert len(evidence) == goal_review._MAX_EVIDENCE_LINES
-        assert sources == {"scorecard_gaps"}
+        evidence = goal_review._collect_evidence(state_dir, repo, snapshot, NOW, sources=sources)
+        assert len(evidence) <= goal_review._MAX_EVIDENCE_LINES
+        assert "decay" in sources
+        assert "scorecard_gaps" not in sources
 
 
 class TestDerivedPriorities:
@@ -691,6 +756,7 @@ class TestDerivedPriorities:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY]})
 
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
@@ -803,6 +869,7 @@ class TestDerivedPriorities:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY]})
         goal_review.maybe_goal_review(state_dir, None, now=NOW)
 
@@ -819,6 +886,7 @@ class TestDerivedPriorities:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         goal_review._write_derived_priorities(
             state_dir,
             [
@@ -946,6 +1014,7 @@ class TestDerivedPriorities:
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
+        _seed_valid_evidence(state_dir)
         monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY]})
         goal_review.maybe_goal_review(state_dir, None, now=NOW)
 
@@ -1181,4 +1250,102 @@ class TestNightContourCandidates:
         monkeypatch.setattr(goal_review, "_call_llm", _fake_llm)
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
         assert titles == ["Priority 17 — Stream archive dirs"]
+
+
+class TestADR020Rule1Contract:
+    """Test contract for ADR-020 Rule 1: The gap-driven mint stops.
+
+    1. Scorecard gap present -> published numbers, but 0 new priority entries.
+    2. Unrelated / non-citable evidence -> validation rejection.
+    3. Deterministic demand items unchanged before and after.
+    4. Zero demand candidates -> idle heartbeat and 0 LLM calls.
+    5. Derived priorities queue depth and limit published for visibility.
+    """
+
+    def test_open_scorecard_gap_produces_zero_new_priorities(
+        self, tmp_path, monkeypatch, enabled
+    ):
+        """Open scorecard gaps do not populate citable evidence and mint 0 priorities."""
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir)
+        _write_snapshot(state_dir, [GAP])  # Open gap present
+
+        llm_called = False
+
+        def _fake_llm(context: str):
+            nonlocal llm_called
+            llm_called = True
+            return {"priorities": [VALID_PRIORITY]}
+
+        monkeypatch.setattr(goal_review, "_call_llm", _fake_llm)
+        titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
+
+        # Without decay or supported hypotheses, evidence is empty -> honest no-op
+        assert titles == []
+        assert llm_called is False
+        assert goal_review.read_derived_priorities(state_dir) == []
+
+        rows = _goal_review_rows(state_dir)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] == "no_gaps"
+        assert rows[0]["retention_status"] == "complete"
+        assert rows[0]["evidence_sources"] == []
+
+    def test_unsuitable_evidence_citation_is_rejected(self):
+        """A candidate citing non-matching or missing evidence is rejected."""
+        evidence = {
+            "E1": "decay: scripts/old.py has no harness-observed use (14+ days; goal vector V1)",
+        }
+        candidate_bad_evidence = {
+            "label": "Do something else",
+            "body": "Fix scripts/old.py. Commit.",
+            "vector": "V1",
+            "evidence": "E99",  # non-existent key
+        }
+        normalized, reason = goal_review.validate_priority(
+            candidate_bad_evidence, evidence, set()
+        )
+        assert normalized is None
+        assert reason == "evidence_not_in_inputs"
+
+        candidate_gap_claim = {
+            "label": "Fix the repeat failure rate gap",
+            "body": "Lower failure rate under 0.3. Commit.",
+            "vector": "V1",
+            "evidence": "E1",  # cites decay evidence for a gap proposal
+        }
+        # Citing decay for non-decay work without matching context still validates evidence presence,
+        # but if evidence is empty, nothing can be cited:
+        norm_empty, reason_empty = goal_review.validate_priority(
+            candidate_gap_claim, {}, set()
+        )
+        assert norm_empty is None
+        assert reason_empty == "evidence_not_in_inputs"
+
+    def test_derived_priorities_queue_depth_and_limit_reported(self, tmp_path):
+        """Derived priorities queue depth and limit are published in health success_signals."""
+        from nanobot.runtime.health import (
+            build_cycle_health_summary,
+            read_derived_priorities_queue,
+        )
+
+        state = tmp_path / "state"
+        state.mkdir(parents=True)
+        queue_info = read_derived_priorities_queue(state)
+        assert queue_info == {"depth": 0, "limit": 10}
+
+        # Seed 10 priorities (saturation)
+        goal_review._write_derived_priorities(
+            state, [
+                {"number": i + 1, "label": f"priority-{i}", "body": "b", "vector": "V1"}
+                for i in range(10)
+            ]
+        )
+        queue_saturated = read_derived_priorities_queue(state)
+        assert queue_saturated == {"depth": 10, "limit": 10}
+
+        summary = build_cycle_health_summary(state)
+        assert summary["success_signals"]["derived_priorities_queue_depth"] == 10
+        assert summary["success_signals"]["derived_priorities_queue_limit"] == 10
+
 

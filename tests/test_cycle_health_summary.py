@@ -134,6 +134,30 @@ def test_read_autonomous_commits_24h_missing_repo_returns_none(tmp_path: Path):
     assert read_autonomous_commits_24h(state) is None
 
 
+def test_read_derived_priorities_queue(tmp_path: Path):
+    from nanobot.runtime.health import read_derived_priorities_queue
+
+    state = tmp_path / "state"
+    assert read_derived_priorities_queue(state) == {"depth": 0, "limit": 10}
+    goals = state / "goals"
+    goals.mkdir(parents=True)
+    (goals / "derived_priorities.json").write_text(
+        json.dumps({
+            "priorities": [
+                {
+                    "number": i + 1,
+                    "label": f"label {i}",
+                    "body": f"body {i}",
+                    "vector": "V1",
+                }
+                for i in range(4)
+            ]
+        }),
+        encoding="utf-8",
+    )
+    assert read_derived_priorities_queue(state) == {"depth": 4, "limit": 10}
+
+
 def test_read_subagent_queue_depth_counts_json_files(tmp_path: Path):
     state = tmp_path / "state"
     requests_dir = state / "subagents" / "requests"
@@ -250,6 +274,8 @@ def test_build_cycle_health_summary_includes_success_signals(tmp_path: Path):
 
     assert summary["success_signals"]["autonomous_commits_24h"] is None
     assert summary["success_signals"]["subagent_queue_depth"] == 1
+    assert summary["success_signals"]["derived_priorities_queue_depth"] == 0
+    assert summary["success_signals"]["derived_priorities_queue_limit"] == 10
 
     lines = format_cycle_health_summary(summary)
     assert any("Success signals:" in line for line in lines)
