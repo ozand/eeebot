@@ -1693,6 +1693,85 @@ class TestWriteRequestSchemaEquality:
         marker = demand._escalation_marker(state_dir, demand_id)
         assert marker and marker["cycle_id"] == row["cycle_id"]
 
+    def test_proposal_serving_truncated_reflection_is_marked_partial_view(self, tmp_path):
+        # ADR-021 Rule 5 Test Contract: proposal built on truncated reflection carries partial_view mark.
+        state_dir = _state_dir(tmp_path)
+        detail = "Fix the initial setup"
+        item = demand._make_item("reflection", detail, "cycle c-prev:")
+        demand_id = item["id"]
+
+        # 1. Seed reflections.jsonl with a truncated reflection
+        ref_file = state_dir / "reflector" / "reflections.jsonl"
+        ref_file.parent.mkdir(parents=True, exist_ok=True)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        ref_record = {
+            "cycle_id": "c-prev",
+            "timestamp": now_iso,
+            "findings": ["Something failed at beginning"],
+            "recommendations": [{"detail": detail, "target_artifact": "scripts/setup.py"}],
+            "input_fit": {
+                "status": "truncated",
+                "transcript": {"chars": 32000, "recorder_truncated": True, "recorder_truncated_chars": 64000, "dropped": 0},
+            },
+            "transcript_coverage": 0.3333,
+            "partial_view": True,
+        }
+        ref_file.write_text(json.dumps(ref_record) + "\n", encoding="utf-8")
+
+        # 2. Write proposal serving this reflection demand
+        proposal = {
+            "task_title": "Fix the initial setup based on truncated reflection",
+            "rationale": "Trainer noticed setup issue",
+            "target_path": "scripts/setup.py",
+            "serves": f"demand {demand_id}",
+        }
+        llm_proposer.write_request(state_dir, proposal)
+
+        # 3. Verify ledger row has partial_view and transcript_coverage
+        ledger_path = state_dir / "ledger" / "cycles.jsonl"
+        rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        proposed_rows = [r for r in rows if r.get("phase") == "proposed"]
+        assert len(proposed_rows) == 1
+        p_row = proposed_rows[0]
+        assert p_row["partial_view"] is True
+        assert p_row["transcript_coverage"] == 0.3333
+
+    def test_proposal_serving_complete_reflection_has_false_partial_view(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        detail = "Optimize step 2"
+        item = demand._make_item("reflection", detail, "cycle c-prev2:")
+        demand_id = item["id"]
+
+        ref_file = state_dir / "reflector" / "reflections.jsonl"
+        ref_file.parent.mkdir(parents=True, exist_ok=True)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        ref_record = {
+            "cycle_id": "c-prev2",
+            "timestamp": now_iso,
+            "findings": ["Clean run"],
+            "recommendations": [{"detail": detail, "target_artifact": "scripts/step2.py"}],
+            "input_fit": {"status": "complete", "transcript": {"chars": 5000, "recorder_truncated": False, "dropped": 0}},
+            "transcript_coverage": 1.0,
+            "partial_view": False,
+        }
+        ref_file.write_text(json.dumps(ref_record) + "\n", encoding="utf-8")
+
+        proposal = {
+            "task_title": "Optimize step 2",
+            "rationale": "Trainer noticed step 2",
+            "target_path": "scripts/step2.py",
+            "serves": f"demand {demand_id}",
+        }
+        llm_proposer.write_request(state_dir, proposal)
+
+        ledger_path = state_dir / "ledger" / "cycles.jsonl"
+        rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        proposed_rows = [r for r in rows if r.get("phase") == "proposed"]
+        assert len(proposed_rows) == 1
+        p_row = proposed_rows[0]
+        assert p_row["partial_view"] is False
+        assert p_row["transcript_coverage"] == 1.0
+
 
 # ─── #1118: optional, frozen expected_outcome claim ────────────────────────
 
