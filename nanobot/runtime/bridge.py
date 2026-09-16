@@ -2892,6 +2892,9 @@ async def _main_impl_body():
         # widen or override it.
         # #958 Part B: add cron, summarize, github (never used by the loop).
         _LOOP_EXCLUDED_SKILLS = ["weather", "tmux", "clawhub", "cron", "summarize", "github"]
+        _denied_sidecar_paths = {
+            (STATE_DIR / rel).resolve() for rel in _FITNESS_SIDECARS
+        }
         mgr = SubagentManager(
             provider=provider,
             workspace=_selfevo_repo,
@@ -2903,6 +2906,7 @@ async def _main_impl_body():
             exec_config=config.tools.exec,
             subagent_config=config.tools.subagent,
             restrict_to_workspace=False,
+            denied_paths=_denied_sidecar_paths,
             max_running=config.tools.subagent.max_running,
             # Issue #578: reuse the same cap as the main agent (agents.defaults.maxToolIterations)
             # instead of the SubagentManager default of 15 — one consistent value end-to-end.
@@ -3229,6 +3233,7 @@ async def _main_impl_body():
                         exec_config=_repair_cfg.tools.exec,
                         subagent_config=_repair_cfg.tools.subagent,
                         restrict_to_workspace=False,
+                        denied_paths=_denied_sidecar_paths,
                         max_running=_repair_cfg.tools.subagent.max_running,
                         # #906: same operator-preset override as the main spawn above.
                         max_iterations=resolve_max_tool_iterations(_repair_cfg.agents.defaults.max_tool_iterations),
@@ -3340,6 +3345,26 @@ async def _main_impl_body():
                             'soft_signals': _test_weakening_soft,
                         },
                     )
+
+            # ── #1456: in-flight prevented writes to fitness sidecars ───────────
+            _prevented_attempts = list(getattr(mgr, "prevented_access_attempts", []))
+            if "_repair_mgr" in locals():
+                _prevented_attempts.extend(getattr(_repair_mgr, "prevented_access_attempts", []))
+            if _prevented_attempts:
+                print(
+                    f'integrity: in-flight fitness sidecar access prevented: '
+                    f'{", ".join(_prevented_attempts)} (#1456)'
+                )
+                append_event(
+                    STATE_DIR,
+                    {
+                        'phase': 'integrity',
+                        'reason': 'sidecar_write_prevented',
+                        'cycle_id': _cycle_id,
+                        'files': _prevented_attempts,
+                    },
+                )
+                _rollback_reason = 'fitness_sidecar_tamper'
 
             # ── #789: spawn-boundary fitness-sidecar tamper detection ────────────
             # Re-hash AFTER the subagent (and any repair turns) finished, BEFORE
