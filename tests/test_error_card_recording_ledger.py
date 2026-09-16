@@ -2,9 +2,16 @@
 
 Tests that error card generation/push during post-cycle outcome handling emits
 a durable cycle_ledger event with phase: 'error_card_recording' and status:
-- 'created' on successful creation & push
+- 'created' on successful creation & push (``card_commit`` names the commit)
 - 'not_created' with skip_reason on rejection / failure
-- 'no_attempt' when no rollback reason is present
+
+Rows are written only on rollback cycles: a cycle with nothing to record
+must not read the same as one that recorded nothing.
+
+The card is committed and pushed from an isolated checkout of origin/main
+under the state dir, so a cycle branch that already carries executor
+commits still ships its card and the live working tree is left exactly as
+the cycle left it (no new untracked or modified files).
 """
 from __future__ import annotations
 
@@ -171,10 +178,84 @@ def test_error_card_recording_created_with_unintegrated_cycle_commits(tmp_path, 
     assert len(card_events) == 1, f"Expected 1 card event, got {card_events}"
     ev = card_events[0]
     assert ev["status"] == "created"
-    assert "error_id" in ev
+    assert "skip_reason" not in ev
 
-    # Remote origin/main has the error card, not the unintegrated commit
+    # Remote origin/main has the error card, not the unintegrated commit,
+    # and the ledger names the very commit that landed.
     subprocess.run(["git", "-C", str(repo), "fetch", "origin"], check=True, capture_output=True)
     out = subprocess.run(["git", "-C", str(repo), "log", "origin/main", "--oneline"], capture_output=True, text=True, check=True).stdout
     assert "chore: record structured error for [cycle-extra]" in out
     assert "cycle commit" not in out
+    remote_head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "origin/main"], capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert ev["card_commit"] == remote_head
+    shipped = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--name-only", f"{remote_head}~1", remote_head],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    assert shipped == ["lessons/errors.yaml"]
+
+    # The live checkout was not the vehicle: nothing untracked, nothing
+    # modified, no leftover isolated worktree or registration.
+    porcelain = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert porcelain == "", porcelain
+    assert not (state_dir / "error_card_wt").exists()
+    worktrees = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "list", "--porcelain"], capture_output=True, text=True, check=True,
+    ).stdout
+    assert worktrees.count("worktree ") == 1, worktrees
+    assert not (repo / "lessons" / "index.md").exists()
+
+    # The next cycle's restore (which fast-forwards local main onto the
+    # shipped card) must still find a clean tree — the exact precondition
+    # that blocked tests/test_bridge_executor_llm_error.py at d9bd5f61.
+    assert bridge._restore_to_main(repo, state_dir) is True
+    assert not (repo / "lessons" / "index.md").exists()
+    assert (repo / "lessons" / "errors.yaml").exists()
+
+
+def test_error_card_f6_guard_still_refuses_extra_files_on_isolated_ref(tmp_path, monkeypatch):
+    """#678 F6 is preserved: a card commit that carries anything beyond
+    lessons/errors.yaml (and archive entries) is refused, and nothing is
+    pushed. The extra file is planted by the writer itself, i.e. inside the
+    isolated checkout, which is the only place the guard now looks."""
+    state_dir = _wire(tmp_path, monkeypatch)
+    repo = tmp_path / "eeebot-self-evolving"
+    title = "Test task failure where the card commit smuggles a file"
+    artifact = tmp_path / "improvements" / "smuggle.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
+    _seed_bridge_request(
+        state_dir, "req-smuggle", "cycle-smuggle", task_title=title, source_artifact=str(artifact),
+    )
+
+    real_writer = bridge._write_structured_error
+
+    def _writer_with_stowaway(repo_root, **kwargs):
+        ok = real_writer(repo_root=repo_root, **kwargs)
+        (repo_root / "lessons" / "stowaway.py").write_text("print('no')", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo_root), "add", "lessons/stowaway.py"], check=True, capture_output=True)
+        return ok
+
+    with patch("nanobot.runtime.bridge._run_smoke_tests_with_shrink_guard", return_value=(False, "smoke failed")), \
+         patch("nanobot.runtime.bridge._write_structured_error", side_effect=_writer_with_stowaway):
+        asyncio.run(bridge._main_impl())
+
+    rows = _read_ledger(state_dir)
+    card_events = [r for r in rows if r.get("phase") == "error_card_recording"]
+    assert len(card_events) == 1
+    ev = card_events[0]
+    assert ev["status"] == "not_created"
+    assert ev["skip_reason"] == "diff_touched_more_than_errors_yaml"
+
+    subprocess.run(["git", "-C", str(repo), "fetch", "origin"], check=True, capture_output=True)
+    out = subprocess.run(["git", "-C", str(repo), "log", "origin/main", "--oneline"], capture_output=True, text=True, check=True).stdout
+    assert "record structured error" not in out
+    assert not (state_dir / "error_card_wt").exists()
+    porcelain = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert porcelain == "", porcelain

@@ -1355,9 +1355,18 @@ def _restore_to_main(repo_root: 'Path', state_dir: 'Path | None' = None, cycle_i
         # The instance repo's root .gitignore protects this generated file from
         # the clean above and from the status check below; no lesson body is
         # written by this call.
+        # #1662: regenerate only when the checkout actually protects the file.
+        # Without the ignore rule the index written here is the ``??`` entry
+        # the status check below refuses, and every later cycle is blocked by
+        # the bridge's own bookkeeping — the error card now genuinely lands on
+        # origin/main, so ``lessons/`` exists on main wherever a card shipped.
         try:
-            from nanobot.runtime.lesson_index import generate_index
-            generate_index(repo_root)
+            _idx_ignored = _sp_restore.run(
+                git + ['check-ignore', '-q', 'lessons/index.md'], capture_output=True,
+            ).returncode == 0
+            if _idx_ignored:
+                from nanobot.runtime.lesson_index import generate_index
+                generate_index(repo_root)
         except Exception:
             pass
         head = _sp_restore.run(git + ['rev-parse', '--abbrev-ref', 'HEAD'], capture_output=True, text=True)
@@ -4227,72 +4236,95 @@ async def _main_impl_body():
     if _rollback_reason:
         # #1041 Part 2: record structured error on gate rejection/rollback into lessons/errors.yaml
         # #1662: track structured error recording outcomes in cycle ledger
+        # The card is written, committed and pushed from an ISOLATED checkout
+        # of origin/main under the state dir — never from the live checkout,
+        # whose HEAD is the cycle branch carrying whatever the executor
+        # committed. The #678 F6 guard then measures the card commit alone,
+        # so a rollback in a cycle that already committed code still ships
+        # its card while the cycle's code stays behind. The live working tree
+        # is not touched by this path (asserted by
+        # tests/test_error_card_recording_ledger.py).
         _rec_status = "not_created"
         _rec_skip_reason: str | None = None
-        _rec_error_id: str | None = None
+        _rec_card_commit: str | None = None
         try:
-            import tempfile as _rec_tempfile
-            with _rec_tempfile.TemporaryDirectory() as _rec_td:
-                _rec_wt = Path(_rec_td) / "err_wt"
-                _git_main = _git_cmd(_selfevo_repo)
-                _wt_add = _sp.run(
-                    _git_main + ['worktree', 'add', '--detach', str(_rec_wt), 'origin/main'],
-                    capture_output=True,
-                )
-                if _wt_add.returncode != 0:
-                    _rec_skip_reason = "worktree_add_failed"
-                else:
-                    try:
-                        _written_error = _write_structured_error(
-                            repo_root=_rec_wt,
-                            cycle_id=req.get('cycle_id') or '',
-                            reason=_rollback_reason,
-                            violated_check=_rollback_reason,
-                            budget_used={},
-                            backlog_title=backlog_title,
+            import shutil as _rec_shutil
+            _rec_wt = Path(STATE_DIR) / "error_card_wt"
+            _git_main = _git_cmd(_selfevo_repo)
+            # A crashed earlier run may have left the directory (and its
+            # worktree registration) behind; clear both or every later
+            # attempt reports worktree_add_failed.
+            if _rec_wt.exists():
+                _sp.run(_git_main + ['worktree', 'remove', '--force', str(_rec_wt)], capture_output=True)
+                _rec_shutil.rmtree(_rec_wt, ignore_errors=True)
+            _sp.run(_git_main + ['worktree', 'prune'], capture_output=True)
+            _wt_add = _sp.run(
+                _git_main + ['worktree', 'add', '--detach', str(_rec_wt), 'origin/main'],
+                capture_output=True,
+            )
+            if _wt_add.returncode != 0:
+                _rec_skip_reason = "worktree_add_failed"
+            else:
+                try:
+                    _written_error = _write_structured_error(
+                        repo_root=_rec_wt,
+                        cycle_id=req.get('cycle_id') or '',
+                        reason=_rollback_reason,
+                        violated_check=_rollback_reason,
+                        budget_used={},
+                        backlog_title=backlog_title,
+                    )
+                    if _written_error:
+                        _git_wt = _git_cmd(_rec_wt)
+                        _sp.run(_git_wt + ['add', 'lessons/errors.yaml'], capture_output=True)
+                        if (_rec_wt / 'lessons' / 'archive').exists():
+                            _sp.run(_git_wt + ['add', 'lessons/archive/'], capture_output=True)
+                        _sp.run(
+                            _git_wt + ['commit', '-m', f'chore: record structured error for [{req.get("cycle_id","")[:12]}]'],
+                            capture_output=True,
                         )
-                        if _written_error:
-                            _rec_error_id = _written_error
-                            _git_wt = _git_cmd(_rec_wt)
-                            _sp.run(_git_wt + ['add', 'lessons/errors.yaml'], capture_output=True)
-                            if (_rec_wt / 'lessons' / 'archive').exists():
-                                _sp.run(_git_wt + ['add', 'lessons/archive/'], capture_output=True)
-                            _sp.run(
-                                _git_wt + ['commit', '-m', f'chore: record structured error for [{req.get("cycle_id","")[:12]}]'],
-                                capture_output=True,
+                        _rec_head = _sp.run(_git_wt + ['rev-parse', 'HEAD'], capture_output=True, text=True)
+                        if _rec_head.returncode == 0 and _rec_head.stdout.strip():
+                            _rec_card_commit = _rec_head.stdout.strip()
+                        _error_allowed: set[str] = {'lessons/errors.yaml'}
+                        try:
+                            import subprocess as _sp_diff1041
+                            _diff_out = _sp_diff1041.run(
+                                _git_wt + ['diff', '--name-only', 'origin/main...HEAD'],
+                                capture_output=True, text=True,
                             )
-                            _error_allowed: set[str] = {'lessons/errors.yaml'}
-                            try:
-                                import subprocess as _sp_diff1041
-                                _diff_out = _sp_diff1041.run(
-                                    _git_wt + ['diff', '--name-only', 'origin/main...HEAD'],
-                                    capture_output=True, text=True,
-                                )
-                                for _f in _diff_out.stdout.splitlines():
-                                    _f = _f.strip()
-                                    if _f.startswith('lessons/archive/'):
-                                        _error_allowed.add(_f)
-                            except Exception:
-                                pass
-                            if _diff_against_remote_touches_only(
-                                _rec_wt, 'origin/main', _error_allowed,
-                            ):
-                                if _push_main_or_report(_git_wt, 'bridge-error', STATE_DIR, refspec='HEAD:main'):
-                                    _rec_status = "created"
-                                    _sp.run(_git_main + ['fetch', 'origin', 'main'], capture_output=True)
-                                    print('bridge-error: recorded structured error to lessons/errors.yaml')
-                                else:
-                                    _rec_skip_reason = "push_rejected"
+                            for _f in _diff_out.stdout.splitlines():
+                                _f = _f.strip()
+                                if _f.startswith('lessons/archive/'):
+                                    _error_allowed.add(_f)
+                        except Exception:
+                            pass
+                        # Same #678 F6 guard as before, now measured against the
+                        # isolated ref: origin/main...HEAD there is the card
+                        # commit and nothing else.
+                        if _diff_against_remote_touches_only(
+                            _rec_wt, 'origin/main', _error_allowed,
+                        ):
+                            if _push_main_or_report(_git_wt, 'bridge-error', STATE_DIR, refspec='HEAD:main'):
+                                _rec_status = "created"
+                                # Refresh the live checkout's remote-tracking ref only;
+                                # its working tree and local main are left alone.
+                                _sp.run(_git_main + ['fetch', 'origin', 'main'], capture_output=True)
+                                print('bridge-error: recorded structured error to lessons/errors.yaml')
                             else:
-                                _rec_skip_reason = "diff_touched_more_than_errors_yaml"
-                                print(
-                                    'bridge-error: error diff touched more than lessons/errors.yaml '
-                                    '— skipping ungated push (#678 F6)'
-                                )
+                                _rec_skip_reason = "push_rejected"
                         else:
-                            _rec_skip_reason = "write_failed"
-                    finally:
-                        _sp.run(_git_main + ['worktree', 'remove', '--force', str(_rec_wt)], capture_output=True)
+                            _rec_skip_reason = "diff_touched_more_than_errors_yaml"
+                            print(
+                                'bridge-error: error diff touched more than lessons/errors.yaml '
+                                '— skipping ungated push (#678 F6)'
+                            )
+                    else:
+                        _rec_skip_reason = "write_failed"
+                finally:
+                    _sp.run(_git_main + ['worktree', 'remove', '--force', str(_rec_wt)], capture_output=True)
+                    _rec_shutil.rmtree(_rec_wt, ignore_errors=True)
+                    _sp.run(_git_main + ['worktree', 'prune'], capture_output=True)
         except Exception as _rec_exc:
             _rec_skip_reason = f"exception:{type(_rec_exc).__name__}"
             pass  # fail-open
@@ -4304,8 +4336,8 @@ async def _main_impl_body():
                 "status": _rec_status,
                 "rollback_reason": _rollback_reason,
             }
-            if _rec_error_id:
-                _rec_evt["error_id"] = _rec_error_id
+            if _rec_card_commit:
+                _rec_evt["card_commit"] = _rec_card_commit
             if _rec_skip_reason:
                 _rec_evt["skip_reason"] = _rec_skip_reason
             append_event(STATE_DIR, _rec_evt)
