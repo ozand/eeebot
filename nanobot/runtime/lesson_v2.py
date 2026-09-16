@@ -1029,27 +1029,20 @@ def record_citations(
     }
     if scan["marker_count"] == 0 and scan["scanned_chars"] < _CITATION_SHORT_RESULT_CHARS:
         scan["notes"].append("short_result_not_confident_zero")
-    citation_failed = False
+    # #1654: a hit no longer gets a second, separate write. `scan["lesson_ids"]`
+    # already carries the exact same ids scans.jsonl persists below, from the
+    # same local variable in this same call -- a citations.jsonl row was
+    # never anything but a lossless copy of that field, one file, one write,
+    # readers derive cited ids from scans.jsonl's lesson_ids instead.
     try:
-        if ids:
-            citation_rows = [{"lesson_id": lesson_id, "cycle_id": str(cycle_id), "ts": timestamp} for lesson_id in ids]
-            try:
-                _append_citation_rows(directory / "citations.jsonl", citation_rows, current)
-            except Exception as error:
-                citation_failed = True
-                scan["status"] = "unavailable"
-                scan["notes"] = ["citation_write_failed", type(error).__name__]
-        try:
-            scan_path = directory / _CITATION_SCAN_FILE
-            _rotate_citation_file(directory, _CITATION_SCAN_FILE, current)
-            _append_citation_rows(
-                scan_path, [scan], current, max_rows=_CITATION_SCAN_MAX_ROWS,
-            )
-        except Exception as error:
-            _record_scan_failure(directory, scan, current, error)
+        scan_path = directory / _CITATION_SCAN_FILE
+        _rotate_citation_file(directory, _CITATION_SCAN_FILE, current)
+        _append_citation_rows(
+            scan_path, [scan], current, max_rows=_CITATION_SCAN_MAX_ROWS,
+        )
     except Exception as error:
         _record_scan_failure(directory, scan, current, error)
-    return [] if citation_failed else ids
+    return ids
 
 
 def _citation_sources(directory: Path) -> list[Path]:
@@ -1169,10 +1162,18 @@ def correlate_citations_with_outcomes(
     now: datetime | None = None,
     window_days: int = CITATION_SCAN_RETENTION_DAYS,
 ) -> dict[str, object]:
-    """Read-only join of ``citations.jsonl`` against the outcome ledger, by
-    ``cycle_id``. Answers one question — does a cycle that cited a lesson
-    show a different outcome distribution than one that did not — and
-    answers it with bounded counts, nothing more.
+    """Read-only join of the citation scan ledger (``scans.jsonl``'s own
+    ``lesson_ids`` field) against the outcome ledger, by ``cycle_id``.
+    Answers one question — does a cycle that cited a lesson show a
+    different outcome distribution than one that did not — and answers it
+    with bounded counts, nothing more.
+
+    #1654: previously read a separate ``citations.jsonl`` file, which
+    duplicated ``scans.jsonl``'s own ``lesson_ids`` field from the same
+    write (verified: every citations.jsonl row matched a scans.jsonl row's
+    ``lesson_ids`` for the same cycle, 0 mismatches, by construction — both
+    came from the identical local variable in ``record_citations``). One
+    source now.
 
     #1505 built the write path (``record_citations``) and #1654 found it had
     zero production readers. This is the first one, and it is explicitly
@@ -1188,10 +1189,13 @@ def correlate_citations_with_outcomes(
     """
     try:
         current = _citation_now(now)
-        directory = Path(state_dir) / "lesson_usage"
-        citation_rows = _read_jsonl(directory / "citations.jsonl", _MAX_ENTRIES)
+        scans = read_citation_scans(state_dir, now=current)
+        if scans["status"] == "unavailable":
+            return {"status": "unavailable", "notes": list(scans.get("notes") or [])}
         cited_cycle_ids = {
-            str(row.get("cycle_id")) for row in citation_rows if row.get("cycle_id")
+            str(row["cycle_id"])
+            for row in scans["rows"]
+            if row.get("lesson_ids") and row.get("cycle_id")
         }
 
         window = state_access.ledger_window(
@@ -1213,10 +1217,9 @@ def correlate_citations_with_outcomes(
                 baseline_outcome_counts[outcome] = baseline_outcome_counts.get(outcome, 0) + 1
 
         return {
-            "status": "present" if citation_rows or window.rows else "empty",
+            "status": "present" if cited_cycle_ids or window.rows else "empty",
             "window_days": window_days,
             "ledger_status": window.status,
-            "citation_rows": len(citation_rows),
             "distinct_cited_cycles": len(cited_cycle_ids),
             "cited_cycles_matched_in_ledger": len(cited_cycles_matched),
             "cited_outcome_counts": cited_outcome_counts,
@@ -1285,22 +1288,28 @@ def lesson_zero_citation_census(
                 if ts is not None and (lesson_id not in last_offered or ts > last_offered[lesson_id]):
                     last_offered[lesson_id] = ts
 
-        directory = Path(state_dir) / "lesson_usage"
-        citation_rows = _read_jsonl(directory / "citations.jsonl", _MAX_ENTRIES)
+        # #1654: cited lesson ids come from the same scans["rows"] already
+        # read above (``lesson_ids`` per row) rather than a separate
+        # citations.jsonl file — that file duplicated this exact field from
+        # the same write, verified byte-for-byte, nothing lost by dropping it.
         cutoff = current - timedelta(days=window_days)
         cited_in_window: dict[str, int] = {}
         last_cited: dict[str, datetime] = {}
-        for row in citation_rows:
-            lesson_id = str(row.get("lesson_id") or "").strip()
-            if not lesson_id:
+        for row in scans["rows"]:
+            row_ids = row.get("lesson_ids")
+            if not isinstance(row_ids, list) or not row_ids:
                 continue
             ts = _citation_ts(row.get("ts"))
             if ts is None:
                 continue
-            if lesson_id not in last_cited or ts > last_cited[lesson_id]:
-                last_cited[lesson_id] = ts
-            if ts >= cutoff:
-                cited_in_window[lesson_id] = cited_in_window.get(lesson_id, 0) + 1
+            for raw_id in row_ids:
+                lesson_id = str(raw_id).strip()
+                if not lesson_id:
+                    continue
+                if lesson_id not in last_cited or ts > last_cited[lesson_id]:
+                    last_cited[lesson_id] = ts
+                if ts >= cutoff:
+                    cited_in_window[lesson_id] = cited_in_window.get(lesson_id, 0) + 1
 
         names = sorted(offered_count)[:_LESSON_CENSUS_MAX_LESSONS]
         return {

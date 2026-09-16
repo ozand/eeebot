@@ -259,11 +259,16 @@ def test_ok_status_and_missing_status_are_both_still_trusted(tmp_path: Path) -> 
 
 
 def test_citations_are_bounded_and_reporting_only(tmp_path: Path) -> None:
+    """#1654: no separate citations.jsonl -- cited ids live only in the scan
+    row's own lesson_ids field, verified byte-for-byte identical to the old
+    file's content before the write was retired."""
     state = tmp_path / "state"
     cited = record_citations(state, "cycle-1", ["proposal [Lesson LESS-1]", "x" * 100_000])
     assert cited == ["LESS-1"]
-    rows = [json.loads(line) for line in (state / "lesson_usage" / "citations.jsonl").read_text().splitlines()]
-    assert rows == [{"lesson_id": "LESS-1", "cycle_id": "cycle-1", "ts": rows[0]["ts"]}]
+    assert not (state / "lesson_usage" / "citations.jsonl").exists()
+    row = read_citation_scans(state)["rows"][-1]
+    assert row["cycle_id"] == "cycle-1"
+    assert row["lesson_ids"] == ["LESS-1"]
 
 
 def test_citation_scan_records_zero_result(tmp_path: Path) -> None:
@@ -287,32 +292,37 @@ def test_citation_scan_records_positive_result(tmp_path: Path) -> None:
     assert row["cycle_id"] == "cycle-hit"
 
 
-def test_citation_writer_failure_is_recorded_fail_open(tmp_path: Path, monkeypatch) -> None:
+def test_scan_writer_failure_is_recorded_fail_open(tmp_path: Path, monkeypatch) -> None:
+    """#1654: with the separate citations.jsonl write retired, scans.jsonl is
+    the only write record_citations makes -- its own failure must still be
+    fail-open (the ids found are still returned) and leave a trace in
+    scan-failures.jsonl rather than disappearing silently."""
+    import nanobot.runtime.lesson_v2 as lesson_v2
+
     state = tmp_path / "state"
-    original = Path.read_text
+    original = lesson_v2._atomic_jsonl
 
-    def broken_read(self: Path, *args: object, **kwargs: object) -> str:
-        if self.name == "citations.jsonl":
-            raise OSError("citation store unavailable")
-        return original(self, *args, **kwargs)
+    def broken_write(path: Path, *args: object, **kwargs: object):
+        if path.name == "scans.jsonl":
+            raise OSError("scan ledger unavailable")
+        return original(path, *args, **kwargs)
 
-    citations = state / "lesson_usage" / "citations.jsonl"
-    citations.parent.mkdir(parents=True)
-    citations.write_text("not-json\n", encoding="utf-8")
-    monkeypatch.setattr(Path, "read_text", broken_read)
+    monkeypatch.setattr(lesson_v2, "_atomic_jsonl", broken_write)
 
-    assert record_citations(state, "cycle-failed", ["[Lesson LESS-1]"]) == []
-    row = read_citation_scans(state)["rows"][-1]
-    assert row["scan_ran"] is True
-    assert row["marker_count"] == 1
-    assert row["status"] == "unavailable"
-    assert "citation_write_failed" in row["notes"]
+    cited = record_citations(state, "cycle-failed", ["[Lesson LESS-1]"])
+    assert cited == ["LESS-1"]  # fail-open: the write failing doesn't erase what was found
+
+    failures = (state / "lesson_usage" / "scan-failures.jsonl").read_text(encoding="utf-8").splitlines()
+    failure_row = json.loads(failures[-1])
+    assert failure_row["cycle_id"] == "cycle-failed"
+    assert failure_row["status"] == "unavailable"
+    assert "scan_write_failed" in failure_row["notes"]
 
 
 def test_correlate_citations_with_outcomes_splits_cited_from_baseline(tmp_path: Path) -> None:
-    """#1505/#1654: the first production reader of citations.jsonl. It must
-    only report bounded counts -- cited cycles vs. baseline, by outcome --
-    never a verdict, per ADR-021 rule 1."""
+    """#1505/#1654: derives cited cycles from scans.jsonl's own lesson_ids
+    field. It must only report bounded counts -- cited cycles vs. baseline,
+    by outcome -- never a verdict, per ADR-021 rule 1."""
     from nanobot.runtime.cycle_ledger import record_cycle_outcome
 
     state = tmp_path / "state"
@@ -327,8 +337,7 @@ def test_correlate_citations_with_outcomes_splits_cited_from_baseline(tmp_path: 
 
     result = correlate_citations_with_outcomes(state)
     assert result["status"] == "present"
-    assert result["citation_rows"] == 2  # only cited-1/cited-2 wrote a lesson_id row
-    assert result["distinct_cited_cycles"] == 2
+    assert result["distinct_cited_cycles"] == 2  # only cited-1/cited-2 have a scan row with lesson_ids
     assert result["cited_cycles_matched_in_ledger"] == 2
     assert result["cited_outcome_counts"] == {"success": 1, "failed": 1}
     # cycle-not-cited and cycle-never-scanned both land in baseline, whether
@@ -340,7 +349,7 @@ def test_correlate_citations_with_outcomes_empty_is_not_unavailable(tmp_path: Pa
     state = tmp_path / "state"
     result = correlate_citations_with_outcomes(state)
     assert result["status"] == "empty"
-    assert result["citation_rows"] == 0
+    assert result["distinct_cited_cycles"] == 0
     assert result["cited_outcome_counts"] == {}
     assert result["baseline_outcome_counts"] == {}
 
