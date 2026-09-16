@@ -750,6 +750,55 @@ class TestQualityAndValue:
         assert "compile_clean_ratio" in quality
         assert "test_file_count" not in quality
 
+    def test_retention_cost_counts_static_consumers_and_zero_consumer_files(self, tmp_path):
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        scripts = repo / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "consumer.py").write_text(
+            "import consumed\n", encoding="utf-8"
+        )
+        (scripts / "consumed.py").write_text("x = 1\n", encoding="utf-8")
+        (scripts / "path_consumer.py").write_text(
+            "TARGET = 'scripts/path_target.py'\n", encoding="utf-8"
+        )
+        (scripts / "path_target.py").write_text("x = 1\n", encoding="utf-8")
+        (scripts / "unused.py").write_text("x = 1\n", encoding="utf-8")
+
+        quality = scorecard.compute_scorecard(state_dir, repo, force=True)["quality"]
+
+        assert quality["retention_cost"] == {
+            "zero_static_consumers": 3,
+            "total_retained_artifacts": 5,
+        }
+
+    def test_retention_cost_missing_repo_is_none_and_empty_scripts_is_zero(
+        self, tmp_path
+    ):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        missing_repo = tmp_path / "absent"
+        assert (
+            scorecard.compute_scorecard(state_dir, missing_repo, force=True)["quality"][
+                "retention_cost"
+            ]
+            is None
+        )
+
+        empty_repo = tmp_path / "empty_repo"
+        empty_repo.mkdir()
+        assert scorecard.compute_scorecard(state_dir, empty_repo, force=True)["quality"][
+            "retention_cost"
+        ] == {
+            "zero_static_consumers": 0,
+            "total_retained_artifacts": 0,
+        }
+
+    def test_retention_cost_is_unavailable_without_repository(self, tmp_path):
+        quality = scorecard.compute_scorecard(tmp_path / "state", None, force=True)["quality"]
+
+        assert quality["retention_cost"] is None
+
     def test_value_counts_from_761_sidecars(self, tmp_path):
         state_dir = tmp_path / "state"
         (state_dir / "demand").mkdir(parents=True)

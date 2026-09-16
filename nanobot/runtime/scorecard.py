@@ -904,6 +904,7 @@ def _quality_section(state_dir: Path, selfevo_repo: Path | None) -> dict[str, An
             "compile_failing": 0,
             "compile_clean": 0,
             "compile_clean_ratio": None,
+            "retention_cost": None,
         }
     try:
         repo = Path(selfevo_repo)
@@ -938,10 +939,61 @@ def _quality_section(state_dir: Path, selfevo_repo: Path | None) -> dict[str, An
         "compile_failing": failing,
         "compile_clean": clean,
         "compile_clean_ratio": _ratio(clean, script_count),
+        "retention_cost": _retention_cost(repo),
     }
 
 
-# ─── section: value (V2, #761 sidecars) ─────────────────────────────────────
+def _retention_cost(repo: Path) -> dict[str, int] | None:
+    """Count retained ``scripts/*.py`` artifacts with no static consumer.
+
+    This is deliberately a static, reporting-only signal. It does not use
+    runtime evidence, add a target, or influence fitness. A consumer is
+    another retained script that imports an artifact or names its explicit
+    ``scripts/<name>.py`` path; missing/unreadable inventory is unavailable,
+    not an empty corpus.
+
+    Implementation performs a single pass over each script: collects imports
+    via AST and static path mentions via a single regex, then tallies incoming
+    references across candidate stems in O(n) without nested re-scans.
+    """
+    try:
+        import ast
+        import re
+
+        if not repo.is_dir():
+            return None
+        scripts_dir = repo / "scripts"
+        if not scripts_dir.is_dir():
+            return {"zero_static_consumers": 0, "total_retained_artifacts": 0}
+        scripts = sorted(scripts_dir.glob("*.py"))
+        stems = {path.stem for path in scripts}
+        consumers = {stem: 0 for stem in stems}
+        scripts_path_re = re.compile(
+            r"(?<![A-Za-z0-9_])scripts/([A-Za-z_]\w*)\.py(?![A-Za-z0-9_])"
+        )
+        for consumer in scripts:
+            text = consumer.read_text(encoding="utf-8", errors="replace")
+            mentioned: set[str] = set()
+            try:
+                tree = ast.parse(text, filename=str(consumer))
+            except SyntaxError:
+                tree = None
+            if tree is not None:
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        mentioned.update(alias.name.split(".")[0] for alias in node.names)
+                    elif isinstance(node, ast.ImportFrom) and node.module:
+                        mentioned.add(node.module.split(".")[0])
+            mentioned.update(scripts_path_re.findall(text))
+            mentioned.discard(consumer.stem)
+            for stem in mentioned.intersection(stems):
+                consumers[stem] += 1
+        return {
+            "zero_static_consumers": sum(count == 0 for count in consumers.values()),
+            "total_retained_artifacts": len(scripts),
+        }
+    except (OSError, UnicodeError, ValueError):
+        return None
 
 
 def _value_section(state_dir: Path, selfevo_repo: Path | None, now: datetime) -> dict[str, Any]:
