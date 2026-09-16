@@ -133,7 +133,23 @@ _EVIDENCE_ID_RE = re.compile(r"^[Ee](\d{1,3})$")
 # #1596: stable, replayable names for the sources that actually contributed
 # at least one citable line to a review. They are ledger provenance, not
 # demand kinds or priority metadata.
-_EVIDENCE_SOURCES = frozenset({"scorecard_gaps", "decay", "supported_hypotheses"})
+# ADR-020 Rule 2: Night contour candidates require at least one citation (link)
+# to a ledger row, commit, or measurement.
+_EVIDENCE_SOURCES = frozenset({
+    "scorecard_gaps",
+    "decay",
+    "supported_hypotheses",
+    "night_contour_candidates",
+})
+
+# Citations: ledger cycle (e.g. cycle-eeb3c220d25b), git commit (7-40 hex chars),
+# or measurement (e.g. 42ms, 3.5s, 85%, 120MB, 14.2kb, 100ops).
+_CYCLE_CITATION_RE = re.compile(r"\bcycle-[A-Za-z0-9][A-Za-z0-9_-]+\b", re.I)
+_COMMIT_CITATION_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.I)
+_MEASUREMENT_CITATION_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:ms|s|sec|seconds?|%|percent|bytes?|kb|mb|gb|tb|ops|ops/s|cycles?)\b",
+    re.I,
+)
 _DIRECTION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 _GOAL_REVIEW_SYSTEM_PROMPT = (
@@ -503,6 +519,36 @@ def _collect_evidence(
     if sources is not None and len(lines) > hypothesis_start:
         sources.add("supported_hypotheses")
         source_starts["supported_hypotheses"] = hypothesis_start
+    # ADR-020 Rule 2: Night contour candidates (reflector and curator)
+    # propose candidates with citations (ledger cycle, commit, measurement)
+    # into the existing demand/goal review pipeline.
+    night_start = len(lines)
+    night_available = True
+    try:
+        from nanobot.runtime import knowledge_curator
+
+        curator_pool = knowledge_curator.load_reflector_pool(Path(state_dir))
+        # Reflector pool is available if load_reflector_pool succeeded (returns dict)
+        clusters = curator_pool.get("clusters") or []
+        for cluster in clusters:
+            detail = str(cluster.get("detail") or "").strip()
+            if not detail:
+                continue
+            cycles = cluster.get("cycles") or []
+            cycles_str = f" [cycles: {', '.join(cycles[:3])}]" if cycles else ""
+            lines.append(
+                f"night contour: {detail}{cycles_str} (reflector/curator recommendation; goal vector V1)"
+            )
+    except Exception:
+        night_available = False
+    if source_status is not None:
+        source_status["night_contour_candidates"] = (
+            "complete" if night_available else "unavailable"
+        )
+    if sources is not None and len(lines) > night_start:
+        sources.add("night_contour_candidates")
+        source_starts["night_contour_candidates"] = night_start
+
     limited_lines = lines[:_MAX_EVIDENCE_LINES]
     if sources is not None:
         sources.intersection_update(
@@ -641,6 +687,31 @@ def _evidence_cited(evidence_ref: str, evidence: dict[str, str]) -> bool:
     return False
 
 
+def _has_required_citation(text: str) -> bool:
+    """True iff text contains at least one citation to a ledger cycle ID,
+    git commit, or measurement. (ADR-020 Rule 2: candidate without at least
+    one link is rejected)."""
+    return bool(
+        _CYCLE_CITATION_RE.search(text)
+        or _COMMIT_CITATION_RE.search(text)
+        or _MEASUREMENT_CITATION_RE.search(text)
+    )
+
+
+def _is_night_contour_evidence(evidence_ref: str, evidence: dict[str, str]) -> bool:
+    """True iff the cited evidence line originates from the night contour
+    (reflector / curator)."""
+    ref = (evidence_ref or "").strip()
+    if not ref:
+        return False
+    ref_norm = ref.upper()
+    for k, v in evidence.items():
+        if k.upper() == ref_norm or ref in v or v in ref:
+            if "night contour:" in v or "reflector" in v or "curator" in v:
+                return True
+    return False
+
+
 def validate_priority(
     candidate: Any,
     evidence: dict[str, str],
@@ -650,7 +721,11 @@ def validate_priority(
     ``(normalized, "")`` or ``(None, reason)``. Requirements: a usable
     label (parseable by the done-detection regexes), a bounded body, a
     ``V1``/``V2`` vector reference, an evidence reference that appears in
-    the presented inputs, and no duplicate of an existing entry."""
+    the presented inputs, and no duplicate of an existing entry.
+
+    ADR-020 Rule 2: Night contour candidates (reflector and curator)
+    require at least one link/citation (ledger cycle, commit, or measurement);
+    a candidate without at least one link is rejected on validation."""
     if not isinstance(candidate, dict):
         return None, "not_an_object"
     label = str(candidate.get("label") or "").strip()
@@ -665,8 +740,19 @@ def validate_priority(
     vector = str(candidate.get("vector") or "").strip().upper()
     if vector not in ("V1", "V2"):
         return None, "missing_vector_reference"
-    if not _evidence_cited(str(candidate.get("evidence") or ""), evidence):
+    evidence_ref = str(candidate.get("evidence") or "")
+    if not _evidence_cited(evidence_ref, evidence):
         return None, "evidence_not_in_inputs"
+    # ADR-020 Rule 2: candidate citing night contour without at least one link is rejected.
+    if _is_night_contour_evidence(evidence_ref, evidence):
+        combined_citation_text = f"{label} {body} {evidence_ref}"
+        ref_norm = evidence_ref.strip().upper()
+        for k, v in evidence.items():
+            if k.upper() == ref_norm:
+                combined_citation_text += f" {v}"
+                break
+        if not _has_required_citation(combined_citation_text):
+            return None, "missing_citation"
     if _normalize_label(label) in existing_labels:
         return None, "duplicate"
     return {"label": label, "body": body, "vector": vector}, ""
