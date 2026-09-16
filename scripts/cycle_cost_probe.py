@@ -82,7 +82,10 @@ def read_process_snapshot(proc_root: Path = Path("/proc/self"), clock_ticks: int
     fields = stat[closing + 2 :].split()
     if len(fields) < 13:
         raise ValueError("/proc stat is truncated")
-    ticks = int(clock_ticks or os.sysconf("SC_CLK_TCK"))
+    try:
+        ticks = int(clock_ticks or os.sysconf("SC_CLK_TCK"))
+    except (AttributeError, ValueError):
+        ticks = 100
     if ticks <= 0:
         raise ValueError("invalid clock tick rate")
     status_values = {
