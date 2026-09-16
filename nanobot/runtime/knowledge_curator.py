@@ -63,6 +63,7 @@ from nanobot.runtime.lesson_v2 import (
 from nanobot.runtime.model_registry import resolve_model
 from nanobot.runtime.schemas import CONTROLLED_LESSON_TAGS
 from nanobot.runtime.state_access import ledger_window
+from nanobot.runtime.trainer_evidence import validate_trainer_citation
 
 MAX_WRITES_DEFAULT = 3
 MAX_LESSONS_DEFAULT = 40
@@ -1781,6 +1782,20 @@ def _reflector_card(
         # echo (#1171); recorded so raising _REFLECTOR_MIN_DAYS/_MIN_CYCLES
         # later is a decision on data.
         "distinct_days": max(1, len(days)),
+        # ADR-021 rule 4 / #1666 phase 2: "a proposal to add, change or retire
+        # cites retrieval counts and outcomes." #1505's citations.jsonl store
+        # is not yet populated (Phase 1, in progress) so this keys on the
+        # recurrence signal this mint already computes and already gates
+        # graduation on — distinct cycles this pattern was seen in — rather
+        # than coupling to the unstable store shape. Validated at the gate by
+        # trainer_evidence.validate_trainer_citation before a card is applied.
+        "citation": {
+            "kind": "lesson",
+            "target_id": card_id,
+            "source": "reflector.recurrence_v1",
+            "retrieval_count": max(1, len(cycles)),
+            "offered_or_shown": True,
+        },
     }
 
 
@@ -2222,6 +2237,15 @@ def _merge_card_into(existing: list[dict[str, Any]], card: dict[str, Any]) -> st
     upgraded in place, #1106) or ``None`` when the card's id is already present
     — the idempotent case a retried pickup relies on. One implementation for
     stage time (in-memory baseline) and pickup time (the checkout).
+
+    The ``None`` branch is also ADR-021 rule 2's two-author conflict rule: the
+    executor authors lessons from inside one cycle (full mutation gate, its
+    own commit); the trainer (reflector -> curator) proposes from across many
+    cycles, through this staging path. Whichever author's id reaches the
+    checkout first keeps it — a same-id trainer proposal is a no-op here, never
+    an overwrite. :func:`apply_staged_lesson_cards` distinguishes a genuine
+    conflict (existing content differs from the proposal) from a harmless
+    idempotent retry and records the former.
     """
     card_id = str(card.get("id") or "")
     if card_id and any(str(entry.get("id") or "") == card_id for entry in existing):
@@ -2353,7 +2377,24 @@ def apply_staged_lesson_cards(repo_root: Path, payload: Any, *, state_dir: Path 
     the ids that changed the store (inserted or folded); an empty list means
     every card was already present and the file was left untouched. The
     caller commits and pushes; this function only edits the working tree.
+
+    This is the gate for ADR-021 rule 4: a card without a valid citation
+    (schema-checked by :func:`trainer_evidence.validate_trainer_citation`) is
+    declined, never applied — recorded in ``decisions.jsonl`` so the drop is
+    visible, not silent.
+
+    ADR-021 rule 2's two-author conflict rule also lands here: the executor
+    authors lessons from inside one cycle (its own commit, through the full
+    mutation gate); the trainer proposes the same id from across many
+    cycles, through this staging path. On an id collision,
+    :func:`_merge_card_into` already refuses silently — first writer keeps
+    the id. When the checkout's existing entry for that id differs in
+    substance from the trainer's proposal (not just a harmless retry of an
+    already-applied card), that silent refusal IS the conflict resolving in
+    the existing writer's favor, and it is recorded here rather than left to
+    read as an ordinary no-op.
     """
+    resolved_state_dir = Path(state_dir) if state_dir is not None else Path(repo_root).parent / "state"
     cards = payload.get("cards") if isinstance(payload, dict) else payload
     cards = [c for c in (cards or []) if isinstance(c, dict) and c.get("id")]
     if not cards:
@@ -2362,13 +2403,31 @@ def apply_staged_lesson_cards(repo_root: Path, payload: Any, *, state_dir: Path 
     existing = _load_lessons_list(target)
     applied: list[str] = []
     for card in cards:
+        card_id = str(card["id"])
+        citation_violations = validate_trainer_citation(card.get("citation"))
+        if citation_violations:
+            _write_decision(
+                resolved_state_dir, card_id, "mint_declined",
+                "citation_invalid: " + "; ".join(citation_violations), LESSONS_REL,
+            )
+            continue
+        prior = next((e for e in existing if str(e.get("id") or "") == card_id), None)
+        if prior is not None and (
+            prior.get("problem") != card.get("problem") or prior.get("solution") != card.get("solution")
+        ):
+            _write_decision(
+                resolved_state_dir, card_id, "mint_declined",
+                "trainer_proposal_declined_id_conflict: existing entry for this id differs "
+                "and keeps authorship (first writer wins)", LESSONS_REL,
+            )
+            continue
         from nanobot.runtime.lesson_v2 import allow_mint
         extending = _fold_target(existing, card) is not None or any(e.get("id") == card.get("id") for e in existing)
-        if not allow_mint(card, existing, state_dir or Path(repo_root).parent / "state",
+        if not allow_mint(card, existing, resolved_state_dir,
                           workspace=repo_root, extending=extending):
             continue
         if _merge_card_into(existing, card) is not None:
-            applied.append(str(card["id"]))
+            applied.append(card_id)
     if applied:
         existing, _unknown = fill_related_links(existing)
         atomic_write_yaml(target, {"lessons": existing})

@@ -88,6 +88,13 @@ def _card(card_id: str, solution: str, problem: str, *, seen: int = 1, evidence:
         "schema_version": 2, "id": card_id, "title": solution[:200], "problem": problem, "solution": solution,
         "tags": ["runtime"], "source": "reflector", "severity": "medium", "seen_count": seen,
         "first_seen": "2026-08-29", "last_seen": "2026-08-29", "evidence": evidence or [],
+        # ADR-021 rule 4 (#1666 phase 2): apply_staged_lesson_cards requires a
+        # valid citation. This helper's cards are staging/pickup fixtures, not
+        # citation-shape tests, so a minimally valid one is always attached.
+        "citation": {
+            "kind": "lesson", "target_id": card_id, "source": "reflector.recurrence_v1",
+            "retrieval_count": max(1, seen), "offered_or_shown": True,
+        },
     }
 
 
