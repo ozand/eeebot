@@ -10,7 +10,7 @@ ride the existing harness-signal confirmation path to a false "verified
 faster" credit.
 
 This module adds the missing measurement gate, enforced at CONFIRMATION time
-(the simplest integration point — no bridge/gate change needed):
+(the simplest existing integration point — no bridge/gate change needed):
 
 - :func:`is_optimization_claim` recognizes the EXPLICIT, structured signal —
   a ``serves`` value normalized and checked with ``startswith("optimization")``
@@ -20,7 +20,10 @@ This module adds the missing measurement gate, enforced at CONFIRMATION time
 - :func:`validate_benchmark` schema-checks a benchmark artifact: ``metric``
   and ``method`` must be non-empty strings; ``baseline``/``new_value`` must
   be finite numbers (not bool, not NaN/inf); ``direction`` must be
-  ``"lower_is_better"`` or ``"higher_is_better"``; and the measurement must
+  ``"lower_is_better"`` or ``"higher_is_better"``; ``alternative`` must name
+  the comparison implementation (or explicitly say ``"none available"``),
+  and ``alternative_reason`` must record why the alternative was not used;
+  a self/previous-revision baseline is rejected. The measurement must
   show an ACTUAL improvement in the declared direction — ``new_value`` equal
   to ``baseline`` (no change) or a regression against ``direction`` is
   rejected. No trust of prose — every field is type/value-checked, nothing
@@ -107,6 +110,10 @@ BENCHMARK_SCHEMA = "benchmark-evidence-v1"
 _REQUIRED_STR_FIELDS = ("metric", "method")
 _REQUIRED_NUM_FIELDS = ("baseline", "new_value")
 _VALID_DIRECTIONS = ("lower_is_better", "higher_is_better")
+_SELF_BASELINE_MARKERS = (
+    "previous revision", "previous implementation", "own previous",
+    "previous version", "this implementation", "same implementation",
+)
 
 # #819: the ONLY metric names a benchmark artifact can ever verify against —
 # each maps to (scorecard snapshot section, canonical improvement direction).
@@ -188,6 +195,9 @@ def validate_benchmark(obj: Any) -> list[str]:
     - ``new_value``: finite number (the after value)
     - ``method``: non-empty string (how it was measured)
     - ``direction``: ``"lower_is_better"`` or ``"higher_is_better"``
+    - ``alternative``: named comparison implementation, or ``"none available"``
+    - ``alternative_reason``: non-empty reason explaining the comparison choice
+      (including why a named alternative was not used, or why none was available)
 
     Beyond shape, the measurement itself must show a genuine improvement:
     ``new_value == baseline`` (no change) is rejected, and a regression
@@ -206,6 +216,18 @@ def validate_benchmark(obj: Any) -> list[str]:
             value = obj.get(field)
             if not isinstance(value, str) or not value.strip():
                 violations.append(f"{field} must be a non-empty string")
+
+        alternative = obj.get("alternative")
+        if not isinstance(alternative, str) or not alternative.strip():
+            violations.append("alternative must name a comparison or state 'none available'")
+        else:
+            alternative_text = alternative.strip().casefold()
+            if any(marker in alternative_text for marker in _SELF_BASELINE_MARKERS):
+                violations.append("alternative must not be a self-baseline")
+
+        alternative_reason = obj.get("alternative_reason")
+        if not isinstance(alternative_reason, str) or not alternative_reason.strip():
+            violations.append("alternative_reason must explain the comparison choice")
 
         direction_raw = obj.get("direction")
         direction: str | None = None

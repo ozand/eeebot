@@ -14,12 +14,10 @@ metric actually moved.
 from __future__ import annotations
 
 import json
-import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from nanobot.runtime import benchmark_evidence
-
 
 _GOOD_BENCHMARK = {
     "metric": "p95_latency_ms",
@@ -27,6 +25,8 @@ _GOOD_BENCHMARK = {
     "new_value": 180,
     "method": "wrk -t2 -c50 -d30s against /health, median of 3 runs",
     "direction": "lower_is_better",
+    "alternative": "installed reference server",
+    "alternative_reason": "reference implementation is unavailable on the target host",
 }
 
 # #819: an artifact naming a metric that IS in the harness-verifiable
@@ -38,6 +38,8 @@ _VERIFIABLE_BENCHMARK = {
     "new_value": 400,
     "method": "scorecard cost section, before/after the integration cycle",
     "direction": "lower_is_better",
+    "alternative": "installed harness reference implementation",
+    "alternative_reason": "the harness microbench is the authoritative comparison for this metric",
 }
 
 
@@ -92,6 +94,29 @@ def _corroborating_history(
 class TestValidateBenchmark:
     def test_good_artifact_has_no_violations(self):
         assert benchmark_evidence.validate_benchmark(dict(_GOOD_BENCHMARK)) == []
+
+    def test_optimization_claim_requires_alternative_declaration(self):
+        claim = dict(_GOOD_BENCHMARK)
+        claim.pop("alternative")
+        violations = benchmark_evidence.validate_benchmark(claim)
+        assert any("alternative" in violation for violation in violations)
+
+    def test_self_baseline_is_rejected_even_with_a_reason(self):
+        claim = dict(
+            _GOOD_BENCHMARK,
+            alternative="the previous revision of this implementation",
+            alternative_reason="the previous revision is the only available reference",
+        )
+        violations = benchmark_evidence.validate_benchmark(claim)
+        assert any("self-baseline" in violation for violation in violations)
+
+    def test_no_external_alternative_is_explicitly_allowed(self):
+        claim = dict(
+            _GOOD_BENCHMARK,
+            alternative="none available",
+            alternative_reason="no compatible implementation is installed on the target host",
+        )
+        assert benchmark_evidence.validate_benchmark(claim) == []
 
     def test_good_artifact_higher_is_better_has_no_violations(self):
         obj = dict(_GOOD_BENCHMARK, baseline=100, new_value=250, direction="higher_is_better")

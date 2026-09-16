@@ -402,6 +402,8 @@ def _write_claim(
         "new_value": new_value,
         "method": "test claim",
         "direction": direction,
+        "alternative": "installed reference implementation",
+        "alternative_reason": "the harness supplies the comparison",
     }
     if module is not None:
         payload["module"] = module
