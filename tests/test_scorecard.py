@@ -1525,8 +1525,14 @@ class TestControlPlaneSnapshot:
         assert tt_snap["current"] in tt_snap["nodes"]
         assert tt_snap["switches"] == 0
         assert all(
-            node == {"status": "active", "mean_gain": 0.0, "attempts": 0, "lever_metric": node["lever_metric"]}
-            for node in tt_snap["nodes"].values()
+            node == {
+                "status": "active", "mean_gain": 0.0, "attempts": 0,
+                "lever_metric": node["lever_metric"],
+                # #1686: a seed node stores no explicit label, so the
+                # display fallback is its own (already clean) key.
+                "label": name,
+            }
+            for name, node in tt_snap["nodes"].items()
         )
 
     def test_set_values_are_captured_others_stay_none(self, tmp_path, monkeypatch):
