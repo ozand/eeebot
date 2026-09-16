@@ -27,6 +27,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from nanobot.runtime import state_access
 from nanobot.runtime.schemas import CONTROLLED_LESSON_TAGS, LESSON_SEVERITIES
 
 _MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -1156,3 +1157,66 @@ def read_citation_scans(
         return {"status": "present" if retained else "empty", "rows": retained, "notes": []}
     except Exception as error:
         return {"status": "unavailable", "rows": [], "notes": [type(error).__name__]}
+
+
+def correlate_citations_with_outcomes(
+    state_dir: Path,
+    *,
+    now: datetime | None = None,
+    window_days: int = CITATION_SCAN_RETENTION_DAYS,
+) -> dict[str, object]:
+    """Read-only join of ``citations.jsonl`` against the outcome ledger, by
+    ``cycle_id``. Answers one question — does a cycle that cited a lesson
+    show a different outcome distribution than one that did not — and
+    answers it with bounded counts, nothing more.
+
+    #1505 built the write path (``record_citations``) and #1654 found it had
+    zero production readers. This is the first one, and it is explicitly
+    NOT a decision: ADR-021 rule 1 forbids granting any trainer authority
+    before usefulness is measured, and a function that both measures and
+    acts would violate that rule the moment it existed. Callers must not
+    branch on this function's output beyond reporting it; the correlation
+    it returns is descriptive evidence for a human or a future proposal to
+    cite, not a signal this module (or anything else) may act on.
+
+    Fail-open to an ``unavailable`` result, matching this module's existing
+    convention for every other bounded reader here.
+    """
+    try:
+        current = _citation_now(now)
+        directory = Path(state_dir) / "lesson_usage"
+        citation_rows = _read_jsonl(directory / "citations.jsonl", _MAX_ENTRIES)
+        cited_cycle_ids = {
+            str(row.get("cycle_id")) for row in citation_rows if row.get("cycle_id")
+        }
+
+        window = state_access.ledger_window(
+            state_dir,
+            since_ts=(current - timedelta(days=window_days)).isoformat().replace("+00:00", "Z"),
+            phases=frozenset({"outcome"}),
+            now=current,
+        )
+        cited_outcome_counts: dict[str, int] = {}
+        baseline_outcome_counts: dict[str, int] = {}
+        cited_cycles_matched: set[str] = set()
+        for row in window.rows:
+            cycle_id = str(row.get("cycle_id") or "")
+            outcome = str(row.get("outcome") or "unknown")
+            if cycle_id and cycle_id in cited_cycle_ids:
+                cited_outcome_counts[outcome] = cited_outcome_counts.get(outcome, 0) + 1
+                cited_cycles_matched.add(cycle_id)
+            else:
+                baseline_outcome_counts[outcome] = baseline_outcome_counts.get(outcome, 0) + 1
+
+        return {
+            "status": "present" if citation_rows or window.rows else "empty",
+            "window_days": window_days,
+            "ledger_status": window.status,
+            "citation_rows": len(citation_rows),
+            "distinct_cited_cycles": len(cited_cycle_ids),
+            "cited_cycles_matched_in_ledger": len(cited_cycles_matched),
+            "cited_outcome_counts": cited_outcome_counts,
+            "baseline_outcome_counts": baseline_outcome_counts,
+        }
+    except Exception as error:
+        return {"status": "unavailable", "notes": [type(error).__name__]}

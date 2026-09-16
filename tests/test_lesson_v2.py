@@ -13,6 +13,7 @@ from nanobot.runtime.knowledge_curator import promote_reflector_recommendations_
 from nanobot.runtime.lesson_v2 import (
     append_curator_decision,
     bounded_load_yaml,
+    correlate_citations_with_outcomes,
     find_duplicate,
     keyword_jaccard,
     normalize_problem,
@@ -306,6 +307,53 @@ def test_citation_writer_failure_is_recorded_fail_open(tmp_path: Path, monkeypat
     assert row["marker_count"] == 1
     assert row["status"] == "unavailable"
     assert "citation_write_failed" in row["notes"]
+
+
+def test_correlate_citations_with_outcomes_splits_cited_from_baseline(tmp_path: Path) -> None:
+    """#1505/#1654: the first production reader of citations.jsonl. It must
+    only report bounded counts -- cited cycles vs. baseline, by outcome --
+    never a verdict, per ADR-021 rule 1."""
+    from nanobot.runtime.cycle_ledger import record_cycle_outcome
+
+    state = tmp_path / "state"
+    record_citations(state, "cycle-cited-1", ["response [Lesson LESS-A]"])
+    record_citations(state, "cycle-cited-2", ["response [Lesson LESS-A]"])
+    record_citations(state, "cycle-not-cited", ["no marker here"])
+
+    record_cycle_outcome(state, "cycle-cited-1", "success", None, [], None)
+    record_cycle_outcome(state, "cycle-cited-2", "failed", "boom", [], None)
+    record_cycle_outcome(state, "cycle-not-cited", "success", None, [], None)
+    record_cycle_outcome(state, "cycle-never-scanned", "success", None, [], None)
+
+    result = correlate_citations_with_outcomes(state)
+    assert result["status"] == "present"
+    assert result["citation_rows"] == 2  # only cited-1/cited-2 wrote a lesson_id row
+    assert result["distinct_cited_cycles"] == 2
+    assert result["cited_cycles_matched_in_ledger"] == 2
+    assert result["cited_outcome_counts"] == {"success": 1, "failed": 1}
+    # cycle-not-cited and cycle-never-scanned both land in baseline, whether
+    # or not a scan ever ran for them.
+    assert result["baseline_outcome_counts"] == {"success": 2}
+
+
+def test_correlate_citations_with_outcomes_empty_is_not_unavailable(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    result = correlate_citations_with_outcomes(state)
+    assert result["status"] == "empty"
+    assert result["citation_rows"] == 0
+    assert result["cited_outcome_counts"] == {}
+    assert result["baseline_outcome_counts"] == {}
+
+
+def test_correlate_citations_with_outcomes_fails_open(tmp_path: Path, monkeypatch) -> None:
+    import nanobot.runtime.lesson_v2 as lesson_v2
+
+    def broken(*args: object, **kwargs: object) -> object:
+        raise OSError("ledger unavailable")
+
+    monkeypatch.setattr(lesson_v2.state_access, "ledger_window", broken)
+    result = correlate_citations_with_outcomes(tmp_path / "state")
+    assert result["status"] == "unavailable"
 
 
 def test_curator_decisions_under_bound_do_not_rotate(tmp_path: Path) -> None:
