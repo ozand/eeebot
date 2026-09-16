@@ -91,6 +91,12 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.runtime.experiment_ledger:append_experiment_result",
     ),
     "ledger": ("nanobot.runtime.cycle_ledger:append_event",),
+    # scans.jsonl/citations.jsonl/scan-failures.jsonl (#1516/#1546/#1570).
+    # Wrapped in `Path(state_dir) / "lesson_usage"` here, not the bare
+    # `state_dir / "..."` form this registry's own scan greps for (#1219's
+    # test), which is exactly why this segment carried no entry until now —
+    # the scan's blind spot, not evidence of no writer (#1505/#1654).
+    "lesson_usage": ("nanobot.runtime.lesson_v2:record_citations",),
     "llm_calls": (
         "nanobot.observability.llm_telemetry:record_llm_call",
         "nanobot.observability.llm_telemetry:record_llm_prompt",
