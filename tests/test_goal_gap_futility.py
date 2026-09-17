@@ -638,6 +638,62 @@ def test_push_pending_outcome_does_not_count_toward_family_futility(tmp_path):
     assert rec["futile"] is False
 
 
+def test_superseded_and_abandoned_do_not_count_toward_family_futility(tmp_path):
+    """#1709 increment 2: 'superseded' (origin/main moved past the pending
+    push's base) and 'abandoned' (the branch is gone) are resolutions of a
+    push_pending cycle — neither a success nor a failure of the original
+    work — and must not advance the family run counter either."""
+    state = tmp_path / "state"
+    item_id = "priority-test-superseded-abandoned"
+    item = {"id": item_id, "kind": "priority", "summary": "test priority"}
+    futility.futile_gap_ids(state, [item])
+
+    rows = []
+    now = datetime.now(timezone.utc)
+    outcomes = ["superseded", "abandoned"] * 3
+    for i, outcome in enumerate(outcomes):
+        cycle = f"c-resolved-{i}"
+        ts = (now + timedelta(seconds=i + 1)).isoformat()
+        rows.append({"phase": "proposed", "cycle_id": cycle, "demand_id": item_id, "ts": ts})
+        rows.append({"phase": "outcome", "cycle_id": cycle, "outcome": outcome, "ts": ts})
+
+    futile_ids = futility.futile_gap_ids(state, [item], ledger_rows=rows)
+    assert item_id not in futile_ids
+    rec = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))[item_id]
+    assert rec["attempt_count"] == 0
+
+
+def test_pushed_late_resets_family_futility_run_like_success(tmp_path):
+    """#1709 increment 2: 'pushed_late' is a genuine success delayed by one
+    cycle — must reset the family run counter the same as 'success', not
+    count as a non-success attempt."""
+    state = tmp_path / "state"
+    item_id = "defect-test-pushed-late"
+    item = {"id": item_id, "kind": "defect", "summary": "test defect"}
+    futility.futile_gap_ids(state, [item])
+
+    now = datetime.now(timezone.utc)
+    rows = []
+    # 5 failing attempts, then a pushed_late (should reset), then one more
+    # failing attempt -- the run since the reset is 1, well under N=6.
+    for i in range(5):
+        cycle = f"c-fail-{i}"
+        ts = (now + timedelta(seconds=i + 1)).isoformat()
+        rows.append({"phase": "proposed", "cycle_id": cycle, "demand_id": item_id, "ts": ts})
+        rows.append({"phase": "outcome", "cycle_id": cycle, "outcome": "validation_failed", "ts": ts})
+    ts_late = (now + timedelta(seconds=10)).isoformat()
+    rows.append({"phase": "proposed", "cycle_id": "c-late", "demand_id": item_id, "ts": ts_late})
+    rows.append({"phase": "outcome", "cycle_id": "c-late", "outcome": "pushed_late", "ts": ts_late})
+    ts_after = (now + timedelta(seconds=11)).isoformat()
+    rows.append({"phase": "proposed", "cycle_id": "c-after", "demand_id": item_id, "ts": ts_after})
+    rows.append({"phase": "outcome", "cycle_id": "c-after", "outcome": "validation_failed", "ts": ts_after})
+
+    futile_ids = futility.futile_gap_ids(state, [item], ledger_rows=rows)
+    assert item_id not in futile_ids
+    rec = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))[item_id]
+    assert rec["attempt_count"] == 1
+
+
 def test_demand_attempt_count_success_resets_run_and_corpus_shapes(tmp_path):
     """#1394 review: non-goal families count consecutive non-success cycles since last success.
 

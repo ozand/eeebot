@@ -1131,6 +1131,157 @@ def _cleanup_cycle_branch(repo_root: 'Path', cycle_branch: str) -> bool:
         return False
 
 
+#: #1709 increment 2: outcomes that resolve a 'push_pending' row. Any of
+#: these already present for a cycle_id means that row is done — the next
+#: cycle-start boundary must not write a second resolution for it.
+_LATE_PUSH_RESOLUTIONS = frozenset({'pushed_late', 'superseded', 'abandoned'})
+
+
+def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
+    """#1709 increment 2: at the same safe cycle-start boundary as
+    :func:`_pickup_staged_promotions` (bridge lock held, HEAD on clean
+    ``main``), resolve every terminal ``outcome: push_pending`` cycle whose
+    push a prior cycle's exhausted transient-connection retries left undone.
+
+    For each ``push_pending`` row without a LATER same-``cycle_id`` row in
+    :data:`_LATE_PUSH_RESOLUTIONS` (idempotency: a resolved row is skipped
+    on every later call):
+
+    - The branch no longer exists -> ``abandoned``. Nothing left to push.
+    - ``origin/main`` has moved past the row's recorded ``main_sha_before``
+      -> ``superseded``. Never merge or rebase onto a moved base
+      automatically (a non-fast-forward is a decision, not a retry) — the
+      branch is KEPT for forensics, the same policy every other
+      unintegrated cycle branch in this module already gets (only a
+      confirmed successful integration ever deletes one).
+    - ``origin/main`` is unchanged -> redo exactly what
+      :func:`_integrate_cycle_to_main` would have done (checkout main at
+      the current tip, ``--no-ff`` merge the branch, push) and record
+      ``pushed_late`` with the ORIGINAL ``cycle_id`` on success, then
+      delete the branch (:func:`_cleanup_cycle_branch`), same as a normal
+      integration. A further push failure here writes NO new row — the
+      cycle is left ``push_pending`` for the next cycle-start to retry.
+
+    Returns the number of rows resolved this call. Fail-open: any
+    unexpected error is printed and 0 is returned so a bookkeeping bug here
+    can never block the normal cycle.
+    """
+    import subprocess as _sp_late
+
+    try:
+        from nanobot.runtime.cycle_ledger import read_events, record_cycle_outcome
+    except Exception as _e:
+        print(f'bridge: late-push pickup: import failed ({_e}); skipping')
+        return 0
+    try:
+        rows = read_events(state_dir)
+        pending_by_cycle: dict[str, dict] = {}
+        resolved_cycles: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict) or row.get('phase') != 'outcome':
+                continue
+            cid = str(row.get('cycle_id') or '').strip()
+            if not cid:
+                continue
+            outcome = str(row.get('outcome') or '')
+            if outcome == 'push_pending':
+                pending_by_cycle[cid] = row
+            elif outcome in _LATE_PUSH_RESOLUTIONS:
+                resolved_cycles.add(cid)
+        todo = {cid: row for cid, row in pending_by_cycle.items() if cid not in resolved_cycles}
+        if not todo:
+            return 0
+
+        git = _git_cmd(repo_root)
+        resolved_count = 0
+        for cycle_id, row in todo.items():
+            branch = str(row.get('branch') or '')
+            main_sha_before = str(row.get('main_sha_before') or '')
+            if not branch:
+                # A push_pending row with no branch name is not something this
+                # boundary can act on either way — skip rather than guess.
+                continue
+
+            branch_ref = _sp_late.run(
+                git + ['show-ref', '--verify', '--quiet', f'refs/heads/{branch}'],
+                capture_output=True,
+            )
+            if branch_ref.returncode != 0:
+                _v, _vr = _derive_cycle_verdict('abandoned', 'push_pending_branch_missing')
+                record_cycle_outcome(
+                    state_dir, cycle_id, 'abandoned', 'push_pending_branch_missing', [], branch,
+                    verdict=_v, verdict_reason=_vr,
+                )
+                print(f'bridge: late push: {branch} (cycle {cycle_id}) no longer exists — recorded abandoned')
+                resolved_count += 1
+                continue
+
+            _sp_late.run(git + ['fetch', 'origin', 'main'], capture_output=True, text=True)
+            current_origin_main = _sp_late.run(
+                git + ['rev-parse', 'origin/main'], capture_output=True, text=True,
+            ).stdout.strip()
+            if not current_origin_main:
+                # Could not confirm origin/main's tip this cycle — try again
+                # next cycle-start rather than guess (fail-open, no row written).
+                continue
+
+            if main_sha_before and current_origin_main != main_sha_before:
+                _v, _vr = _derive_cycle_verdict('superseded', 'push_pending_main_moved')
+                record_cycle_outcome(
+                    state_dir, cycle_id, 'superseded', 'push_pending_main_moved', [], branch,
+                    verdict=_v, verdict_reason=_vr,
+                )
+                print(
+                    f"bridge: late push: origin/main moved past {branch}'s recorded base "
+                    f'(cycle {cycle_id}) — recorded superseded; branch kept for forensics'
+                )
+                resolved_count += 1
+                continue
+
+            # origin/main is unchanged since the original attempt: redo the
+            # merge against the current tip and push, exactly what
+            # _integrate_cycle_to_main would have done at cycle end.
+            co_main = _sp_late.run(
+                git + ['checkout', '-B', 'main', current_origin_main], capture_output=True, text=True,
+            )
+            if co_main.returncode != 0:
+                continue  # fail-open; retry at the next cycle-start
+            merge = _sp_late.run(
+                git + [
+                    'merge', '--no-ff', branch,
+                    '-m', f'merge: integrate {branch} (late push, cycle {cycle_id})',
+                ],
+                capture_output=True, text=True,
+            )
+            if merge.returncode != 0:
+                _sp_late.run(git + ['merge', '--abort'], capture_output=True)
+                _sp_late.run(git + ['reset', '--hard', current_origin_main], capture_output=True)
+                continue  # fail-open; retry at the next cycle-start
+            push = _sp_late.run(
+                git + ['push', f'--force-with-lease=main:{current_origin_main}', 'origin', 'main'],
+                capture_output=True, text=True,
+            )
+            if push.returncode != 0:
+                _sp_late.run(git + ['reset', '--hard', current_origin_main], capture_output=True)
+                continue  # still can't push — leave push_pending, retry next cycle-start
+
+            main_sha_after = _sp_late.run(
+                git + ['rev-parse', 'HEAD'], capture_output=True, text=True,
+            ).stdout.strip()
+            _v, _vr = _derive_cycle_verdict('pushed_late', None)
+            record_cycle_outcome(
+                state_dir, cycle_id, 'pushed_late', None, [], branch,
+                verdict=_v, verdict_reason=_vr,
+            )
+            _cleanup_cycle_branch(repo_root, branch)
+            print(f'bridge: late push: {branch} (cycle {cycle_id}) pushed to main at {main_sha_after}')
+            resolved_count += 1
+        return resolved_count
+    except Exception as _exc:
+        print(f'bridge: late-push pickup failed: {_exc!r}')
+        return 0
+
+
 _FORENSIC_CYCLE_BRANCH_KEEP = 20
 
 
@@ -2624,6 +2775,9 @@ async def _main_impl_body():
         # failure is printed and the cycle proceeds normally.
         if _selfevo_repo_check.is_dir():
             _pickup_staged_promotions(_selfevo_repo_check, STATE_DIR)
+            # #1709 increment 2: same safe boundary — finish any push a prior
+            # cycle's exhausted transient retries left as push_pending.
+            _finish_pending_pushes(_selfevo_repo_check, STATE_DIR)
 
         # #944: read executor mission from immutable goals.md at the release
         # root when available; fall back to the legacy goal_text.json chain.
@@ -4303,6 +4457,10 @@ async def _main_impl_body():
         lane=req.get('lane') or None,
         prompt_fit_rung=_res.get('prompt_fit_rung'),
         change_shape=change_shape,
+        # #1709 increment 2: only a push_pending row needs the base it
+        # merged against — _finish_pending_pushes reads this back to tell
+        # "origin/main unchanged" (safe to redo) from "moved" (superseded).
+        main_sha_before=(main_sha_before if _cycle_outcome == 'push_pending' else None),
     )
     # #721: post-cycle tag at the terminal HEAD, same outcome value as the
     # ledger row above. Integrated -> main_sha_after (shared checkout stayed on
@@ -4737,6 +4895,11 @@ def _request_serves_demand(req: dict) -> bool:
 _OUTCOME_TO_VERDICT: dict[str, str] = {
     'success': 'accept',
     'promotion_candidate': 'accept',
+    # #1709: main advanced, just on a later cycle than the one that did the
+    # work — a genuine success, not an ambiguous one. 'superseded'/'abandoned'
+    # are deliberately absent: neither a success nor a failure of the
+    # original work, so they fall through to the 'inconclusive' default below.
+    'pushed_late': 'accept',
     # A duplicate/already-done/recently-rejected skip is a HEALTHY negative
     # result — the loop correctly declined to redo settled work. This is
     # exactly the issue's "reject = verified already-done" case.

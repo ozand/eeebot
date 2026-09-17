@@ -174,6 +174,31 @@ class TestTypedHelpers:
         assert rows[0]["reason"] == "push_pending"
         assert rows[0]["branch"] == "selfevo/cycle-1"
 
+    def test_record_cycle_outcome_push_pending_carries_main_sha_before(self, tmp_path):
+        """#1709 increment 2: bridge._finish_pending_pushes reads this back
+        to tell whether origin/main moved since the original attempt."""
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c1", "push_pending", "push_pending", [], "selfevo/cycle-1",
+            main_sha_before="abc123",
+        )
+        rows = _read_ledger(tmp_path)
+        assert rows[0]["main_sha_before"] == "abc123"
+
+    def test_record_cycle_outcome_without_main_sha_before_omits_the_key(self, tmp_path):
+        """Additive field: every pre-#1709 call site (and any outcome other
+        than push_pending) keeps a byte-identical row with no such key."""
+        cycle_ledger.record_cycle_outcome(tmp_path, "c1", "success", None, [], "selfevo/cycle-1")
+        rows = _read_ledger(tmp_path)
+        assert "main_sha_before" not in rows[0]
+
+    @pytest.mark.parametrize("outcome", ["pushed_late", "superseded", "abandoned"])
+    def test_record_cycle_outcome_late_push_resolutions_are_valid_not_coerced(self, tmp_path, outcome):
+        """#1709 increment 2: the three resolutions of a push_pending cycle
+        must survive VALID_OUTCOMES coercion the same as push_pending itself."""
+        cycle_ledger.record_cycle_outcome(tmp_path, "c1", outcome, None, [], "selfevo/cycle-1")
+        rows = _read_ledger(tmp_path)
+        assert rows[0]["outcome"] == outcome
+
     # ─── #1118: verdict is a NEW, purely additive, keyword-only field ─────
 
     def test_record_cycle_outcome_lesson_candidate_without_refusal_omits_reason(self, tmp_path):

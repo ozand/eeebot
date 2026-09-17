@@ -2505,7 +2505,11 @@ def _fold_completed(
                 if serves:
                     serves_by_cycle[cycle_id] = serves
             elif phase == "outcome":
-                if str(row.get("outcome") or "").strip().lower() == "success":
+                # #1709: 'pushed_late' is a genuine success delayed by one
+                # cycle (the gate passed, main advanced, just later than the
+                # cycle that did the work) — folds into completed the same as
+                # 'success' so the demand is not re-proposed as unfinished.
+                if str(row.get("outcome") or "").strip().lower() in ("success", "pushed_late"):
                     success_by_cycle[cycle_id] = row
         changed = False
         for cycle_id in fallback_cycles:

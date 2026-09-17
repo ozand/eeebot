@@ -1507,6 +1507,28 @@ class TestCompletedSidecar:
         assert "priority-normal123" in entries
         assert "fallback:normal-cycle" not in entries
 
+    def test_pushed_late_folds_the_same_as_success(self, tmp_path):
+        """#1709 increment 2: 'pushed_late' is a genuine success delayed by
+        one cycle (a gate-passed cycle whose push exhausted its transient
+        retries, then finished at the next cycle-start) — must fold into
+        completed the same as 'success', or the demand looks unfinished
+        forever."""
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "late-cycle", "priority-latepush1234", ts=_now_iso(2))
+        _append_outcome(
+            state_dir, "late-cycle", "push_pending", ts=_now_iso(2),
+            files_changed=[],
+        )
+        _append_outcome(
+            state_dir, "late-cycle", "pushed_late", ts=_now_iso(1),
+            files_changed=["scripts/late.py"],
+        )
+
+        assert demand._fold_completed(state_dir) == {"priority-latepush1234"}
+        entries = _completed_sidecar(state_dir)["entries"]
+        assert "priority-latepush1234" in entries
+        assert entries["priority-latepush1234"]["cycle_id"] == "late-cycle"
+
     def test_fold_pairs_proposed_with_same_cycle_success(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _append_proposed(state_dir, "c1", "priority-abcabcabcabc", ts=_now_iso(20))

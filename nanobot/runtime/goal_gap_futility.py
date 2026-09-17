@@ -168,9 +168,18 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
     #1709: an ``outcome: push_pending`` row (a gate-passed cycle whose final
     push exhausted its transient-error retries) is excluded from BOTH counts
     above — it is not yet terminal, since the next cycle's pickup resolves it
-    to success/superseded/abandoned, and none of those outcomes are "this
-    attempt failed".
+    to pushed_late/superseded/abandoned.
+
+    #1709 increment 2: of those three resolutions, ``pushed_late`` is a
+    genuine success delayed by one cycle — it resets the family run counter
+    the same as ``success`` (below) and is excluded from the goal-gap
+    cumulative count for the same reason ``success`` alone would not be
+    (nothing about this attempt "failed"). ``superseded`` and ``abandoned``
+    are neither a success nor a failure of the original work — origin/main
+    moved, or the branch aged out, through no fault of this attempt — and
+    are excluded from both counts entirely, the same as ``push_pending``.
     """
+    _NOT_YET_TERMINAL = frozenset({"push_pending", "superseded", "abandoned"})
     lane = _lane(gap_id)
     if lane not in _FAMILY_PREFIXES:
         proposed: set[str] = set()
@@ -187,10 +196,11 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
             elif (
                 row.get("phase") == "outcome"
                 and row.get("outcome")
-                # #1709: a gate-passed cycle whose push is still pending is not
-                # yet a terminal attempt — the next cycle's pickup resolves it
-                # to success/superseded/abandoned, which is what should count.
-                and row.get("outcome") != "push_pending"
+                # #1709: push_pending/superseded/abandoned are excluded — see
+                # the docstring above. pushed_late counts here same as any
+                # other terminal outcome (this branch counts capacity spent
+                # regardless of success/failure).
+                and str(row.get("outcome")) not in _NOT_YET_TERMINAL
             ):
                 terminal.add(cycle)
         return len(proposed & terminal)
@@ -213,7 +223,7 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
             row.get("phase") == "outcome"
             and row.get("outcome")
             # #1709: not yet terminal — see the sibling branch above.
-            and row.get("outcome") != "push_pending"
+            and str(row.get("outcome")) not in _NOT_YET_TERMINAL
         ):
             terminal_outcomes[cycle] = str(row.get("outcome"))
             if ts is not None:
@@ -224,7 +234,9 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
 
     run = 0
     for c in matched:
-        if terminal_outcomes[c] == "success":
+        # #1709: pushed_late is a genuine success delayed by one cycle —
+        # resets the run the same as success.
+        if terminal_outcomes[c] in ("success", "pushed_late"):
             run = 0
         else:
             run += 1
