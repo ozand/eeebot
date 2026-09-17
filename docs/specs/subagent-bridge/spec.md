@@ -929,20 +929,24 @@ executor run does not stop early or hand off instead of acting:
   (the materialized-improvement JSON) directly into the subagent prompt
   (truncated to ~4000 chars), so the subagent has concrete data and does not
   hunt the workspace for context.
-- R7. When the cycle is isolated on a branch, the prompt SHALL include a
-  mandatory branch-discipline addendum instructing the subagent to commit on the
-  current branch and to NOT run `git checkout`/`switch`/`branch` or `git push`.
+- R7. `build_task` SHALL NOT restate branch discipline, the skip check,
+  verification, termination, handoff, the iteration-budget note, or the
+  final-response JSON contract as literals; it emits a single pointer line,
+  "Rules: see OPERATING.md in your system prompt.", trusting the loop-profile
+  loader (#1725) to have already placed `OPERATING.md` (release root) into
+  the system prompt.
 
 ADR-022 (#1720, #1723) names `OPERATING.md`, a release-root file, as the
-single source of the cycle rules R7 above states as a `build_task` literal
-today — branch discipline, the skip check, verification, termination,
+single source of the cycle rules R7 above used to state as `build_task`
+literals — branch discipline, the skip check, verification, termination,
 handoff, the iteration-budget note, and the final-response JSON contract, all
 consolidated out of both `build_task` and the instance `AGENTS.md`'s runtime
 sections into one operator-owned document. `OPERATING.md` exists in the
-release root as of #1723 part (a); it is inert on the running host until the
-file-driven loader (#1725) reads it into the assembled prompt, at which point
-`build_task`'s literals are removed (#1723 part (b), a separate PR that must
-not merge before this file is in a deployed release).
+release root as of #1723 part (a); `build_task`'s literals were removed in
+part (b), once the file-driven loader (#1725) was deployed and reading it
+into the assembled prompt — measured on a fixture request (no source
+artifact, lessons, previous attempts, or repair context) at 2,379 chars
+before, 245 after.
 
 ### Prompt budget and reserve (#1313)
 

@@ -13,8 +13,11 @@ def test_executor_declared_and_registered_tool_names_match():
     assert "web_search" not in manager.registered_tool_names()
     assert "web_fetch" not in manager.registered_tool_names()
 
+    # #1723(b): the "Use your tools: ..." line moved to OPERATING.md's Tools
+    # section (release root, loaded by the loop-profile loader, #1725) --
+    # build_task no longer renders declared_tool_names as a literal.
     from nanobot.runtime import bridge
-    assert "Use your tools: " + ", ".join(SubagentManager.declared_tool_names()) + "." in bridge.build_task({}, "goal", "")
+    assert "Use your tools: " not in bridge.build_task({}, "goal", "")
 
 
 def test_runtime_registration_assertion_rejects_declared_tool_divergence(tmp_path, monkeypatch):

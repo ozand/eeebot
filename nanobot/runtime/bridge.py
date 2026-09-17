@@ -19,7 +19,6 @@ entrypoint.
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import json
 import os
 import sys
@@ -1967,7 +1966,9 @@ def build_task(req: dict, goal_text: str, report_source: str,
     if reflection_hints:
         lessons_lines += [
             '## Recent reflections (how past cycles worked — steering hints)',
-            *[f'- {str(h)[:200]}' for h in reflection_hints[:3]],
+            # #1723(b): no [:200] re-slice here -- lessons_context already
+            # bounds each hint at 320 chars, sentence-bounded (#1737).
+            *[f'- {str(h)}' for h in reflection_hints[:3]],
             '',
         ]
 
@@ -2112,87 +2113,18 @@ def build_task(req: dict, goal_text: str, report_source: str,
             '',
         ]
 
+    # #1723(b): Branch discipline, Your instructions, the final-response JSON
+    # contract, the tool-name line, and the rendered Mutation surfaces block
+    # all moved to OPERATING.md (release root, loaded into the system prompt
+    # by the loop-profile loader, #1725) -- kept here they were the same
+    # ~2 300 chars repeated on every prompt this issue measured. One pointer
+    # line replaces them; declared_tool_names/max_iterations pacing notes now
+    # live in OPERATING.md's Tools/Iteration budget sections.
+    del declared_tool_names
     lines += [
-        '## Branch discipline (MANDATORY)',
-        'This checkout is already isolated on a fresh cycle branch off origin/main.',
-        'Implement and commit on THIS branch. Do NOT run git checkout/switch/branch,',
-        'and do NOT run git push — the bridge integrates your commit(s) into main',
-        'itself, only after your changes pass the test-suite gate. A stray push from',
-        'this branch cannot reach main (it is not the checked-out branch), but it',
-        'still wastes a turn, so just commit and let the bridge handle integration.',
-        'Work you do not commit is discarded when this turn ends; commit completed',
-        'implementation work on this cycle branch before the session ends.',
+        'Rules: see OPERATING.md in your system prompt.',
         '',
     ]
-
-    _pytest_available = importlib.util.find_spec('pytest') is not None
-    _verification_line = (
-        '   - Verify: exec(\"python3 -m pytest <affected test file>\") — pytest is installed; run the tests you touch.'
-        if _pytest_available
-        else '   - Verify: exec(\"python3 -c \'import <module>; print(ok)\'\") or exec(\"python3 <script>\")'
-    )
-    _verification_note = (
-        '' if _pytest_available else '     (pytest is not installed — use python3 -c imports as smoke tests)'
-    )
-    # Keep the literal fallback for standalone AST-extracted contract tests;
-    # production passes the shared declaration explicitly at both call sites.
-    declared_tool_names = declared_tool_names or (
-        "read_file", "write_file", "edit_file", "list_dir", "exec", "search_memory",
-    )
-    lines += [
-        '## Your instructions',
-        'You MUST take a concrete action in this session. Do not return a review only.',
-        '',
-        '1. Before implementing, check the "Recent activity" section above and',
-        '   the codebase — if this task is already done, do NOT re-implement it;',
-        '   report outcome: skipped.',
-        '2. Review the concrete task above.',
-        f'3. Implement the task within the resolved limit of {max_iterations} tool iterations:',
-        '   - Write or edit the file using write_file or edit_file.',
-        _verification_line,
-        _verification_note,
-        "   - Commit implementation changes: exec(\"git add <file> && git commit -m '<type>: <what>'\") ",
-        '   - Do not create bookkeeping-only commits.',
-        '4. If the task is already done or not applicable: report outcome: "skipped" without a bookkeeping commit.',
-        '',
-        '## Your final response MUST be this JSON (no markdown wrapping):',
-        '{',
-        '  "action_taken": "<one sentence: what you actually did>",',
-        '  "files_changed": ["<path1>", "<path2>"],',
-        '  "outcome": "completed" | "skipped" | "blocked",',
-        '  "concrete_next_action": "<what the next subagent should do>",',
-        '  "findings": ["<observation1>", "<observation2>"]',
-        '}',
-        '',
-        'Use your tools: ' + ', '.join(declared_tool_names) + '.',
-        f'You have up to {max_iterations} tool iterations. Use them deliberately.',
-    ]
-
-    # Mutation surfaces are generated from the authoritative read/commit policy.
-    # Keep the section heading literal for standalone prompt extraction tests.
-    _mutation_surface_heading = '## Mutation surfaces'
-    try:
-        from nanobot.runtime.mutation_policy import MUTATION_POLICY as _prompt_policy
-    except Exception:
-        # Standalone AST-contract tests execute build_task without module imports;
-        # production always takes the authoritative-policy branch.
-        _prompt_policy = None
-    if _prompt_policy is not None:
-        mutation_block = _prompt_policy.render_bridge_surface_block()
-        _prompt_policy.validate_rendered_surfaces(mutation_block)
-    else:
-        mutation_block = (
-            '## Mutation surfaces\n'
-            'Allowed targets: ' + ', '.join(_ALLOWED_PATH_PREFIXES) + '\n'
-            'Creating or improving skills for repeated patterns is valuable work.\n'
-            'Do NOT modify: state/, goals.md, IDENTITY.md, secrets, or systemd units.'
-        )
-    lines += ['', mutation_block, '']
-    # #812: the runtime-slice tier is enforced entirely at the gate
-    # (_classify_mutation_surface + R12b) and is intentionally NOT advertised in
-    # this prompt — steering the proposer toward runtime work is #815 (vector
-    # bias). Keeping build_task free of the surface helpers also preserves its
-    # standalone-exec test contract (tests/test_repair_loop.py).
 
     # Repair context: injected when previous commit broke tests (closed-loop repair loop)
     if repair_context:

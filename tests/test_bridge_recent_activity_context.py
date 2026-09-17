@@ -40,12 +40,16 @@ def test_recent_activity_includes_rejected_results(tmp_path: Path):
     assert "mutation_surface_violation" in ctx
 
 
-def test_build_task_has_anti_duplicate_instruction():
+def test_build_task_anti_duplicate_instruction_moved_to_operating_md():
+    """#1723(b): the skip-if-already-done instruction moved to OPERATING.md's
+    'Before editing: skip check' section (release root, loaded into the
+    system prompt by the loop-profile loader, #1725); build_task keeps only
+    the one-line pointer."""
     req = {"task_title": "some task", "request_id": "r1", "cycle_id": "c1", "goal_id": "g1"}
     task = build_task(req, "mission text", "report_source.json")
 
-    assert "if this task is already done, do NOT re-implement it" in task
-    assert "report outcome: skipped" in task
+    assert "if this task is already done, do NOT re-implement it" not in task
+    assert "Rules: see OPERATING.md in your system prompt." in task
 
 
 def test_build_task_includes_origin_report_line_when_source_nonempty():

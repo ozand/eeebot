@@ -180,21 +180,14 @@ def test_mixed_clean_and_violation():
     assert 'state/bad_file.json' in violations[0]
 
 
-# ─── build_task prompt includes mutation surfaces section ─────────────────────
+# ─── build_task no longer renders mutation surfaces (#1723 part b) ────────────
 
-def test_build_task_prompt_includes_mutation_surfaces():
-    """build_task() prompt must include '## Mutation surfaces' section."""
-    source = _BRIDGE_PATH.read_text()
-    assert '## Mutation surfaces' in source, \
-        'build_task() must include ## Mutation surfaces section in the prompt'
-
-
-def test_build_task_surfaces_come_from_gate_constants():
+def test_build_task_no_longer_renders_mutation_surfaces():
+    """#1723(b): the '## Mutation surfaces' block moved to OPERATING.md
+    (release root, loaded into the system prompt by the loop-profile loader,
+    #1725) -- build_task must not repeat it as a literal any more."""
     import nanobot.runtime.bridge as bridge
     req = {"task_title": "x", "request_id": "r", "cycle_id": "c", "goal_id": "g"}
     prompt = bridge.build_task(req, "derived", "", max_iterations=17)
-    for surface in list(bridge._ALLOWED_PATH_PREFIXES) + list(bridge._ALLOWED_EXACT_PATHS):
-        assert surface in prompt
-    assert "Allowed targets: surfaces/, scripts/, memory/, lessons/, docs/, tests/, skills/, AGENTS.md" in prompt
-    assert "Do NOT modify: state/, ops/, goals.md, IDENTITY.md, SOUL.md, USER.md, OPERATING.md" in prompt
-    assert "Creating or improving skills for repeated patterns is valuable work." in prompt
+    assert '## Mutation surfaces' not in prompt
+    assert 'Rules: see OPERATING.md in your system prompt.' in prompt

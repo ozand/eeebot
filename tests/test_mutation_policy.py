@@ -84,14 +84,21 @@ def test_gate_agents_md_scope_runs_only_when_agents_md_changed(tmp_path) -> None
     assert missing.startswith("agents_md_scope: AGENTS.md missing at HEAD")
 
 
-def test_bridge_rendering_matches_policy() -> None:
+def test_bridge_no_longer_renders_surfaces_and_points_to_operating_md() -> None:
+    """#1723(b): build_task rendered its own mutation-surface block (a second
+    copy of the policy) until this issue moved it to OPERATING.md, loaded
+    into the system prompt by the loop-profile loader (#1725). The
+    byte-for-byte parity check against `MUTATION_POLICY.render_bridge_surface_block()`
+    now lives in tests/test_operating_md.py; here we only assert build_task
+    stopped duplicating it."""
     prompt = bridge.build_task(
         {"task_title": "x", "request_id": "r", "cycle_id": "c", "goal_id": "g"},
         "derived",
         "",
     )
-    MUTATION_POLICY.validate_rendered_surfaces(prompt)
-    assert MUTATION_POLICY.render_commit_surfaces() in prompt
+    with pytest.raises(MutationPolicyError):
+        MUTATION_POLICY.validate_rendered_surfaces(prompt)
+    assert "Rules: see OPERATING.md in your system prompt." in prompt
 
 
 def test_proposer_renderings_match_policy() -> None:
