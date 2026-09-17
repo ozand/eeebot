@@ -55,9 +55,17 @@ _DEFAULT_RETENTION_DAYS = 90
 # failed, only the last network hop. Kept distinct from 'failed' so
 # exit_streak, futility and skipped_recent_failure cooling don't count it
 # (see their own docstrings/readers, updated alongside this).
+# 'pushed_late' / 'superseded' / 'abandoned' (#1709 increment 2): the three
+# ways a 'push_pending' cycle gets resolved at the next cycle-start boundary
+# (see bridge._finish_pending_pushes). 'pushed_late' is a genuine success —
+# main advanced, just on a later cycle — and is folded into demand.py's
+# completed-demand sidecar the same as 'success'. 'superseded' (origin/main
+# moved past the row's recorded base — never merged/rebased automatically)
+# and 'abandoned' (the branch no longer exists) are neither a success nor a
+# failure of the original work; excluded from futility's attempt counting.
 VALID_OUTCOMES = frozenset({
     "success", "partial", "failed", "skipped-duplicate", "promotion_candidate",
-    "push_pending",
+    "push_pending", "pushed_late", "superseded", "abandoned",
 })
 VALID_DEDUP_DECISIONS = frozenset({"proceeded", "skipped_duplicate", "skipped_recent_failure"})
 
@@ -248,6 +256,7 @@ def record_cycle_outcome(
     lane: str | None = None,
     prompt_fit_rung: str | None = None,
     change_shape: str | None = None,
+    main_sha_before: str | None = None,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
 
@@ -281,6 +290,13 @@ def record_cycle_outcome(
     honest state for any caller not yet updated for #1118).
     ``verdict_reason`` (e.g. ``already_done``) is recorded only alongside a
     valid ``verdict`` and is always optional/free-form.
+
+    #1709: ``main_sha_before`` (keyword-only, additive) is written only when
+    given — a ``push_pending`` row carries the ``origin/main`` sha the cycle
+    merged against, so ``bridge._finish_pending_pushes`` can later tell
+    whether ``origin/main`` moved (-> ``superseded``) or is unchanged
+    (-> safe to redo the push -> ``pushed_late``) without re-deriving it.
+    Omitted by every other caller — byte-identical row shape otherwise.
     """
     if outcome not in VALID_OUTCOMES:
         outcome = "failed"
@@ -314,6 +330,8 @@ def record_cycle_outcome(
         row["prompt_fit_rung"] = str(prompt_fit_rung)[:40]
     if change_shape in {"feature", "maintenance", "documentation", "testing", "performance", "knowledge", "unclassified"}:
         row["change_shape"] = change_shape
+    if main_sha_before:
+        row["main_sha_before"] = str(main_sha_before)
     if files_changed is not None:
         try:
             from nanobot.runtime.demand import classify_change_tier
