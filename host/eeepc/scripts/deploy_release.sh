@@ -453,6 +453,7 @@ sync_timer eeebot-knowledge-curator.timer optional
 sync_timer eeebot-action-index.timer optional
 sync_timer eeebot-reflector.timer optional
 sync_timer eeebot-strategist.timer optional
+sync_timer eeebot-systemd-drift-check.timer optional
 
 # Activate the long-running dashboard against the new current release. Unlike
 # the static oneshot bridge, it keeps the old Python process alive across a

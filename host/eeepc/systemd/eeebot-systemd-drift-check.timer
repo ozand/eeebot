@@ -1,0 +1,11 @@
+[Unit]
+Description=Compare installed eeebot/eeepc systemd units and drop-ins against the release tree daily (#1701)
+
+[Timer]
+OnBootSec=15min
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+Unit=eeebot-systemd-drift-check.service
+
+[Install]
+WantedBy=timers.target

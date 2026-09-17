@@ -1,0 +1,17 @@
+[Unit]
+Description=Compare installed eeebot/eeepc systemd units and drop-ins against the release tree (#1701)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=eeepc-agent
+Group=eeepc-agent
+WorkingDirectory=/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/eeepc-agent/venv/bin/python /opt/eeepc-agent/runtimes/self-evolving-agent/current/host/eeepc/scripts/systemd_drift_check.py --state-dir /var/lib/eeepc-agent/self-evolving-agent/state
+TimeoutStartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=false
+ProtectSystem=strict
+ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state
