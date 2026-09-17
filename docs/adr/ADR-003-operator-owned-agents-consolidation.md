@@ -11,6 +11,8 @@ tags: [runtime, prompt, operations]
 
 Proposed — implemented in the change governed by #1313, pending merge and rollout.
 
+Superseded in part by ADR-022 (AGENTS.md ownership).
+
 # Context
 
 #1188 measured 20 autonomous integrations in five days whose only substantive change was appending to the instance `AGENTS.md`, against six deleted lines. #1193 then made the file operator-owned. #1300/#1302 replaced positional truncation with declared-droppable sections and a loud overflow. On 2026-09-05, #1313 measured only 732 prompt characters of slack plus 2,948 characters of still-droppable reserve.
