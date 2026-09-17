@@ -162,6 +162,18 @@ class TestTypedHelpers:
         rows = _read_ledger(tmp_path)
         assert rows[0]["outcome"] == "failed"
 
+    def test_record_cycle_outcome_push_pending_is_valid_not_coerced(self, tmp_path):
+        """#1709: a gate-passed cycle whose push exhausted its transient
+        retries is 'push_pending', not 'failed' — it must survive the
+        VALID_OUTCOMES coercion, carrying the branch and reason."""
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c1", "push_pending", "push_pending", [], "selfevo/cycle-1",
+        )
+        rows = _read_ledger(tmp_path)
+        assert rows[0]["outcome"] == "push_pending"
+        assert rows[0]["reason"] == "push_pending"
+        assert rows[0]["branch"] == "selfevo/cycle-1"
+
     # ─── #1118: verdict is a NEW, purely additive, keyword-only field ─────
 
     def test_record_cycle_outcome_lesson_candidate_without_refusal_omits_reason(self, tmp_path):

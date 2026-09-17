@@ -50,8 +50,14 @@ _DEFAULT_RETENTION_DAYS = 90
 # pending promotion candidate instead of integrating to main — not a success
 # (main never moved) and not a failure (the gate passed). Kept distinct so
 # fitness/analytics don't miscount it as either.
+# 'push_pending' (#1709): a gate-passed cycle whose final push exhausted its
+# transient-error retries — the branch is kept and nothing about the WORK
+# failed, only the last network hop. Kept distinct from 'failed' so
+# exit_streak, futility and skipped_recent_failure cooling don't count it
+# (see their own docstrings/readers, updated alongside this).
 VALID_OUTCOMES = frozenset({
     "success", "partial", "failed", "skipped-duplicate", "promotion_candidate",
+    "push_pending",
 })
 VALID_DEDUP_DECISIONS = frozenset({"proceeded", "skipped_duplicate", "skipped_recent_failure"})
 

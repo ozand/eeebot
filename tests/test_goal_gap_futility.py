@@ -610,6 +610,34 @@ def test_demand_attempt_count_collapses_retries_of_one_cycle_id(tmp_path):
     assert rec["attempt_count"] == 2  # 2 cycles, not the 6 outcome rows
 
 
+def test_push_pending_outcome_does_not_count_toward_family_futility(tmp_path):
+    """#1709: a gate-passed cycle whose push exhausted its transient retries
+    ('outcome: push_pending') is not yet terminal — the next cycle's pickup
+    resolves it. It must not advance the family (defect/reflection/priority)
+    run counter toward the N=6 threshold."""
+    state = tmp_path / "state"
+    item_id = "priority-test-push-pending"
+    item = {"id": item_id, "kind": "priority", "summary": "test priority"}
+    futility.futile_gap_ids(state, [item])
+
+    rows = []
+    now = datetime.now(timezone.utc)
+    for i in range(6):
+        cycle = f"c-push-pending-{i}"
+        ts = (now + timedelta(seconds=i + 1)).isoformat()
+        rows.append({"phase": "proposed", "cycle_id": cycle, "demand_id": item_id, "ts": ts})
+        rows.append({"phase": "outcome", "cycle_id": cycle, "outcome": "push_pending", "ts": ts})
+
+    # 6 push_pending rows would hit the N=6 threshold if counted — none of
+    # them do, so the item stays unmeasured/non-futile.
+    futile_ids = futility.futile_gap_ids(state, [item], ledger_rows=rows)
+    assert item_id not in futile_ids
+
+    rec = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))[item_id]
+    assert rec["attempt_count"] == 0
+    assert rec["futile"] is False
+
+
 def test_demand_attempt_count_success_resets_run_and_corpus_shapes(tmp_path):
     """#1394 review: non-goal families count consecutive non-success cycles since last success.
 
