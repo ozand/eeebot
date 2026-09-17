@@ -303,3 +303,21 @@ def test_cycle_progress_capped_and_notes_exposed(tmp_path: Path):
     assert progress["threshold_cycles"] == 20
     assert progress["threshold_hours"] == 8.0
     assert progress["cadence_minutes"] == 4.0
+
+
+def test_format_progress_line_renders_absent_hours_without_raising():
+    """#1706: a non-terminal state (``empty`` / ``partial_no_success``) carries
+    ``hours_since_last_success: None``; the line must name the absence, not
+    format None (#1173 reader contract)."""
+    from nanobot.runtime.health import _format_progress_line
+
+    for state in ("empty", "partial_no_success", "healthy"):
+        line = _format_progress_line({
+            "state": state,
+            "hours_since_last_success": None,
+            "consecutive_non_integrating_cycles": 0,
+            "dominant_reason": None,
+        })
+        assert "absent" in line, (state, line)
+        assert "None" not in line.split(";")[0], (state, line)
+        assert "non_integrating_cycles=0" in line, (state, line)

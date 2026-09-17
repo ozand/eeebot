@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import gzip
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from nanobot.runtime import knowledge_curator as curator
 
 
-def _write_archive(state: Path, cycle_id: str, *, day: str = "2026-09-10") -> None:
+def _yesterday_utc() -> str:
+    # #1706: `_read_ledger_cycle_text` looks back a fixed 7 days from
+    # ``datetime.now(timezone.utc)`` (``now - timedelta(days=7)`` in
+    # knowledge_curator.py); a fixed archive day fell out of that window on
+    # 2026-09-17. Yesterday is always inside it.
+    return (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def _write_archive(state: Path, cycle_id: str, *, day: str | None = None) -> None:
+    day = day or _yesterday_utc()
     ledger = state / "ledger"
     ledger.mkdir(parents=True, exist_ok=True)
     with gzip.open(ledger / f"cycles-{day}.jsonl.gz", "wt", encoding="utf-8") as fh:
