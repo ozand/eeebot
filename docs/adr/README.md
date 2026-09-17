@@ -37,3 +37,37 @@ Conventions:
 | [ADR-019](ADR-019-the-baseline-is-the-fastest-thing-this-host-can-do.md) | An optimisation is measured against the fastest implementation this host can run | proposed |
 | [ADR-020](ADR-020-direction-comes-from-reflection-over-a-span.md) | Direction comes from reflection over a span, never from an instantaneous error signal | proposed |
 | [ADR-021](ADR-021-whoever-sees-the-performance-may-change-the-capability.md) | Whoever sees the performance may change the capability, after measuring whether it was used | proposed |
+
+## Acceptance
+
+Each status word has one meaning:
+
+- `proposed` -- guidance for humans and agents. Its rules are not a gate;
+  nothing in CI enforces them yet. A proposed record may still be edited.
+- `accepted` -- binding, and immutable from here on. Every item of the
+  record's `# Test Contract` is enforced by a named test on `main`, or is
+  explicitly deferred.
+- `superseded` -- replaced. The record names the superseding ADR and is
+  otherwise left as it was.
+- `deferred (#NNN)` -- a marker on one contract item, not a record status:
+  the test is owed and issue #NNN owns it.
+
+A record moves `proposed -> accepted` when, and only when:
+
+1. Every item in its `# Test Contract` names a test -- `tests/<file>.py` or
+   `tests/<file>.py::<name>` -- that exists on `main` and cites the record
+   (the string `ADR-NNN` appears in that test file), or carries the marker
+   `deferred (#NNN)`. An item with neither is the reason the record is not
+   accepted. Amending a proposed record's contract items to name their tests
+   is part of accepting it.
+2. The operator accepts, by a commit that flips frontmatter `status:` to
+   `accepted`. Not the agent that wrote the record, and not the loop.
+3. The record carries its own acceptance: date and accepting change (PR
+   number or commit) under `# Status`.
+
+`tests/test_adr_acceptance.py` enforces rule 1 on every `accepted` record,
+checks this index against each record's frontmatter, and prints contract
+coverage for `proposed` records. A record without a `# Test Contract` section
+is exempt from rule 1 (ADR-001). ADR-002, 004, 008 and 009 were accepted
+before this procedure existed; their unmapped items are reported as expected
+failures, not enforced, until the operator maps or defers them.
