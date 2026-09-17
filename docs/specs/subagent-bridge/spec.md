@@ -976,7 +976,9 @@ instead. #1188 measured that `AGENTS.md` only grows and nothing ever removes;
   built). Readers tolerate rows written before #1379 that lack `sections`.
 - **Something removes.** `scripts/agents_md_consolidate.py` is a minimal,
   explicit, operator-only CLI (not imported by, or reachable from, any
-  runtime/loop code path — `AGENTS.md` stays operator-owned per #1193). It
+  runtime/loop code path — section removal stays an operator action per
+  #1193/ADR-003; loop commits to `AGENTS.md` are bounded by the gate per
+  ADR-022, PR #1731). It
   removes only `## ` sections named explicitly on the command line, and only
   if every one of them already carries the exact droppable marker; a named
   section that is missing, or present but critical/unmarked, refuses the

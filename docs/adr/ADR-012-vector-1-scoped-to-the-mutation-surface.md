@@ -20,11 +20,12 @@ Proposed — filed with #1598, ahead of any charter edit. ADR-011 governs how th
 The agent system is the harness in `ozand/eeebot`: prompt assembly, compaction, the gate, demand collection, the proposer. The loop cannot change a line of it.
 
 ```text
-nanobot/runtime/mutation_policy.py:16
+nanobot/runtime/mutation_policy.py:24
 _COMMIT_PATH_PREFIXES = ("surfaces/", "scripts/", "memory/", "lessons/", "docs/", "tests/", "skills/")
+_COMMIT_EXACT_PATHS = frozenset({"AGENTS.md"})
 ```
 
-`nanobot/`, `systemd/`, `ops/` and `state/` sit outside the commit surface deliberately, and AGENTS.md names them forbidden operational paths. The loop's reach is the scaffolding around the executor, never the executor.
+`nanobot/`, `systemd/`, `ops/` and `state/` sit outside the commit surface deliberately; `state/` and `ops/` are the policy's `forbidden_dirs`, and `goals.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, `OPERATING.md` are its `immutable_files` (PR #1731). `AGENTS.md` is the single exact-path allowance (`commit_exact_paths`), for repository layout only (ADR-022 decision 6). The loop's reach is the scaffolding around the executor, never the executor.
 
 What that produces is visible in 2 288 non-merge commits on `eeebot-self-evolving@origin/main` since 2026-07-01:
 
@@ -47,7 +48,7 @@ A charter that asks for an object the permissions withhold makes every measureme
 
 ## 1. Every named object of improvement intersects the mutation surface
 
-A vector that directs the loop names something inside `_COMMIT_PATH_PREFIXES`. Vector 1's object becomes the instance's own tooling, knowledge and workflows — the surface the loop actually holds.
+A vector that directs the loop names something inside `_COMMIT_PATH_PREFIXES` or `commit_exact_paths` (`AGENTS.md`, repository layout only). Vector 1's object becomes the instance's own tooling, knowledge and workflows — the surface the loop actually holds.
 
 ## 2. Operator-executed work is labelled as operator-executed
 

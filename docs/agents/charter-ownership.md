@@ -38,5 +38,5 @@ this file.
 
 - The loop commits only inside `eeebot-self-evolving/`; the `state/` directory
   is not git-tracked. This rule was stated in `goals.md` as an IMPORTANT
-  paragraph and is now owned by the operating instructions (`OPERATING.md`,
-  ADR-022 / #1720) — it is no longer repeated in the charter.
+  paragraph (removed in PR #1734) and is now owned by `OPERATING.md`
+  (PR #1738, ADR-022 / #1720) — it is no longer repeated in the charter.
