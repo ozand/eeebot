@@ -177,22 +177,30 @@ immutable `goals.md` charter. Proposer and bridge gate mirrors SHALL agree on
 these paths.
 
 **Stale text corrected (#1313):** an earlier revision of this paragraph also
-allowed the instance-root `AGENTS.md`. That changed with #1193 (closed
-2026-09-02): `AGENTS.md` is operator-owned, not a loop-mutable target.
-`nanobot/runtime/mutation_policy.py:MUTATION_POLICY` is the authoritative
-read-versus-commit policy. Its read paths include `AGENTS.md` because the loop
-must consume those instructions; its commit prefixes remain
-`surfaces/`, `scripts/`, `memory/`, `lessons/`, `docs/`, `tests/`, and `skills/`,
-with no exact-path allowance. `nanobot/agent/context.py` and both proposer
-prompt renderings read the policy for their declarations; `nanobot/runtime/gate.py`
-consults it before classifying a diff. Thus a policy/rendering mismatch fails
-closed with a diagnostic, while a proposal or diff whose only file is
-`AGENTS.md` is rejected with `reason: operator_owned_path`. The policy module
+allowed the instance-root `AGENTS.md`. #1193 (closed 2026-09-02) made
+`AGENTS.md` operator-owned; ADR-022 (#1720, PR #1731) returned it to the loop
+as **repository layout only**. `nanobot/runtime/mutation_policy.py:MUTATION_POLICY`
+is the authoritative read-versus-commit policy. Its read paths include
+`AGENTS.md` because the loop must consume those instructions; its commit
+prefixes remain `surfaces/`, `scripts/`, `memory/`, `lessons/`, `docs/`,
+`tests/`, and `skills/`, and `AGENTS.md` is the single exact-path allowance
+(`commit_exact_paths`). Whenever a cycle changed `AGENTS.md`, the bridge
+classifier applies `gate._agents_md_scope_violations` to `HEAD:AGENTS.md`: more
+than `agents_md_max_lines` (150) lines, or any runtime-rule heading listed in
+`agents_md_runtime_headings` (those rules live in the release-owned
+`OPERATING.md`), blocks integration with an `agents_md_scope:` reason; a
+deleted file fails closed. Release-owned files (`immutable_files`: `goals.md`,
+`IDENTITY.md`, `SOUL.md`, `USER.md`, `OPERATING.md`) are blocked by basename in
+gate, bridge and proposer, and the rendered "Do NOT modify" line names
+`state/` and `ops/` (`forbidden_dirs`). `nanobot/agent/context.py` and both
+proposer prompt renderings read the policy for their declarations;
+`nanobot/runtime/gate.py` consults it before classifying a diff. Thus a
+policy/rendering mismatch fails closed with a diagnostic, while a proposal or
+diff touching a release-owned file is rejected as immutable. The policy module
 is not in `_RUNTIME_DENY_ALWAYS_FILES`: it is a declarative, off-surface
 projection of the already protected gate contract, not an additional gate or
-trust decision. See "Prompt budget and reserve (#1313)"
-below for the mechanism that replaced "the loop edits `AGENTS.md`": the
-operator marks sections droppable and, separately, removes them.
+trust decision. See "Prompt budget and reserve (#1313)" below for the
+droppable-section mechanism that bounds what the instance file costs.
 
 Successful executor `read_file` calls for an exact workspace path
 `skills/<name>/SKILL.md` SHALL be observed in-process by the harness. Reads from
