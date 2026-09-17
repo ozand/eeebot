@@ -315,6 +315,20 @@ if [ -e /etc/systemd/system/eeepc-network-fallback.timer ] || [ -e /etc/systemd/
   die "ghost unit files still present on disk"
 fi
 
+# #1718: a timer unit file that did not exist on the host before this
+# deploy's copy is NEW -- its `systemctl is-enabled` reading "disabled" is
+# "never enabled", not an operator's deliberate `systemctl disable`, and
+# the two read identically to sync_timer below unless this is captured
+# first. #1701 shipped eeebot-systemd-drift-check.timer disabled and
+# nobody noticed for the same reason #1663's drop-in went uninstalled for
+# 14 days: never-configured and operator-disabled look the same from
+# inside the unit itself.
+PRE_EXISTING_TIMERS=""
+for _pre_existing_timer in /etc/systemd/system/*.timer; do
+  [ -f "$_pre_existing_timer" ] || continue
+  PRE_EXISTING_TIMERS="$PRE_EXISTING_TIMERS $(basename "$_pre_existing_timer")"
+done
+
 if [ "$VERIFY_ONLY" -eq 0 ]; then
   echo "[remote] syncing systemd units + reloading"
   sudo cp "$RELEASE_DIR/host/eeepc/systemd/"*.service "$RELEASE_DIR/host/eeepc/systemd/"*.timer /etc/systemd/system/
@@ -363,6 +377,7 @@ sync_timer() {
   initial_state="$(systemctl is-enabled "$timer" 2>/dev/null || true)"
 
   if [ "$initial_state" = "enabled" ]; then
+    echo "SYNC-BRANCH: $timer already-enabled"
     if [ "$VERIFY_ONLY" -eq 0 ]; then
       sudo systemctl restart "$timer"
     fi
@@ -383,6 +398,7 @@ sync_timer() {
         return 1
       fi
       echo "[remote] enabling required timer $timer"
+      echo "SYNC-BRANCH: $timer new-enabled"
       sudo systemctl enable --now "$timer"
       local final_state
       final_state="$(systemctl is-enabled "$timer" 2>/dev/null || true)"
@@ -394,8 +410,11 @@ sync_timer() {
         echo "CRITICAL: required timer $timer failed to become active" >&2
         return 1
       fi
-    else
+    elif case "$PRE_EXISTING_TIMERS " in *" $timer "*) true ;; *) false ;; esac; then
+      # #1718: the unit file already existed before this deploy's copy --
+      # "disabled" here can only be an operator's own `systemctl disable`.
       echo "NOTICE: $timer is administratively disabled; preserving disabled state"
+      echo "SYNC-BRANCH: $timer preserved-disabled"
       local final_state
       final_state="$(systemctl is-enabled "$timer" 2>/dev/null || true)"
       if [ "$final_state" != "disabled" ]; then
@@ -404,6 +423,28 @@ sync_timer() {
       fi
       if systemctl is-active --quiet "$timer"; then
         echo "CRITICAL: disabled timer $timer is unexpectedly active" >&2
+        return 1
+      fi
+    else
+      # #1718: no unit file existed before this deploy -- this timer is
+      # new, and "disabled" is "never enabled", not an operator's choice.
+      # A never-enabled timer and a deliberately-disabled one report the
+      # identical state; this is the only point that still knows which.
+      if [ "$VERIFY_ONLY" -eq 1 ]; then
+        echo "CRITICAL: $timer state is disabled, failing verify-only mode" >&2
+        return 1
+      fi
+      echo "[remote] $timer has no pre-existing unit file; enabling"
+      echo "SYNC-BRANCH: $timer new-enabled"
+      sudo systemctl enable --now "$timer"
+      local final_state
+      final_state="$(systemctl is-enabled "$timer" 2>/dev/null || true)"
+      if [ "$final_state" != "enabled" ]; then
+        echo "CRITICAL: $timer failed to enable (state: $final_state)" >&2
+        return 1
+      fi
+      if ! systemctl is-active --quiet "$timer"; then
+        echo "CRITICAL: $timer failed to become active" >&2
         return 1
       fi
     fi
