@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,7 @@ from scripts.journal_story import (
     assemble_story_artifact,
     build_story_prompt,
     load_day_journal,
+    run_narrator_job,
     select_beats,
     validate_narration,
 )
@@ -147,3 +149,107 @@ def test_artifact_carries_prompt_model_output_and_citation_set():
     )
     assert artifact["schema_version"] == "journal-story-v1"
     assert artifact["citation_set"]["beat-001"]["line"] == 3
+
+
+# ─── increment 2: run_narrator_job ──────────────────────────────────────────
+
+
+def _compliant_llm(messages, model):
+    prompt = json.loads(messages[1]["content"])
+    out = [
+        {"beat_id": b["beat_id"], "text": f"Something happened: {b['event']}.", "sign": b["sign"], "terms": []}
+        for b in prompt["beats"]
+    ]
+    return json.dumps(out)
+
+
+def _sign_flipping_llm(messages, model):
+    prompt = json.loads(messages[1]["content"])
+    out = [{"beat_id": b["beat_id"], "text": "it worked great", "sign": "worked", "terms": []} for b in prompt["beats"]]
+    return json.dumps(out)
+
+
+def _raising_llm(messages, model):
+    raise RuntimeError("gateway unreachable")
+
+
+def test_prompt_contains_only_the_selected_days_beats(tmp_path):
+    _write_ledger(
+        tmp_path,
+        [_ledger_row("2026-09-15T08:00:00Z", "cycle-a", "success")],
+        [_ledger_row("2026-09-16T09:00:00Z", "cycle-b", "failed")],
+    )
+    captured: dict = {}
+
+    def _capturing_llm(messages, model):
+        captured["prompt"] = json.loads(messages[1]["content"])
+        return json.dumps([
+            {"beat_id": b["beat_id"], "text": "x", "sign": b["sign"], "terms": []}
+            for b in captured["prompt"]["beats"]
+        ])
+
+    result = run_narrator_job(tmp_path, "2026-09-15", llm=_capturing_llm)
+    assert result["status"] == "ok"
+    event_names = {b["event"] for b in captured["prompt"]["beats"]}
+    assert event_names == {"cycle-a"}  # never the 09-16 row
+
+
+def test_sign_flipping_model_is_rejected_with_the_violation_named(tmp_path):
+    _write_ledger(tmp_path, [_ledger_row("2026-09-15T08:00:00Z", "cycle-a", "failed")], [])
+    result = run_narrator_job(tmp_path, "2026-09-15", llm=_sign_flipping_llm)
+    assert result["status"] == "rejected"
+    assert result["violations"] and "sign drift" in result["violations"][0]
+    on_disk = json.loads(Path(result["artifact_path"]).read_text(encoding="utf-8"))
+    assert on_disk["status"] == "rejected"
+    assert on_disk["violations"] == result["violations"]
+
+
+def test_compliant_model_is_ok_with_a_citation_map_resolving_real_rows(tmp_path):
+    _write_ledger(
+        tmp_path,
+        [_ledger_row("2026-09-15T08:00:00Z", "cycle-a", "success"),
+         _ledger_row("2026-09-15T09:00:00Z", "cycle-b", "failed")],
+        [],
+    )
+    result = run_narrator_job(tmp_path, "2026-09-15", llm=_compliant_llm)
+    assert result["status"] == "ok"
+    assert len(result["narration"]) == 2
+    for beat_id, source in result["citation_set"].items():
+        assert source["file"] == "cycles-2026-09-15.jsonl.gz"
+        assert isinstance(source["line"], int)
+
+
+def test_writer_never_raises_on_a_gateway_failure(tmp_path):
+    _write_ledger(tmp_path, [_ledger_row("2026-09-15T08:00:00Z", "cycle-a", "success")], [])
+    result = run_narrator_job(tmp_path, "2026-09-15", llm=_raising_llm)  # must not raise
+    assert result["status"] == "rejected"
+    assert "RuntimeError" in result["violations"][0]
+    assert Path(result["artifact_path"]).is_file()
+
+
+def test_writer_never_raises_on_malformed_model_output(tmp_path):
+    _write_ledger(tmp_path, [_ledger_row("2026-09-15T08:00:00Z", "cycle-a", "success")], [])
+    result = run_narrator_job(tmp_path, "2026-09-15", llm=lambda messages, model: "not json at all")
+    assert result["status"] == "rejected"
+    assert Path(result["artifact_path"]).is_file()
+
+
+def test_no_beats_day_writes_ok_artifact_with_no_model_call(tmp_path):
+    calls: list = []
+
+    def _should_not_be_called(messages, model):
+        calls.append(1)
+        return "[]"
+
+    result = run_narrator_job(tmp_path, "2026-09-15", llm=_should_not_be_called)
+    assert result["status"] == "ok"
+    assert result["beats"] == []
+    assert result["narration"] == []
+    assert not calls  # no model call for a day with nothing to narrate
+    assert Path(result["artifact_path"]).is_file()
+
+
+def test_artifact_path_is_state_story_day_json(tmp_path):
+    _write_ledger(tmp_path, [_ledger_row("2026-09-15T08:00:00Z", "cycle-a", "success")], [])
+    result = run_narrator_job(tmp_path, "2026-09-15", llm=_compliant_llm)
+    assert result["artifact_path"] == str(tmp_path / "story" / "2026-09-15.json")

@@ -1,23 +1,47 @@
 """Deterministic journal-to-story preparation and provenance validation (#1622).
 
-This module owns the harness-side trust boundary for narration. It does not
-choose work, call a model, render video, or publish. It reduces ledger rows to
-bounded beats, carries the source line and sign into every beat, builds a
-model prompt from those beats, and validates a model-shaped response before an
-artifact can be assembled.
+This module owns the harness-side trust boundary for narration. It reduces
+ledger rows to bounded beats, carries the source line and sign into every
+beat, builds a model prompt from those beats, and validates a model-shaped
+response before an artifact can be assembled. It does not choose work,
+render video, or publish.
+
+Increment 2 (:func:`run_narrator_job`) adds the one piece increment 1/1b
+deliberately left out: an actual model call, through the same gateway
+client the strategist uses (:func:`nanobot.runtime.strategist._default_llm`
+pattern -- ``LITELLM_BASE_URL``/``LITELLM_API_KEY`` from the unit
+environment, bounded retries, a fixed timeout), and the write of the
+resulting artifact to ``state/story/<day>.json``. This is a job, not a
+service: it is meant to be run once per day by an operator or a future
+systemd unit (increment 3, not built here) -- no publishing, no video, no
+channel figure anywhere in this module (ADR-016 rule 1's call-graph
+constraint: the narrator has no reader for any channel figure, and no
+figure is a parameter here for it to have one).
 """
 from __future__ import annotations
 
 import gzip
 import json
+import os
 import re
+import tempfile
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 SCHEMA_VERSION = "journal-story-v1"
+JOB_SCHEMA_VERSION = "journal-story-job-v1"
 PRODUCER = "scripts.journal_story"
 DEFAULT_MAX_BEATS = 8
+# Narrator-specific override, falling back to the strategist role's own
+# resolved model (env vars, then its built-in default) -- #1622's own
+# instruction: "model from an env var with the strategist's default". No
+# new model_registry.py role: this reuses "strategist" via resolve_model's
+# `explicit` precedence rather than registering a parallel one.
+NARRATOR_MODEL_ENV = "SELFEVO_NARRATOR_MODEL"
+NARRATOR_MAX_RETRIES_ENV = "SELFEVO_NARRATOR_MAX_RETRIES"
+DEFAULT_MAX_RETRIES = 3
 # The journal source, named once (#1622 comment 2026-09-16): the cycle ledger
 # under ``state/ledger`` — the live ``cycles.jsonl`` plus the dated
 # ``cycles-YYYY-MM-DD.jsonl.gz`` archives the midnight rotation writes. Never
@@ -306,3 +330,186 @@ def assemble_story_artifact(
         "model_output": model_output,
         "citation_set": {item["beat_id"]: next(beat["source"] for beat in beats if beat["beat_id"] == item["beat_id"]) for item in validated},
     }
+
+
+# ─── increment 2: one runnable job ──────────────────────────────────────────
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+_NARRATOR_SYSTEM_PROMPT = (
+    "You write plain, warm narration for a small autonomous project's daily "
+    "story, from the beats given to you and nothing else. Respond with ONLY "
+    "a JSON list, no markdown fences, no surrounding prose: one object per "
+    "beat, each {\"beat_id\", \"text\", \"sign\", \"terms\"}. The sign field "
+    "must repeat the beat's own sign exactly -- you may not change it, soften "
+    "it, or imply a different one in the text. Do not invent a beat_id that "
+    "was not given to you. \"terms\" is the list of glossary terms your text "
+    "uses, if any."
+)
+
+
+def _default_narrator_llm(messages: list[dict[str, str]], model: str) -> str:
+    """The strategist's own gateway-client pattern
+    (:func:`nanobot.runtime.strategist._default_llm`), reused verbatim:
+    ``LITELLM_BASE_URL``/``LITELLM_API_KEY`` from the unit's own
+    environment, a fixed timeout, bounded retries. Telemetry is recorded
+    the same way, under the ``narrator`` component name."""
+    from openai import OpenAI
+
+    from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
+
+    base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
+    api_key = os.environ.get("LITELLM_API_KEY", "").strip()
+    if not base_url or not api_key:
+        raise RuntimeError("litellm credentials not configured; check the unit EnvironmentFile chain")
+    started = time.monotonic()
+    max_retries = _env_int(NARRATOR_MAX_RETRIES_ENV, DEFAULT_MAX_RETRIES)
+    response = OpenAI(base_url=base_url, api_key=api_key, timeout=120, max_retries=max_retries).chat.completions.create(
+        model=model, messages=messages, max_tokens=2_000, temperature=0.3
+    )
+    choice = response.choices[0]
+    content = getattr(getattr(choice, "message", None), "content", "") or ""
+    usage_obj = getattr(response, "usage", None)
+    usage = {key: int(getattr(usage_obj, key, 0) or 0) for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
+    # The narrator runs as its own job (increment 3's future timer, or an
+    # operator invocation), not inside a bridge cycle -- no cycle_id to
+    # attribute, same reasoning as the strategist's own call site.
+    with call_context(None, "narrator"):
+        record_llm_call(model=model, duration_ms=(time.monotonic() - started) * 1000, usage=usage,
+                        finish_reason=getattr(choice, "finish_reason", ""), retries=0)
+        record_llm_prompt(messages=messages, content=content, reasoning_content=None,
+                          finish_reason=getattr(choice, "finish_reason", ""), model=model,
+                          prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"])
+    return content
+
+
+def _resolve_narrator_model() -> str:
+    from nanobot.runtime.model_registry import resolve_model
+
+    explicit = os.environ.get(NARRATOR_MODEL_ENV, "").strip() or None
+    return resolve_model("strategist", explicit=explicit, strip_openai=True)
+
+
+def _parse_model_output(raw: Any) -> Any:
+    """Best-effort single parse of the model's response -- no retry, no
+    second guess at the shape. A JSON list is returned as-is; a single pair
+    of markdown code fences is stripped once (a common small-model habit,
+    not a correction of content); anything else is returned unparsed so
+    :func:`validate_narration` (or the job's own not-a-list check) reports
+    it as a real violation instead of masking a malformed response as an
+    empty one.
+    """
+    if hasattr(raw, "content"):
+        raw = raw.content
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        if text.endswith("```"):
+            text = text[: -3]
+        text = text.strip()
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
+def _write_story_artifact(state_dir: str | Path, day: str, artifact: dict[str, Any]) -> Path:
+    """Write ``state/story/<day>.json`` atomically (tmp + ``os.replace``),
+    the same pattern :func:`nanobot.runtime.strategist._atomic_json` uses."""
+    path = Path(state_dir) / "story" / f"{day}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if os.name != "nt":
+            os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    return path
+
+
+def run_narrator_job(
+    state_dir: str | Path,
+    day: str,
+    *,
+    llm: "Callable[[list[dict[str, str]], str], Any] | None" = None,
+    glossary: dict[str, str] | None = None,
+    max_beats: int = DEFAULT_MAX_BEATS,
+) -> dict[str, Any]:
+    """One runnable job, increment 2: load the day, select beats, prompt one
+    model through the strategist's own gateway pattern, validate, and write
+    ``state/story/<day>.json``.
+
+    A day with no beats at all never reaches the model -- there is nothing
+    for it to narrate, and every item :func:`validate_narration` could
+    receive would fail the "no selected beat" check trivially, so it is not
+    a real attempt, just a guaranteed-empty round trip. That day's artifact
+    is written directly with ``status: "ok"`` and empty narration: a quiet
+    day is still an honest one (ADR-016), and it costs nothing to say so.
+
+    A rejected narration (:class:`StoryValidationError`) is written too --
+    ``status: "rejected"`` plus the violation -- never silently dropped.
+    There is no retry: at most the one model call this function makes,
+    ever, per invocation. Never raises; a failure at any stage before the
+    artifact is written is itself recorded as a rejected/erred artifact.
+    """
+    generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    journal = load_day_journal(state_dir, day)
+    beats = select_beats(journal["rows"], day=day, max_beats=max_beats)
+    base: dict[str, Any] = {
+        "schema_version": JOB_SCHEMA_VERSION,
+        "producer": PRODUCER,
+        "day": day,
+        "generated_at": generated_at,
+        "journal_status": journal["status"],
+        "journal_notes": journal["notes"],
+        "beats": beats,
+    }
+    if not beats:
+        no_beats_result = {
+            **base, "status": "ok", "model": None, "prompt": "", "model_output": None,
+            "narration": [], "citation_set": {}, "violations": [],
+            "note": "no beats recorded for this day; no model call made",
+        }
+        no_beats_result["artifact_path"] = str(_write_story_artifact(state_dir, day, no_beats_result))
+        return no_beats_result
+    model = _resolve_narrator_model()
+    prompt = build_story_prompt(beats, glossary=glossary)
+    messages = [
+        {"role": "system", "content": _NARRATOR_SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ]
+    raw: Any = None
+    try:
+        raw = (llm or _default_narrator_llm)(messages, model)
+        narration = _parse_model_output(raw)
+        artifact = assemble_story_artifact(beats, narration, prompt=prompt, model_output=raw, glossary=glossary)
+        result = {**base, **artifact, "status": "ok", "model": model, "violations": []}
+    except StoryValidationError as exc:
+        result = {
+            **base, "status": "rejected", "model": model, "prompt": prompt,
+            "model_output": raw,
+            "narration": [], "citation_set": {}, "violations": [str(exc)],
+        }
+    except Exception as exc:  # gateway/parse failure before validation ran at all
+        result = {
+            **base, "status": "rejected", "model": model, "prompt": prompt,
+            "model_output": None, "narration": [], "citation_set": {},
+            "violations": [f"{exc.__class__.__name__}: {exc}"],
+        }
+    result["artifact_path"] = str(_write_story_artifact(state_dir, day, result))
+    return result
