@@ -21,7 +21,7 @@ The remaining decision is who may remove accumulated guidance. Giving the autono
 
 # Decision
 
-`AGENTS.md` remains operator-owned. Autonomous proposals and diffs targeting it remain rejected as `operator_owned_path`.
+`AGENTS.md` was operator-owned under this record: autonomous proposals and diffs targeting it were rejected as `operator_owned_path`. Superseded on this point by ADR-022 decision 6 (PR #1731): `AGENTS.md` is a loop-owned exact commit path (`MUTATION_POLICY.commit_exact_paths`), bounded by the gate to ≤150 lines and none of `agents_md_runtime_headings`.
 
 Removal is an explicit operator action through `scripts/agents_md_consolidate.py`. The operator names each `## ` section. The tool removes a section only when there is exactly one matching heading and that section carries the exact `<!-- prompt-fit: droppable -->` declaration. It is dry-run by default, requires `--apply`, and replaces the file atomically. Missing, duplicate, or unmarked headings reject the whole operation without a partial write.
 
@@ -41,7 +41,7 @@ Consolidation requires an operator to choose sections deliberately. The tool can
 
 ## What does not change
 
-Critical sections are never dropped by prompt fitting or removed by the consolidation tool. The autonomous loop keeps learning through skills, lessons, and memory, but cannot mutate `AGENTS.md`.
+Critical sections are never dropped by prompt fitting or removed by the consolidation tool. The autonomous loop keeps learning through skills, lessons, and memory; since ADR-022 decision 6 (PR #1731) it may commit `AGENTS.md` only within the gate's scope bound.
 
 # Alternatives considered
 
@@ -59,7 +59,7 @@ Critical sections are never dropped by prompt fitting or removed by the consolid
 | Every `system_prompt` row carries `sections` (one entry per assembled section, `0` when empty) and `sum(sections) + separators` reconciles to `chars` / `cap + over_by` (#1379) | `tests/test_system_prompt_sections.py` | passing |
 | Dry-run never writes and `--apply` removes only explicitly named marked sections | `tests/test_agents_md_consolidate.py` | passing |
 | Missing, duplicate, or unmarked headings reject without partial mutation | `tests/test_agents_md_consolidate.py` refusal tests | passing |
-| Autonomous root `AGENTS.md` mutation remains rejected | `tests/test_mutation_surfaces.py`, `tests/test_llm_proposer.py` | passing |
+| Autonomous root `AGENTS.md` mutation is permitted as an exact path, bounded to ≤150 lines and no runtime headings (ADR-022 decision 6, PR #1731) | `tests/test_mutation_policy.py::test_agents_md_is_readable_and_commit_permitted_as_exact_path`, `tests/test_mutation_policy.py::test_agents_md_scope_bound` | passing |
 | Autonomous edits to `agents_md_consolidate.py` are rejected by proposal sizing and integration policy | `tests/test_mutation_surfaces.py::test_agents_md_consolidate_script_is_immutable`, `tests/test_llm_proposer.py::TestValidateSizing::test_rejects_agents_md_consolidate_script`, `tests/test_runtime_slice.py::test_bridge_policy_mirrors_stay_synced_with_gate` | passing |
 
 # Rollback
