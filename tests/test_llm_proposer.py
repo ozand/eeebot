@@ -1986,9 +1986,11 @@ class TestWriteRequestLessonsContext:
         repo = tmp_path / "instance_repo"
         errors_path = repo / "lessons" / "errors.yaml"
         errors_path.parent.mkdir(parents=True)
+        # #1728: ``timeout`` is an infrastructure class (excluded from
+        # executor-facing selection); this card is about a config guard.
         errors_path.write_text(
             "- id: ERR-AUTO-timeout-guard\n"
-            "  category: timeout\n"
+            "  category: config\n"
             "  title: Subagent timeout guard misconfigured\n"
             "  root_cause: Timeout value read from stale config default.\n"
             "  prevention: Always read timeout from live config.\n",

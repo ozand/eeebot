@@ -23,7 +23,11 @@ def test_real_lesson_index_and_retrieval(tmp_path):
         "Add tabular-nums to the dashboard state table test",
         "Refactor prompt runtime state handling in subagent telemetry",
     ):
-        assert lessons_context.build_lessons_context(tmp_path, task) == {}
+        # #1728: a corpus WAS read (the one index row) and nothing matched, so
+        # no card is emitted and the lesson slot says why.
+        unmatched = lessons_context.build_lessons_context(tmp_path, task)
+        assert "relevant_lesson" not in unmatched and "relevant_error" not in unmatched
+        assert unmatched["selection_provenance"]["lessons"]["reason"] == "below_threshold"
     monkey_task = "Fix repeat failures in duplicate proposals"
     assert lessons_context.build_lessons_context(tmp_path, monkey_task)["relevant_lesson"]
     from unittest.mock import patch

@@ -517,11 +517,14 @@ def _best_card_with_provenance(
 
 def _select_cards(
     lessons_dir: Path, task_words: set[str]
-) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any] | None, dict[str, Any], bool]:
+) -> tuple[dict[str, Any] | None, dict[str, Any], dict[str, Any] | None, dict[str, Any], bool, bool]:
     """The one selector both public entry points run (#1728).
 
     Returns ``(error, error_provenance, lesson, lesson_provenance,
-    lesson_from_archive)``. Keeping ``build_lessons_context`` (the request
+    lesson_from_archive, corpus_read)``; ``corpus_read`` is False when none
+    of errors.yaml / lessons.yaml / index.md yielded a single entry, so the
+    caller can tell fail-open "nothing to say" from "a corpus was read and
+    nothing matched". Keeping ``build_lessons_context`` (the request
     writer) and ``selection_provenance`` (the bridge's reconstruction when a
     request carries no context) on the same code path is what makes the
     reconstructed provenance a faithful stand-in for the recorded one.
@@ -555,7 +558,8 @@ def _select_cards(
     lesson, lesson_data = _best_card_with_provenance(lesson_entries, lesson_words, "approach")
     lesson_data["generic_suppressed"] = sorted(task_words & lesson_generic)[:_GENERIC_PROVENANCE_CAP]
     from_archive = bool(lesson is not None and lesson in archive_entries and lesson not in live_index_entries)
-    return error, error_data, lesson, lesson_data, from_archive
+    corpus_read = bool(error_entries or yaml_lessons or live_index_entries or archive_entries)
+    return error, error_data, lesson, lesson_data, from_archive, corpus_read
 
 
 def _provenance_envelope(
@@ -586,7 +590,7 @@ def selection_provenance(
         if not selfevo_repo or os.environ.get(ENABLED_ENV, "1").strip().lower() in _FALSY:
             return {"source": "reconstructed", "status": "empty", "selected_ids": []}
         words = _task_words(task_title, target_path, instructions)
-        error, error_data, lesson, lesson_data, _from_archive = _select_cards(
+        error, error_data, lesson, lesson_data, _from_archive, _corpus_read = _select_cards(
             Path(selfevo_repo) / "lessons", words
         )
         return _provenance_envelope("reconstructed", error, error_data, lesson, lesson_data)
@@ -604,16 +608,24 @@ def build_lessons_context(
     ``selection_provenance`` (#1728) -- ``errors`` (pitfall slot) and
     ``lessons`` (lesson slot) each with ``score``, ``threshold`` and
     ``reason`` so the ledger shows why a section was or was not present.
-    ``selection_provenance`` is present whenever selection ran, including
-    when neither card qualified; the renderer ignores it.
+    ``selection_provenance`` is present whenever a corpus was actually read
+    (at least one entry from errors.yaml, lessons.yaml or index.md),
+    including when neither card qualified; the renderer ignores it.
+    ``relevant_error`` / ``relevant_lesson`` are absent, never ``None``,
+    when not selected -- every reader (bridge renderer, proposer ledger
+    line, knowledge_lift, lesson_v2 provenance) uses ``.get``.
 
     ``instructions`` (#1728) is optional: identifier-shaped tokens in it
     (``prevent_repeat_failures.py``) join the task word set. The proposer
     does not pass it yet.
 
-    Never raises: any failure (kill-switch off, no repo, no task words, an
-    unexpected exception) returns ``{}``, matching the field's behavior
-    before #912.
+    Never raises, and fail-open still means "nothing to say": kill-switch
+    off, no repo, no task words, no readable corpus at all (missing
+    lessons/ dir, missing or corrupt or oversized YAML with no index,
+    missing ``pyyaml`` with no index), or an unexpected exception all return
+    ``{}``, matching the field's behavior before #912. A per-slot
+    ``no_candidates`` reason therefore only appears when the OTHER slot's
+    corpus was read.
     """
     try:
         raw_enabled = os.environ.get(ENABLED_ENV, "1").strip().lower()
@@ -625,9 +637,11 @@ def build_lessons_context(
         if not task_words:
             return {}
 
-        err, error_provenance, less, lesson_provenance, from_archive = _select_cards(
+        err, error_provenance, less, lesson_provenance, from_archive, corpus_read = _select_cards(
             Path(selfevo_repo) / "lessons", task_words
         )
+        if not corpus_read:
+            return {}
 
         result: dict[str, Any] = {}
         if err:

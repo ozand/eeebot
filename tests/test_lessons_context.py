@@ -35,15 +35,6 @@ def _write_yaml(path: Path, entries: list[dict]) -> None:
     path.write_text(yaml.dump(entries, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
-def _no_cards(result: dict, reason: str) -> bool:
-    """#1728 contract for "nothing selected": no card keys, and both slots of
-    ``selection_provenance`` explain themselves with ``reason``."""
-    assert "relevant_error" not in result and "relevant_lesson" not in result, result
-    prov = result["selection_provenance"]
-    assert prov["errors"]["reason"] == reason and prov["lessons"]["reason"] == reason, prov
-    return True
-
-
 def _repo_with_lessons(tmp_path: Path, errors: list[dict] | None = None,
                         lessons: list[dict] | None = None) -> Path:
     repo = tmp_path / "instance_repo"
@@ -217,16 +208,32 @@ class TestFailOpen:
         monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
         missing_repo = tmp_path / "does-not-exist"
 
-        # #1728: no card, and the ledger sees "no_candidates" rather than
-        # an unexplained blank.
-        assert _no_cards(build_lessons_context(missing_repo, "Any task title here"), "no_candidates")
+        # #1728 contract: no readable corpus at all is fail-open "nothing to
+        # say" -- still {}, no provenance (ADR fail-open empty vs unavailable).
+        assert build_lessons_context(missing_repo, "Any task title here") == {}
 
     def test_missing_files_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
         repo = tmp_path / "instance_repo"
         repo.mkdir()
 
-        assert _no_cards(build_lessons_context(repo, "Any task title here"), "no_candidates")
+        assert build_lessons_context(repo, "Any task title here") == {}
+
+    def test_one_corpus_read_gives_other_slot_no_candidates(self, tmp_path, monkeypatch):
+        """#1728: provenance appears once ANY corpus was read; the slot whose
+        corpus is missing says ``no_candidates``, the other explains itself."""
+        monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+        repo = _repo_with_lessons(
+            tmp_path,
+            errors=[{"id": "ERR", "category": "config", "title": "Unrelated card",
+                     "root_cause": "different", "prevention": "y"}],
+        )
+
+        result = build_lessons_context(repo, "Any task title here")
+
+        assert "relevant_error" not in result and "relevant_lesson" not in result
+        assert result["selection_provenance"]["errors"]["reason"] == "below_threshold"
+        assert result["selection_provenance"]["lessons"]["reason"] == "no_candidates"
 
     def test_corrupt_yaml_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
@@ -235,9 +242,7 @@ class TestFailOpen:
         errors_path.parent.mkdir(parents=True)
         errors_path.write_text("title: [unterminated flow\n  - not valid yaml: [", encoding="utf-8")
 
-        assert _no_cards(
-            build_lessons_context(repo, "Fix the unterminated flow bug in the parser"), "no_candidates"
-        )
+        assert build_lessons_context(repo, "Fix the unterminated flow bug in the parser") == {}
 
     def test_none_repo_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
@@ -618,7 +623,7 @@ class TestSizeGuard:
         }])
         assert errors_path.stat().st_size > _MAX_FILE_BYTES
 
-        assert _no_cards(build_lessons_context(repo, "Fix timeout guard fails issue"), "no_candidates")
+        assert build_lessons_context(repo, "Fix timeout guard fails issue") == {}
 
 
 class TestIssue1728Threshold:
