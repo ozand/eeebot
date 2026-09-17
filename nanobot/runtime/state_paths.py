@@ -141,6 +141,15 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
     "state": (
         "nanobot.runtime.reflector:_append_journal",
     ),
+    # #1622 increment 2: one artifact per UTC day, written by the narrator
+    # job (no systemd unit yet -- increment 3, operator-invoked today).
+    # No reader exists yet either (the channel/publishing side is future
+    # work, #1613 et al.) -- registered proactively so a reader that
+    # appears later finds the writer already named, per this module's own
+    # standing failure mode (#924/#1219).
+    "story": (
+        "scripts.journal_story:_write_story_artifact",
+    ),
     "strategist": (
         "nanobot.runtime.strategist:_write_advisories",
         "nanobot.runtime.strategist:save_watermark",
