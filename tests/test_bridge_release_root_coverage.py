@@ -30,15 +30,22 @@ def test_release_root_default_and_env_override(monkeypatch, tmp_path: Path):
 
 
 def test_build_task_charter_pointer_only_when_in_system():
+    """#1727 replaced '## System mission' with a one-line priority statement
+    in both modes (acceptance criterion: "one line ... no full priority text
+    appears") -- goal_text ("CHARTER_SENTINEL" here, standing in for either
+    the full charter or another priority's full text) is no longer inlined
+    either way. What must still hold, and is what #944/#954 introduced this
+    test to pin: the system-context pointer line appears exactly when the
+    charter is already loaded into system context, never otherwise."""
     req = {"task_title": "x", "request_id": "r", "cycle_id": "c", "goal_id": "g"}
     inline = build_task(req, "CHARTER_SENTINEL", "", charter_in_system=False)
     pointer = build_task(req, "CHARTER_SENTINEL", "", charter_in_system=True)
 
-    assert "CHARTER_SENTINEL" in inline
+    assert "CHARTER_SENTINEL" not in inline
+    assert "CHARTER_SENTINEL" not in pointer
     assert "see system context" not in inline
     assert "see system context" in pointer
-    assert pointer.count("CHARTER_SENTINEL") == 1
-    assert pointer.index("see system context") < pointer.index("CHARTER_SENTINEL")
+    assert pointer.count("see system context") == 1
 
 
 def test_build_task_renders_doc_budget_notice():
