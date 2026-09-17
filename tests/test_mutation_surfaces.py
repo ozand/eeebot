@@ -116,10 +116,12 @@ def test_agents_md_consolidate_script_is_immutable():
     ]
 
 
-def test_root_agents_is_operator_owned_and_skill_files_are_allowed():
+def test_root_agents_is_an_exact_allowance_and_skill_files_are_allowed():
+    # ADR-022: AGENTS.md is loop-owned repository layout; the path passes the
+    # surface check and the content bound is applied by
+    # gate._agents_md_scope_violations (tests/test_mutation_policy.py).
     fn = _get_validate()
-    violations = fn(['AGENTS.md'])
-    assert violations == ['operator_owned_path: AGENTS.md']
+    assert fn(['AGENTS.md']) == []
     assert fn(['skills/review/SKILL.md']) == []
 
 
@@ -193,5 +195,6 @@ def test_build_task_surfaces_come_from_gate_constants():
     prompt = bridge.build_task(req, "derived", "", max_iterations=17)
     for surface in list(bridge._ALLOWED_PATH_PREFIXES) + list(bridge._ALLOWED_EXACT_PATHS):
         assert surface in prompt
-    assert "AGENTS.md" not in prompt
+    assert "Allowed targets: surfaces/, scripts/, memory/, lessons/, docs/, tests/, skills/, AGENTS.md" in prompt
+    assert "Do NOT modify: state/, ops/, goals.md, IDENTITY.md, SOUL.md, USER.md, OPERATING.md" in prompt
     assert "Creating or improving skills for repeated patterns is valuable work." in prompt

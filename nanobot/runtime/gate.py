@@ -37,11 +37,13 @@ _ALLOWED_SENSITIVE_BASENAMES = frozenset({
 })
 
 # #944: explicit block list for files that must never be mutated by the
-# instance regardless of path-prefix rules. goals.md is the immutable
-# operator charter — it ships read-only in the release tree and must not
-# appear on ANY mutation surface.
-_BLOCKED_EXACT_PATHS = frozenset({
-    'goals.md', 'IDENTITY.md', 'agents_md_consolidate.py',
+# instance regardless of path-prefix rules. The release-owned files come
+# from the mutation policy (ADR-022: goals.md, IDENTITY.md, SOUL.md, USER.md,
+# OPERATING.md); they ship read-only in the release tree and must not appear
+# on ANY mutation surface. bridge/llm_proposer keep literal mirrors — a test
+# asserts equality.
+_BLOCKED_EXACT_PATHS = frozenset(MUTATION_POLICY.immutable_files) | frozenset({
+    'agents_md_consolidate.py',
 })
 
 
@@ -164,10 +166,9 @@ def _validate_mutation_surfaces(
         if fname in blocked_exact_paths or f in blocked_exact_paths:
             violations.append(f'immutable file blocked from mutation: {f}')
             continue
-        if f == 'AGENTS.md':
-            violations.append(f'operator_owned_path: {f}')
-            continue
-        # Allowed exact paths bypass the prefix check.
+        # Allowed exact paths (AGENTS.md, ADR-022) bypass the prefix check;
+        # the AGENTS.md scope bound is applied on content by
+        # _agents_md_scope_violations in the bridge classifier.
         if f in allowed_exact_paths:
             continue
         # Blocked filename patterns
@@ -383,6 +384,29 @@ def _git_show_many(repo_root: 'Path', ref: str, paths: 'list[str]') -> 'dict[str
             pos += size + 1  # trailing newline after the blob
         # 'missing' / 'ambiguous' lines have no body
     return out
+
+
+def _agents_md_scope_violations(repo_root: 'Path', changed_files: 'list[str]') -> 'list[str]':
+    """AGENTS.md scope violations for the staged HEAD (ADR-022, #1720 decision 6).
+
+    Only runs when the cycle changed ``AGENTS.md``. Reads the blob via
+    ``git show HEAD:AGENTS.md`` so a deleted or unreadable file fails closed
+    (the loop may shrink the file, never remove it). Reason strings share the
+    ``agents_md_scope:`` prefix and block integration like a surface violation.
+    """
+    if 'AGENTS.md' not in changed_files:
+        return []
+    import subprocess as _sp
+    try:
+        shown = _sp.run(
+            ['git', 'show', 'HEAD:AGENTS.md'], capture_output=True, text=True,
+            cwd=str(repo_root), timeout=30,
+        )
+    except Exception as exc:
+        return [f'agents_md_scope: unreadable at HEAD: {exc}']
+    if shown.returncode != 0:
+        return ['agents_md_scope: AGENTS.md missing at HEAD (the loop may shrink it, not delete it)']
+    return MUTATION_POLICY.agents_md_scope_violations(shown.stdout)
 
 
 def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: 'list[str]') -> 'list[str]':
@@ -642,9 +666,6 @@ def _classify_mutation_surface(
         fname = f.rsplit('/', 1)[-1] if '/' in f else f
         if fname in blocked_exact_paths or f in blocked_exact_paths:
             blocked.append(f'immutable file blocked from mutation: {f}')
-            continue
-        if f == 'AGENTS.md':
-            violations.append(f'operator_owned_path: {f}')
             continue
         # Allowed exact paths bypass the prefix and pattern checks.
         if f in allowed_exact_paths:

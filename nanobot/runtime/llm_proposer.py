@@ -100,10 +100,11 @@ _ALLOWED_PATH_PREFIXES = MUTATION_POLICY.commit_path_prefixes
 _ALLOWED_EXACT_PATHS = MUTATION_POLICY.commit_exact_paths
 
 # #944: explicitly blocked paths (immutable files that proposals may never
-# target), mirroring bridge._BLOCKED_EXACT_PATHS. goals.md is the immutable
-# operator charter shipped in the release tree.
-_BLOCKED_EXACT_PATHS = frozenset({
-    'goals.md', 'IDENTITY.md', 'agents_md_consolidate.py',
+# target), mirroring bridge._BLOCKED_EXACT_PATHS. The release-owned files
+# (ADR-022: goals.md, IDENTITY.md, SOUL.md, USER.md, OPERATING.md) ship
+# read-only in the release tree.
+_BLOCKED_EXACT_PATHS = frozenset(MUTATION_POLICY.immutable_files) | frozenset({
+    'agents_md_consolidate.py',
 })
 # #947 (fix-pass): mirror of bridge structural filename policy. Keep this
 # module-level copy behaviorally identical because bridge imports proposer.
@@ -2083,9 +2084,12 @@ def validate_sizing(proposal: dict[str, Any] | None) -> tuple[bool, str]:
         return False, f"target_path matches a blocked filename pattern: {target_path}"
     if _target_basename in _BLOCKED_EXACT_PATHS or _norm_target in _BLOCKED_EXACT_PATHS:
         return False, f"target_path is an immutable file that proposals may never modify: {target_path}"
-    if _norm_target == "AGENTS.md":
-        return False, "operator_owned_path"
-    _in_script_surface = any(target_path.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES)
+    # ADR-022: AGENTS.md is commit-permitted as an exact path (repository
+    # layout only; the gate bounds the staged content).
+    _in_script_surface = (
+        _norm_target in _ALLOWED_EXACT_PATHS
+        or any(target_path.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES)
+    )
     _in_runtime_slice = _norm_target in _runtime_slice_paths()
     if not (_in_script_surface or _in_runtime_slice):
         return False, f"target_path outside allowed surfaces {_ALLOWED_PATH_PREFIXES}: {target_path}"
