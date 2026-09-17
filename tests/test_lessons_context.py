@@ -5,20 +5,29 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from nanobot.runtime.bridge import _error_condition_title, _write_structured_error, build_task
 from nanobot.runtime.lessons_context import (
+    _GENERIC_MIN_CORPUS,
     _MAX_FILE_BYTES,
+    _MIN_SCORE,
     _best_card,
     _best_card_with_provenance,
     _capped_entries,
     _extract_words,
+    _generic_words,
+    _identifier_words,
+    _identifiers_in_prose,
+    _is_infra_class,
     _normalize_entry,
     _safe_load_yaml,
     build_lessons_context,
     selection_provenance,
 )
+
+_REASONS = {"selected", "below_threshold", "empty_prevention", "infra_class", "no_candidates"}
 
 
 def _write_yaml(path: Path, entries: list[dict]) -> None:
@@ -44,7 +53,7 @@ class TestErrorMatching:
             errors=[
                 {
                     "id": "ERR-AUTO-timeout-guard",
-                    "category": "timeout",
+                    "category": "config",
                     "title": "Subagent timeout guard misconfigured",
                     "root_cause": "Timeout value read from stale config default.",
                     "prevention": "Always read timeout from live config, not a cached default.",
@@ -54,7 +63,8 @@ class TestErrorMatching:
 
         result = build_lessons_context(repo, "Fix subagent timeout guard misconfiguration")
 
-        assert set(result.keys()) == {"relevant_error"}
+        # #1728: selection_provenance rides along whenever selection ran.
+        assert set(result.keys()) == {"relevant_error", "selection_provenance"}
         err = result["relevant_error"]
         # Bridge-compatible keys exactly.
         assert set(err.keys()) == {"id", "title", "root_cause", "prevention"}
@@ -68,7 +78,7 @@ class TestErrorMatching:
             errors=[
                 {
                     "id": "ERR-AUTO-timeout-guard",
-                    "category": "timeout",
+                    "category": "config",
                     "title": "Subagent timeout guard misconfigured",
                     "root_cause": "Timeout value read from stale config default.",
                     "prevention": "Always read timeout from live config.",
@@ -78,7 +88,9 @@ class TestErrorMatching:
 
         result = build_lessons_context(repo, "Document the ledger digest helper for operators")
 
-        assert result == {}
+        assert "relevant_error" not in result and "relevant_lesson" not in result
+        # #1728: the ledger sees why the section was absent.
+        assert result["selection_provenance"]["errors"]["reason"] == "below_threshold"
 
 
 class TestRecurrenceRanking:
@@ -196,6 +208,8 @@ class TestFailOpen:
         monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
         missing_repo = tmp_path / "does-not-exist"
 
+        # #1728 contract: no readable corpus at all is fail-open "nothing to
+        # say" -- still {}, no provenance (ADR fail-open empty vs unavailable).
         assert build_lessons_context(missing_repo, "Any task title here") == {}
 
     def test_missing_files_returns_empty(self, tmp_path, monkeypatch):
@@ -204,6 +218,22 @@ class TestFailOpen:
         repo.mkdir()
 
         assert build_lessons_context(repo, "Any task title here") == {}
+
+    def test_one_corpus_read_gives_other_slot_no_candidates(self, tmp_path, monkeypatch):
+        """#1728: provenance appears once ANY corpus was read; the slot whose
+        corpus is missing says ``no_candidates``, the other explains itself."""
+        monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+        repo = _repo_with_lessons(
+            tmp_path,
+            errors=[{"id": "ERR", "category": "config", "title": "Unrelated card",
+                     "root_cause": "different", "prevention": "y"}],
+        )
+
+        result = build_lessons_context(repo, "Any task title here")
+
+        assert "relevant_error" not in result and "relevant_lesson" not in result
+        assert result["selection_provenance"]["errors"]["reason"] == "below_threshold"
+        assert result["selection_provenance"]["lessons"]["reason"] == "no_candidates"
 
     def test_corrupt_yaml_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
@@ -227,7 +257,7 @@ class TestKillSwitch:
             errors=[
                 {
                     "id": "ERR-AUTO-timeout-guard",
-                    "category": "timeout",
+                    "category": "config",
                     "title": "Subagent timeout guard misconfigured",
                     "root_cause": "Timeout value read from stale config default.",
                     "prevention": "Always read timeout from live config.",
@@ -246,7 +276,7 @@ class TestKillSwitch:
             errors=[
                 {
                     "id": "ERR-AUTO-timeout-guard",
-                    "category": "timeout",
+                    "category": "config",
                     "title": "Subagent timeout guard misconfigured",
                     "root_cause": "Timeout value read from stale config default.",
                     "prevention": "Always read timeout from live config.",
@@ -263,7 +293,7 @@ class TestKillSwitch:
             errors=[
                 {
                     "id": "ERR-AUTO-timeout-guard",
-                    "category": "timeout",
+                    "category": "config",
                     "title": "Subagent timeout guard misconfigured",
                     "root_cause": "Timeout value read from stale config default.",
                     "prevention": "Always read timeout from live config.",
@@ -283,7 +313,7 @@ class TestCaps:
             errors=[
                 {
                     "id": "ERR-AUTO-timeout-guard",
-                    "category": "timeout",
+                    "category": "config",
                     "title": "Subagent timeout guard misconfigured",
                     "root_cause": long_root_cause,
                     "prevention": "Always read timeout from live config.",
@@ -304,7 +334,7 @@ class TestCaps:
             errors=[
                 {
                     "id": "ERR-AUTO-timeout-guard",
-                    "category": "timeout",
+                    "category": "config",
                     "title": long_title,
                     "root_cause": "Timeout value read from stale config default.",
                     "prevention": "Always read timeout from live config.",
@@ -494,8 +524,8 @@ def test_write_structured_error_raises_reports_write_failed_with_exception(tmp_p
 def test_selector_provenance_reports_candidates_and_tie_break(tmp_path, monkeypatch):
     monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
     repo = _repo_with_lessons(tmp_path, errors=[
-        {"id": "ERR-new", "category": "timeout", "title": "Timeout guard fails today", "root_cause": "x", "prevention": "y"},
-        {"id": "ERR-old", "category": "timeout", "title": "Timeout guard fails again", "root_cause": "x", "prevention": "y"},
+        {"id": "ERR-new", "category": "config", "title": "Timeout guard fails today", "root_cause": "x", "prevention": "y"},
+        {"id": "ERR-old", "category": "config", "title": "Timeout guard fails again", "root_cause": "x", "prevention": "y"},
     ])
     provenance = selection_provenance(repo, "Fix timeout guard fails issue")
     data = provenance["errors"]
@@ -556,14 +586,14 @@ class TestNewestFirstOrdering:
             errors=[
                 {
                     "id": "ERR-2-newest",
-                    "category": "timeout",
+                    "category": "config",
                     "title": "Timeout guard fails again",
                     "root_cause": "x",
                     "prevention": "y",
                 },
                 {
                     "id": "ERR-1-older",
-                    "category": "timeout",
+                    "category": "config",
                     "title": "Timeout guard fails today",
                     "root_cause": "x",
                     "prevention": "y",
@@ -586,7 +616,7 @@ class TestSizeGuard:
         padding = "x" * (_MAX_FILE_BYTES + 1024)
         _write_yaml(errors_path, [{
             "id": "ERR-1",
-            "category": "timeout",
+            "category": "config",
             "title": "Timeout guard fails",
             "root_cause": padding,
             "prevention": "y",
@@ -594,6 +624,256 @@ class TestSizeGuard:
         assert errors_path.stat().st_size > _MAX_FILE_BYTES
 
         assert build_lessons_context(repo, "Fix timeout guard fails issue") == {}
+
+
+class TestIssue1728Threshold:
+    """#1728: relevance threshold + identifier overlap, one fixture per AC bullet."""
+
+    _INSPECT_TASK = "Add scripts/inspect_cycle_diff.py to summarize the changed files of one cycle"
+    _INSPECT_PATH = "scripts/inspect_cycle_diff.py"
+    _PREVENT_LESSON = {
+        "id": "LESS-prevent-repeat",
+        "title": "Integrate the new demand and target path deduplication thresholds from "
+                 "prevent_repeat_failures.py into the preflight proposer check",
+        "approach": "Read lessons/prevent_repeat_failures.md: run the preflight check before proposing.",
+        "reusable_insight": "Deduplicate demand before it reaches the proposer.",
+    }
+    _INSPECT_LESSON = {
+        "id": "lessons/inspect_cycle_diff_helper.md",
+        "title": "Summarize a cycle diff with inspect_cycle_diff before proposing",
+        "approach": "Read lessons/inspect_cycle_diff_helper.md: run scripts/inspect_cycle_diff.py first.",
+        "reusable_insight": "A diff summary beats re-reading the whole tree.",
+    }
+
+    def test_unrelated_lesson_yields_no_proven_approach_section(self, tmp_path, monkeypatch):
+        """AC1a: the issue's own example -- an inspect_cycle_diff task must
+        not receive the prevent_repeat_failures lesson."""
+        monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+        repo = _repo_with_lessons(tmp_path, lessons=[self._PREVENT_LESSON])
+
+        result = build_lessons_context(repo, self._INSPECT_TASK, self._INSPECT_PATH)
+
+        assert "relevant_lesson" not in result
+        slot = result["selection_provenance"]["lessons"]
+        assert slot["reason"] == "below_threshold"
+        assert slot["score"] < slot["threshold"] == _MIN_SCORE
+        # The renderer emits no section and therefore no cite line.
+        prompt = build_task(
+            {"task_title": self._INSPECT_TASK, "request_id": "r", "cycle_id": "c", "goal_id": "g",
+             "lessons_context": result},
+            "mission", "report.json",
+        )
+        assert "## Proven approach" not in prompt and "cite [Lesson" not in prompt
+
+    def test_lesson_naming_the_target_identifier_is_selected(self, tmp_path, monkeypatch):
+        """AC1b: the same task with a lesson naming inspect_cycle_diff gets it,
+        and the ADR-021 cite line stays whenever a lesson is emitted."""
+        monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+        repo = _repo_with_lessons(tmp_path, lessons=[self._PREVENT_LESSON, self._INSPECT_LESSON])
+
+        result = build_lessons_context(repo, self._INSPECT_TASK, self._INSPECT_PATH)
+
+        assert result["relevant_lesson"]["id"] == "lessons/inspect_cycle_diff_helper.md"
+        slot = result["selection_provenance"]["lessons"]
+        assert slot["reason"] == "selected" and slot["score"] >= slot["threshold"]
+        prompt = build_task(
+            {"task_title": self._INSPECT_TASK, "request_id": "r", "cycle_id": "c", "goal_id": "g",
+             "lessons_context": result},
+            "mission", "report.json",
+        )
+        assert "## Proven approach for this task" in prompt
+        assert "cite [Lesson lessons/inspect_cycle_diff_helper.md]" in prompt
+
+    def test_identifier_overlap_alone_can_select(self, tmp_path, monkeypatch):
+        """Identifier tokens count even when the prose title shares nothing:
+        a target_path / lesson id pair naming the same module is evidence."""
+        monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+        lesson = {"id": "lessons/inspect_cycle_diff_helper.md", "title": "Helper notes", "approach": "Read it."}
+        repo = _repo_with_lessons(tmp_path, lessons=[lesson])
+
+        result = build_lessons_context(repo, "Do the thing", "scripts/inspect_cycle_diff.py")
+
+        assert result["relevant_lesson"]["id"] == "lessons/inspect_cycle_diff_helper.md"
+
+    def test_card_with_empty_prevention_is_never_selected(self, tmp_path, monkeypatch):
+        """AC2: a relevant card with empty Prevention is excluded, the slot
+        says why, and the card is still in the errors corpus reader."""
+        monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+        card = {
+            "id": "ERR-empty-prevention", "category": "config",
+            "title": "Subagent guard misconfigured for inspection",
+            "root_cause": "Guard read a stale default.", "prevention": "",
+        }
+        repo = _repo_with_lessons(tmp_path, errors=[card])
+
+        result = build_lessons_context(repo, "Fix subagent guard misconfigured")
+
+        assert "relevant_error" not in result
+        slot = result["selection_provenance"]["errors"]
+        assert slot["reason"] == "empty_prevention"
+        assert slot["score"] >= slot["threshold"]  # relevant, yet not taught
+        assert slot["excluded_count"] == 1
+        assert [e["id"] for e in _capped_entries(repo / "lessons" / "errors.yaml")] == ["ERR-empty-prevention"]
+
+    def test_card_with_empty_root_cause_is_never_selected(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+        card = {
+            "id": "ERR-empty-root-cause", "category": "config",
+            "title": "Subagent guard misconfigured for inspection",
+            "root_cause": None, "prevention": "Read the live config.",
+        }
+        repo = _repo_with_lessons(tmp_path, errors=[card])
+
+        result = build_lessons_context(repo, "Fix subagent guard misconfigured")
+
+        assert "relevant_error" not in result
+        assert result["selection_provenance"]["errors"]["reason"] == "empty_prevention"
+
+    def test_executor_llm_error_card_is_never_selected_for_executor(self, tmp_path, monkeypatch):
+        """AC3: a recorder-shaped executor_llm_error card (title matching the
+        task, category == reason == class, no root_cause/prevention) is
+        excluded as infra_class -- reported ahead of empty_prevention -- and
+        stays in the errors corpus reader."""
+        monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+        card = {
+            "id": "ERR-20260917-deadbeef", "category": "executor_llm_error",
+            "reason": "executor_llm_error", "violated_check": "executor_llm_error",
+            "title": "Executor LLM call failed while attempting: Fix subagent guard misconfigured",
+            "hypothesis": "Cycle failed due to executor_llm_error.",
+            "result": "Failed/rejected: executor_llm_error",
+            "generalized_insight": "Avoid executor_llm_error: cycle gate verification or execution failed.",
+        }
+        repo = _repo_with_lessons(tmp_path, errors=[card])
+
+        result = build_lessons_context(repo, "Fix subagent guard misconfigured")
+
+        assert "relevant_error" not in result
+        slot = result["selection_provenance"]["errors"]
+        assert slot["reason"] == "infra_class"
+        assert [e["id"] for e in _capped_entries(repo / "lessons" / "errors.yaml")] == ["ERR-20260917-deadbeef"]
+
+    def test_recorder_writes_class_into_category_and_reason(self, tmp_path):
+        """The labels matched are the ones bridge._write_structured_error
+        (#1687) actually writes: the rollback reason lands verbatim in both
+        ``category`` and ``reason``."""
+        repo = tmp_path / "instance_repo"
+        repo.mkdir()
+        for reason in ("executor_llm_error", "push_rejected", "push_pending"):
+            wrote = _write_structured_error(
+                repo_root=repo, cycle_id=f"cycle-{reason}-0123456789", reason=reason,
+                violated_check=reason, backlog_title="Any task",
+            )
+            assert wrote["status"] == "created"
+        written = yaml.safe_load((repo / "lessons" / "errors.yaml").read_text(encoding="utf-8"))
+        assert {e["category"] for e in written} == {"executor_llm_error", "push_rejected", "push_pending"}
+        assert all(e["reason"] == e["category"] for e in written)
+        assert all(_is_infra_class(e) for e in written)
+        # Recorder cards written before ``category`` existed carry ``reason`` only.
+        assert _is_infra_class({"reason": "executor_llm_error"})
+
+    @pytest.mark.parametrize("label", [
+        "executor_llm_error", "push_rejected", "push_pending",
+        "llm_gateway_5xx", "timeout-desync", "subagent_timeout", "llm_unavailable",
+    ])
+    def test_infra_class_labels(self, label):
+        assert _is_infra_class({"category": label})
+
+    @pytest.mark.parametrize("label", [
+        "gate_failed", "mutation_surface_violation", "test_weakening",
+        "out_of_band_main_detected", "workspace-permissions", "", None,
+    ])
+    def test_task_class_labels_are_not_infra(self, label):
+        assert not _is_infra_class({"category": label, "reason": label})
+
+    def test_provenance_carries_score_threshold_reason_for_both_slots(self, tmp_path, monkeypatch):
+        """AC5: both the pitfall slot (``errors``) and the lesson slot
+        (``lessons``) carry score/threshold/reason, and reason is drawn from
+        the five-word vocabulary."""
+        monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+        repo = _repo_with_lessons(
+            tmp_path,
+            errors=[{
+                "id": "ERR-dashboard", "category": "dashboard",
+                "title": "Dashboard render crash on empty ledger",
+                "root_cause": "Ledger digest helper assumed non-empty rows.",
+                "prevention": "Guard the digest helper against empty ledger input.",
+            }],
+            lessons=[{
+                "id": "LESS-dashboard", "title": "Dashboard ledger digest helper works well",
+                "approach": "Added a small digest helper summarizing ledger rows.",
+                "reusable_insight": "Digest helpers keep dashboards fast.",
+            }],
+        )
+
+        result = build_lessons_context(repo, "Improve the dashboard ledger digest helper")
+
+        prov = result["selection_provenance"]
+        assert prov["source"] == "executor_prompt_context"
+        assert prov["selected_ids"] == ["ERR-dashboard", "LESS-dashboard"]
+        for slot in ("errors", "lessons"):
+            data = prov[slot]
+            assert {"score", "threshold", "reason"} <= set(data)
+            assert data["reason"] == "selected" and data["reason"] in _REASONS
+            assert isinstance(data["score"], int) and data["score"] >= data["threshold"] == _MIN_SCORE
+        # The request's provenance is what lesson_v2.record_citations persists.
+        from nanobot.runtime.lesson_v2 import _citation_selector_provenance
+        assert _citation_selector_provenance(result) == {"selection_provenance": prov}
+
+    def test_reconstructed_provenance_matches_recorded(self, tmp_path, monkeypatch):
+        """bridge falls back to selection_provenance() when a request carries
+        no context; it must be the same selector, differing only in ``source``."""
+        monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+        repo = _repo_with_lessons(tmp_path, lessons=[self._PREVENT_LESSON, self._INSPECT_LESSON])
+
+        recorded = build_lessons_context(repo, self._INSPECT_TASK, self._INSPECT_PATH)["selection_provenance"]
+        reconstructed = selection_provenance(repo, self._INSPECT_TASK, self._INSPECT_PATH)
+
+        assert reconstructed["source"] == "reconstructed"
+        assert {k: v for k, v in reconstructed.items() if k != "source"} == {
+            k: v for k, v in recorded.items() if k != "source"
+        }
+
+    def test_instructions_identifiers_join_the_task_words(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+        repo = _repo_with_lessons(tmp_path, lessons=[self._INSPECT_LESSON])
+        without = build_lessons_context(repo, "Tidy the helper")
+        with_instr = build_lessons_context(
+            repo, "Tidy the helper", instructions="Touch only scripts/inspect_cycle_diff.py and its test.",
+        )
+        assert "relevant_lesson" not in without
+        assert with_instr["relevant_lesson"]["id"] == "lessons/inspect_cycle_diff_helper.md"
+
+    def test_identifier_tokenisation(self):
+        assert _identifier_words("scripts/inspect_cycle_diff.py") == {"inspect", "cycle", "diff"}
+        assert _identifier_words("lessons/prevent-repeat_failures.md") == {"prevent", "repeat", "failures"}
+        assert _identifier_words("nanobot/runtime/lesson_v2.py") == {"lesson"}  # v2 under the length floor
+        assert _identifiers_in_prose("Wire prevent_repeat_failures.py into the check, then stop.") == {
+            "prevent", "repeat", "failures",
+        }
+        assert _identifiers_in_prose("Plain prose has no identifiers at all.") == set()
+
+    def test_generic_words_need_a_real_corpus(self):
+        common = [{"id": f"L{i}", "title": f"Cycle note {i}", "approach": "Read before"} for i in range(_GENERIC_MIN_CORPUS)]
+        assert _generic_words(common, "approach") == {"cycle", "note", "read", "before"}
+        assert _generic_words(common[:-1], "approach") == set()
+
+    def test_generic_corpus_words_do_not_carry_a_match(self, tmp_path, monkeypatch):
+        """Twenty lessons all mentioning "cycle" and "check": those two words
+        cleared the old shared-word floor on every prompt. They no longer
+        count; a lesson naming the task's own identifier still wins."""
+        monkeypatch.delenv("SELFEVO_LESSONS_CONTEXT_ENABLED", raising=False)
+        filler = [
+            {"id": f"LESS-filler-{i}", "title": f"Cycle check note {i}", "approach": f"Check the cycle first {i}."}
+            for i in range(_GENERIC_MIN_CORPUS)
+        ]
+        repo = _repo_with_lessons(tmp_path, lessons=filler + [self._INSPECT_LESSON])
+
+        result = build_lessons_context(repo, "Add a cycle budget check to scripts/check_cycle_budget.py")
+
+        assert "relevant_lesson" not in result
+        slot = result["selection_provenance"]["lessons"]
+        assert slot["reason"] == "below_threshold"
+        assert {"cycle", "check"} <= set(slot["generic_suppressed"])
 
 
 class TestBridgeIntegration:

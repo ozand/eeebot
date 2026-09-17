@@ -1224,9 +1224,98 @@ def correlate_citations_with_outcomes(
             "cited_cycles_matched_in_ledger": len(cited_cycles_matched),
             "cited_outcome_counts": cited_outcome_counts,
             "baseline_outcome_counts": baseline_outcome_counts,
+            "offer_outcomes": _offer_outcomes(scans["rows"]),
         }
     except Exception as error:
         return {"status": "unavailable", "notes": [type(error).__name__]}
+
+
+# #1728: a scan row's selection_provenance says whether a lesson was OFFERED
+# in the executor prompt (the "## Proven approach" section with its
+# ``cite [Lesson ID]`` line). A zero-marker scan of a prompt that offered no
+# lesson is "no lesson offered", not "lesson not cited" -- the two must never
+# be summed, or a stricter selector reads as a politeness collapse.
+_OFFER_NO_LESSON = "no_lesson_offered"
+_OFFER_NOT_CITED = "offered_not_cited"
+_OFFER_CITED = "offered_cited"
+_OFFER_SCAN_UNAVAILABLE = "offered_scan_unavailable"
+_OFFER_UNKNOWN = "offer_unknown"
+
+
+def lesson_offered_in_scan(row: dict[str, object]) -> bool | None:
+    """Was a lesson offered in the prompt this scan row describes?
+
+    ``True``/``False`` when the row's ``selection_provenance`` says so;
+    ``None`` when it cannot (no provenance at all -- rows written before
+    #1500's provenance existed). Two provenance shapes are read:
+
+    - #1728 shape (``lessons_context.build_lessons_context`` /
+      ``selection_provenance``): a ``lessons`` slot dict whose
+      ``selected_id`` names the offered lesson, or is ``None`` with a
+      ``reason`` (``below_threshold``/``no_candidates``) when none was.
+    - pre-#1728 executor-prompt shape (``_citation_selector_provenance``):
+      only ``selected_ids``, which mixes the pitfall card id and the lesson
+      id. Error cards carry the recorder's ``ERR-`` prefix
+      (``bridge._write_structured_error``, and the manual ``ERR-AUTO-``
+      cards); anything else in the list is a lesson.
+    """
+    provenance = row.get("selection_provenance")
+    if not isinstance(provenance, dict):
+        return None
+    if provenance.get("status") == "unavailable":
+        # The reconstruction itself failed -- nothing can be read off it.
+        return None
+    slot = provenance.get("lessons")
+    if isinstance(slot, dict) and ("selected_id" in slot or "reason" in slot):
+        return bool(str(slot.get("selected_id") or "").strip())
+    ids = provenance.get("selected_ids")
+    if isinstance(ids, list):
+        return any(
+            str(raw).strip() and not str(raw).strip().upper().startswith("ERR-")
+            for raw in ids
+        )
+    return None
+
+
+def _offer_outcomes(rows: list[dict[str, object]]) -> dict[str, int]:
+    """Distinct-cycle counts of the offer/citation distinction (#1728).
+
+    ``no_lesson_offered`` -- the prompt carried no lesson, so a zero-marker
+    scan says nothing about usefulness. ``offered_not_cited`` -- a lesson
+    (and its ``cite [Lesson ID]`` line) was offered, the scan ran and found
+    no marker. ``offered_cited`` -- offered and cited.
+    ``offered_scan_unavailable`` -- offered, but the scan did not run
+    (``status: unavailable``), so neither cited nor not-cited is known.
+    ``offer_unknown`` -- the row carries no provenance to read.
+    """
+    latest: dict[str, str] = {}
+    for row in rows:
+        cycle_id = str(row.get("cycle_id") or "")
+        if not cycle_id:
+            continue
+        offered = lesson_offered_in_scan(row)
+        if offered is None:
+            bucket = _OFFER_UNKNOWN
+        elif not offered:
+            bucket = _OFFER_NO_LESSON
+        elif row.get("lesson_ids"):
+            bucket = _OFFER_CITED
+        elif row.get("scan_ran") is False or row.get("status") == "unavailable":
+            bucket = _OFFER_SCAN_UNAVAILABLE
+        else:
+            bucket = _OFFER_NOT_CITED
+        # A cycle with several scan rows (a retry) keeps its strongest
+        # reading: cited beats not-cited beats unavailable beats unknown.
+        rank = {_OFFER_CITED: 4, _OFFER_NOT_CITED: 3, _OFFER_NO_LESSON: 3,
+                _OFFER_SCAN_UNAVAILABLE: 2, _OFFER_UNKNOWN: 1}
+        if cycle_id not in latest or rank[bucket] > rank[latest[cycle_id]]:
+            latest[cycle_id] = bucket
+    counts = {key: 0 for key in (
+        _OFFER_NO_LESSON, _OFFER_NOT_CITED, _OFFER_CITED, _OFFER_SCAN_UNAVAILABLE, _OFFER_UNKNOWN,
+    )}
+    for bucket in latest.values():
+        counts[bucket] += 1
+    return counts
 
 
 _LESSON_CENSUS_MAX_LESSONS = 200
