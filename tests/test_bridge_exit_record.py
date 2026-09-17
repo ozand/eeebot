@@ -248,13 +248,18 @@ def test_tracked_run_telemetry_contract_is_documented():
     assert "beyond_retention" in spec
 
 
-def test_tracked_drop_in_carries_the_execstoppost_line_and_says_it_is_inert():
-    """Pre-fix: the tracked drop-in had no ExecStopPost."""
+def test_tracked_drop_in_carries_the_execstoppost_line_and_names_its_installers():
+    """Pre-fix: the tracked drop-in had no ExecStopPost.
+
+    #1701: it is installed by deploy_release.sh as well as install.sh now, so
+    the file must name both rather than declare itself inert.
+    """
 
     conf = (REPO / "host" / "eeepc" / "systemd" / "drop-ins" / "eeepc-self-evolving-subagent-bridge.service.d" / "override.conf").read_text(encoding="utf-8")
     line = next(line for line in conf.splitlines() if line.startswith("ExecStopPost="))
     assert "-m nanobot.crash_record --source systemd --exit-code ${EXIT_CODE} --exit-status ${EXIT_STATUS} --service-result ${SERVICE_RESULT}" in line
-    assert "INERT" in conf and "install.sh" in conf
+    assert "install.sh" in conf and "deploy_release.sh" in conf
+    assert "INERT" not in conf
 
 
 def test_bridge_guard_records_the_exit_code_and_stays_last():

@@ -1,8 +1,74 @@
 """Tests for host deployment script and systemd unit integrity (#1037)."""
 
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+SYSTEMD_DIR = REPO_ROOT / "host" / "eeepc" / "systemd"
+DROP_INS_DIR = SYSTEMD_DIR / "drop-ins"
+DEPLOY_SCRIPT = REPO_ROOT / "host" / "eeepc" / "scripts" / "deploy_release.sh"
+INSTALL_SCRIPT = REPO_ROOT / "host" / "eeepc" / "scripts" / "install.sh"
+
+_SECTION_HEADER = re.compile(r"\[[A-Za-z]+\]")
+_DIRECTIVE = re.compile(r"[A-Za-z][A-Za-z0-9]*=.*")
+
+
+def test_deploy_installs_systemd_drop_ins_with_unit_discipline() -> None:
+    """#1701 part 2: the unit copy skipped ``*.d/*.conf``.
+
+    #1663 found the crash recorder's ``ExecStopPost=`` never installed for 14
+    days because it lived in a drop-in only install.sh (first-time setup)
+    copied. The deploy must walk the same ``drop-ins/<unit>.d/<name>.conf``
+    layout install.sh does, create the ``.d`` directory, and apply the same
+    root:root 0644 repair the units get -- all before the daemon-reload that
+    makes them effective.
+    """
+    content = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    block = content[content.index("syncing systemd units + reloading"):content.index("sync_timer()")]
+
+    assert 'for dropin_source in "$RELEASE_DIR"/host/eeepc/systemd/drop-ins/*.d/*.conf; do' in block
+    assert '[ -f "$dropin_source" ] || continue' in block
+    assert 'dropin_dir="$(basename "$(dirname "$dropin_source")")"' in block
+    assert 'dropin_name="$(basename "$dropin_source")"' in block
+    assert 'sudo mkdir -p "/etc/systemd/system/$dropin_dir"' in block
+    assert 'sudo cp "$dropin_source" "/etc/systemd/system/$dropin_dir/$dropin_name"' in block
+    assert 'sudo chown root:root "/etc/systemd/system/$dropin_dir/$dropin_name"' in block
+    assert 'sudo chmod 0644 "/etc/systemd/system/$dropin_dir/$dropin_name"' in block
+    assert block.index("drop-ins/*.d/*.conf") < block.index("sudo systemctl daemon-reload"), (
+        "drop-ins must be on disk before the reload that makes them effective")
+    assert block.count("sudo systemctl daemon-reload") == 1, "one reload after units and drop-ins"
+
+    # The deploy and first-time install must agree on where drop-ins live, or
+    # the two writers drift apart again.
+    install = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    assert '"$src"/drop-ins/**/*.conf' in install
+    assert 'local rel="${f#"$src/drop-ins/"}"' in install
+
+
+def test_repo_drop_ins_are_unit_fragments_for_shipped_units() -> None:
+    """Every tracked drop-in parses as a systemd unit fragment and attaches to a unit this repo ships.
+
+    A file the deploy glob cannot see (wrong extension, nested one level too
+    deep) would be tracked but never installed -- the #1663 shape again.
+    """
+    confs = sorted(DROP_INS_DIR.glob("*.d/*.conf"))
+    assert confs, f"expected at least one drop-in under {DROP_INS_DIR}"
+    everything = {path for path in DROP_INS_DIR.rglob("*") if path.is_file()}
+    assert everything == set(confs), (
+        f"files the deploy glob drop-ins/*.d/*.conf does not reach: {sorted(everything - set(confs))}")
+
+    shipped_units = {path.name for path in SYSTEMD_DIR.glob("*.service")} | {path.name for path in SYSTEMD_DIR.glob("*.timer")}
+    for conf in confs:
+        unit_dir = conf.parent.name
+        assert unit_dir.endswith(".d"), f"{conf.parent} is not a <unit>.d directory"
+        assert unit_dir[:-2] in shipped_units, f"{conf} attaches to {unit_dir[:-2]}, which this repo does not ship"
+
+        lines = [line.strip() for line in conf.read_text(encoding="utf-8").splitlines()]
+        body = [line for line in lines if line and not line.startswith(("#", ";"))]
+        assert body, f"{conf} has no directives"
+        assert _SECTION_HEADER.fullmatch(body[0]), f"{conf} must open with a [Section] header, got {body[0]!r}"
+        for line in body[1:]:
+            assert _SECTION_HEADER.fullmatch(line) or _DIRECTIVE.fullmatch(line), f"{conf}: not a unit directive: {line!r}"
 
 
 def test_ghost_units_removed_from_repo() -> None:

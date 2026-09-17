@@ -327,6 +327,21 @@ if [ "$VERIFY_ONLY" -eq 0 ]; then
     sudo chown root:root "/etc/systemd/system/$unit_name"
     sudo chmod 0644 "/etc/systemd/system/$unit_name"
   done
+  # #1701: the copy above never reached the drop-ins, so a directive that only
+  # existed in host/eeepc/systemd/drop-ins/ stayed inert on the host until an
+  # operator copied it by hand (#1663: the crash recorder's ExecStopPost=, 14
+  # days).  Same layout install.sh uses -- drop-ins/<unit>.d/<name>.conf lands
+  # at /etc/systemd/system/<unit>.d/<name>.conf -- and the same ownership and
+  # mode discipline as the units.
+  for dropin_source in "$RELEASE_DIR"/host/eeepc/systemd/drop-ins/*.d/*.conf; do
+    [ -f "$dropin_source" ] || continue
+    dropin_dir="$(basename "$(dirname "$dropin_source")")"
+    dropin_name="$(basename "$dropin_source")"
+    sudo mkdir -p "/etc/systemd/system/$dropin_dir"
+    sudo cp "$dropin_source" "/etc/systemd/system/$dropin_dir/$dropin_name"
+    sudo chown root:root "/etc/systemd/system/$dropin_dir/$dropin_name"
+    sudo chmod 0644 "/etc/systemd/system/$dropin_dir/$dropin_name"
+  done
   sudo systemctl daemon-reload
 fi
 
