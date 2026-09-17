@@ -245,7 +245,10 @@ Skills with available="false" need dependencies installed first - you can try in
         so the section was always empty under this profile."""
         sections, missing, truncated = self._load_ontology_blocks()
 
-        skills_summary = self.skills.build_skills_summary(excluded_names=excluded_skill_names)
+        # #1732: the loop profile renders the catalogue one line per skill.
+        skills_summary = self.skills.build_skills_summary(
+            excluded_names=excluded_skill_names, compact=True,
+        )
         self._skills_catalogue_usage = dict(getattr(self.skills, "last_catalogue_usage", {}))
         skills_section = (f"""# Skills
 
