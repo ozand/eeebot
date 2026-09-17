@@ -68,6 +68,8 @@ This is the #878 integration point generalised, not a new mint path: candidates 
 
 Not because the operator is senior, but because the charter is **the only demand source that can see outside this machine**. Every other source — the ledger, usage telemetry, hypotheses — observes the loop observing itself. An architecture where those sort as peers cannot reach an external goal, and the queue above is what that looks like in practice.
 
+**Addendum (#1708):** ranking is not selection. `llm_proposer._select_assigned_demand` (#902) ran a least-recently-served rotation that ignored this sort — a never-served `reflection-*` id (minted fresh most cycles) always beat the operator head, so rule 3 held in the ranking and not in the loop that acts on it. Fixed: an eligible item with `provenance == "operator"` is now selected outright, ahead of rotation, unless cooling/futility/exhaustion has excluded it — those guards, and #902's stall protection, are unchanged.
+
 ## 4. The deterministic sources stay, and the executor still selects
 
 Defects, decay, and existing priorities remain exactly as they are: those are facts, not invention, and #760's inversion is preserved. The executor continues to **select and refine from a bounded candidate set** rather than deciding direction from its whole corpus.

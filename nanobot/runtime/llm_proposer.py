@@ -1316,6 +1316,18 @@ def _select_assigned_demand(
 ) -> list[dict[str, Any]]:
     """#902: pick ONE demand item via least-recently-served rotation.
 
+    #1708 (ADR-020 addendum, option (a)): before rotation runs, an
+    ``eligible`` item with ``provenance == "operator"`` — the head of
+    :func:`demand._priority_items`'s provenance sort (ADR-020 rule 3,
+    #1697) — is selected outright, first one in list order, bypassing the
+    served/unserved rotation entirely. Cooling still applies (a cooled
+    operator item is excluded from ``eligible`` before this check runs, so
+    rotation proceeds to the next eligible item — #1328/#902's
+    stall-protection is unchanged), and futility/exhaustion are already
+    filtered upstream by :func:`demand.collect_demand`. Without an eligible
+    operator item, the pre-#1708 rotation below is unchanged: the list
+    order is otherwise only a tie-break, never a selection rule.
+
     State lives in ``state_dir/demand/rotation.json`` — ``{"schema_version":
     "demand-rotation-v1", "served": {"<demand_id>": "<iso-ts>"}}``. The item
     whose id is absent from ``served`` wins first; when every presented id
@@ -1365,17 +1377,26 @@ def _select_assigned_demand(
             )
             return []
 
-        unserved = [item for item in eligible if str(item["id"]) not in served]
-        if unserved:
-            selected = unserved[0]
+        operator_head = [
+            item for item in eligible
+            if str(item.get("provenance") or "") == demand.PROVENANCE_OPERATOR
+        ]
+        if operator_head:
+            # #1708: the operator's charter-ranked item is exempt from
+            # rotation — selected outright, not merely tie-broken.
+            selected = operator_head[0]
         else:
-            def _served_ts_key(item: dict[str, Any]) -> datetime:
-                ts = _parse_inventory_ts(served.get(str(item["id"])))
-                return ts or datetime.min.replace(tzinfo=timezone.utc)
+            unserved = [item for item in eligible if str(item["id"]) not in served]
+            if unserved:
+                selected = unserved[0]
+            else:
+                def _served_ts_key(item: dict[str, Any]) -> datetime:
+                    ts = _parse_inventory_ts(served.get(str(item["id"])))
+                    return ts or datetime.min.replace(tzinfo=timezone.utc)
 
-            # min() keeps the FIRST minimal element on ties, matching the
-            # "tie-break: first in list order" spec.
-            selected = min(eligible, key=_served_ts_key)
+                # min() keeps the FIRST minimal element on ties, matching the
+                # "tie-break: first in list order" spec.
+                selected = min(eligible, key=_served_ts_key)
 
         served[str(selected["id"])] = datetime.now(timezone.utc).isoformat()
         _write_rotation(state_dir, {"schema_version": _ROTATION_SCHEMA, "served": served})
