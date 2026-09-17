@@ -178,3 +178,109 @@ def test_id_collision_with_identical_content_is_a_quiet_retry(tmp_path: Path) ->
     assert applied == []
     decisions = _decisions(state)
     assert not any("id_conflict" in d.get("reason", "") for d in decisions)
+
+
+# --- ADR-021 phase 1's owed follow-up: cross-check the citation's claimed
+# retrieval_count against state/lesson_usage/scans.jsonl -------------------
+
+def _scans_row(lesson_ids: list[str], *, ts: str | None = None) -> dict:
+    # Must be inside the 14-day retention window relative to the REAL
+    # clock (read_citation_scans has no `now=` override in the gate's
+    # call path) -- a fixed past date would eventually (and did, once)
+    # fall outside retention and silently make the store read as
+    # unavailable instead of present.
+    if ts is None:
+        from datetime import datetime, timezone
+
+        ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return {"ts": ts, "cycle_id": "cycle-scan", "lesson_ids": lesson_ids}
+
+
+def _write_scans(state: Path, rows: list[dict]) -> None:
+    import json as _json
+
+    lesson_usage = state / "lesson_usage"
+    lesson_usage.mkdir(parents=True, exist_ok=True)
+    (lesson_usage / "scans.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in rows) + "\n", encoding="utf-8"
+    )
+
+
+def test_citation_overstated_when_store_present_is_declined(tmp_path: Path) -> None:
+    """scans.jsonl shows this lesson was actually cited once; the card
+    claims 5 -- the gate must catch the overstatement rather than trust
+    the claimed number at face value."""
+    workspace = _workspace(tmp_path)
+    state = tmp_path / "state"
+    _write_scans(state, [_scans_row(["LESS-REF-cite-0001"])])
+    citation = {**_VALID_CITATION, "retrieval_count": 5}
+    card = _card("LESS-REF-cite-0001", citation=citation)
+
+    applied = apply_staged_lesson_cards(workspace, {"cards": [card]}, state_dir=state)
+
+    assert applied == []
+    decisions = _decisions(state)
+    assert any(
+        d["lesson_id"] == "LESS-REF-cite-0001" and d["decision"] == "mint_declined"
+        and "citation_overstated" in d["reason"]
+        for d in decisions
+    )
+
+
+def test_citation_within_store_count_is_accepted(tmp_path: Path) -> None:
+    """The claimed count (1) is within (equal to) what scans.jsonl shows --
+    a truthful claim is not penalized."""
+    workspace = _workspace(tmp_path)
+    state = tmp_path / "state"
+    _write_scans(state, [_scans_row(["LESS-REF-cite-0001"])])
+    citation = {**_VALID_CITATION, "retrieval_count": 1}
+    card = _card("LESS-REF-cite-0001", citation=citation)
+
+    applied = apply_staged_lesson_cards(workspace, {"cards": [card]}, state_dir=state)
+
+    assert applied == ["LESS-REF-cite-0001"]
+    decisions = _decisions(state)
+    assert not any("citation_overstated" in d.get("reason", "") for d in decisions)
+
+
+def test_missing_scan_store_accepts_on_schema_alone_and_records_the_skip(tmp_path: Path) -> None:
+    """No state/lesson_usage/ at all -- the cross-check cannot run, so it
+    must never fail the citation closed. The card is accepted on citation
+    schema alone, and the skip is recorded so the gap stays visible."""
+    workspace = _workspace(tmp_path)
+    state = tmp_path / "state"  # deliberately: no lesson_usage/ created
+    citation = {**_VALID_CITATION, "retrieval_count": 999}
+    card = _card("LESS-REF-cite-0001", citation=citation)
+
+    applied = apply_staged_lesson_cards(workspace, {"cards": [card]}, state_dir=state)
+
+    assert applied == ["LESS-REF-cite-0001"]
+    decisions = _decisions(state)
+    assert any(
+        d["lesson_id"] == "LESS-REF-cite-0001" and d["decision"] == "citation_crosscheck_skipped"
+        for d in decisions
+    )
+
+
+def test_unreadable_scan_store_also_accepts_on_schema_alone(tmp_path: Path, monkeypatch) -> None:
+    """A present-but-broken store (read_citation_scans raising or
+    returning 'unavailable') must degrade the same way as an absent one --
+    never a fail-closed decline on a store the gate cannot trust."""
+    from nanobot.runtime import knowledge_curator as kc
+
+    workspace = _workspace(tmp_path)
+    state = tmp_path / "state"
+    (state / "lesson_usage").mkdir(parents=True)  # dir exists, no readable content
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("corrupt store")
+
+    monkeypatch.setattr(kc, "read_citation_scans", _boom)
+    citation = {**_VALID_CITATION, "retrieval_count": 999}
+    card = _card("LESS-REF-cite-0001", citation=citation)
+
+    applied = apply_staged_lesson_cards(workspace, {"cards": [card]}, state_dir=state)
+
+    assert applied == ["LESS-REF-cite-0001"]
+    decisions = _decisions(state)
+    assert any(d["decision"] == "citation_crosscheck_skipped" for d in decisions)
