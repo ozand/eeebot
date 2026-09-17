@@ -10,7 +10,7 @@ def _oversized_builder(tmp_path):
     builder._load_bootstrap_files = lambda: "## AGENTS.md\n\n" + "bootstrap line\n" * 5000
     builder.skills.get_always_skills = lambda: ["memory"]
     builder.skills.load_skills_for_context = lambda names: "always skill content"
-    builder.skills.build_skills_summary = lambda excluded_names=None: "<skills>\n  <skill><name>catalogue</name></skill>\n</skills>"
+    builder.skills.build_skills_summary = lambda excluded_names=None, compact=False: "<skills>\n  <skill><name>catalogue</name></skill>\n</skills>"
     builder.memory.get_memory_context = lambda loop=False: "## Long-term Memory\nremembered fact"
     return builder
 

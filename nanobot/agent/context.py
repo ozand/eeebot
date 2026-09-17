@@ -132,6 +132,7 @@ class ContextBuilder:
 
         skills_summary = self.skills.build_skills_summary(
             excluded_names=excluded_skill_names,
+            compact=loop_profile,
         )
         self._skills_catalogue_usage = dict(getattr(self.skills, "last_catalogue_usage", {}))
         skills_section = (f"""# Skills
@@ -179,12 +180,29 @@ Skills with available="false" need dependencies installed first - you can try in
         """Bound the loop catalogue without splitting a skill entry.
 
         The complete rendered section is loaded first, then a deterministic
-        prefix of complete ``<skill>...</skill>`` entries is retained. Every
-        omission is named in the returned fit evidence and in the prompt
-        marker; the global prompt-fit ladder remains the final safety net.
+        prefix of complete entries is retained. Every omission is named in
+        the returned fit evidence and in the prompt marker; the global
+        prompt-fit ladder remains the final safety net.
+
+        #1732: the loop profile now renders the catalogue as one ``- NAME:
+        DESC`` line per skill (``format: "lines"``) instead of an XML
+        ``<skill>...</skill>`` block (``format: "xml"``) — this function
+        branches on which one it was handed, entry-extraction and
+        name-extraction differ, the rest of the bounding algorithm (full-fits
+        short-circuit, greedy whole-entry prefix, truncation marker, observed
+        fit evidence) is shared.
         """
-        matches = list(re.finditer(r"<skill\b[^>]*>.*?</skill>", section, re.DOTALL))
+        is_xml = "<skill" in section
+        if is_xml:
+            entry_pattern = re.compile(r"<skill\b[^>]*>.*?</skill>", re.DOTALL)
+        else:
+            # One skill per line: "- NAME: DESC ..."; the two-line header
+            # (layout rule + blank line) precedes the first entry and is
+            # never itself a candidate for truncation.
+            entry_pattern = re.compile(r"^- .*$", re.MULTILINE)
+        matches = list(entry_pattern.finditer(section))
         source_chars = len(section)
+        fmt = "xml" if is_xml else "lines"
         if not matches:
             observation = {
                 "status": "empty" if not section else "unavailable",
@@ -197,6 +215,7 @@ Skills with available="false" need dependencies installed first - you can try in
                 "omitted_chars": 0,
                 "omitted_names": [],
                 "truncated": False,
+                "format": fmt,
                 "load": {"status": "empty" if not section else "unavailable", "source_chars": source_chars, "total_count": 0},
                 "start": {"budget": budget, "source_chars": source_chars, "total_count": 0},
                 "sweep": {"status": "not_run", "retained_count": 0, "omitted_count": 0},
@@ -207,9 +226,17 @@ Skills with available="false" need dependencies installed first - you can try in
         suffix = section[matches[-1].end():]
         blocks = [match.group(0) for match in matches]
         names = []
-        for block in blocks:
-            name_match = re.search(r"<name>(.*?)</name>", block, re.DOTALL)
-            names.append(re.sub(r"<[^>]+>", "", name_match.group(1)).strip() if name_match else "")
+        if is_xml:
+            for block in blocks:
+                name_match = re.search(r"<name>(.*?)</name>", block, re.DOTALL)
+                names.append(re.sub(r"<[^>]+>", "", name_match.group(1)).strip() if name_match else "")
+        else:
+            for block in blocks:
+                # "- NAME: DESC ..." -> "NAME". A line with no ':' (should
+                # not happen from the renderer) yields the whole entry text
+                # rather than raising.
+                entry_text = block[2:] if block.startswith("- ") else block
+                names.append(entry_text.split(":", 1)[0].strip())
         block_chars = [len(block) for block in blocks]
 
         full_candidate = section
@@ -225,6 +252,7 @@ Skills with available="false" need dependencies installed first - you can try in
                 "omitted_chars": 0,
                 "omitted_names": [],
                 "truncated": False,
+                "format": fmt,
                 "load": {"status": "complete", "source_chars": source_chars, "total_count": len(blocks)},
                 "start": {"budget": budget, "source_chars": source_chars, "total_count": len(blocks)},
                 "sweep": {"status": "not_needed", "retained_count": len(blocks), "omitted_count": 0},
@@ -237,7 +265,8 @@ Skills with available="false" need dependencies installed first - you can try in
             marker = self.SKILLS_CATALOGUE_TRUNCATION_MARKER.format(
                 count=len(omitted_names), chars=omitted_chars,
             )
-            candidate = section[:matches[index].end()] + marker + suffix
+            marker_text = marker if is_xml else f"\n{marker}"
+            candidate = section[:matches[index].end()] + marker_text + suffix
             if len(candidate) > budget:
                 break
             retained_count = index + 1
@@ -247,16 +276,17 @@ Skills with available="false" need dependencies installed first - you can try in
         marker = self.SKILLS_CATALOGUE_TRUNCATION_MARKER.format(
             count=len(omitted_names), chars=omitted_chars,
         )
+        marker_text = marker if is_xml else f"\n{marker}"
         candidate = (
-            section[:matches[retained_count - 1].end()] + marker + suffix
-            if retained_count else prefix + marker + suffix
+            section[:matches[retained_count - 1].end()] + marker_text + suffix
+            if retained_count else prefix + marker_text + suffix
         )
         if len(candidate) > budget:
             # The derived floor should leave room for the marker. If a future
             # floor consumes that room, keep the marker visible rather than
             # pretending the catalogue was complete; the global ladder then
             # reports the remaining failure honestly.
-            candidate = prefix + marker + suffix
+            candidate = prefix + marker_text + suffix
         observation = {
             "status": "bounded",
             "source_chars": source_chars,
@@ -268,6 +298,7 @@ Skills with available="false" need dependencies installed first - you can try in
             "omitted_chars": omitted_chars,
             "omitted_names": omitted_names,
             "truncated": True,
+            "format": fmt,
             "load": {"status": "complete", "source_chars": source_chars, "total_count": len(blocks)},
             "start": {"budget": budget, "source_chars": source_chars, "total_count": len(blocks)},
             "sweep": {"status": "bounded", "retained_count": retained_count, "omitted_count": len(omitted_names)},

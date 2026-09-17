@@ -85,7 +85,7 @@ def test_resident_fields_survive_into_the_builder_fit(tmp_path: Path):
     builder = ContextBuilder(tmp_path)
     builder.skills.get_always_skills = lambda: []
     builder.skills.load_skills_for_context = lambda names: ""
-    builder.skills.build_skills_summary = lambda excluded_names=None: ""
+    builder.skills.build_skills_summary = lambda excluded_names=None, compact=False: ""
     builder.build_system_prompt(loop_profile=True)
 
     memory_index = builder.last_fit["memory_index"]
@@ -105,7 +105,7 @@ def test_a_renamed_rule_entry_reaches_the_builder_fit_by_name(tmp_path: Path):
     builder = ContextBuilder(tmp_path)
     builder.skills.get_always_skills = lambda: []
     builder.skills.load_skills_for_context = lambda names: ""
-    builder.skills.build_skills_summary = lambda excluded_names=None: ""
+    builder.skills.build_skills_summary = lambda excluded_names=None, compact=False: ""
     builder.build_system_prompt(loop_profile=True)
 
     memory_index = builder.last_fit["memory_index"]
@@ -121,7 +121,7 @@ def test_sections_aggregate_is_unchanged_by_the_addition(tmp_path: Path):
     builder = ContextBuilder(tmp_path)
     builder.skills.get_always_skills = lambda: []
     builder.skills.load_skills_for_context = lambda names: ""
-    builder.skills.build_skills_summary = lambda excluded_names=None: ""
+    builder.skills.build_skills_summary = lambda excluded_names=None, compact=False: ""
     prompt = builder.build_system_prompt(loop_profile=True)
 
     fit = builder.last_fit

@@ -244,7 +244,7 @@ def test_all_empty_sections_are_zero_except_identity(tmp_path):
     builder._load_bootstrap_files = lambda: ""
     builder.skills.get_always_skills = lambda: []
     builder.skills.load_skills_for_context = lambda names: ""
-    builder.skills.build_skills_summary = lambda excluded_names=None: ""
+    builder.skills.build_skills_summary = lambda excluded_names=None, compact=False: ""
     builder.memory.get_memory_context = lambda loop=False: ""
 
     prompt = builder.build_system_prompt(loop_profile=True)

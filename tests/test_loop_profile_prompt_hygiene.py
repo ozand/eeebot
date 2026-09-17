@@ -10,7 +10,13 @@ def test_loop_profile_skips_stale_memory_always_skill_but_keeps_catalogue(tmp_pa
 
     assert "Always loaded into your context" not in prompt
     assert "You don't need to manage this" not in prompt
-    assert "<name>memory</name>" in prompt
+    # #1732: the loop profile renders the catalogue as one line per skill;
+    # memory is a builtin that is not excluded from the loop catalogue
+    # (only removed from get_always_skills above), so it still appears,
+    # named with its real path since it is not under the workspace rule.
+    assert "- memory: " in prompt
+    assert "(nanobot/skills/memory/SKILL.md)" in prompt
+    assert "<name>memory</name>" not in prompt
 
 
 def test_loop_profile_uses_index_identity_and_neutral_role(tmp_path: Path):
