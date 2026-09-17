@@ -1,13 +1,4 @@
-# eeebot operator charter
-
-> **Immutable.** This file ships in the product release tree and is served
-> read-only from `/opt/eeepc-agent/runtimes/self-evolving-agent/current/`
-> under the `ProtectSystem=strict` sandbox (#880, #944). It may never be
-> edited by the agent. Proposals targeting `goals.md` are rejected by the
-> gate and the proposer alike.
->
-> Mutable priorities live separately in `state/goals/derived_priorities.json`
-> and are owned by `goal_review`. They never modify this charter.
+> Immutable. Ships in the release tree; the gate rejects any cycle that touches it.
 
 ## Goal statement
 
@@ -64,6 +55,3 @@ Valid progress requires at least one of:
 1. A git commit with real code/config change in eeebot-self-evolving/
 2. A new or improved tool/script
 3. A measurable reduction in a known failure mode with evidence
-
-**IMPORTANT:** Only commit files inside `eeebot-self-evolving/` — the
-`state/` directory is not git-tracked.
