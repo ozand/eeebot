@@ -354,6 +354,64 @@ def test_correlate_citations_with_outcomes_empty_is_not_unavailable(tmp_path: Pa
     assert result["baseline_outcome_counts"] == {}
 
 
+def test_correlate_offer_outcomes_distinguish_no_lesson_offered_from_not_cited(tmp_path: Path) -> None:
+    """#1728 AC6: the scorecard reader must never sum "no lesson offered"
+    into "offered, not cited". Rows are written by record_citations exactly
+    as the bridge writes them, with the request's own selection_provenance."""
+    import nanobot.runtime.lesson_v2 as lesson_v2
+
+    state = tmp_path / "state"
+
+    def offered(lesson_id: str) -> dict:
+        return {
+            "relevant_lesson": {"id": lesson_id, "title": "t", "approach": "a", "reusable_insight": "r"},
+            "selection_provenance": {
+                "source": "executor_prompt_context", "status": "present", "selected_ids": [lesson_id],
+                "errors": {"selected_id": None, "reason": "below_threshold", "score": 2, "threshold": 4},
+                "lessons": {"selected_id": lesson_id, "reason": "selected", "score": 6, "threshold": 4},
+            },
+        }
+
+    none_offered = {
+        "selection_provenance": {
+            "source": "executor_prompt_context", "status": "empty", "selected_ids": [],
+            "errors": {"selected_id": None, "reason": "infra_class", "score": 6, "threshold": 4},
+            "lessons": {"selected_id": None, "reason": "below_threshold", "score": 3, "threshold": 4},
+        },
+    }
+    # A pitfall card was offered but no lesson: the pre-#1728 executor-prompt
+    # shape only lists ids, and the ERR- prefix is what tells the two apart.
+    card_only_legacy = {"relevant_error": {"id": "ERR-20260913-1453d13c", "title": "t", "root_cause": "", "prevention": ""}}
+    lesson_only_legacy = {"relevant_lesson": {"id": "lessons/check_existing_tests_before_proposals.md", "title": "t"}}
+
+    record_citations(state, "cycle-offered-cited", ["applied [Lesson LESS-A]"], lessons_context=offered("LESS-A"))
+    record_citations(state, "cycle-offered-not-cited", ["no marker in this long enough answer " * 4], lessons_context=offered("LESS-A"))
+    record_citations(state, "cycle-no-lesson", ["no marker in this long enough answer " * 4], lessons_context=none_offered)
+    record_citations(state, "cycle-card-only-legacy", ["no marker in this long enough answer " * 4], lessons_context=card_only_legacy)
+    record_citations(state, "cycle-lesson-only-legacy", ["no marker in this long enough answer " * 4], lessons_context=lesson_only_legacy)
+    record_citations(
+        state, "cycle-offered-scan-unavailable", executor_result=lesson_v2._EXECUTOR_RESULT_UNAVAILABLE,
+        lessons_context=offered("LESS-A"),
+    )
+    record_citations(state, "cycle-no-provenance", ["no marker in this long enough answer " * 4],
+                     selector_provenance={"source": "reconstructed", "status": "unavailable", "selected_ids": []})
+
+    result = correlate_citations_with_outcomes(state)
+
+    assert result["status"] == "present"
+    assert result["offer_outcomes"] == {
+        "no_lesson_offered": 2,          # cycle-no-lesson, cycle-card-only-legacy
+        "offered_not_cited": 2,          # cycle-offered-not-cited, cycle-lesson-only-legacy
+        "offered_cited": 1,
+        "offered_scan_unavailable": 1,
+        "offer_unknown": 1,              # reconstruction unavailable: nothing to read
+    }
+    # The per-row reader the counts are built from.
+    assert lesson_v2.lesson_offered_in_scan({"selection_provenance": none_offered["selection_provenance"]}) is False
+    assert lesson_v2.lesson_offered_in_scan({"selection_provenance": offered("LESS-A")["selection_provenance"]}) is True
+    assert lesson_v2.lesson_offered_in_scan({}) is None
+
+
 def test_correlate_citations_with_outcomes_fails_open(tmp_path: Path, monkeypatch) -> None:
     import nanobot.runtime.lesson_v2 as lesson_v2
 

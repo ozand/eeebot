@@ -9,15 +9,45 @@ from pathlib import Path
 from typing import Any
 
 _MAX_HINTS = 3
-_MAX_HINT_CHARS = 200
-_MAX_SECTION_CHARS = 800
+# #1728: hints are cut at a sentence boundary within this cap, never
+# mid-sentence (the pre-#1728 200-char slice produced "...rather than
+# not_a_test.py when testing"). A hint whose first sentence does not fit is
+# dropped, not truncated. NOTE: ``bridge.build_task`` still slices each
+# rendered hint at 200 chars (out of this PR's file set, see #1731); that
+# one-line follow-up is what makes the longer cap visible in the prompt.
+_MAX_HINT_CHARS = 320
+# Three sentence-bounded hints at the cap plus "- " / newline overhead.
+_MAX_SECTION_CHARS = 1000
 _MAX_TAIL_BYTES = 128_000
 _TTL_DAYS = 7
 _WORD_RE = re.compile(r"[A-Za-z0-9_/-]{4,}")
+# A sentence ends at . ! or ? (optionally followed by a closing quote or
+# bracket) when whitespace or end-of-text follows. ``scripts/x.py when``
+# is not a boundary: the dot is followed by a letter.
+_SENTENCE_END_RE = re.compile(r"[.!?]+[\"'”’)\]]*(?=\s|$)")
 
 
 def _words(value: Any) -> set[str]:
     return {x.lower() for x in _WORD_RE.findall(str(value or ""))}
+
+
+def _sentence_bounded(text: str, cap: int = _MAX_HINT_CHARS) -> str:
+    """Return ``text`` cut at the last sentence boundary within ``cap``, or
+    ``""`` when no sentence ends within the cap (#1728).
+
+    Text that already fits is a complete hint as written (end-of-text is a
+    boundary). Text over the cap keeps whole sentences only; a first
+    sentence longer than the cap yields nothing rather than a fragment.
+    """
+    text = " ".join(str(text or "").split())
+    if len(text) <= cap:
+        return text
+    cut = 0
+    for match in _SENTENCE_END_RE.finditer(text):
+        if match.end() > cap:
+            break
+        cut = match.end()
+    return text[:cut].rstrip()
 
 
 def _parse(value: Any) -> datetime | None:
@@ -184,7 +214,12 @@ def build_reflection_hints(
                     or row.get("error_pattern")
                     else 0
                 )
-                candidates.append((preferred * 100 + shared, ts.isoformat(), text[:_MAX_HINT_CHARS]))
+                bounded = _sentence_bounded(text)
+                if not bounded:
+                    # #1728: first sentence longer than the cap -- drop, never
+                    # emit a fragment.
+                    continue
+                candidates.append((preferred * 100 + shared, ts.isoformat(), bounded))
         candidates.sort(key=lambda x: (-x[0], x[1]), reverse=False)
         out: list[str] = []
         total = 0
@@ -206,9 +241,13 @@ def build_reflection_hints(
 def render_reflection_hints(hints: list[str]) -> str:
     if not hints:
         return ""
+    bounded = [_sentence_bounded(h) for h in hints]
+    lines = [f"- {h}" for h in bounded if h]
+    if not lines:
+        return ""
     return (
         "## Recent reflections (steering hints)\n"
-        + "\n".join(f"- {h[:_MAX_HINT_CHARS]}" for h in hints)[:_MAX_SECTION_CHARS]
+        + "\n".join(lines)[:_MAX_SECTION_CHARS]
         + "\n"
     )
 

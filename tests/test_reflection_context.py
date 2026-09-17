@@ -23,7 +23,70 @@ def test_selects_recent_relevant_bounded_hints(tmp_path: Path) -> None:
     _write(tmp_path / "reflector/reflections.jsonl", [_row("old timeout", 8), _row("new timeout approach", 1), _row("other timeout error", 0, "error_pattern")])
     hints = build_reflection_hints(tmp_path, "fix timeout bridge", now=datetime.now(timezone.utc))
     assert hints == ["new timeout approach", "other timeout error"]
-    assert len(hints) <= 3 and all(len(x) <= 200 for x in hints)
+    assert len(hints) <= 3 and all(len(x) <= 320 for x in hints)
+
+
+def _sentences(n: int, stem: str) -> str:
+    return " ".join(f"{stem} sentence number {i} keeps the timeout bridge steady." for i in range(n))
+
+
+def test_long_hint_is_cut_at_a_sentence_boundary_within_320(tmp_path: Path) -> None:
+    """#1728 AC4a: a hint longer than the cap keeps whole sentences only."""
+    text = _sentences(8, "Approach")  # ~55 chars each, ~440 total
+    assert len(text) > 320
+    _write(tmp_path / "reflector/reflections.jsonl", [_row(text, 1)])
+
+    hints = build_reflection_hints(tmp_path, "fix timeout bridge", now=datetime.now(timezone.utc))
+
+    assert len(hints) == 1
+    hint = hints[0]
+    assert len(hint) <= 320 and hint.endswith(".")
+    assert text.startswith(hint)
+    # The cut is exactly the longest run of whole sentences that fits.
+    expected = ""
+    for sentence in (s + "." for s in text.rstrip(".").split(". ")):
+        candidate = f"{expected} {sentence}".strip()
+        if len(candidate) > 320:
+            break
+        expected = candidate
+    assert hint == expected and hint.count(".") == 5
+
+
+def test_400_char_first_sentence_yields_no_hint(tmp_path: Path) -> None:
+    """#1728 AC4b: a first sentence over the cap is dropped, never truncated."""
+    text = "timeout bridge " + "very " * 78 + "long sentence."
+    assert len(text) > 400 and text.count(".") == 1
+    _write(tmp_path / "reflector/reflections.jsonl", [_row(text, 1), _row("short timeout hint.", 0)])
+
+    hints = build_reflection_hints(tmp_path, "fix timeout bridge", now=datetime.now(timezone.utc))
+
+    assert hints == ["short timeout hint."]
+
+
+def test_every_emitted_hint_ends_at_a_sentence_boundary(tmp_path: Path) -> None:
+    """#1728 AC4: across cut and uncut hints, none ends mid-sentence, and a
+    path with a dot inside (``not_a_test.py when``) is not a boundary."""
+    cut = "Use tests/test_bridge.py rather than not_a_test.py when testing the timeout bridge. " + _sentences(6, "Extra")
+    whole = "Prefer the timeout bridge fixture."
+    dotted = "Read scripts/x.py when the timeout bridge fails. " + "Then " + "check the fixture " * 30 + "again."
+    _write(tmp_path / "reflector/reflections.jsonl", [_row(cut, 1), _row(whole, 0), _row(dotted, 2)])
+
+    hints = build_reflection_hints(tmp_path, "fix timeout bridge", now=datetime.now(timezone.utc))
+
+    assert len(hints) == 3
+    for hint in hints:
+        assert len(hint) <= 320
+        assert hint.endswith(".")
+    assert whole in hints
+    assert any(h.startswith("Use tests/test_bridge.py rather than not_a_test.py when testing the timeout bridge.") for h in hints)
+    assert "Read scripts/x.py when the timeout bridge fails." in hints  # cut at the sentence, not at ``x.py``
+
+
+def test_render_applies_the_same_sentence_bound() -> None:
+    rendered = render_reflection_hints([_sentences(8, "Rendered"), "x" * 400])
+    assert rendered.startswith("## Recent reflections")
+    lines = rendered.strip().splitlines()[1:]
+    assert len(lines) == 1 and lines[0].endswith(".") and len(lines[0]) <= 322
 
 
 def test_reads_matching_hint_from_rotated_archive(tmp_path: Path) -> None:
