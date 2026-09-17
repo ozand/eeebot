@@ -260,6 +260,25 @@ def test_skip_bookkeeping_rows_do_not_suppress(tmp_path: Path):
     ) is None
 
 
+def test_push_pending_result_does_not_suppress(tmp_path: Path):
+    """#1709: a gate-passed cycle whose push exhausted its transient retries
+    is bookkeeping, not a failure of the work — must not seed the
+    recent-failure matcher and block re-proposing the same title before the
+    next cycle's pickup finishes the push."""
+    state_dir = tmp_path / "state"
+    results_dir = state_dir / "subagents" / "results"
+    _write_result(
+        results_dir,
+        "r1.json",
+        backlog_title="Refactor coordinator materializer split logic",
+        result_status="completed",
+        rollback={"integrated": False, "reason": "push_pending"},
+    )
+    assert _recent_failure_match(
+        "Refactor coordinator materializer split logic", state_dir,
+    ) is None
+
+
 def test_skipped_result_status_does_not_suppress(tmp_path: Path):
     """Belt for the same class (#798): any 'skipped*' result_status row is
     bookkeeping too, never failure history — regardless of rollback."""

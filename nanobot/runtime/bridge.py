@@ -594,6 +594,71 @@ def _diff_against_remote_touches_only(repo_root: 'Path', remote_ref: str, allowe
     return all(f in allowed for f in changed)
 
 
+#: #1709: allowlist of stderr fragments that mark a ``git push`` failure as a
+#: TRANSIENT connection/handshake fault, worth retrying, rather than a real
+#: rejection. Checked ONLY on ``rc=128`` (git's own "fatal" exit code for
+#: connection/transport failures; a non-fast-forward rejection is rc=1). A
+#: fragment naming the CAUSE of a genuine rejection is never added here even
+#: if it happens to share the word "rejected" with a network message —
+#: membership is a positive allowlist match, not the absence of a denylist
+#: word, so an unrecognised stderr is never transient by default.
+_PUSH_TRANSIENT_STDERR_PATTERNS = (
+    "could not read from remote repository",
+    "please make sure you have the correct access rights",
+    "could not resolve host",
+    "connection timed out",
+    "connection reset by peer",
+    "failed to connect to",
+    "the remote end hung up unexpectedly",
+    "network is unreachable",
+    "temporary failure in name resolution",
+    "operation timed out",
+    "early eof",
+    "rpc failed",
+    "recv failure",
+    "ssl_read:",
+    "handshake failure",
+)
+
+#: #1709: explicit denylist checked BEFORE the allowlist above — a
+#: non-fast-forward or a hook-declined push is never transient no matter what
+#: else its stderr contains; retrying either would just reproduce the same
+#: rejection instead of recording it.
+_PUSH_NON_TRANSIENT_STDERR_MARKERS = (
+    "non-fast-forward",
+    "fetch first",
+    "stale info",
+    "hook declined",
+    "pre-receive hook declined",
+)
+
+#: #1709: bounded retry count for a transient push failure (3 total
+#: attempts: 1 original + 2 retries), matching the executor's own retry
+#: convention. Backoff (seconds) waited BEFORE attempts 2 and 3.
+_PUSH_MAX_ATTEMPTS = 3
+_PUSH_RETRY_BACKOFF_SECONDS = (2.0, 5.0)
+
+
+def _is_transient_push_error(returncode: int, stderr: str) -> bool:
+    """#1709: is this ``git push`` failure a connection/handshake fault worth
+    retrying, rather than a real rejection?
+
+    Fail-closed classification: only ``rc=128`` is even considered (a
+    non-fast-forward or hook-declined push exits 1, not 128), the denylist in
+    :data:`_PUSH_NON_TRANSIENT_STDERR_MARKERS` is checked first and always
+    wins, and the remaining stderr must match one of the explicit fragments
+    in :data:`_PUSH_TRANSIENT_STDERR_PATTERNS`. An unrecognised ``rc=128``
+    stderr is NOT transient — retrying an unclassified fatal error would only
+    delay recording the real outcome, never fix it.
+    """
+    if returncode != 128:
+        return False
+    lowered = (stderr or "").lower()
+    if any(marker in lowered for marker in _PUSH_NON_TRANSIENT_STDERR_MARKERS):
+        return False
+    return any(pattern in lowered for pattern in _PUSH_TRANSIENT_STDERR_PATTERNS)
+
+
 def _push_main_or_report(
     git: list,
     label: str,
@@ -823,19 +888,48 @@ def _integrate_cycle_to_main(
     # (e.g. a genuinely first-ever push with no known prior value) falls
     # back to a plain push rather than force-pushing blind.
     _lease_sha = expected_origin_main if expected_origin_main is not None else main_sha_before
-    if _lease_sha:
-        push = _sp_int.run(
-            git + ['push', f'--force-with-lease=main:{_lease_sha}', 'origin', 'main'],
-            capture_output=True, text=True,
-        )
-    else:
-        push = _sp_int.run(git + ['push', 'origin', 'main'], capture_output=True, text=True)
+
+    def _do_push() -> '_sp_int.CompletedProcess':
+        if _lease_sha:
+            return _sp_int.run(
+                git + ['push', f'--force-with-lease=main:{_lease_sha}', 'origin', 'main'],
+                capture_output=True, text=True,
+            )
+        return _sp_int.run(git + ['push', 'origin', 'main'], capture_output=True, text=True)
+
+    # #1709: a transient connection/handshake failure (rc=128, an allowlisted
+    # stderr fragment — see _is_transient_push_error) gets bounded retries
+    # with backoff INSIDE this cycle before anything is declared. A
+    # non-fast-forward or hook-declined push is never transient and fails on
+    # the first attempt, unchanged from pre-#1709 behavior.
+    push = _do_push()
+    push_attempts = 1
+    while (
+        push.returncode != 0
+        and _is_transient_push_error(push.returncode, push.stderr)
+        and push_attempts < _PUSH_MAX_ATTEMPTS
+    ):
+        time.sleep(_PUSH_RETRY_BACKOFF_SECONDS[push_attempts - 1])
+        push_attempts += 1
+        push = _do_push()
+
     if push.returncode != 0:
         _sp_int.run(git + ['reset', '--hard', base], capture_output=True)
-        return {'ok': False, 'main_sha_after': main_sha_before, 'reason': 'push_rejected'}
+        if _is_transient_push_error(push.returncode, push.stderr):
+            # #1709: retries exhausted on a transient class — the WORK did
+            # not fail, only the last network hop. cycle_branch is kept
+            # (never deleted on this path) for the next cycle's pickup.
+            return {
+                'ok': False, 'main_sha_after': main_sha_before, 'reason': 'push_pending',
+                'push_attempts': push_attempts,
+            }
+        return {
+            'ok': False, 'main_sha_after': main_sha_before, 'reason': 'push_rejected',
+            'push_attempts': push_attempts,
+        }
 
     main_sha_after = _sp_int.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
-    return {'ok': True, 'main_sha_after': main_sha_after, 'reason': None}
+    return {'ok': True, 'main_sha_after': main_sha_after, 'reason': None, 'push_attempts': push_attempts}
 
 
 def _detect_out_of_band_main(repo_root: 'Path', main_sha_before: str) -> str:
@@ -4105,6 +4199,12 @@ async def _main_impl_body():
     # accounting above rather than a distinct outcome.
     if _integrated:
         _cycle_outcome = 'success'
+    elif _rollback_reason == 'push_pending':
+        # #1709: the cycle gate-passed and merged locally; only the final
+        # push exhausted its transient-error retries. Nothing about the WORK
+        # failed — distinct from 'failed' so exit_streak/futility/cooling
+        # (see their own call sites) don't count it as one.
+        _cycle_outcome = 'push_pending'
     elif _rollback_reason in ('internal_error', 'executor_llm_error', 'system_prompt_overflow'):
         # #1280: an executor whose LLM call never returned is a failure with
         # zero commits, not a `partial` no-op — `partial` is what eleven
@@ -5001,6 +5101,11 @@ _SKIP_ROLLBACK_REASONS = frozenset({
     'recent_duplicate_failure',
     'existence_index_duplicate',
     'out_of_band_main_detected',
+    # #1709: a gate-passed cycle whose final push exhausted its transient
+    # retries is not a failure of the WORK — must not seed the recent-failure
+    # matcher and suppress a re-proposal of the same (already-integrated,
+    # once main catches up) title.
+    'push_pending',
 })
 
 

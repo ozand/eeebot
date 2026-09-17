@@ -196,6 +196,108 @@ class TestIntegrateCycleToMain:
         assert integ["reason"] == "push_rejected"
         # origin/main untouched by the failed integration attempt.
         assert _origin_main_sha(origin) == main_sha_after_divergence
+        # #1709: a genuine non-fast-forward is never transient — one attempt, no retry.
+        assert integ["push_attempts"] == 1
+
+
+_TRANSIENT_PUSH_STDERR = (
+    "fatal: unable to access 'https://github.com/ozand/eeebot-self-evolving.git/': "
+    "Failed to connect to github.com port 443: Connection timed out"
+)
+
+
+def _patch_push_outcomes(monkeypatch, *, fail_times: int, stderr: str = _TRANSIENT_PUSH_STDERR):
+    """#1709: intercept only the `git ... push ...` subprocess call so the first
+    ``fail_times`` attempts return a canned transient (rc=128) failure; every
+    other call (and every push attempt past ``fail_times``) runs the real
+    ``subprocess.run`` against the fixture repos. Returns a call counter dict.
+    """
+    import subprocess as _real_subprocess
+
+    real_run = _real_subprocess.run
+    calls = {"push_attempts": 0}
+
+    def fake_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and "push" in cmd:
+            calls["push_attempts"] += 1
+            if calls["push_attempts"] <= fail_times:
+                return subprocess.CompletedProcess(cmd, 128, stdout="", stderr=stderr)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(_real_subprocess, "run", fake_run)
+    monkeypatch.setattr(bridge.time, "sleep", lambda *_a, **_k: None)
+    return calls
+
+
+class TestIntegrateCycleToMainPushRetry:
+    """#1709: a transient (connection/handshake) push failure gets bounded
+    retries with backoff before anything is declared; a non-transient
+    rejection (covered above by ``test_stale_base_is_rejected_...``) still
+    fails on the first attempt, unchanged."""
+
+    def test_transient_push_error_retries_then_succeeds(self, tmp_path, monkeypatch):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "flaky")
+        assert setup["ok"]
+        _commit_file(work, "feature.py", "def feature():\n    return 42\n", "feat: add feature")
+        calls = _patch_push_outcomes(monkeypatch, fail_times=1)
+
+        integ = bridge._integrate_cycle_to_main(work, setup["branch"], setup["main_sha"])
+
+        assert integ["ok"] is True, integ
+        assert integ["push_attempts"] == 2
+        assert calls["push_attempts"] == 2
+        assert _origin_main_sha(origin) == integ["main_sha_after"]
+        assert (work / "feature.py").exists()
+
+    def test_transient_push_error_exhausts_retries_to_push_pending(self, tmp_path, monkeypatch):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "stuck")
+        assert setup["ok"]
+        _commit_file(work, "feature.py", "def feature():\n    return 42\n", "feat: add feature")
+        calls = _patch_push_outcomes(monkeypatch, fail_times=99)
+
+        integ = bridge._integrate_cycle_to_main(work, setup["branch"], setup["main_sha"])
+
+        assert integ["ok"] is False
+        assert integ["reason"] == "push_pending"
+        assert integ["push_attempts"] == bridge._PUSH_MAX_ATTEMPTS
+        assert calls["push_attempts"] == bridge._PUSH_MAX_ATTEMPTS
+        # origin/main never touched by an exhausted transient push.
+        assert _origin_main_sha(origin) == setup["main_sha"]
+        # #1709: the branch is KEPT (never deleted) for the next cycle's pickup.
+        branches = _run(work, "branch", "--list", setup["branch"]).stdout
+        assert setup["branch"] in branches
+
+
+class TestIsTransientPushError:
+    """#1709: pure classifier — allowlist match on rc=128, denylist wins first."""
+
+    def test_connection_timeout_is_transient(self):
+        assert bridge._is_transient_push_error(128, _TRANSIENT_PUSH_STDERR) is True
+
+    def test_access_rights_fragment_is_transient(self):
+        stderr = (
+            "ERROR: Repository not found.\nfatal: Could not read from remote repository.\n\n"
+            "Please make sure you have the correct access rights\nand the repository exists."
+        )
+        assert bridge._is_transient_push_error(128, stderr) is True
+
+    def test_non_fast_forward_is_never_transient(self):
+        stderr = "! [rejected]  main -> main (non-fast-forward)\nerror: failed to push some refs"
+        assert bridge._is_transient_push_error(1, stderr) is False
+        # Even if it somehow carried rc=128, the denylist wins over any allowlist word.
+        assert bridge._is_transient_push_error(128, stderr + "\nconnection reset by peer") is False
+
+    def test_hook_declined_is_never_transient(self):
+        stderr = "! [remote rejected] main -> main (pre-receive hook declined)"
+        assert bridge._is_transient_push_error(1, stderr) is False
+
+    def test_unrecognised_rc128_stderr_is_not_transient(self):
+        assert bridge._is_transient_push_error(128, "fatal: something we've never seen") is False
+
+    def test_non_128_returncode_is_never_transient(self):
+        assert bridge._is_transient_push_error(1, _TRANSIENT_PUSH_STDERR) is False
 
 
 class TestCleanupCycleBranch:

@@ -164,6 +164,12 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
     budget is spent (``_llm_error_retries_exhausted``) -- so by the time a
     cooling-triggering row exists, the three attempts have already been
     reduced to one.
+
+    #1709: an ``outcome: push_pending`` row (a gate-passed cycle whose final
+    push exhausted its transient-error retries) is excluded from BOTH counts
+    above — it is not yet terminal, since the next cycle's pickup resolves it
+    to success/superseded/abandoned, and none of those outcomes are "this
+    attempt failed".
     """
     lane = _lane(gap_id)
     if lane not in _FAMILY_PREFIXES:
@@ -178,7 +184,14 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
                 continue
             if row.get("phase") == "proposed" and str(row.get("demand_id") or "") == gap_id:
                 proposed.add(cycle)
-            elif row.get("phase") == "outcome" and row.get("outcome"):
+            elif (
+                row.get("phase") == "outcome"
+                and row.get("outcome")
+                # #1709: a gate-passed cycle whose push is still pending is not
+                # yet a terminal attempt — the next cycle's pickup resolves it
+                # to success/superseded/abandoned, which is what should count.
+                and row.get("outcome") != "push_pending"
+            ):
                 terminal.add(cycle)
         return len(proposed & terminal)
 
@@ -196,7 +209,12 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
             proposed_cycles.add(cycle)
             if cycle not in terminal_ts and ts is not None:
                 terminal_ts[cycle] = ts
-        elif row.get("phase") == "outcome" and row.get("outcome"):
+        elif (
+            row.get("phase") == "outcome"
+            and row.get("outcome")
+            # #1709: not yet terminal — see the sibling branch above.
+            and row.get("outcome") != "push_pending"
+        ):
             terminal_outcomes[cycle] = str(row.get("outcome"))
             if ts is not None:
                 terminal_ts[cycle] = ts
