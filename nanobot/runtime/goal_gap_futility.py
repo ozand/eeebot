@@ -151,6 +151,19 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
 
     For goal-gap records, counting remains cumulative capacity spent to a
     terminal outcome, paired with metric-improvement checks.
+
+    #1710: an executor-LLM-error retry re-runs the SAME ``cycle_id`` up to
+    ``LLM_ERROR_MAX_RETRIES`` times, each attempt writing its own ``outcome``
+    row. Both branches above key by ``cycle_id`` (a set or a dict), so those
+    rows collapse to ONE terminal cycle here -- a single flaky request cannot
+    burn through the futility threshold on its own retries. The demand-
+    cooling reader (``_recent_duplicate_failure_cooling`` in llm_proposer.py)
+    inherits the same answer transitively: it only consumes rows the #716
+    gate (``_recent_duplicate_failure`` in bridge.py) already produced, and
+    that gate exempts a retry from counting as a failure at all until its
+    budget is spent (``_llm_error_retries_exhausted``) -- so by the time a
+    cooling-triggering row exists, the three attempts have already been
+    reduced to one.
     """
     lane = _lane(gap_id)
     if lane not in _FAMILY_PREFIXES:

@@ -424,11 +424,71 @@ def test_write_structured_error_records_matchable_title_and_category(tmp_path):
         violated_check="gate_failed",
         backlog_title="Add bounded import validation",
     )
-    assert wrote is True
+    assert wrote["status"] == "created"
     written = yaml.safe_load((repo / "lessons" / "errors.yaml").read_text(encoding="utf-8"))[0]
     assert written["title"] == "Verification gate rejected the proposed change while attempting: Add bounded import validation"
     assert written["category"] == "gate_failed"
     assert written["hypothesis"] == "Cycle failed due to gate_failed."
+
+
+def test_write_structured_error_second_call_same_cycle_is_already_recorded(tmp_path):
+    """#1710: an executor retry re-running the same cycle_id/date computes the
+    same deterministic error_id. The second call must not write again and
+    must not read as write_failed -- it is proof the card is already there."""
+    repo = tmp_path / "instance_repo"
+    repo.mkdir()
+    cycle_id = "cycle-retryabc12345"
+    reason = "executor_llm_error"
+    backlog_title = "Retry same cycle twice"
+
+    first = _write_structured_error(
+        repo_root=repo, cycle_id=cycle_id, reason=reason,
+        violated_check=reason, backlog_title=backlog_title,
+    )
+    assert first["status"] == "created"
+    error_id = first["error_id"]
+
+    second = _write_structured_error(
+        repo_root=repo, cycle_id=cycle_id, reason=reason,
+        violated_check=reason, backlog_title=backlog_title,
+    )
+    assert second["status"] == "already_recorded"
+    assert second["error_id"] == error_id
+    assert second["error"] is None
+
+    # No duplicate entry, no second write.
+    entries = yaml.safe_load((repo / "lessons" / "errors.yaml").read_text(encoding="utf-8"))
+    assert len([e for e in entries if e["id"] == error_id]) == 1
+
+
+def test_write_structured_error_raises_reports_write_failed_with_exception(tmp_path, monkeypatch):
+    """#1710 acceptance: a write that raises names the exception class and
+    path in `error` -- a bare write_failed with nothing to chase is not
+    diagnosable."""
+    repo = tmp_path / "instance_repo"
+    repo.mkdir()
+
+    from pathlib import Path as _Path
+
+    real_write_text = _Path.write_text
+
+    def _boom(self, *args, **kwargs):
+        if self.name == "errors.yaml":
+            raise PermissionError("locked")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Path, "write_text", _boom)
+
+    result = _write_structured_error(
+        repo_root=repo,
+        cycle_id="cycle-boom12345678",
+        reason="gate_failed",
+        violated_check="gate_failed",
+        backlog_title="Write raises",
+    )
+    assert result["status"] == "write_failed"
+    assert "PermissionError" in result["error"]
+    assert "errors.yaml" in result["error"]
 
 
 def test_selector_provenance_reports_candidates_and_tie_break(tmp_path, monkeypatch):

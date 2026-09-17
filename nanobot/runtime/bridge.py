@@ -4258,6 +4258,8 @@ async def _main_impl_body():
         _rec_status = "not_created"
         _rec_skip_reason: str | None = None
         _rec_card_commit: str | None = None
+        _rec_card_id: str | None = None
+        _rec_write_error: str | None = None
         try:
             import shutil as _rec_shutil
             _rec_wt = Path(STATE_DIR) / "error_card_wt"
@@ -4277,7 +4279,7 @@ async def _main_impl_body():
                 _rec_skip_reason = "worktree_add_failed"
             else:
                 try:
-                    _written_error = _write_structured_error(
+                    _write_result = _write_structured_error(
                         repo_root=_rec_wt,
                         cycle_id=req.get('cycle_id') or '',
                         reason=_rollback_reason,
@@ -4285,7 +4287,19 @@ async def _main_impl_body():
                         budget_used={},
                         backlog_title=backlog_title,
                     )
-                    if _written_error:
+                    _rec_write_status = _write_result.get("status")
+                    if _rec_write_status == "already_recorded":
+                        # #1710: the card for this cycle_id/date already exists
+                        # on origin/main (a prior attempt's card, already
+                        # committed and pushed) -- an executor retry finding it
+                        # again is not a write failure, there is nothing to
+                        # commit or push this attempt.
+                        _rec_status = "already_recorded"
+                        _rec_card_id = _write_result.get("error_id")
+                    elif _rec_write_status == "write_failed":
+                        _rec_skip_reason = "write_failed"
+                        _rec_write_error = _write_result.get("error")
+                    else:
                         _git_wt = _git_cmd(_rec_wt)
                         _sp.run(_git_wt + ['add', 'lessons/errors.yaml'], capture_output=True)
                         if (_rec_wt / 'lessons' / 'archive').exists():
@@ -4330,8 +4344,6 @@ async def _main_impl_body():
                                 'bridge-error: error diff touched more than lessons/errors.yaml '
                                 '— skipping ungated push (#678 F6)'
                             )
-                    else:
-                        _rec_skip_reason = "write_failed"
                 finally:
                     _sp.run(_git_main + ['worktree', 'remove', '--force', str(_rec_wt)], capture_output=True)
                     _rec_shutil.rmtree(_rec_wt, ignore_errors=True)
@@ -4339,6 +4351,22 @@ async def _main_impl_body():
         except Exception as _rec_exc:
             _rec_skip_reason = f"exception:{type(_rec_exc).__name__}"
             pass  # fail-open
+
+        # #1710: name the attempt (e.g. "2/3") when this rollback is an
+        # executor-LLM-error retry of the same cycle_id -- the same counter
+        # `_decide_handled_marker` above just wrote/read. Absent for every
+        # other rollback reason, which has no retry structure to name.
+        _rec_attempt: str | None = None
+        try:
+            _retry_path = _llm_error_retry_path(request_id)
+            if _retry_path is not None and _retry_path.exists():
+                _retry_data = json.loads(_retry_path.read_text(encoding='utf-8'))
+                _retry_count = int(_retry_data.get('count') or 0)
+                if _retry_count:
+                    _retry_max = int(_retry_data.get('max') or LLM_ERROR_MAX_RETRIES)
+                    _rec_attempt = f"{_retry_count}/{_retry_max}"
+        except Exception:
+            pass
 
         try:
             _rec_evt = {
@@ -4349,8 +4377,14 @@ async def _main_impl_body():
             }
             if _rec_card_commit:
                 _rec_evt["card_commit"] = _rec_card_commit
+            if _rec_card_id:
+                _rec_evt["card_id"] = _rec_card_id
             if _rec_skip_reason:
                 _rec_evt["skip_reason"] = _rec_skip_reason
+            if _rec_write_error:
+                _rec_evt["error"] = _rec_write_error
+            if _rec_attempt:
+                _rec_evt["attempt"] = _rec_attempt
             append_event(STATE_DIR, _rec_evt)
         except Exception:
             pass
@@ -5362,11 +5396,22 @@ def _write_structured_error(
     violated_check: str = "",
     budget_used: dict | None = None,
     backlog_title: str = "",
-) -> bool:
+) -> dict:
     """Record a failed cycle / gate rejection into lessons/errors.yaml and rotate (#1041).
 
     Mirrors the structured lesson candidate path, storing errors with cycle_id, reason, and violated check.
     Fail-open: failures never raise out of the cycle outcome flow.
+
+    Returns ``{"status": ..., "error_id": ..., "error": ...}``. ``status`` is
+    one of:
+
+    - ``"created"`` — the entry was written to ``lessons/errors.yaml`` this call.
+    - ``"already_recorded"`` (#1710) — the deterministic ``error_id`` for this
+      cycle/date already exists (an executor retry re-running the same
+      ``cycle_id`` after an earlier attempt's card was committed and pushed).
+      No write is attempted; this is not a failure.
+    - ``"write_failed"`` — a write was attempted and raised; ``error`` names
+      the exception class and the target path.
     """
     import datetime as _dt
     import json
@@ -5422,7 +5467,11 @@ def _write_structured_error(
     error_id = f'ERR-{date_str.replace("-", "")}-{short_cycle[:8]}'
 
     if any(e.get('id') == error_id for e in existing_list):
-        return False
+        # #1710: an executor retry re-running the same cycle_id finds the
+        # prior attempt's card already committed and pushed to origin/main
+        # (this isolated checkout is fresh off that ref) -- this is not a
+        # failed write, it is proof the retry ran and found the card.
+        return {"status": "already_recorded", "error_id": error_id, "error": None}
 
     b_used = budget_used or {}
     tool_calls = int(b_used.get('tool_calls', 0))
@@ -5460,9 +5509,15 @@ def _write_structured_error(
             errors_path.write_text(_yaml.dump(to_write, allow_unicode=True, sort_keys=False), encoding='utf-8')
         except ImportError:
             errors_path.write_text(json.dumps(to_write, indent=2, ensure_ascii=False), encoding='utf-8')
-        return True
-    except Exception:
-        return False
+        return {"status": "created", "error_id": error_id, "error": None}
+    except Exception as _write_exc:
+        # #1710: name the exception class and path so write_failed is
+        # diagnosable instead of a bare status with nothing to chase.
+        return {
+            "status": "write_failed",
+            "error_id": error_id,
+            "error": f'{type(_write_exc).__name__}:{errors_path}'[:200],
+        }
 
 
 # #1219: ``_auto_seed_backlog_from_research`` (and its only caller-side
