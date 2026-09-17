@@ -198,3 +198,53 @@ def test_deploy_script_fail_closed_and_ghost_cleanup() -> None:
     assert 'for ghost_unit in eeepc-network-fallback.timer eeepc-network-fallback.service' in content
     assert 'ghost_load_state" != "not-found"' in content
 
+
+def test_1718_new_timer_gets_enabled_never_confused_with_operator_disabled() -> None:
+    """#1718: PR #1717 shipped eeebot-systemd-drift-check.timer disabled --
+    ``systemctl is-enabled`` reads "disabled" for a timer that was never
+    enabled and for one an operator deliberately disabled alike, and
+    sync_timer's preserve-disabled branch could not tell them apart. Same
+    shape as #1663 (a drop-in the deploy never installed, invisible for 14
+    days): a unit that ships inert reads exactly like a healthy quiet one.
+
+    Fix: snapshot which timer unit files already existed on the host
+    BEFORE this deploy's copy, and let sync_timer's disabled branch use
+    that snapshot to tell "just shipped" from "operator's own choice".
+    """
+    content = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    # The snapshot must be taken before the unit files are copied, or it
+    # would see every timer as "pre-existing" (this deploy's own copy) and
+    # the whole fix would be inert.
+    snapshot_pos = content.index("PRE_EXISTING_TIMERS=")
+    copy_pos = content.index('sudo cp "$RELEASE_DIR/host/eeepc/systemd/"*.service')
+    assert snapshot_pos < copy_pos, "pre-existing snapshot must be taken before the unit copy"
+
+    snapshot_block = content[snapshot_pos:copy_pos]
+    assert 'for _pre_existing_timer in /etc/systemd/system/*.timer; do' in snapshot_block
+    assert '[ -f "$_pre_existing_timer" ] || continue' in snapshot_block
+    assert 'PRE_EXISTING_TIMERS="$PRE_EXISTING_TIMERS $(basename "$_pre_existing_timer")"' in snapshot_block
+
+    sync_timer_block = content[content.index("sync_timer()"):content.index("\nsync_timer eeepc-promotion-verifier.timer")]
+
+    # The disabled/non-required path now branches on whether the unit file
+    # pre-existed, instead of unconditionally preserving disabled.
+    disabled_branch_pos = sync_timer_block.index('elif [ "$initial_state" = "disabled" ]; then')
+    membership_check_pos = sync_timer_block.index('case "$PRE_EXISTING_TIMERS " in *" $timer "*) true ;; *) false ;; esac')
+    preserved_pos = sync_timer_block.index('is administratively disabled; preserving disabled state')
+    new_enable_pos = sync_timer_block.index('has no pre-existing unit file; enabling')
+    assert disabled_branch_pos < membership_check_pos < preserved_pos < new_enable_pos
+
+    # A never-installed timer still gets sudo systemctl enable --now, same
+    # as the pre-existing "required" path already did.
+    new_branch = sync_timer_block[membership_check_pos:]
+    assert 'sudo systemctl enable --now "$timer"' in new_branch.split("preserving disabled state", 1)[1]
+
+    # One log line per timer naming the branch actually taken, so a live
+    # deploy's log (like the one that surfaced this bug) says which
+    # decision fired without an operator having to infer it from
+    # "administratively disabled" alone.
+    assert 'echo "SYNC-BRANCH: $timer already-enabled"' in content
+    assert 'echo "SYNC-BRANCH: $timer preserved-disabled"' in content
+    assert content.count('echo "SYNC-BRANCH: $timer new-enabled"') == 2  # required path + newly-shipped path
+
