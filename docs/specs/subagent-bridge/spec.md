@@ -933,6 +933,17 @@ executor run does not stop early or hand off instead of acting:
   mandatory branch-discipline addendum instructing the subagent to commit on the
   current branch and to NOT run `git checkout`/`switch`/`branch` or `git push`.
 
+ADR-022 (#1720, #1723) names `OPERATING.md`, a release-root file, as the
+single source of the cycle rules R7 above states as a `build_task` literal
+today — branch discipline, the skip check, verification, termination,
+handoff, the iteration-budget note, and the final-response JSON contract, all
+consolidated out of both `build_task` and the instance `AGENTS.md`'s runtime
+sections into one operator-owned document. `OPERATING.md` exists in the
+release root as of #1723 part (a); it is inert on the running host until the
+file-driven loader (#1725) reads it into the assembled prompt, at which point
+`build_task`'s literals are removed (#1723 part (b), a separate PR that must
+not merge before this file is in a deployed release).
+
 ### Prompt budget and reserve (#1313)
 
 `ContextBuilder.build_system_prompt` (loop profile, strict — #1300/#1302) may
