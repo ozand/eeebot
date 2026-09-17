@@ -352,59 +352,50 @@ def find_pending_request() -> tuple[Path | None, dict]:
 
 def _get_previous_attempts(
     state_dir: 'Path',
-    backlog_title: str,
-    cycle_id: str,
+    *,
+    semantic_task_id: str = '',
+    target_path: 'str | None' = None,
     max_attempts: int = 3,
     entries: 'list[tuple[Path, dict, float]] | None' = None,
 ) -> list[dict]:
-    """Return last N bridge result entries for the same backlog_title or cycle.
+    """Return the last N bridge result entries for the SAME task (#1727).
 
-    Matching priority (first hit wins):
-    1. Primary: source_artifact → next_bounded_candidate.title keyword match
-       (≥3 word matches). Most reliable because
-       the title comes from the artifact, not from a generic summary string.
-    2. Fallback: summary keyword match (when artifact file missing/unreadable).
-    3. Tertiary: exact cycle_id match.
+    Keyed by ``semantic_task_id`` or ``target_path`` — fields the result row
+    itself carries (see :func:`_write_bridge_completed_result`) — never by
+    keyword overlap. The pre-#1727 keyword-overlap matcher (≥3 shared words
+    between titles) produced false positives: a task titled "Ensure CLI
+    companion test scaffolding…" received a previous-attempt line from an
+    unrelated "Commit 1 change(s) to: scripts/inspect_cycle_diff.py" result
+    on shared vocabulary alone. No cycle_id fallback either, for the same
+    reason (a coincidentally-reused id proves nothing about task identity).
+    No match on either key → the caller omits the section entirely, rather
+    than showing an unrelated attempt.
+
+    Note: ``semantic_task_id`` is a constant (``'llm-proposed-improvement'``)
+    for every demand-driven proposal today (the sole live request writer,
+    ``llm_proposer.write_request``, never sets a per-task value), so in
+    practice ``target_path`` is the discriminator that matches. Both keys
+    are tried because other request sources (``nanobot.runtime.state``) do
+    carry a genuine per-task ``semantic_task_id``.
 
     Used by build_task() to inject a '## Previous attempts' section into the
     subagent prompt so it knows what the prior session did (and why it failed).
     """
     results_dir = state_dir / 'subagents' / 'results'
-    import json as _json
-    import re as _re2
+    norm_target = str(target_path or '').strip().replace('\\', '/')
     candidates: list[tuple[float, dict]] = []
-    title_words = [w.lower() for w in _re2.findall(r'[A-Za-z]{4,}', backlog_title)] if backlog_title else []
 
     for _p, data, mtime in _iter_result_entries(results_dir, entries=entries):
         if data.get('materialized_from') != 'bridge_llm_execution':
             continue
 
         is_match = False
-
-        # 1. Primary: read source_artifact → nbc.title and match keywords
-        if title_words and not is_match:
-            _src = data.get('source_artifact', '')
-            if _src:
-                try:
-                    _art = _json.loads(Path(_src).read_text(encoding='utf-8'))
-                    _nbc_title = (_art.get('next_bounded_candidate') or {}).get('title', '')
-                    if _nbc_title:
-                        _nbc_words = [w.lower() for w in _re2.findall(r'[A-Za-z]{4,}', _nbc_title)]
-                        _matches = sum(1 for w in title_words if w in _nbc_words)
-                        if _matches >= min(3, len(title_words)):
-                            is_match = True
-                except Exception:
-                    pass  # artifact missing or unreadable — fall through to summary
-
-        # 2. Fallback: summary keyword match (generic but better than nothing)
-        if title_words and not is_match:
-            summary_txt = str(data.get('summary', '')).lower()
-            if any(w in summary_txt for w in title_words):
+        if semantic_task_id and str(data.get('semantic_task_id') or '') == semantic_task_id:
+            is_match = True
+        if not is_match and norm_target:
+            hist_target = str(data.get('target_path') or '').strip().replace('\\', '/')
+            if hist_target and hist_target == norm_target:
                 is_match = True
-
-        # 3. Tertiary: exact cycle_id match
-        if not is_match:
-            is_match = data.get('cycle_id') == cycle_id
 
         if is_match:
             candidates.append((mtime, data))
@@ -1828,7 +1819,21 @@ def _recent_activity_context(
         if selfevo_repo_root is not None:
             from nanobot.runtime.goal_text_utils import _recent_git_log
             git_log = _recent_git_log(selfevo_repo_root, since="7 days ago")
-            subjects = [ln for ln in git_log.splitlines() if ln.strip()][:8]
+            # #1727: 4 of 8 subjects on the recorded prompts were
+            # `merge: integrate selfevo/cycle-...` — the bridge's own
+            # integration commits, not "recent work" a subagent should read
+            # as novelty pressure. `git log --oneline` lines are
+            # `<sha> <subject>`; skip any whose subject starts with `merge:`.
+            subjects: list[str] = []
+            for ln in git_log.splitlines():
+                if not ln.strip():
+                    continue
+                _subject = ln.split(' ', 1)[1] if ' ' in ln else ''
+                if _subject.strip().lower().startswith('merge:'):
+                    continue
+                subjects.append(ln)
+                if len(subjects) >= 8:
+                    break
             if subjects:
                 lines.append('Recently completed (recent commits):')
                 lines.extend(f'- {s}' for s in subjects)
@@ -1877,6 +1882,13 @@ def build_task(req: dict, goal_text: str, report_source: str,
     """Build a concrete task prompt for the subagent from the request payload.
 
     Args:
+        goal_text: accepted for signature compatibility with every caller;
+            no longer injected into the prompt (#1727 — the '## System
+            mission' section now prints one line stating whether this task
+            IS an operator priority, not the full priority-list text this
+            param used to carry verbatim; three unrelated priorities'
+            full descriptions were shown on every prompt regardless of what
+            the executor was actually working on).
         repair_context: If set, adds a '## Repair context' section with the failed test
             traceback. Used by the closed-loop repair cycle (issue #526).
         selfevo_repo_root: If set (with state_dir), used to inject a
@@ -1887,37 +1899,36 @@ def build_task(req: dict, goal_text: str, report_source: str,
             present in the SubagentManager system_context (#944); the System
             mission section emits a single pointer line instead of the full
             charter text, eliminating the duplicate (~2.7 KB saved per spawn).
-            ``goal_text`` must carry ONLY the derived/filtered priorities when
-            this flag is True (#954).
     """
+    del goal_text  # #1727: kept as a parameter, no longer rendered — see above.
     task_title = req.get('task_title') or req.get('semantic_task_id') or 'subagent review task'
     request_id = req.get('request_id') or req.get('verification_task_id') or '?'
     cycle_id = req.get('cycle_id') or '?'
-    goal_id = req.get('goal_id') or '?'
     source_artifact = req.get('source_artifact') or ''
 
-    # Read the source artifact content inline so subagent has concrete data
-    artifact_content = ''
+    # #1727: read the source artifact only to parse its JSON — the raw text is
+    # no longer echoed into the prompt (it repeated the title/instructions/
+    # target already printed in Task:/Concrete task, four to five times per
+    # message on the recorded prompts this issue measured).
     artifact_data: dict = {}
     if source_artifact and Path(source_artifact).exists():
         try:
             raw = Path(source_artifact).read_text(encoding='utf-8')
-            artifact_content = raw[:4000]
-            if len(raw) > 4000:
-                artifact_content += '\n... [truncated]'
-            try:
-                artifact_data = json.loads(raw)
-            except Exception:
-                pass
-        except Exception as e:
-            artifact_content = f'[could not read artifact: {e}]'
-    else:
-        artifact_content = '[source artifact not found or not specified]'
+            artifact_data = json.loads(raw)
+        except Exception:
+            pass
 
     # Extract concrete task from backlog if coordinator injected it
     backlog_title = artifact_data.get('next_bounded_candidate', {}).get('title', '')
     backlog_instructions = artifact_data.get('next_bounded_candidate', {}).get('backlog_instructions', '')
     backlog_priority = artifact_data.get('next_bounded_candidate', {}).get('backlog_priority')
+    # #1727: the only currently-populated "P<n>" signal on this artifact
+    # shape — see the '## System mission' one-liner below. Both this and
+    # backlog_priority are always unset by the sole live request writer
+    # (llm_proposer.py's write_request), so today every rendered mission
+    # line reads "not an operator priority" until a future issue threads a
+    # real operator-priority number through demand-mode requests (#1708).
+    curriculum_level = artifact_data.get('next_bounded_candidate', {}).get('curriculum_level')
     recommended_action = artifact_data.get('recommended_next_action', '')
     # #1118: the proposer's optional, FROZEN falsifiable claim (never rewritten
     # after write_request wrote it) — informational only, never enforced here.
@@ -1964,45 +1975,53 @@ def build_task(req: dict, goal_text: str, report_source: str,
         f'Task: {task_title}',
         f'Request ID: {request_id}',
         f'Cycle ID: {cycle_id}',
-        f'Goal ID: {goal_id}',
     ]
+    # #1727: 'Goal ID' printed a constant (the single active goal id) in 20 of
+    # 20 recorded prompts — no per-task signal, and no reader (ledger/
+    # dashboard key on cycle_id/request_id). It cannot carry the real
+    # per-task demand id without new plumbing (demand_id is kept out of the
+    # request payload by design, and state/demand/rotation.json's served
+    # map has no other per-task metadata to join against) — removed rather
+    # than kept constant.
+    if source_artifact:
+        # #1727: one line for ledger tracing, replacing the fenced JSON dump
+        # (see below) that repeated the title/instructions/target already in
+        # Task:/Concrete task, four to five times per message.
+        lines.append(f'Source artifact: {source_artifact}')
     # #913: report_source is optional now that goal_id no longer requires an
     # outbox bootstrap — an empty value (fresh install / registry-only state)
     # simply omits this cosmetic line instead of printing "Origin report: ".
     if report_source:
         lines.append(f'Origin report: {report_source}')
+    # #1727: one line naming whether this task IS an operator priority,
+    # replacing the full text of every OTHER operator priority the executor
+    # is not working on this cycle (three unrelated priorities' full text,
+    # described in more detail than the actual task, on every prompt).
+    if curriculum_level:
+        _mission_line = f'This task is operator priority P{curriculum_level}.'
+    else:
+        _mission_line = 'This task is not an operator priority; priorities are handled by the proposer.'
     # #954: charter is already in system_context when charter_in_system=True;
     # emit a single pointer line so the combined prompt has the charter text
-    # exactly once.  goal_text must carry derived/filtered priorities only
-    # (not the full charter) when charter_in_system is True.
+    # exactly once.
     if charter_in_system:
         lines += [
             '',
             '## System mission (read before acting)',
             'Full operator charter: see system context (already loaded above).',
-            '',
-            goal_text,
+            _mission_line,
             '',
         ]
     else:
         lines += [
             '',
             '## System mission (read before acting)',
-            goal_text,
+            _mission_line,
             '',
         ]
     _recent_activity = _recent_activity_context(state_dir, selfevo_repo_root)
     if _recent_activity:
         lines.append(_recent_activity)
-    lines += [
-        '## Source artifact',
-        f'Path: {source_artifact}',
-        '',
-        '```json',
-        artifact_content,
-        '```',
-        '',
-    ]
     if lessons_lines:
         lines += lessons_lines
 
@@ -2016,12 +2035,26 @@ def build_task(req: dict, goal_text: str, report_source: str,
             '',
         ]
 
+    # #1727: current request's own target path (the same 'Target path: X'
+    # marker _extract_target_path() reads elsewhere in this module — inlined
+    # here, not called, so build_task's standalone-exec test contract
+    # (tests/test_repair_loop.py) doesn't need a new stub for it).
+    import re as _re_target
+    _current_target_path = ''
+    for _field in ('task', 'recommended_next_action'):
+        _text = req.get(_field)
+        if isinstance(_text, str) and _text:
+            _m = _re_target.search(r'Target path:\s*(\S+)', _text)
+            if _m:
+                _current_target_path = _m.group(1).strip().rstrip(').,;')
+                break
+
     # Inject previous attempts section so subagent knows what prior sessions did
-    if state_dir is not None and backlog_title:
+    if state_dir is not None:
         _prev = _get_previous_attempts(
             state_dir=state_dir,
-            backlog_title=backlog_title,
-            cycle_id=str(cycle_id),
+            semantic_task_id=str(req.get('semantic_task_id') or ''),
+            target_path=_current_target_path,
         )
         if _prev:
             prev_lines = ['## Previous attempts for this task']
@@ -2045,8 +2078,10 @@ def build_task(req: dict, goal_text: str, report_source: str,
             prev_lines.append('')
             lines += prev_lines
 
+    # #1727: ONE '## Concrete task to implement' section — the
+    # recommended_action branch (identical purpose, different framing) is
+    # removed; it produced a second heading in 10 of 20 recorded prompts.
     if backlog_title and backlog_instructions:
-        curriculum_level = artifact_data.get('next_bounded_candidate', {}).get('curriculum_level')
         curriculum_note = (
             f'Curriculum level: P{curriculum_level} — complete THIS priority before attempting any higher-numbered priority.'
             if curriculum_level else ''
@@ -2060,6 +2095,12 @@ def build_task(req: dict, goal_text: str, report_source: str,
             backlog_instructions,
             '',
         ]
+    elif recommended_action and 'Materialize one' not in recommended_action:
+        lines += [
+            '## Concrete task to implement',
+            recommended_action,
+            '',
+        ]
     # #1118: surface the frozen claim (informational, never enforced) right
     # after the concrete task — same place regardless of which branch above
     # populated the task, since expected_outcome is orthogonal to backlog vs.
@@ -2068,12 +2109,6 @@ def build_task(req: dict, goal_text: str, report_source: str,
         lines += [
             '## Expected outcome (frozen claim from the proposal — informational)',
             str(expected_outcome['claim'])[:300],
-            '',
-        ]
-    elif recommended_action and 'Materialize one' not in recommended_action:
-        lines += [
-            '## Concrete task to implement',
-            recommended_action,
             '',
         ]
 
@@ -2111,7 +2146,7 @@ def build_task(req: dict, goal_text: str, report_source: str,
         '1. Before implementing, check the "Recent activity" section above and',
         '   the codebase — if this task is already done, do NOT re-implement it;',
         '   report outcome: skipped.',
-        '2. Read the source artifact and the concrete task above.',
+        '2. Review the concrete task above.',
         f'3. Implement the task within the resolved limit of {max_iterations} tool iterations:',
         '   - Write or edit the file using write_file or edit_file.',
         _verification_line,
@@ -3065,8 +3100,10 @@ async def _main_impl_body():
         # _setup_cycle_branch/spawn per run, S6 unchanged).
         break
 
-    # One-time migration: backfill backlog_title into existing result files
-    # so _get_previous_attempts() can match by artifact title.
+    # One-time migration: backfill backlog_title into existing result files.
+    # #1727: _get_previous_attempts() itself now matches by semantic_task_id
+    # or target_path, not by title, but backlog_title is still the display
+    # label _recent_activity_context()'s "recently rejected" listing uses.
     _results_dir_mig = STATE_DIR / 'subagents' / 'results'
     _mig_count = _migrate_backlog_title_in_results(_results_dir_mig)
     if _mig_count:
@@ -6027,10 +6064,10 @@ def _write_bridge_completed_result(
     if key_learnings is None:
         if commits_pushed > 0:
             _files_str = ', '.join(files_changed[:3]) if files_changed else '(unknown)'
-            key_learnings = [
-                f'Committed {commits_pushed} change(s) to: {_files_str}. '
-                'Reward signal will be upgraded by coordinator.',
-            ]
+            # #1727: dropped the trailing "Reward signal will be upgraded by
+            # coordinator" sentence — no reader ever consumed it; it just
+            # rode along into every '## Previous attempts' line.
+            key_learnings = [f'Committed {commits_pushed} change(s) to: {_files_str}.']
         elif result_status == 'already_done':
             key_learnings = [
                 'Cycle already carries a success tag (exact replay guard). '
