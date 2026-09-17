@@ -487,6 +487,10 @@ def _format_progress_line(progress: Any) -> str:
     reason = progress.get("dominant_reason") or "none"
     if progress.get("state") == "no_success_yet":
         return f"no success yet; non_integrating_cycles={cycles}; dominant_reason={reason}"
+    if hours is None:
+        # #1706: `empty` / `partial_no_success` progress carries no success
+        # timestamp; render the absence as a word, never format None (#1173).
+        return f"hours=absent; non_integrating_cycles={cycles}; dominant_reason={reason}"
     return f"{hours:.1f}h since success; non_integrating_cycles={cycles}; dominant_reason={reason}"
 
 
