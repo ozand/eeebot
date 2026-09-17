@@ -983,6 +983,11 @@ instead. #1188 measured that `AGENTS.md` only grows and nothing ever removes;
   whole run — no partial removal, no write. Dry-run (report only) is the
   default; `--apply` is required to write, and the write is atomic (temp file
   in the same directory, then `os.replace`).
+- **The wrapper itself shrank (#1732).** `skills_catalogue` under the loop
+  profile renders one `- NAME: DESC` line per skill under a two-line layout
+  header instead of an XML `<skill>` block, dropping the ~200-char-per-skill
+  tag/attribute/`<location>` wrapper (measured 9,225 → 3,567 chars on a
+  33-skill fixture); interactive sessions keep the XML form unchanged.
 
 ### Cycle isolation
 - R8. Before spawning, the bridge SHALL isolate the cycle on a fresh branch

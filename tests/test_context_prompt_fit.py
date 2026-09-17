@@ -31,7 +31,7 @@ def _builder(tmp_path, bootstrap_body: str, *, catalogue_lines: int = 40, memory
     builder._load_bootstrap_files = lambda: "## AGENTS.md\n\n# Instance AGENTS.md\n\nintro paragraph.\n\n" + bootstrap_body
     builder.skills.get_always_skills = lambda: []
     builder.skills.load_skills_for_context = lambda names: ""
-    builder.skills.build_skills_summary = lambda excluded_names=None: "<skills>\n" + "  <skill><name>s</name></skill>\n" * catalogue_lines + "</skills>"
+    builder.skills.build_skills_summary = lambda excluded_names=None, compact=False: "<skills>\n" + "  <skill><name>s</name></skill>\n" * catalogue_lines + "</skills>"
     builder.memory.get_memory_context = lambda loop=False: "## Long-term Memory\n" + "remembered fact\n" * memory_lines
     return builder
 
@@ -226,7 +226,7 @@ def test_catalogue_bound_keeps_complete_entries_and_records_named_omissions(tmp_
 
 def test_catalogue_budget_uses_live_fixed_floor(tmp_path, monkeypatch):
     builder = _builder(tmp_path, "", catalogue_lines=1, memory_lines=1)
-    builder.skills.build_skills_summary = lambda excluded_names=None: (
+    builder.skills.build_skills_summary = lambda excluded_names=None, compact=False: (
         '<skill available="true"><name>catalogue</name></skill>'
     )
     monkeypatch.setattr(ContextBuilder, "MAX_SYSTEM_PROMPT_CHARS", 3_000)

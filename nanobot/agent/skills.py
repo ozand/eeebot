@@ -204,7 +204,18 @@ class SkillsLoader:
                 "zero_read_names": [],
             }
 
-    def build_skills_summary(self, excluded_names: "list[str] | None" = None) -> str:
+    # #1732: the two-line header stated once for the compact (loop-profile)
+    # catalogue, replacing a per-skill <location> that only ever restated
+    # this same canonical layout rule (~200 chars of wrapper per skill,
+    # 66% of a 10,109-char catalogue measured on 33 skills).
+    _COMPACT_HEADER = (
+        "Skills live at skills/<name>/SKILL.md; read one with read_file "
+        "when its description matches the task."
+    )
+
+    def build_skills_summary(
+        self, excluded_names: "list[str] | None" = None, *, compact: bool = False,
+    ) -> str:
         """
         Build a summary of all skills (name, description, path, availability).
 
@@ -219,8 +230,17 @@ class SkillsLoader:
         ``source="workspace"`` so the loop knows they exist and may read them;
         they are never auto-loaded (see get_always_skills).
 
+        *compact* (#1732): render one ``- NAME: DESC`` line per skill under a
+        two-line header instead of an XML ``<skill>`` block. The loop profile
+        passes ``compact=True`` (an explicit flag, not inferred from
+        *excluded_names*, so a future interactive caller may pass
+        *excluded_names* without switching format). Interactive sessions are
+        unaffected: this parameter defaults to ``False`` and their XML output
+        is unchanged.
+
         Returns:
-            XML-formatted skills summary.
+            The skills summary — XML by default, or one line per skill when
+            ``compact=True``.
         """
         all_skills = self.list_skills(filter_unavailable=False)
         if not all_skills:
@@ -241,15 +261,37 @@ class SkillsLoader:
         def escape_xml(s: str) -> str:
             return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-        lines = ["<skills>"]
+        if compact:
+            lines = [self._COMPACT_HEADER, ""]
+        else:
+            lines = ["<skills>"]
         for s in all_skills:
             if s["name"] in excluded_set:
                 continue
             if self._is_retired_skill(s, retired_paths):
                 continue
+            source = s.get("source", "builtin")
+            skill_meta = self._get_skill_meta(s["name"])
+            available = self._check_requirements(skill_meta)
+
+            if compact:
+                name = s["name"]
+                desc = self._get_skill_description(s["name"]).replace("\n", " ").strip()
+                entry = f"- {name}: {desc}"
+                if source != _WORKSPACE_SOURCE:
+                    # Not under the "skills/<name>/SKILL.md" rule the header
+                    # states once — a builtin surviving exclusion (memory,
+                    # skill-creator) needs its real path named.
+                    entry += f" (nanobot/skills/{name}/SKILL.md)"
+                if not available:
+                    missing = self._get_missing_requirements(skill_meta)
+                    if missing:
+                        entry += f" (requires {missing})"
+                lines.append(entry)
+                continue
+
             name = escape_xml(s["name"])
             path = s["path"]
-            source = s.get("source", "builtin")
             if source == _WORKSPACE_SOURCE:
                 try:
                     path = str(Path(path).relative_to(self.workspace))
@@ -257,9 +299,6 @@ class SkillsLoader:
                     path = str(Path(path))
                 path = path.replace("\\", "/")
             desc = escape_xml(self._get_skill_description(s["name"]))
-            skill_meta = self._get_skill_meta(s["name"])
-            available = self._check_requirements(skill_meta)
-            source = s.get("source", "builtin")
 
             lines.append(f'  <skill available="{str(available).lower()}" source="{source}">')
             lines.append(f"    <name>{name}</name>")
@@ -273,7 +312,8 @@ class SkillsLoader:
                     lines.append(f"    <requires>{escape_xml(missing)}</requires>")
 
             lines.append("  </skill>")
-        lines.append("</skills>")
+        if not compact:
+            lines.append("</skills>")
         self.last_catalogue_usage = usage_observation
 
         return "\n".join(lines)
