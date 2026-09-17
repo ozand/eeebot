@@ -580,6 +580,36 @@ def test_family_threshold_defect_reflection_priority(tmp_path):
         assert "futile_until" in rec
 
 
+def test_demand_attempt_count_collapses_retries_of_one_cycle_id(tmp_path):
+    """#1710: executor_llm_error retries re-run the SAME cycle_id up to
+    LLM_ERROR_MAX_RETRIES times, each attempt writing its own 'outcome' row
+    (and, on rollback, its own error_card_recording row). Demand futility
+    must count that as ONE terminal cycle, not one per retry row -- else a
+    single flaky request could burn through the futility threshold on its
+    own retries alone."""
+    state = tmp_path / "state"
+    item_id = "defect-retry-abc123"
+    item = {"id": item_id, "kind": "defect", "summary": "retried defect"}
+    futility.futile_gap_ids(state, [item])
+
+    now = datetime.now(timezone.utc)
+    rows = []
+    for cycle_i in range(2):
+        cycle = f"c-defect-{cycle_i}"
+        ts = (now + timedelta(seconds=cycle_i + 1)).isoformat()
+        rows.append({"phase": "proposed", "cycle_id": cycle, "demand_id": item_id, "ts": ts})
+        # 3 outcome rows for the SAME cycle_id -- one per executor retry
+        # attempt (1/3, 2/3, 3/3), all sharing one cycle_id per #1710.
+        for attempt in range(3):
+            attempt_ts = (now + timedelta(seconds=cycle_i + 1, milliseconds=attempt)).isoformat()
+            rows.append({"phase": "outcome", "cycle_id": cycle, "outcome": "validation_failed", "ts": attempt_ts})
+
+    futile_ids = futility.futile_gap_ids(state, [item], ledger_rows=rows)
+    assert item_id not in futile_ids
+    rec = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))[item_id]
+    assert rec["attempt_count"] == 2  # 2 cycles, not the 6 outcome rows
+
+
 def test_demand_attempt_count_success_resets_run_and_corpus_shapes(tmp_path):
     """#1394 review: non-goal families count consecutive non-success cycles since last success.
 

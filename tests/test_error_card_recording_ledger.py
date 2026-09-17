@@ -23,6 +23,7 @@ from unittest.mock import patch
 import pytest
 
 from nanobot.runtime import bridge
+from tests.test_bridge_executor_llm_error import _LLMDeadSubagentManager
 from tests.test_cycle_ledger import (
     _FakeSubagentManager,
     _init_selfevo_repo,
@@ -60,7 +61,7 @@ def test_error_card_recording_created(tmp_path, monkeypatch):
     )
 
     with patch("nanobot.runtime.bridge._run_smoke_tests_with_shrink_guard", return_value=(False, "smoke failed")), \
-         patch("nanobot.runtime.bridge._write_structured_error", return_value=True), \
+         patch("nanobot.runtime.bridge._write_structured_error", return_value={"status": "created", "error_id": "ERR-x", "error": None}), \
          patch("nanobot.runtime.bridge._diff_against_remote_touches_only", return_value=True), \
          patch("nanobot.runtime.bridge._push_main_or_report", return_value=True):
         asyncio.run(bridge._main_impl())
@@ -85,7 +86,7 @@ def test_error_card_recording_not_created_diff_mismatch(tmp_path, monkeypatch):
     )
 
     with patch("nanobot.runtime.bridge._run_smoke_tests_with_shrink_guard", return_value=(False, "smoke failed")), \
-         patch("nanobot.runtime.bridge._write_structured_error", return_value=True), \
+         patch("nanobot.runtime.bridge._write_structured_error", return_value={"status": "created", "error_id": "ERR-x", "error": None}), \
          patch("nanobot.runtime.bridge._diff_against_remote_touches_only", return_value=False):
         asyncio.run(bridge._main_impl())
 
@@ -109,7 +110,7 @@ def test_error_card_recording_not_created_push_rejected(tmp_path, monkeypatch):
     )
 
     with patch("nanobot.runtime.bridge._run_smoke_tests_with_shrink_guard", return_value=(False, "smoke failed")), \
-         patch("nanobot.runtime.bridge._write_structured_error", return_value=True), \
+         patch("nanobot.runtime.bridge._write_structured_error", return_value={"status": "created", "error_id": "ERR-x", "error": None}), \
          patch("nanobot.runtime.bridge._diff_against_remote_touches_only", return_value=True), \
          patch("nanobot.runtime.bridge._push_main_or_report", return_value=False):
         asyncio.run(bridge._main_impl())
@@ -124,6 +125,8 @@ def test_error_card_recording_not_created_push_rejected(tmp_path, monkeypatch):
 
 
 def test_error_card_recording_not_created_write_failed(tmp_path, monkeypatch):
+    """#1710 acceptance: a write that actually raises names the exception
+    class and path in `error`, distinct from `already_recorded` below."""
     state_dir = _wire(tmp_path, monkeypatch)
     title = "Test task failure where write_structured_error returns False"
     artifact = tmp_path / "improvements" / "llm-proposed-cycle-wf.json"
@@ -134,7 +137,10 @@ def test_error_card_recording_not_created_write_failed(tmp_path, monkeypatch):
     )
 
     with patch("nanobot.runtime.bridge._run_smoke_tests_with_shrink_guard", return_value=(False, "smoke failed")), \
-         patch("nanobot.runtime.bridge._write_structured_error", return_value=False):
+         patch(
+             "nanobot.runtime.bridge._write_structured_error",
+             return_value={"status": "write_failed", "error_id": "ERR-wf", "error": "PermissionError:/tmp/lessons/errors.yaml"},
+         ):
         asyncio.run(bridge._main_impl())
 
     rows = _read_ledger(state_dir)
@@ -144,7 +150,72 @@ def test_error_card_recording_not_created_write_failed(tmp_path, monkeypatch):
     assert ev["status"] == "not_created"
     assert ev["skip_reason"] == "write_failed"
     assert ev["cycle_id"] == "cycle-wf"
+    assert ev["error"] == "PermissionError:/tmp/lessons/errors.yaml"
+    assert "card_id" not in ev
 
+
+def test_error_card_recording_already_recorded_on_retry(tmp_path, monkeypatch):
+    """#1710: an executor retry re-running the same cycle_id finds the prior
+    attempt's card already on origin/main. This must not read as write_failed
+    -- it is proof the retry ran and found the card, not a lost record."""
+    state_dir = _wire(tmp_path, monkeypatch)
+    title = "Test task failure where the card was already recorded on a prior attempt"
+    artifact = tmp_path / "improvements" / "llm-proposed-cycle-ar.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
+    _seed_bridge_request(
+        state_dir, "req-ar", "cycle-ar", task_title=title, source_artifact=str(artifact),
+    )
+
+    with patch("nanobot.runtime.bridge._run_smoke_tests_with_shrink_guard", return_value=(False, "smoke failed")), \
+         patch(
+             "nanobot.runtime.bridge._write_structured_error",
+             return_value={"status": "already_recorded", "error_id": "ERR-20260917-cyclearx", "error": None},
+         ):
+        asyncio.run(bridge._main_impl())
+
+    rows = _read_ledger(state_dir)
+    card_events = [r for r in rows if r.get("phase") == "error_card_recording"]
+    assert len(card_events) == 1
+    ev = card_events[0]
+    assert ev["status"] == "already_recorded"
+    assert ev["card_id"] == "ERR-20260917-cyclearx"
+    assert ev["cycle_id"] == "cycle-ar"
+    assert "skip_reason" not in ev
+    assert "error" not in ev
+
+
+
+def test_error_card_recording_created_then_already_recorded_across_retries(tmp_path, monkeypatch):
+    """#1710 acceptance: an executor-LLM-error retry re-running the same
+    cycle_id finds the prior attempt's card already pushed to origin/main.
+    Real git flow (no _write_structured_error/_push_main_or_report mocking):
+    attempt 1 creates and pushes the card; attempts 2 and 3 must read
+    already_recorded -- never write_failed -- and every row carries the
+    attempt number that produced it, out of LLM_ERROR_MAX_RETRIES."""
+    state_dir = _wire(tmp_path, monkeypatch, _LLMDeadSubagentManager)
+    monkeypatch.setattr(bridge, "LLM_ERROR_MAX_RETRIES", 3)
+    title = "Retry same cycle three times, card recorded once"
+    artifact = tmp_path / "improvements" / "llm-proposed-cycle-retry-card.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
+    _seed_bridge_request(
+        state_dir, "req-retry-card", "cycle-retry-card", task_title=title, source_artifact=str(artifact),
+    )
+
+    for _ in range(3):
+        asyncio.run(bridge._main_impl())
+
+    rows = _read_ledger(state_dir)
+    card_events = [r for r in rows if r.get("phase") == "error_card_recording"]
+    assert len(card_events) == 3
+    assert [e["status"] for e in card_events] == ["created", "already_recorded", "already_recorded"]
+    assert [e.get("skip_reason") for e in card_events] == [None, None, None]
+    assert [e["attempt"] for e in card_events] == ["1/3", "2/3", "3/3"]
+    assert {e["cycle_id"] for e in card_events} == {"cycle-retry-card"}
+    assert "card_id" not in card_events[0]
+    assert card_events[1]["card_id"] == card_events[2]["card_id"]
+    assert card_events[1]["card_id"]
 
 
 def test_error_card_recording_created_with_unintegrated_cycle_commits(tmp_path, monkeypatch):
