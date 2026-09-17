@@ -20,11 +20,15 @@ def test_loop_profile_skips_stale_memory_always_skill_but_keeps_catalogue(tmp_pa
 
 
 def test_loop_profile_uses_index_identity_and_neutral_role(tmp_path: Path):
+    """#1725: the loop profile's runtime block names the memory index path
+    (a workspace fact) but no longer carries any role sentence at all — the
+    old loop role text moved out of code entirely (ADR-022 rule 2); it is
+    the operator's to state, in IDENTITY.md/SOUL.md, not code's to author."""
     prompt = ContextBuilder(tmp_path).build_system_prompt(loop_profile=True)
 
     assert "memory/index.md (catalog; read facts on demand)" in prompt
     assert "MEMORY.md (write important facts here)" not in prompt
-    assert "You are the autonomous improvement agent operating within a bounded engineering loop." in prompt
+    assert "You are the autonomous improvement agent operating within a bounded engineering loop." not in prompt
     assert "You are nanobot, a helpful AI assistant." not in prompt
 
 

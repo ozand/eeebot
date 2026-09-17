@@ -8,6 +8,7 @@ from pathlib import Path
 import datetime as datetime_module
 
 from nanobot.agent.context import ContextBuilder
+from nanobot.runtime.mutation_policy import MUTATION_POLICY
 
 
 class _FakeDatetime(real_datetime):
@@ -25,9 +26,16 @@ def _make_workspace(tmp_path: Path) -> Path:
 
 
 def test_bootstrap_files_are_backed_by_templates() -> None:
+    """#1725: ``BOOTSTRAP_FILES`` is now the loop profile's ordered
+    ``(root_kind, filename, cap, required)`` block list, mixing
+    operator-authored release-root files (IDENTITY.md/SOUL.md/goals.md/
+    USER.md/OPERATING.md — not package templates by design, ADR-022) with
+    the workspace file. Only the workspace files (``MUTATION_POLICY.
+    read_paths`` — interactive sessions read the same list, unchanged)
+    still need a package template backing them."""
     template_dir = pkg_files("nanobot") / "templates"
 
-    for filename in ContextBuilder.BOOTSTRAP_FILES:
+    for filename in MUTATION_POLICY.read_paths:
         assert (template_dir / filename).is_file(), f"missing bootstrap template: {filename}"
 
 

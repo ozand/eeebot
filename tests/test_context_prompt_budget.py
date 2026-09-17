@@ -35,4 +35,9 @@ def test_oversized_bootstrap_preserves_memory_and_skills_and_reports_drop(tmp_pa
 
 
 def test_bootstrap_configuration_contains_only_tracked_file():
-    assert ContextBuilder.BOOTSTRAP_FILES == ["AGENTS.md"]
+    # #1725: BOOTSTRAP_FILES is now the loop profile's ordered block list;
+    # the interactive loader this file exercises (_load_bootstrap_files)
+    # still reads MUTATION_POLICY.read_paths directly, unchanged.
+    from nanobot.runtime.mutation_policy import MUTATION_POLICY
+
+    assert list(MUTATION_POLICY.read_paths) == ["AGENTS.md"]

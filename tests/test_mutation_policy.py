@@ -14,7 +14,12 @@ def test_agents_md_is_readable_and_commit_permitted_as_exact_path() -> None:
     assert "AGENTS.md" in MUTATION_POLICY.read_paths
     assert "AGENTS.md" in MUTATION_POLICY.commit_exact_paths
     assert "AGENTS.md" in MUTATION_POLICY.commit_surfaces
-    assert ContextBuilder.BOOTSTRAP_FILES == ["AGENTS.md"]
+    # #1725: BOOTSTRAP_FILES is now the loop profile's ordered
+    # (root_kind, filename, cap, required) block list; the workspace-tagged
+    # subset must stay exactly MUTATION_POLICY.read_paths, not a literal, so
+    # the two can never drift apart.
+    workspace_blocks = [b for b in ContextBuilder.BOOTSTRAP_FILES if b[0] == "workspace"]
+    assert [name for _, name, _, _ in workspace_blocks] == list(MUTATION_POLICY.read_paths)
     assert MUTATION_POLICY.commit_path_prefixes == gate._ALLOWED_PATH_PREFIXES
     assert MUTATION_POLICY.commit_path_prefixes == bridge._ALLOWED_PATH_PREFIXES
     assert MUTATION_POLICY.commit_exact_paths == gate._ALLOWED_EXACT_PATHS
