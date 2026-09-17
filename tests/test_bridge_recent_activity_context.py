@@ -67,6 +67,25 @@ def test_build_task_omits_origin_report_line_when_source_empty():
     assert "Origin report:" not in task
 
 
+def test_1727_recent_activity_skips_merge_commits_keeps_eight(tmp_path: Path):
+    """#1727 AC: a fixture git log with four merge subjects and six feature
+    subjects yields six non-merge lines and no `merge:` line."""
+    messages = []
+    for i in range(4):
+        messages.append(f"merge: integrate selfevo/cycle-cycle-{i}")
+        messages.append(f"feat: implement feature {i}")
+    messages.append("feat: implement feature 4")
+    messages.append("feat: implement feature 5")
+    # 4 merge + 6 feature commits, oldest first.
+    repo = _make_git_repo_with_commit(tmp_path, *messages)
+
+    ctx = _recent_activity_context(state_dir=None, selfevo_repo_root=repo)
+
+    assert "merge:" not in ctx
+    feature_lines = [ln for ln in ctx.splitlines() if ln.startswith("- ") and "implement feature" in ln]
+    assert len(feature_lines) == 6
+
+
 def test_recent_activity_fail_open(tmp_path: Path):
     missing_repo = tmp_path / "does-not-exist"
     missing_state = tmp_path / "also-missing"
@@ -139,6 +158,8 @@ def test_bridge_composition_single_scandir_across_all_consumers(tmp_path: Path, 
                 "backlog_title": f"Create test for module {i}",
                 "task_title": f"Create test for module {i}",
                 "summary": f"Create test for module {i}",
+                "semantic_task_id": f"task-{i}",
+                "target_path": f"scripts/module_{i}.py",
                 "cycle_id": f"c{i}",
                 "result_status": "blocked",
                 "rollback": {"reason": "smoke_failed"},
@@ -170,7 +191,9 @@ def test_bridge_composition_single_scandir_across_all_consumers(tmp_path: Path, 
     assert scandir_calls == 1
 
     # 2. _get_previous_attempts reuses cache
-    prev = bridge._get_previous_attempts(state_dir=state_dir, backlog_title="Create test for module 0", cycle_id="c99")
+    prev = bridge._get_previous_attempts(
+        state_dir=state_dir, semantic_task_id="task-0", target_path="scripts/module_0.py",
+    )
     assert len(prev) >= 1
     assert scandir_calls == 1
 

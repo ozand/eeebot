@@ -35,6 +35,11 @@ def test_previous_attempt_learning_truncates_at_word_boundary(tmp_path: Path):
             "result_status": "completed",
             "key_learnings": [learning],
             "source_artifact": str(artifact),
+            # #1727: _get_previous_attempts keys on semantic_task_id or
+            # target_path carried on the result row itself, never on
+            # keyword overlap with the title -- give this result the same
+            # semantic_task_id as the request below so it matches.
+            "semantic_task_id": "context-tail-task",
         }),
         encoding="utf-8",
     )
@@ -45,6 +50,7 @@ def test_previous_attempt_learning_truncates_at_word_boundary(tmp_path: Path):
         "cycle_id": "cycle-971",
         "goal_id": "goal-1",
         "source_artifact": str(artifact),
+        "semantic_task_id": "context-tail-task",
     }
     prompt = build_task(request, "goal", "", state_dir=tmp_path)
 
