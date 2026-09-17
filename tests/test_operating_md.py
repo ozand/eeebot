@@ -1,0 +1,128 @@
+"""OPERATING.md — the cycle rules, as a release-owned file (#1723 part (a), ADR-022).
+
+`OPERATING.md` answers question 5 of ADR-022's seven ("how does a cycle run,
+including which tools exist"). It replaces literals scattered across
+`nanobot/runtime/bridge.py:build_task` and runtime sections of the instance
+`AGENTS.md` with one file, so each rule states once instead of the 6-8 times
+measured on 2026-09-17.
+
+Part (a) only: this file and its parity test. `build_task` itself is
+untouched here (part (b), after #1727 merges and this part is deployed) --
+so this suite does not import or exercise `build_task`.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from nanobot.runtime.mutation_policy import MUTATION_POLICY
+
+RELEASE_ROOT = Path(__file__).resolve().parents[1]
+OPERATING_MD = RELEASE_ROOT / "OPERATING.md"
+
+MAX_CHARS = 5_000
+
+# ADR-022's assembly order, section 5 (OPERATING.md): the ten headings this
+# file must carry, in this exact order.
+EXPECTED_HEADINGS = [
+    "Cycle contract",
+    "Mutation surface",
+    "Before editing: skip check",
+    "Execution",
+    "Verification",
+    "Termination",
+    "Handoff",
+    "Iteration budget",
+    "Final response",
+    "Tools",
+]
+
+RENDERED_FROM_MARKER = "<!-- rendered-from: mutation_policy -->"
+
+
+def _read() -> str:
+    return OPERATING_MD.read_text(encoding="utf-8")
+
+
+def _headings(text: str) -> list[str]:
+    return [ln[3:].strip() for ln in text.splitlines() if ln.startswith("## ")]
+
+
+def _section(text: str, heading: str) -> str:
+    """Body lines under ``## heading`` up to the next ``## `` heading, joined."""
+    lines = text.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == f"## {heading}")
+    body: list[str] = []
+    for ln in lines[start + 1:]:
+        if ln.startswith("## "):
+            break
+        body.append(ln)
+    return "\n".join(body).strip("\n")
+
+
+def test_operating_md_exists_non_empty_and_within_budget():
+    assert OPERATING_MD.is_file(), "OPERATING.md missing from the release root"
+    text = _read()
+    assert text.strip(), "OPERATING.md is empty"
+    assert len(text) <= MAX_CHARS, f"OPERATING.md is {len(text)} chars; budget {MAX_CHARS}"
+
+
+def test_operating_md_has_the_ten_sections_in_order():
+    headings = _headings(_read())
+    assert headings == EXPECTED_HEADINGS, headings
+
+
+def test_mutation_surface_section_matches_policy_render_byte_for_byte():
+    """The section is generated, never hand-edited (#1723 constraint): drift
+    between OPERATING.md and mutation_policy must fail this test, not ship."""
+    text = _read()
+    section = _section(text, "Mutation surface")
+    assert section.startswith(RENDERED_FROM_MARKER), section[:80]
+    body = section[len(RENDERED_FROM_MARKER):].lstrip("\n")
+
+    # The render's own first line is its "## Mutation surfaces" heading
+    # (note: plural, and it is OPERATING.md's own "## Mutation surface"
+    # heading, singular, that already introduces this section) -- stripped
+    # here so the file carries the heading exactly once, not twice.
+    rendered = MUTATION_POLICY.render_bridge_surface_block()
+    rendered_body = rendered.split("\n", 1)[1]
+
+    assert body == rendered_body, (
+        f"OPERATING.md's Mutation surface section has drifted from "
+        f"MUTATION_POLICY.render_bridge_surface_block():\n--- file ---\n{body}\n"
+        f"--- render ---\n{rendered_body}"
+    )
+
+
+def test_unittest_does_not_appear_as_a_runner_instruction():
+    """#1723: the test runner is stated once, as pytest. AGENTS.md's own
+    'standard-test-runner-unittest-over-pytest' skill pointer and the
+    memory fact contradicting it are retired by a separate loop task, but
+    this file must never repeat that contradiction."""
+    assert "unittest" not in _read().lower()
+
+
+def test_verification_section_names_pytest_and_the_exec_command():
+    section = _section(_read(), "Verification")
+    assert "pytest" in section
+    assert 'exec("python3 -m pytest' in section
+
+
+def test_json_contract_appears_exactly_once():
+    text = _read()
+    assert text.count('"action_taken"') == 1
+    assert text.count('"concrete_next_action"') == 1
+    # The contract is quoted once, here, and this file has no other JSON block.
+    assert text.count("```") == 2
+
+
+def test_no_identity_values_or_charter_prose():
+    """Nothing about identity, values, or the charter belongs in this file
+    (#1723 constraint) -- those are IDENTITY.md, SOUL.md, and goals.md."""
+    text = _read()
+    for phrase in ("You are", "Vector 1"):
+        assert phrase not in text, phrase
+
+
+def test_file_states_it_is_release_owned_and_not_committed_by_the_loop():
+    text = _read()
+    assert "release-owned" in text.lower()
