@@ -31,13 +31,14 @@ ROTATION_ENV = llm_proposer._DEMAND_ROTATION_ENABLED_ENV
 SATURATED_K_ENV = llm_proposer._SATURATED_THEME_K_ENV
 
 
-def _item(kind: str, item_id: str, summary: str = "x") -> dict:
+def _item(kind: str, item_id: str, summary: str = "x", *, provenance: str = "") -> dict:
     return {
         "kind": kind,
         "id": item_id,
         "summary": summary,
         "evidence": "",
         "affected_path": "",
+        "provenance": provenance,
     }
 
 
@@ -314,6 +315,61 @@ class TestDemandCoolingLedgerRow:
         assert _cooling_rows(state_dir) == []
         # Rotation still ran and persisted as usual.
         assert item_1["id"] in _read_rotation(state_dir)["served"]
+
+    # ─── #1708: operator-head exemption ────────────────────────────────────
+
+    def test_served_operator_item_beats_unserved_reflection(self, tmp_path):
+        """#1708 AC 1: a served operator-provenance item still wins over a
+        never-served reflection item — provenance exemption, not just
+        recency, is what selects it."""
+        state_dir = _state_dir(tmp_path)
+        operator_item = _item(
+            "priority", "priority-f16f62371f33", "Priority 17",
+            provenance=demand.PROVENANCE_OPERATOR,
+        )
+        reflection_item = _item("reflection", "reflection-abc123", "fresh observation")
+        _write_rotation(state_dir, {operator_item["id"]: "2026-09-15T22:02:47Z"})
+
+        result = llm_proposer._select_assigned_demand(
+            state_dir, [reflection_item, operator_item],
+        )
+
+        assert result == [operator_item]
+
+    def test_cooled_operator_item_yields_to_rotation(self, tmp_path):
+        """#1708 AC 2: cooling still overrides the operator exemption —
+        #902's stall protection survives. A cooled operator head is
+        excluded from ``eligible`` and rotation proceeds normally."""
+        state_dir = _state_dir(tmp_path)
+        operator_item = _item(
+            "priority", "priority-f16f62371f33", "Priority 17",
+            provenance=demand.PROVENANCE_OPERATOR,
+        )
+        other_item = _item("defect", "defect-1", "repair parser")
+        _append_recent_duplicate_failure(state_dir, operator_item["id"], age_hours=1)
+
+        result = llm_proposer._select_assigned_demand(
+            state_dir, [operator_item, other_item],
+        )
+
+        assert result == [other_item]
+
+    def test_operator_head_selection_preserves_rotation_schema(self, tmp_path):
+        """#1708 AC 6: the exemption stamps ``served`` the same as any other
+        selection — ``rotation.json``'s schema is unchanged."""
+        state_dir = _state_dir(tmp_path)
+        operator_item = _item(
+            "priority", "priority-f16f62371f33", "Priority 17",
+            provenance=demand.PROVENANCE_OPERATOR,
+        )
+        reflection_item = _item("reflection", "reflection-abc123", "fresh observation")
+
+        llm_proposer._select_assigned_demand(state_dir, [reflection_item, operator_item])
+
+        data = _read_rotation(state_dir)
+        assert data["schema_version"] == "demand-rotation-v1"
+        assert set(data.keys()) == {"schema_version", "served"}
+        assert operator_item["id"] in data["served"]
 
     def test_ledger_unavailable_still_selects_and_logs(self, tmp_path, monkeypatch, caplog):
         state_dir = _state_dir(tmp_path)
