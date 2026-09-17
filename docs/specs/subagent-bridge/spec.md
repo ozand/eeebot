@@ -991,6 +991,26 @@ instead. #1188 measured that `AGENTS.md` only grows and nothing ever removes;
   tag/attribute/`<location>` wrapper (measured 9,225 → 3,567 chars on a
   33-skill fixture); interactive sessions keep the XML form unchanged.
 
+**#1725 (ADR-022) update:** the loop profile's `sections` breakdown is now
+nine ADR-022 ontology blocks in assembly order — `identity`, `soul`, `goals`,
+`user`, `operating`, `agents` (the instance `AGENTS.md`, loop-owned through
+the gate), `skills_catalogue`, `memory`, `runtime` — replacing the old five
+(`identity`, `bootstrap`, `active_skills`, `skills_catalogue`, `memory`);
+`active_skills` is gone (it was always empty under this profile) and the
+five release-root files (`IDENTITY.md`/`SOUL.md`/`goals.md`/`USER.md`/
+`OPERATING.md`) are loaded by `ContextBuilder.load_block` under their own
+per-block char cap (1 500/1 800/3 200/4 000/5 000; the workspace `AGENTS.md`
+block is capped at 4 000, memory at 1 000, runtime at 400, skills catalogue
+takes the remainder) instead of arriving as a post-fit `system_context`
+tail outside the cap and outside this ledger row. The row gains two new
+keys, `missing` and `truncated` — filenames (not section keys) whose
+required release/workspace file was absent (rendered as `[missing:
+<name>]`) or cut at its per-block cap (rendered with a built-in
+`"<name> truncated at N chars; read the file for the rest"` notice) on that
+spawn; both are `[]` on a fully-present, fully-fitting build. The
+`sum(sections) + separators == chars` invariant is unchanged, just over the
+new nine-key breakdown.
+
 ### Cycle isolation
 - R8. Before spawning, the bridge SHALL isolate the cycle on a fresh branch
   `selfevo/cycle-<id>` created with `git checkout -B <branch> origin/main`

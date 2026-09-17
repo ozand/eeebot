@@ -65,16 +65,26 @@ def test_build_task_renders_doc_budget_notice():
 class _ReleaseRootManager:
     instances: list["_ReleaseRootManager"] = []
 
-    def __init__(self, *, workspace, system_context="", **_kwargs):
+    def __init__(self, *, workspace, system_context="", release_root=None, **_kwargs):
         self.workspace = workspace
         self.system_context = system_context
+        # #1725: the bridge now passes release_root instead of a
+        # pre-built charter+identity system_context string.
+        self.release_root = release_root
         self._running_tasks: dict = {}
         self._skill_reads_this_cycle: list[dict] = []
         self.__class__.instances.append(self)
 
     def _build_subagent_prompt(self) -> str:
         agents = (self.workspace / "AGENTS.md").read_text(encoding="utf-8")
-        return f"{agents}\n\n---\n\n{self.system_context}"
+        release_parts = []
+        if self.release_root is not None:
+            for name in ("goals.md", "IDENTITY.md"):
+                path = self.release_root / name
+                if path.is_file():
+                    release_parts.append(path.read_text(encoding="utf-8"))
+        release_text = "\n\n".join(release_parts)
+        return f"{agents}\n\n---\n\n{release_text}\n\n---\n\n{self.system_context}"
 
     async def spawn(self, **_kwargs):
         (self.workspace / "scripts").mkdir(exist_ok=True)
@@ -126,9 +136,16 @@ def test_spawn_reads_charter_and_identity_from_release_root_not_target(
     assert asyncio.run(bridge._main_impl()) == 0
 
     manager = _ReleaseRootManager.instances[0]
-    assert "RELEASE CHARTER" in manager.system_context
-    assert "RELEASE IDENTITY" in manager.system_context
-    assert "WRONG TARGET" not in manager.system_context
+    # #1725: the bridge no longer builds a system_context charter+identity
+    # string for the executor — it passes release_root, and the (real)
+    # ContextBuilder loads goals.md/IDENTITY.md from it. This fake double's
+    # own _build_subagent_prompt reads the same release_root to prove the
+    # bridge pointed it at the release tree, not the target workspace.
+    assert manager.release_root == release
+    prompt = manager._build_subagent_prompt()
+    assert "RELEASE CHARTER" in prompt
+    assert "RELEASE IDENTITY" in prompt
+    assert "WRONG TARGET" not in prompt
     assert manager.workspace == work
     dumps = list((state_dir / "prompts").glob("cycle-root.system.txt"))
     assert len(dumps) == 1

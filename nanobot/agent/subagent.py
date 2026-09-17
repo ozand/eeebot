@@ -129,6 +129,7 @@ class SubagentManager:
         telemetry_component: str = "",
         web_tools_enabled: bool = False,
         denied_paths: "set[Path] | None" = None,
+        release_root: "Path | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -151,6 +152,14 @@ class SubagentManager:
         self.denied_paths = {p.resolve() for p in denied_paths} if denied_paths else set()
         self.prevented_access_attempts: list[str] = []
         self.system_context = system_context.strip()
+        #: #1725 (ADR-022): passed straight to ContextBuilder so the loop
+        #: profile can load IDENTITY.md/SOUL.md/goals.md/USER.md/
+        #: OPERATING.md through the normal prompt-fit cap and telemetry,
+        #: replacing the old post-fit ``system_context`` charter+identity
+        #: tail for the self-evolving executor. ``None`` for every other
+        #: caller — those blocks render ``[missing: <name>]``, same as a
+        #: genuinely absent file.
+        self.release_root = release_root
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
         from nanobot.runtime.state import resolve_runtime_state_location
@@ -717,9 +726,19 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
     def _build_subagent_prompt(self) -> str:
         """Build the system prompt for the subagent.
 
-        Uses the full ContextBuilder pipeline so that AGENTS.md, always-skills
-        (including memory/MEMORY.md), and the skills catalogue are all visible
-        to the subagent — exactly as they are for the main agent session.
+        Uses the full ContextBuilder pipeline so that the ADR-022 ontology
+        blocks (IDENTITY.md, SOUL.md, goals.md, USER.md, OPERATING.md,
+        AGENTS.md), always-skills (including memory/MEMORY.md), and the
+        skills catalogue are all visible to the subagent — exactly as they
+        are for the main agent session. ``release_root`` (set by the bridge
+        for the self-evolving executor) is where the release-owned blocks
+        are read from; ``None`` for every other caller.
+
+        #1725: the bridge no longer appends a post-fit charter+identity
+        ``system_context`` tail for the executor — those blocks are now
+        loaded and capped inside the fit itself. ``system_context`` (when a
+        caller still sets it) is still appended after the fit, unchanged,
+        for whatever non-loop use it may have elsewhere.
 
         #939 Part E: passes ``excluded_skill_names`` to suppress operator-only
         builtin skills (weather, tmux, clawhub) from the loop summary without
@@ -727,7 +746,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         """
         from nanobot.agent.context import ContextBuilder
 
-        builder = ContextBuilder(self.workspace)
+        builder = ContextBuilder(self.workspace, release_root=self.release_root)
         # #1300: the loop profile is strict — a prompt that cannot hold every
         # critical AGENTS.md section raises SystemPromptOverflow here, and the
         # bridge records the cycle as failed instead of spawning on a prompt

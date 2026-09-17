@@ -1,8 +1,13 @@
 """#1724 / ADR-022: ``goals.md`` carries only what the executor can act on,
 and the injected charter block carries exactly one top-level heading.
 
-The bridge prepends ``# Immutable operator charter`` to the charter text
-before handing it to the executor (``bridge.py``, ``system_context``). The
+The bridge used to prepend ``# Immutable operator charter`` to the charter
+text as a post-fit ``system_context`` tail for the executor; #1725 removed
+that path — ``ContextBuilder(release_root=RELEASE_ROOT)`` now loads
+``goals.md`` itself as an ADR-022 ontology block, inside the fit and its
+telemetry. The literal survives in exactly one place, a fallback used only
+when dumping the prompt for an old bridge-test double that doesn't
+implement ``_build_subagent_prompt`` — see ``_BRIDGE_CONSTRUCTION``. The
 file used to carry its own ``# eeebot operator charter`` heading, a preamble
 about the sandbox path and issue numbers, and an IMPORTANT paragraph
 restating the commit surface. None of that is an instruction the executor
@@ -26,8 +31,12 @@ _CHARTER = _REPO_ROOT / "goals.md"
 _BRIDGE_SRC = _REPO_ROOT / "nanobot" / "runtime" / "bridge.py"
 
 _BRIDGE_HEADING = "# Immutable operator charter"
-# Exactly how bridge.py builds the executor's system_context (three sites).
-_BRIDGE_CONSTRUCTION = '"# Immutable operator charter\\n\\n" + charter_text'
+# #1725: bridge.py no longer builds the executor's system_context this way
+# at all — ContextBuilder(release_root=RELEASE_ROOT) loads goals.md as an
+# ADR-022 ontology block, inside the fit and its telemetry. The ONE
+# remaining site is the prompt-dump fallback for old bridge-test doubles
+# that don't implement ``_build_subagent_prompt``.
+_BRIDGE_CONSTRUCTION = "'# Immutable operator charter\\n\\n' + charter_text"
 
 _LEVEL_ONE = re.compile(r"^# ", re.MULTILINE)
 _OPERATOR_EXECUTED = "### Operator-executed"
@@ -96,10 +105,13 @@ def test_vectors_and_validity_rules_survive(charter: str) -> None:
 
 
 def test_bridge_block_carries_exactly_one_top_level_heading() -> None:
-    """Build the block the way bridge.py does and count its ``# `` lines."""
+    """Build the block the way bridge.py's prompt-dump fallback does (#1725:
+    the only remaining site — the executor itself no longer gets this as a
+    system_context tail, see ``_BRIDGE_CONSTRUCTION``'s docstring) and count
+    its ``# `` lines."""
     src = _BRIDGE_SRC.read_text(encoding="utf-8")
     assert _BRIDGE_CONSTRUCTION in src, (
-        "bridge.py no longer builds system_context as "
+        "bridge.py no longer builds the charter block as "
         f"{_BRIDGE_CONSTRUCTION}; update this test to mirror the new shape"
     )
 

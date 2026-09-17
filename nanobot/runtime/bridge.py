@@ -3196,9 +3196,12 @@ async def _main_impl_body():
         # defined and validated by _cycle_setup['ok'] above, so the subagent lands
         # on the checked-out cycle branch. restrict_to_workspace=False already
         # leaves no fencing behavior to change.
+        # #1725: charter_text is kept for the fail-open prompt-dump fallback
+        # below (mgr._build_subagent_prompt absent — old bridge-test doubles
+        # only); the executor no longer receives it as a system_context tail
+        # — ContextBuilder(release_root=RELEASE_ROOT) loads goals.md/
+        # IDENTITY.md itself, inside the fit and its telemetry.
         charter_text = read_charter_text(RELEASE_ROOT)
-        identity_path = RELEASE_ROOT / 'IDENTITY.md'
-        identity_text = identity_path.read_text(encoding='utf-8').strip() if identity_path.is_file() else ''
         # #939 Part E: builtins irrelevant to the self-evolving loop are excluded
         # from the subagent skills summary to reduce context noise.  The list is
         # closed here (bridge-side, not instance-controlled) — instance code cannot
@@ -3226,12 +3229,10 @@ async def _main_impl_body():
             # Issue #906: SELFEVO_MAX_TOOL_ITERATIONS (operator preset knob) overrides the
             # config value when set to a valid positive int; fail-open to config otherwise.
             max_iterations=resolved_iterations,
-            system_context=(
-                "# Immutable operator charter\n\n" + charter_text
-                + ("\n\n# Loop agent identity\n\n" + identity_text if identity_text else "")
-                if charter_text
-                else ("# Loop agent identity\n\n" + identity_text if identity_text else "")
-            ),
+            # #1725 (ADR-022): the loop profile loads IDENTITY.md/SOUL.md/
+            # goals.md/USER.md/OPERATING.md itself, under the fit's own cap
+            # and telemetry — no more post-fit system_context tail.
+            release_root=RELEASE_ROOT,
             # #939 Part C: skill-fitness instrumentation context.  The bridge
             # supplies repo + cycle context so skill_fitness.py can resolve the
             # last-edit commit of each SKILL.md and apply the birth-use guard.
@@ -3359,6 +3360,14 @@ async def _main_impl_body():
                     # sections are still standing — the fuse length the
                     # operator would otherwise have to compute by hand.
                     'droppable_reserve_chars': _prompt_fit.get('droppable_reserve_chars'),
+                    # #1725: which ADR-022 ontology blocks were absent
+                    # (required-file marker) or cut at their per-block cap
+                    # this spawn — block-load-time flags, not the rung
+                    # ladder's own dropped/trimmed above. Empty list when
+                    # the builder did not record either key (older fakes in
+                    # bridge tests), never omitted.
+                    'missing': list(_prompt_fit.get('missing') or []),
+                    'truncated': list(_prompt_fit.get('truncated') or []),
                 })
             msg = await mgr.spawn(
                 task=task,
@@ -3550,10 +3559,9 @@ async def _main_impl_body():
                         max_running=_repair_cfg.tools.subagent.max_running,
                         # #906: same operator-preset override as the main spawn above.
                         max_iterations=resolve_max_tool_iterations(_repair_cfg.agents.defaults.max_tool_iterations),
-                        system_context=(
-                            "# Immutable operator charter\n\n" + charter_text
-                            if charter_text else ""
-                        ),
+                        # #1725: same block loader as the main spawn above —
+                        # no post-fit system_context tail for the repair turn either.
+                        release_root=RELEASE_ROOT,
                         skill_fitness_state_dir=STATE_DIR,
                         skill_fitness_repo=_selfevo_repo,
                         skill_fitness_cycle_id=_cycle_id,

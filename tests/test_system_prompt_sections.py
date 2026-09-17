@@ -1,25 +1,33 @@
-"""#1379: every system-prompt fit now names all five sections (identity,
-bootstrap, active_skills, skills_catalogue, memory), in build order, on
+"""#1379: every system-prompt fit names every section, in build order, on
 ``ContextBuilder.last_fit["sections"]`` and on
 ``SystemPromptOverflowError.sections`` -- including a section that ended up
 legitimately empty (0) or was removed by the fit (also 0). "Never existed"
 is the only thing 0 does NOT mean, because the key is always present.
+
+#1725 (ADR-022): the loop profile's breakdown is now nine blocks --
+identity, soul, goals, user, operating, agents, skills_catalogue, memory,
+runtime -- replacing the old five (identity, bootstrap, active_skills,
+skills_catalogue, memory). ``active_skills`` is gone (it was always empty
+under this profile); the five release-root files plus the workspace
+``AGENTS.md`` ("agents") arrive as individually-capped
+``ContextBuilder.load_block`` blocks instead of one combined "bootstrap"
+section.
 
 This pins the reconciliation invariant the issue is built around:
 
     sum(sizes.values()) + len(SECTION_SEPARATOR) * max(0, n_nonempty - 1)
         == chars == len(prompt)
 
-(``n_nonempty`` = how many of the five recorded sizes are > 0 -- one
-separator per *gap* between assembled non-empty sections, not one per
-section). ``test_healthy_build_sections_reconcile`` (case a) is a
-regression pin: it fails on pre-#1379 main, where ``last_fit`` for a
-fitting prompt has no ``"sections"`` key at all -- the key was only ever
-populated on the overflow exception.
+(``n_nonempty`` = how many of the recorded sizes are > 0 -- one separator
+per *gap* between assembled non-empty sections, not one per section).
+``test_healthy_build_sections_reconcile`` (case a) is a regression pin: it
+fails on pre-#1379 main, where ``last_fit`` for a fitting prompt has no
+``"sections"`` key at all -- the key was only ever populated on the
+overflow exception.
 
-Reuses ``tests/test_context_prompt_fit.py``'s ``_builder``/``_section``
-fixture-builders (droppable-section bootstrap fixed by ``_section(...,
-droppable=True)`` + ``ContextBuilder.DROPPABLE_MARKER``) and
+Reuses ``tests/test_context_prompt_fit.py``'s ``_builder``/``_loop_builder``/
+``_section`` fixture-builders (droppable-section AGENTS.md text fixed by
+``_section(..., droppable=True)`` + ``ContextBuilder.DROPPABLE_MARKER``) and
 ``tests/test_cycle_ledger.py``'s bridge-integration fixtures (same fakes
 ``tests/test_bridge_system_prompt_overflow.py`` drives).
 """
@@ -35,7 +43,7 @@ import pytest
 from nanobot import crash_record
 from nanobot.agent.context import ContextBuilder, SystemPromptOverflowError
 from nanobot.runtime import bridge
-from tests.test_context_prompt_fit import MARK, _builder, _section
+from tests.test_context_prompt_fit import LOOP_SECTION_NAMES, MARK, _builder, _loop_builder, _section
 from tests.test_cycle_ledger import (
     _FakeSubagentManager,
     _init_selfevo_repo,
@@ -43,7 +51,10 @@ from tests.test_cycle_ledger import (
     _seed_bridge_request,
 )
 
-SECTION_NAMES = ["identity", "bootstrap", "active_skills", "skills_catalogue", "memory"]
+#: #1725: the loop profile's nine ontology/generated blocks, in build order
+#: (was the five-section list identity/bootstrap/active_skills/
+#: skills_catalogue/memory before ADR-022's loader).
+SECTION_NAMES = list(LOOP_SECTION_NAMES)
 
 DASHBOARD_PATH = Path(__file__).resolve().parents[1] / "scripts" / "eeebot_dashboard.py"
 _SPEC = importlib.util.spec_from_file_location("eeebot_dashboard", DASHBOARD_PATH)
@@ -72,18 +83,14 @@ def _assert_reconciles(fit: dict, prompt: str | None = None) -> None:
         assert fit["chars"] == len(prompt)
 
 
-def _expected_section_texts(builder: ContextBuilder, *, loop_profile: bool) -> dict[str, str]:
-    """Mirrors ``ContextBuilder.build_system_prompt``'s section assembly
-    exactly, so a test can compare the builder's own ``last_fit["sections"]``
-    sizes against the actual text it must have produced -- independent of the
-    prompt string itself."""
-    identity = builder._get_identity(loop_profile=loop_profile)
-    bootstrap = builder._load_bootstrap_files() or ""
-    always_skills = builder.skills.get_always_skills()
-    if loop_profile:
-        always_skills = [n for n in always_skills if n != "memory"]
-    always_content = builder.skills.load_skills_for_context(always_skills) if always_skills else ""
-    active_skills = f"# Active Skills\n\n{always_content}" if always_content else ""
+def _expected_loop_section_texts(builder: ContextBuilder) -> dict[str, str]:
+    """Mirrors ``ContextBuilder._build_loop_system_prompt``'s section
+    assembly exactly (#1725), so a test can compare the builder's own
+    ``last_fit["sections"]`` sizes against the actual text it must have
+    produced -- independent of the prompt string itself. No catalogue
+    bounding here (tests using this helper keep the catalogue tiny enough
+    to never need it) -- the raw skills_summary is the expected text."""
+    ontology_sections, _missing, _truncated = builder._load_ontology_blocks()
     skills_summary = builder.skills.build_skills_summary(excluded_names=None)
     skills_catalogue = (f"""# Skills
 
@@ -91,12 +98,14 @@ The following skills extend your capabilities. To use a skill, read the skill's 
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
 
 {skills_summary}""" if skills_summary else "")
-    memory = builder.memory.get_memory_context(loop=loop_profile)
+    memory = builder.memory.get_memory_context(loop=True, max_chars=builder._MEMORY_BLOCK_CAP)
     memory_section = f"# Memory\n\n{memory}" if memory else ""
-    return {
-        "identity": identity, "bootstrap": bootstrap, "active_skills": active_skills,
-        "skills_catalogue": skills_catalogue, "memory": memory_section,
-    }
+    runtime_section = builder._get_identity(loop_profile=True)
+    texts = dict(ontology_sections)
+    texts["skills_catalogue"] = skills_catalogue
+    texts["memory"] = memory_section
+    texts["runtime"] = runtime_section
+    return texts
 
 
 # ─── (a) healthy build ──────────────────────────────────────────────────────
@@ -110,14 +119,13 @@ def test_healthy_build_sections_reconcile(tmp_path):
     the cap; ``"active_skills"`` is also absent there whenever no
     always-skill content was assembled, rather than present as 0.
     """
-    builder = _builder(tmp_path, _section("Working knowledge", 3))
+    builder = _loop_builder(tmp_path, _section("Working knowledge", 3))
     prompt = builder.build_system_prompt(loop_profile=True)
     fit = builder.last_fit
 
     assert list(fit["sections"]) == SECTION_NAMES, "present, in build order, even when empty"
-    assert fit["sections"]["active_skills"] == 0, "no always-skills content for this builder"
 
-    expected_texts = _expected_section_texts(builder, loop_profile=True)
+    expected_texts = _expected_loop_section_texts(builder)
     for name, text in expected_texts.items():
         assert fit["sections"][name] == len(text), name
 
@@ -128,35 +136,36 @@ def test_healthy_build_sections_reconcile(tmp_path):
 
 
 def test_strict_drop_reconciles_post_drop_bootstrap_length(tmp_path, monkeypatch):
-    """(i) strict fit that drops a declared-droppable bootstrap section: the
-    recorded bootstrap size reflects the text left standing AFTER the drop,
-    not the originally-assembled bootstrap."""
+    """(i) strict fit that drops a declared-droppable AGENTS.md sub-section:
+    the recorded "agents" size reflects the text left standing AFTER the
+    drop, not the originally-assembled block (#1725: "agents" replaces the
+    old "bootstrap" key as the loop's one droppable-marker-carrying block)."""
     monkeypatch.setattr(ContextBuilder, "MAX_SYSTEM_PROMPT_CHARS", 6_000)
-    bootstrap = (
+    agents_md = (
         _section("Working knowledge", 6)
         + _section("Big optional appendix", 60, droppable=True)
         + _section("Small optional note", 5, droppable=True)
         + _section("Standard test runner", 8)
     )
-    builder = _builder(tmp_path, bootstrap)
+    builder = _loop_builder(tmp_path, agents_md)
     prompt = builder.build_system_prompt(loop_profile=True)
     fit = builder.last_fit
 
     assert fit["dropped"], "the big appendix must have gone for this to be a meaningful check"
-    original_bootstrap = builder._load_bootstrap_files()
+    original_agents = builder._load_ontology_blocks()[0][5][1]
     dropped_chars = sum(d["chars"] for d in fit["dropped"])
-    assert fit["sections"]["bootstrap"] == len(original_bootstrap) - dropped_chars
+    assert fit["sections"]["agents"] == len(original_agents) - dropped_chars
 
     _assert_reconciles(fit, prompt)
 
 
 def test_strict_overflow_sections_reconcile(tmp_path, monkeypatch):
-    """(ii) strict overflow: ``exc.sections`` has all five keys and
+    """(ii) strict overflow: ``exc.sections`` has all nine keys and
     reconciles to ``exc.cap + exc.over_by`` (there is no returned prompt to
     compare against -- the build failed)."""
     monkeypatch.setattr(ContextBuilder, "MAX_SYSTEM_PROMPT_CHARS", 4_000)
-    bootstrap = _section("Working knowledge", 40) + _section("Optional", 4, droppable=True) + _section("Standard test runner", 40)
-    builder = _builder(tmp_path, bootstrap)
+    agents_md = _section("Working knowledge", 40) + _section("Optional", 4, droppable=True) + _section("Standard test runner", 40)
+    builder = _loop_builder(tmp_path, agents_md)
     with pytest.raises(SystemPromptOverflowError) as info:
         builder.build_system_prompt(loop_profile=True)
     exc = info.value
@@ -224,7 +233,7 @@ def test_reconciliation_helper_catches_a_future_hidden_section(tmp_path, monkeyp
 
     monkeypatch.setattr(ContextBuilder, "_join_sections", classmethod(_leaky_join))
 
-    builder = _builder(tmp_path, _section("Working knowledge", 3))
+    builder = _loop_builder(tmp_path, _section("Working knowledge", 3))
     prompt = builder.build_system_prompt(loop_profile=True)
     fit = builder.last_fit
 
@@ -237,15 +246,23 @@ def test_reconciliation_helper_catches_a_future_hidden_section(tmp_path, monkeyp
 
 
 def test_all_empty_sections_are_zero_except_identity(tmp_path):
-    """No bootstrap, no always-skills, no skills catalogue, no memory: every
-    section but identity is 0, chars equals identity's size exactly (no
-    separators counted, since there is only ever one non-empty section)."""
+    """No other ontology block, no skills catalogue, no memory, no runtime:
+    every section but identity is 0, chars equals identity's size exactly
+    (no separators counted, since there is only ever one non-empty
+    section)."""
     builder = ContextBuilder(tmp_path)
-    builder._load_bootstrap_files = lambda: ""
+    builder._load_ontology_blocks = lambda: (
+        [
+            ("identity", "## IDENTITY.md\n\nstub identity."),
+            ("soul", ""), ("goals", ""), ("user", ""), ("operating", ""), ("agents", ""),
+        ],
+        [], [],
+    )
+    builder._get_identity = lambda loop_profile=False: ""
     builder.skills.get_always_skills = lambda: []
     builder.skills.load_skills_for_context = lambda names: ""
     builder.skills.build_skills_summary = lambda excluded_names=None, compact=False: ""
-    builder.memory.get_memory_context = lambda loop=False: ""
+    builder.memory.get_memory_context = lambda *, loop=False, max_chars=4000: ""
 
     prompt = builder.build_system_prompt(loop_profile=True)
     fit = builder.last_fit
@@ -262,8 +279,26 @@ def test_all_empty_sections_are_zero_except_identity(tmp_path):
 
 # ─── (e) bridge ledger row ───────────────────────────────────────────────────
 
-HEALTHY_SECTIONS = {"identity": 1_200, "bootstrap": 15_000, "active_skills": 0, "skills_catalogue": 5_179, "memory": 2_100}
-OVERFLOW_SECTIONS = {"identity": 1_446, "bootstrap": 22_986, "active_skills": 0, "skills_catalogue": 6_951, "memory": 4_030}
+# #1725: nine ADR-022 blocks replace the old five (identity/bootstrap/
+# active_skills/skills_catalogue/memory). "agents" is picked last so the
+# breakdown reconciles exactly to the row's own chars/(cap+over_by) --
+# see the arithmetic pin in _assert_reconciles.
+_HEALTHY_CHARS = 23_500
+_OVERFLOW_TOTAL = 24_000 + 11_434  # cap + over_by
+HEALTHY_SECTIONS = {
+    "identity": 1_200, "soul": 900, "goals": 2_000, "user": 1_800, "operating": 3_000,
+    "agents": 0, "skills_catalogue": 5_179, "memory": 1_000, "runtime": 321,
+}
+HEALTHY_SECTIONS["agents"] = (
+    _HEALTHY_CHARS - sum(HEALTHY_SECTIONS.values()) - len(ContextBuilder.SECTION_SEPARATOR) * (len(HEALTHY_SECTIONS) - 1)
+)
+OVERFLOW_SECTIONS = {
+    "identity": 1_446, "soul": 1_200, "goals": 2_800, "user": 3_500, "operating": 4_800,
+    "agents": 0, "skills_catalogue": 6_951, "memory": 4_030, "runtime": 320,
+}
+OVERFLOW_SECTIONS["agents"] = (
+    _OVERFLOW_TOTAL - sum(OVERFLOW_SECTIONS.values()) - len(ContextBuilder.SECTION_SEPARATOR) * (len(OVERFLOW_SECTIONS) - 1)
+)
 OVERFLOW = SystemPromptOverflowError(
     over_by=11_434, cap=24_000, sections=OVERFLOW_SECTIONS,
     dropped=[{"section": "## Optional appendix", "chars": 512, "how": "declared-droppable"}],
@@ -371,7 +406,6 @@ def test_bridge_overflow_row_carries_sections_with_a_zero_entry_and_reconciles_t
     assert row["overflow"] is True
     assert row["over_by"] == 11_434 and row["cap"] == 24_000
     assert set(row["sections"]) == set(SECTION_NAMES)
-    assert row["sections"]["active_skills"] == 0
 
     assert "chars" not in row, "a refused build must not be journaled with a fabricated assembled length"
     _assert_reconciles({"sections": row["sections"], "chars": row["cap"] + row["over_by"]})

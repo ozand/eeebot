@@ -50,10 +50,43 @@ class SystemPromptOverflowError(RuntimeError):
 class ContextBuilder:
     """Builds the context (system prompt + messages) for the agent."""
 
-    # Read bootstrap files from the authoritative read policy. This list is
-    # intentionally separate from the commit surfaces: AGENTS.md is readable,
-    # but operator-owned and never commit-permitted.
-    BOOTSTRAP_FILES = list(MUTATION_POLICY.read_paths)
+    # #1725 (ADR-022): release-owned ontology files, in assembly order, with
+    # their per-block char caps. Operator-authored, immutable to the loop.
+    _RELEASE_BLOCK_CAPS: tuple[tuple[str, int], ...] = (
+        ("IDENTITY.md", 1500),
+        ("SOUL.md", 1800),
+        ("goals.md", 3200),
+        ("USER.md", 4000),
+        ("OPERATING.md", 5000),
+    )
+    #: Loop-owned, gate-bounded workspace files. Sourced from the read policy
+    #: (not a literal) so this list and MUTATION_POLICY.read_paths cannot
+    #: drift apart — see tests/test_mutation_policy.py.
+    _WORKSPACE_BLOCK_CAP = 4000
+    _MEMORY_BLOCK_CAP = 1000
+    _RUNTIME_BLOCK_CAP = 400
+    #: #1725: ordered ``(root_kind, filename, cap, required)`` blocks —
+    #: "release" root files are operator-owned and immutable to the loop;
+    #: "workspace" files are loop-owned through the gate. Replaces the old
+    #: single-root ``BOOTSTRAP_FILES = list(MUTATION_POLICY.read_paths)``
+    #: (kept under the same name for the loop profile's block loader;
+    #: interactive sessions keep reading MUTATION_POLICY.read_paths directly
+    #: via :meth:`_load_bootstrap_files`, unchanged).
+    # A genexpr referencing another class-body name lives in its own scope
+    # and cannot see it (a real NameError, not just a lint nit) -- built with
+    # plain list literals instead.
+    BOOTSTRAP_FILES: tuple[tuple[str, str, int, bool], ...] = tuple(
+        [("release", name, cap, True) for name, cap in _RELEASE_BLOCK_CAPS]
+        + [("workspace", name, 4000, True) for name in MUTATION_POLICY.read_paths]
+    )
+    #: The one workspace block name, used as the strict-fit "declared
+    #: droppable" target for the loop profile (interactive still targets the
+    #: literal "bootstrap" section — see ``_fit_system_prompt``'s
+    #: ``droppable_section_name`` default). Falls back to "bootstrap" if the
+    #: read policy is ever emptied (never true today; a defensive default).
+    _LOOP_DROPPABLE_SECTION = (
+        Path(MUTATION_POLICY.read_paths[0]).stem.lower() if MUTATION_POLICY.read_paths else "bootstrap"
+    )
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
     MAX_SYSTEM_PROMPT_CHARS = 24000
     #: Operator override of the cap (positive int). The cap is legitimate;
@@ -72,8 +105,15 @@ class ContextBuilder:
         "[skills catalogue truncated: omitted {count} skill(s) / {chars} chars]"
     )
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, release_root: "Path | None" = None):
         self.workspace = workspace
+        #: #1725 (ADR-022): root the loop profile's release-owned blocks
+        #: (IDENTITY.md, SOUL.md, goals.md, USER.md, OPERATING.md) are read
+        #: from. ``None`` (every caller but the self-evolving bridge) makes
+        #: every release block render ``[missing: <name>]`` — the same
+        #: graceful-degradation path a genuinely absent file takes, not a
+        #: special case.
+        self.release_root = release_root
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
         #: What the last build kept and dropped: ``{"cap", "chars", "strict",
@@ -93,13 +133,23 @@ class ContextBuilder:
         strict: bool | None = None,
         degrade_on_overflow: bool = False,
     ) -> str:
-        """Build the system prompt from identity, bootstrap files, skills, and memory.
+        """Build the system prompt.
 
-        Prompt ordering is identity, bootstrap, active skills, skills
-        catalogue, then memory. Under the cap (#1300):
+        Interactive sessions (``loop_profile=False``, unchanged since before
+        #1725): identity, bootstrap (workspace files from
+        ``MUTATION_POLICY.read_paths``), active skills, skills catalogue,
+        memory.
 
-        * ``strict`` (default for the loop profile): only bootstrap ``## ```
-          sections carrying :data:`DROPPABLE_MARKER` may be dropped, whole,
+        The loop profile (#1725, ADR-022) instead assembles the ordered
+        ontology blocks — identity -> soul -> goals -> user -> operating ->
+        instance AGENTS.md -> skills catalogue -> memory -> runtime facts —
+        each release/workspace block loaded by :meth:`load_block` under its
+        own per-block cap; see :meth:`_build_loop_system_prompt`.
+
+        Under the cap (#1300):
+
+        * ``strict`` (default for the loop profile): only the declared-
+          droppable section (the workspace block) may be dropped, whole,
           largest first. If the rest still does not fit, the prompt degrades
           uniformly and visibly — never choose survivors by position.
         * non-strict (interactive sessions): the pre-#1300 behaviour, bootstrap
@@ -114,19 +164,25 @@ class ContextBuilder:
         """
         if strict is None:
             strict = loop_profile
+
+        if loop_profile:
+            return self._build_loop_system_prompt(
+                excluded_skill_names=excluded_skill_names,
+                strict=strict,
+                degrade_on_overflow=degrade_on_overflow,
+            )
+
         # #1379: every section is always present in the list, empty content
         # included — ``_join_sections`` skips empty content, so the prompt is
         # unchanged, but ``last_fit["sections"]`` then records a legitimately
-        # empty section (``active_skills`` under the loop profile) as 0 rather
-        # than omitting the key, which is what a dropped section would look like.
-        sections = [("identity", self._get_identity(loop_profile=loop_profile))]
+        # empty section as 0 rather than omitting the key, which is what a
+        # dropped section would look like.
+        sections = [("identity", self._get_identity(loop_profile=False))]
 
         sections.append(("bootstrap", self._load_bootstrap_files() or ""))
 
         # Active Skills — always-loaded builtin/operator skills (never workspace).
         always_skills = self.skills.get_always_skills()
-        if loop_profile:
-            always_skills = [name for name in always_skills if name != "memory"]
         always_content = self.skills.load_skills_for_context(always_skills) if always_skills else ""
         sections.append(("active_skills", f"# Active Skills\n\n{always_content}" if always_content else ""))
 
@@ -142,15 +198,78 @@ Skills with available="false" need dependencies installed first - you can try in
 
 {skills_summary}""" if skills_summary else "")
 
-        memory = self.memory.get_memory_context(loop=loop_profile)
+        memory = self.memory.get_memory_context(loop=False)
         memory_section = f"# Memory\n\n{memory}" if memory else ""
 
         self._skills_catalogue_observation = None
-        if loop_profile and skills_section:
-            # Derive the catalogue budget from the exact fixed sections built
-            # above. Memory is deliberately included at its current size: the
-            # floor is not a frozen measurement from one day (#1563).
-            fixed_sections = [sections[0][1], sections[1][1], sections[2][1], memory_section]
+        sections.append(("skills_catalogue", skills_section))
+        sections.append(("memory", memory_section))
+        return self._fit_system_prompt(
+            sections, strict=strict, degrade_on_overflow=degrade_on_overflow,
+            memory_fit=self.memory.last_index_fit,
+        )
+
+    def _load_ontology_blocks(self) -> tuple[list[tuple[str, str]], list[str], list[str]]:
+        """#1725 (ADR-022): load the loop profile's ordered release+workspace
+        blocks. Returns ``(sections, missing_names, truncated_names)`` —
+        ``missing``/``truncated`` name the FILE (e.g. ``"SOUL.md"``), not the
+        section key, matching the ledger contract in the issue."""
+        sections: list[tuple[str, str]] = []
+        missing: list[str] = []
+        truncated: list[str] = []
+        for root_kind, filename, cap, required in self.BOOTSTRAP_FILES:
+            root = self.release_root if root_kind == "release" else self.workspace
+            key = Path(filename).stem.lower()
+            if root is None:
+                text, meta = f"[missing: {filename}]", {"missing": True, "truncated": False}
+            else:
+                text, meta = self.load_block(filename, Path(root) / filename, cap, required)
+            sections.append((key, text))
+            if meta.get("missing"):
+                missing.append(filename)
+            if meta.get("truncated"):
+                truncated.append(filename)
+        return sections, missing, truncated
+
+    def _build_loop_system_prompt(
+        self,
+        *,
+        excluded_skill_names: list[str] | None,
+        strict: bool,
+        degrade_on_overflow: bool,
+    ) -> str:
+        """#1725 (ADR-022): the loop profile's own assembly — six ontology
+        blocks, skills catalogue, memory, then code-generated runtime facts
+        LAST. No ``active_skills`` section (dropped, #1725 item 3): the
+        loop's only always-skill, ``memory``, is already excluded from it,
+        so the section was always empty under this profile."""
+        sections, missing, truncated = self._load_ontology_blocks()
+
+        skills_summary = self.skills.build_skills_summary(excluded_names=excluded_skill_names)
+        self._skills_catalogue_usage = dict(getattr(self.skills, "last_catalogue_usage", {}))
+        skills_section = (f"""# Skills
+
+The following skills extend your capabilities. To use a skill, read the skill's SKILL.md file using the read_file tool.
+Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
+
+{skills_summary}""" if skills_summary else "")
+
+        # #1725: MemoryStore already caps+labels its own loop-mode output
+        # (resident/remainder split, ``last_index_fit`` telemetry) — pass
+        # the block cap straight in rather than re-trimming its result.
+        memory_raw = self.memory.get_memory_context(loop=True, max_chars=self._MEMORY_BLOCK_CAP)
+        memory_section = f"# Memory\n\n{memory_raw}" if memory_raw else ""
+
+        runtime_section = self._trim_lines(self._get_identity(loop_profile=True), self._RUNTIME_BLOCK_CAP)
+
+        self._skills_catalogue_observation = None
+        if skills_section:
+            # Derive the catalogue budget from every other fixed section
+            # (#1725: six ontology blocks + memory + runtime, not the old
+            # four) built above. Memory/runtime are included at their
+            # (already-capped) actual size: the floor is not a frozen
+            # measurement from one day (#1563).
+            fixed_sections = [content for _, content in sections] + [memory_section, runtime_section]
             nonempty_fixed = [content for content in fixed_sections if content]
             fixed_floor = sum(len(content) for content in nonempty_fixed) + len(nonempty_fixed) * len(self.SECTION_SEPARATOR)
             catalogue_budget = max(0, self._cap() - fixed_floor)
@@ -159,9 +278,12 @@ Skills with available="false" need dependencies installed first - you can try in
             )
         sections.append(("skills_catalogue", skills_section))
         sections.append(("memory", memory_section))
+        sections.append(("runtime", runtime_section))
         return self._fit_system_prompt(
             sections, strict=strict, degrade_on_overflow=degrade_on_overflow,
             memory_fit=self.memory.last_index_fit,
+            droppable_section_name=self._LOOP_DROPPABLE_SECTION,
+            missing=missing, truncated=truncated,
         )
 
     SECTION_SEPARATOR = "\n\n---\n\n"
@@ -341,6 +463,39 @@ Skills with available="false" need dependencies installed first - you can try in
             used += len(line)
         return "".join(kept)
 
+    @staticmethod
+    def load_block(name: str, path: "Path", cap: int, required: bool) -> tuple[str, dict[str, Any]]:
+        """#1725 (ADR-022): load one ontology block, never raising.
+
+        Returns ``(text, meta)``:
+
+        * File absent, ``required``: ``text`` is the marker
+          ``"[missing: <name>]"``; ``meta["missing"] is True`` — the ledger
+          flag this absence is seen through, never a silent empty section.
+        * File absent, not required: ``text`` is ``""``; ``meta["missing"]
+          is False`` (nothing was owed).
+        * File present, under cap: the full ``## <name>`` heading plus
+          content; ``meta["truncated"] is False``.
+        * File present, over cap: cut at a line boundary with a built-in
+          notice ("<name> truncated at N chars; read the file for the
+          rest"); ``meta["truncated"] is True``. The heading, kept body, and
+          notice together never exceed ``cap``.
+        """
+        heading = f"## {name}\n\n"
+        if not path.is_file():
+            if required:
+                return f"[missing: {name}]", {"missing": True, "truncated": False, "chars": len(f"[missing: {name}]")}
+            return "", {"missing": False, "truncated": False, "chars": 0}
+        raw = path.read_text(encoding="utf-8")
+        text = heading + raw
+        if len(text) <= cap:
+            return text, {"missing": False, "truncated": False, "chars": len(text)}
+        notice = f"\n\n[{name} truncated at {cap} chars; read the file for the rest]"
+        budget = max(0, cap - len(heading) - len(notice))
+        trimmed_body = ContextBuilder._trim_lines(raw, budget)
+        text = heading + trimmed_body + notice
+        return text, {"missing": False, "truncated": True, "chars": len(text)}
+
     def _cap(self) -> int:
         """The cap: :data:`SYSTEM_PROMPT_CAP_ENV` when it is a positive int, else the class default."""
         raw = os.environ.get(self.SYSTEM_PROMPT_CAP_ENV, "").strip()
@@ -400,13 +555,20 @@ Skills with available="false" need dependencies installed first - you can try in
         return units
 
     def _drop_droppable_bootstrap_sections(
-        self, sections: list[tuple[str, str]], cap: int,
+        self, sections: list[tuple[str, str]], cap: int, section_name: str = "bootstrap",
     ) -> tuple[list[tuple[str, str]], list[dict[str, Any]]]:
-        """Strict fit (#1300): remove bootstrap sections the operator declared
-        droppable, whole and largest first, until the prompt fits or none are
-        left. Critical (unmarked) sections are never touched. Returns the
-        sections and the record of what went."""
-        index = next((i for i, (name, _) in enumerate(sections) if name == "bootstrap"), None)
+        """Strict fit (#1300): remove ``## `` sub-sections of *section_name*
+        the operator declared droppable, whole and largest first, until the
+        prompt fits or none are left. Critical (unmarked) sections are never
+        touched. Returns the sections and the record of what went.
+
+        #1725: *section_name* defaults to ``"bootstrap"`` (interactive
+        sessions, unchanged); the loop profile passes its own workspace
+        block name (:data:`_LOOP_DROPPABLE_SECTION`) — the one file the loop
+        can carry :data:`DROPPABLE_MARKER` sections in, same convention, new
+        section key.
+        """
+        index = next((i for i, (name, _) in enumerate(sections) if name == section_name), None)
         dropped: list[dict[str, Any]] = []
         if index is None:
             return sections, dropped
@@ -422,19 +584,21 @@ Skills with available="false" need dependencies installed first - you can try in
             removed.add(i)
             dropped.append({"section": units[i][0], "chars": len(units[i][1]), "how": "declared-droppable"})
             kept = "".join(text for j, (_, text) in enumerate(units) if j not in removed)
-            sections = sections[:index] + [("bootstrap", kept)] + sections[index + 1:]
+            sections = sections[:index] + [(section_name, kept)] + sections[index + 1:]
         return sections, dropped
 
-    def _droppable_reserve_chars(self, sections: list[tuple[str, str]]) -> int:
-        """#1313: chars of bootstrap ``## `` sections still carrying
-        :data:`DROPPABLE_MARKER` in *sections* as finally assembled — how
-        much more the cap could remove before it would have to touch a
-        critical section. This is the operator's fuse-length reading: it is
-        the full declared-droppable total when nothing has been dropped yet,
-        shrinks by exactly what strict mode removes, and is 0 once every
-        declared-droppable section is gone (including at overflow, where the
-        fit loop only gives up after exhausting them)."""
-        index = next((i for i, (name, _) in enumerate(sections) if name == "bootstrap"), None)
+    def _droppable_reserve_chars(self, sections: list[tuple[str, str]], section_name: str = "bootstrap") -> int:
+        """#1313: chars of *section_name*'s ``## `` sub-sections still
+        carrying :data:`DROPPABLE_MARKER` in *sections* as finally
+        assembled — how much more the cap could remove before it would have
+        to touch a critical section. This is the operator's fuse-length
+        reading: it is the full declared-droppable total when nothing has
+        been dropped yet, shrinks by exactly what strict mode removes, and
+        is 0 once every declared-droppable section is gone (including at
+        overflow, where the fit loop only gives up after exhausting them).
+        #1725: *section_name* defaults to ``"bootstrap"`` — see
+        :meth:`_drop_droppable_bootstrap_sections`."""
+        index = next((i for i, (name, _) in enumerate(sections) if name == section_name), None)
         if index is None:
             return 0
         units = self._split_bootstrap_sections(sections[index][1])
@@ -522,6 +686,9 @@ Skills with available="false" need dependencies installed first - you can try in
         strict: bool = False,
         degrade_on_overflow: bool = False,
         memory_fit: dict[str, Any] | None = None,
+        droppable_section_name: str = "bootstrap",
+        missing: list[str] | None = None,
+        truncated: list[str] | None = None,
     ) -> str:
         """Fit sections under the cap and record the outcome in :attr:`last_fit`.
 
@@ -544,7 +711,13 @@ Skills with available="false" need dependencies installed first - you can try in
         # tests): sum(sections.values()) + len(SECTION_SEPARATOR) *
         # max(0, non_empty_sections - 1) == chars.
         section_names = [name for name, _ in sections]
-        fit: dict[str, Any] = {"cap": cap, "strict": strict, "dropped": [], "trimmed": []}
+        fit: dict[str, Any] = {
+            "cap": cap, "strict": strict, "dropped": [], "trimmed": [],
+            # #1725: block-load-time flags (from load_block), distinct from
+            # the rung ladder's own dropped/trimmed — set once here, never
+            # touched by the strict/uniform_trim/names_only branches below.
+            "missing": list(missing or []), "truncated": list(truncated or []),
+        }
         # #1447: copy the whole record rather than an allowlist of keys. The
         # allowlist silently dropped `resident_matched` / `resident_missing`
         # the moment #1443 added them, so the signal that a rule entry stopped
@@ -576,14 +749,14 @@ Skills with available="false" need dependencies installed first - you can try in
                     "System prompt occupancy alert: rung=full occupancy={:.1%} cap={} chars={}",
                     occupancy, cap, len(joined),
                 )
-            fit["droppable_reserve_chars"] = self._droppable_reserve_chars(sections)
+            fit["droppable_reserve_chars"] = self._droppable_reserve_chars(sections, section_name=droppable_section_name)
             self.last_fit = fit
             return joined
 
         if strict:
-            sections, dropped = self._drop_droppable_bootstrap_sections(sections, cap)
+            sections, dropped = self._drop_droppable_bootstrap_sections(sections, cap, section_name=droppable_section_name)
             prompt = self._record_fit(fit, section_names, sections)
-            droppable_reserve_chars = self._droppable_reserve_chars(sections)
+            droppable_reserve_chars = self._droppable_reserve_chars(sections, section_name=droppable_section_name)
             fit.update(dropped=dropped, droppable_reserve_chars=droppable_reserve_chars)
             self.last_fit = fit
             if len(prompt) > cap and degrade_on_overflow:
@@ -685,17 +858,41 @@ Skills with available="false" need dependencies installed first - you can try in
             starved=list(dropped_chars),
             occupancy_alert=(len(prompt) / cap >= 0.92 if cap else True),
             dropped=[{"section": n, "chars": c, "how": "line-trim"} for n, c in dropped_chars.items()],
-            droppable_reserve_chars=self._droppable_reserve_chars(sections),
+            droppable_reserve_chars=self._droppable_reserve_chars(sections, section_name=droppable_section_name),
         )
         self.last_fit = fit
         return prompt
 
 
     def _get_identity(self, loop_profile: bool = False) -> str:
-        """Get the core identity section."""
+        """Runtime facts (loop profile) or the legacy identity template
+        (interactive only).
+
+        #1725 (ADR-022 rule 2): the two profiles no longer share prose. The
+        loop profile gets ONLY ``## Runtime`` — platform, Python version,
+        and workspace paths — placed LAST among the stable blocks by the
+        caller (:meth:`_build_loop_system_prompt`); no role sentence, no
+        ``## Platform Policy``, no ``## nanobot Guidelines``, no closing
+        ``message``-tool line (guidance about a tool the executor's
+        registry may not even carry, e.g. ``message``/``web_fetch``/
+        ``web_search`` — ADR-022 rule 5). Everything that text used to say
+        about identity/behaviour is now the operator's to say, in
+        ``IDENTITY.md``/``SOUL.md``/``OPERATING.md``, not code's to author.
+
+        The interactive profile keeps the original template verbatim.
+        """
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
+
+        if loop_profile:
+            return f"""## Runtime
+{runtime}
+
+Workspace: {workspace_path}
+Memory index: {workspace_path}/memory/index.md (catalog; read facts on demand)
+History log: {workspace_path}/memory/HISTORY.md (grep-searchable). Each entry starts with [YYYY-MM-DD HH:MM].
+Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md"""
 
         platform_policy = ""
         if system == "Windows":
@@ -710,26 +907,16 @@ Skills with available="false" need dependencies installed first - you can try in
 - Use file tools when they are simpler or more reliable than shell commands.
 """
 
-        role = (
-            "You are the autonomous improvement agent operating within a bounded engineering loop."
-            if loop_profile
-            else "You are nanobot, a helpful AI assistant."
-        )
-        memory_line = (
-            f"- Long-term memory: {workspace_path}/memory/index.md (catalog; read facts on demand)"
-            if loop_profile
-            else f"- Long-term memory: {workspace_path}/memory/MEMORY.md (write important facts here)"
-        )
         return f"""# nanobot 🐈
 
-{role}
+You are nanobot, a helpful AI assistant.
 
 ## Runtime
 {runtime}
 
 ## Workspace
 Your workspace is at: {workspace_path}
-{memory_line}
+- Long-term memory: {workspace_path}/memory/MEMORY.md (write important facts here)
 - History log: {workspace_path}/memory/HISTORY.md (grep-searchable). Each entry starts with [YYYY-MM-DD HH:MM].
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
@@ -754,10 +941,16 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     def _load_bootstrap_files(self) -> str:
-        """Load all bootstrap files from workspace."""
+        """Load all bootstrap files from workspace (interactive sessions only).
+
+        #1725: reads ``MUTATION_POLICY.read_paths`` directly rather than
+        ``BOOTSTRAP_FILES`` — the latter is now the loop profile's ordered
+        release+workspace block list (a list of tuples, not filenames).
+        Interactive behaviour is otherwise unchanged.
+        """
         parts = []
 
-        for filename in self.BOOTSTRAP_FILES:
+        for filename in MUTATION_POLICY.read_paths:
             file_path = self.workspace / filename
             if file_path.exists():
                 content = file_path.read_text(encoding="utf-8")
