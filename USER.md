@@ -21,7 +21,6 @@ One sentence each, imperative, dated, with the record that carries the
 rationale. When a preference changes, rewrite the active directive in place
 and move the old one to Superseded; never append a contradictory directive.
 
-- Never manufacture an event — a failure, a setback or a demand — to test a detector, to fill a quiet day or to film it. (2026-09-15; ADR-016 rules 1 and 4)
 - Never read channel comments, and never request comment, community or subscription scopes. (2026-09-15; ADR-015 rule 3, #1612)
 - Always attach a before/after measurement to an optimisation claim. (2026-09-15; goals.md Vector 1, ADR-016 rule 3)
 - Never touch `state/`, `systemd/`, `ops/` or any secret; those are the operator's to change. (2026-09-18; goals.md, #1720)
