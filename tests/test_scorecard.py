@@ -1896,3 +1896,62 @@ class TestFeedFreshness:
         assert len(rows) == 3
         tpis = [r["cost"]["tokens_per_integration"] for r in rows]
         assert tpis == [100.0, 101.0, 300.0]
+
+
+class TestLessonCitationOutcomesSection:
+    """#1666 phase 1 (last open box): the scorecard now reads
+    lesson_v2.correlate_citations_with_outcomes -- the reader #1505 built
+    and #1654 found had zero production callers. Bounded counts only, no
+    verdict, no new fitness target."""
+
+    def test_absent_state_dir_is_unavailable(self) -> None:
+        assert scorecard._lesson_citation_outcomes_section(None) == {"status": "unavailable"}
+
+    def test_missing_lesson_usage_dir_reports_status_not_a_bare_zero(self, tmp_path: Path) -> None:
+        """No state/lesson_usage/ at all -- correlate_citations_with_outcomes's
+        own read_citation_scans call reports this via read_citation_scans,
+        never as a silent zero-citation claim."""
+        result = scorecard._lesson_citation_outcomes_section(tmp_path)
+        assert result["status"] in ("unavailable", "empty")
+
+    def test_present_store_surfaces_bounded_counts(self, tmp_path: Path) -> None:
+        lesson_usage = tmp_path / "lesson_usage"
+        lesson_usage.mkdir(parents=True)
+        now = datetime.now(timezone.utc)
+        row = {
+            "ts": now.isoformat().replace("+00:00", "Z"),
+            "cycle_id": "cycle-abc123",
+            "lesson_ids": ["LESS-A"],
+        }
+        (lesson_usage / "scans.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir(parents=True)
+        outcome_row = {
+            "ts": now.isoformat().replace("+00:00", "Z"),
+            "phase": "outcome",
+            "cycle_id": "cycle-abc123",
+            "outcome": "success",
+        }
+        (ledger_dir / "cycles.jsonl").write_text(json.dumps(outcome_row) + "\n", encoding="utf-8")
+
+        result = scorecard._lesson_citation_outcomes_section(tmp_path)
+        assert result["status"] == "present"
+        assert result["distinct_cited_cycles"] == 1
+        assert result["cited_outcome_counts"] == {"success": 1}
+        # No verdict field of any kind -- evidence only.
+        assert "verdict" not in result
+        assert "should_retire" not in result
+
+    def test_read_error_is_unavailable_not_a_crash(self, tmp_path: Path, monkeypatch) -> None:
+        from nanobot.runtime import lesson_v2
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(lesson_v2, "correlate_citations_with_outcomes", _boom)
+        assert scorecard._lesson_citation_outcomes_section(tmp_path) == {"status": "unavailable"}
+
+    def test_compute_scorecard_includes_the_section(self, tmp_path: Path) -> None:
+        snap = scorecard.compute_scorecard(tmp_path, None, force=True)
+        assert "lesson_citations" in snap
+        assert snap["lesson_citations"]["status"] in ("present", "empty", "unavailable")

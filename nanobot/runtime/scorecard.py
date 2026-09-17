@@ -1167,6 +1167,25 @@ _FEEDS: tuple[tuple[str, str, bool, str | None, int], ...] = (
 )
 
 
+def _lesson_citation_outcomes_section(state_dir: Path | None) -> dict[str, Any]:
+    """#1666 phase 1 (last open box): reporting-only bounded read of
+    lesson_v2.correlate_citations_with_outcomes -- bounded counts only,
+    never a verdict. #1505 built the write path (record_citations) and
+    #1654 found it had zero production readers; this is the first one.
+    ADR-021 rule 1 forbids granting any trainer authority before
+    usefulness is measured, and a section that both measured and acted
+    would violate that the moment it existed -- so this only surfaces the
+    counts correlate_citations_with_outcomes already computes, unchanged."""
+    if state_dir is None:
+        return {"status": "unavailable"}
+    try:
+        from nanobot.runtime import lesson_v2
+
+        return lesson_v2.correlate_citations_with_outcomes(Path(state_dir))
+    except Exception:
+        return {"status": "unavailable"}
+
+
 def _knowledge_lift_section(state_dir: Path | None) -> dict[str, Any]:
     """#1093: Reporting-only summary of knowledge lift evaluations."""
     if state_dir is None:
@@ -1773,6 +1792,9 @@ def compute_scorecard(
             "bridge": _bridge_section(state_dir, rows),
             # #1093: reporting-only knowledge lift A/B summary (no fitness target)
             "knowledge_lift": _knowledge_lift_section(state_dir),
+            # #1666 phase 1: reporting-only lesson-citation/outcome correlation
+            # (bounded counts, no fitness target, no verdict)
+            "lesson_citations": _lesson_citation_outcomes_section(state_dir),
             # #865: visibility-only snapshot of active operator flags — never
             # fed into fitness/targets/gaps below.
             "control_plane": _control_plane_snapshot(state_dir),

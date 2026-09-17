@@ -55,6 +55,7 @@ from nanobot.runtime.lesson_v2 import (
     inline_related_slugs,
     keyword_set,
     problem_hash,
+    read_citation_scans,
     related_hint,
     set_jaccard,
     solution_is_meaningful,
@@ -2377,6 +2378,41 @@ def _stage_lesson_cards(state_dir: Path, cards: list[dict[str, Any]]) -> dict[st
     return entry
 
 
+def _cited_count_in_scans(state_dir: Path, lesson_id: str) -> "tuple[int | None, str]":
+    """Count of ``scans.jsonl`` rows citing *lesson_id* in the retained
+    window, and a status naming why not when unavailable.
+
+    Returns ``(None, status)`` when the store cannot be trusted as real
+    evidence -- the caller must treat that as "cannot cross-check", never
+    as a count of zero: an absent store is not evidence the lesson was
+    never cited, only that this reader cannot say. Never raises -- fails
+    to ``(None, "unavailable")``.
+
+    :func:`read_citation_scans` reports ``"empty"`` for a ``lesson_usage``
+    directory that was never created at all (#1516/#1546's own
+    documented behavior -- the same "no data is not zero" trap
+    :func:`lesson_v2.lesson_zero_citation_census` already guards against
+    with this exact directory check), so a bare status-string check would
+    silently read "never scanned" as "confirmed zero citations". Checking
+    directory existence first is required, not optional.
+    """
+    try:
+        if not (Path(state_dir) / "lesson_usage").is_dir():
+            return None, "missing"
+        scans = read_citation_scans(state_dir)
+        status = str(scans.get("status") or "unavailable")
+        if status not in ("present", "empty"):
+            return None, status
+        count = 0
+        for row in scans.get("rows") or []:
+            ids = row.get("lesson_ids")
+            if isinstance(ids, list) and lesson_id in {str(x) for x in ids}:
+                count += 1
+        return count, status
+    except Exception:
+        return None, "unavailable"
+
+
 def apply_staged_lesson_cards(repo_root: Path, payload: Any, *, state_dir: Path | None = None) -> list[str]:
     """Merge staged v2 cards into ``<repo_root>/lessons/lessons.yaml`` (#1209).
 
@@ -2416,6 +2452,29 @@ def apply_staged_lesson_cards(repo_root: Path, payload: Any, *, state_dir: Path 
             _write_decision(
                 resolved_state_dir, card_id, "mint_declined",
                 "citation_invalid: " + "; ".join(citation_violations), LESSONS_REL,
+            )
+            continue
+        # ADR-021 phase 1's owed follow-up: cross-check the citation's
+        # claimed retrieval_count against what state/lesson_usage/scans.jsonl
+        # actually shows. A store that's present/empty is real evidence to
+        # check against; a store that's absent/unavailable is not evidence
+        # of anything and must never fail the citation closed -- accept on
+        # schema alone, but record that the cross-check itself was skipped
+        # so the gap stays visible rather than silently glossed over.
+        citation = card.get("citation") or {}
+        claimed_retrieval_count = citation.get("retrieval_count") if isinstance(citation, dict) else None
+        cited_count, scan_status = _cited_count_in_scans(resolved_state_dir, card_id)
+        if cited_count is None:
+            _write_decision(
+                resolved_state_dir, card_id, "citation_crosscheck_skipped",
+                f"state/lesson_usage/scans.jsonl status={scan_status}; "
+                "accepted on citation schema alone", LESSONS_REL,
+            )
+        elif isinstance(claimed_retrieval_count, int) and claimed_retrieval_count > cited_count:
+            _write_decision(
+                resolved_state_dir, card_id, "mint_declined",
+                f"citation_overstated: claimed retrieval_count={claimed_retrieval_count} "
+                f"exceeds scans.jsonl's actual cited count={cited_count} for this id", LESSONS_REL,
             )
             continue
         prior = next((e for e in existing if str(e.get("id") or "") == card_id), None)
