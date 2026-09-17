@@ -536,6 +536,9 @@ def _changed_files_and_violations(repo_root: 'Path', base_sha: str) -> 'tuple[li
     # #1342: skill layout/frontmatter/duplicate hygiene — same hard-block list as
     # the surface violations, so a malformed or duplicate skill never integrates.
     mutation = mutation + _gate._skill_hygiene_violations(repo_root, base_sha, files_changed)
+    # ADR-022: AGENTS.md is commit-permitted only as repository layout — the
+    # staged HEAD must stay within the policy's line and heading bounds.
+    mutation = mutation + _gate._agents_md_scope_violations(repo_root, files_changed)
     return files_changed, blocked, mutation, tier
 
 
@@ -4676,10 +4679,10 @@ _BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token'})
 _SENSITIVE_WORDS = _BLOCKED_WORD_PATTERNS
 _ALLOWED_SENSITIVE_BASENAMES = frozenset({'token_report.py', 'summarize_token_costs.py', 'token_budget_check.py', 'analyze_token_usage.py', 'check_token_budget.py', 'validate_no_secrets.py', 'count_tokens.py'})
 _BLOCKED_EXACT_PATHS = frozenset({
-    'goals.md', 'IDENTITY.md', 'agents_md_consolidate.py',
+    'goals.md', 'IDENTITY.md', 'SOUL.md', 'USER.md', 'OPERATING.md', 'agents_md_consolidate.py',
 })
 _ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/', 'skills/')
-_ALLOWED_EXACT_PATHS = frozenset()
+_ALLOWED_EXACT_PATHS = frozenset({'AGENTS.md'})
 _GATE_EXT_ALLOWLIST = frozenset(('.py', '.md', '.json', '.yaml', '.yml', '.toml', '.txt', '.sh', '.service', '.timer', '.conf', '.cron', '.html', '.css', '.ts', '.js', '.example'))
 _GATE_BASENAME_ALLOWLIST = frozenset(('Makefile', 'Dockerfile'))
 _RUNTIME_SLICE_ENV = 'SELFEVO_RUNTIME_SLICE'
@@ -4728,9 +4731,6 @@ def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
         fname = f.rsplit('/', 1)[-1] if '/' in f else f
         if fname in _BLOCKED_EXACT_PATHS or f in _BLOCKED_EXACT_PATHS:
             violations.append(f'immutable file blocked from mutation: {f}')
-            continue
-        if f == 'AGENTS.md':
-            violations.append(f'operator_owned_path: {f}')
             continue
         if f in _ALLOWED_EXACT_PATHS:
             continue

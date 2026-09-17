@@ -976,12 +976,19 @@ class TestValidateSizing:
         assert ok is False
         assert "immutable" in reason
 
-    def test_rejects_operator_owned_agents_and_accepts_skill_surface(self):
+    def test_accepts_root_agents_exact_path_and_skill_surface(self):
+        # ADR-022: AGENTS.md is a commit-permitted exact path (repository
+        # layout only; the gate bounds the staged content).
         ok, reason = llm_proposer.validate_sizing(self._good(target_path="AGENTS.md"))
-        assert ok is False
-        assert reason == "operator_owned_path"
+        assert ok is True, reason
         ok, reason = llm_proposer.validate_sizing(self._good(target_path="skills/review/SKILL.md"))
         assert ok is True, reason
+
+    def test_rejects_release_owned_ontology_files(self):
+        for name in ("SOUL.md", "USER.md", "OPERATING.md", "docs/OPERATING.md"):
+            ok, reason = llm_proposer.validate_sizing(self._good(target_path=name))
+            assert ok is False, name
+            assert "immutable" in reason, name
 
     def test_nested_agents_is_not_root_exact_allowance(self):
         ok, reason = llm_proposer.validate_sizing(self._good(target_path="other/AGENTS.md"))
