@@ -134,27 +134,24 @@ def test_1727_repair_turn_also_produces_single_concrete_task_heading(tmp_path):
     assert "## Repair context" in prompt
 
 
-def test_iteration_and_skip_contract_are_explicit():
+def test_iteration_and_skip_contract_moved_to_operating_md():
+    """#1723(b): the explicit iteration-count / skip / verification /
+    bookkeeping-commit instructions moved to OPERATING.md's Iteration budget,
+    Before editing: skip check, and Verification sections (release root,
+    loaded into the system prompt by the loop-profile loader, #1725).
+    build_task keeps only the one-line pointer -- and, since OPERATING.md
+    is a static file, the pytest-presence fallback branch this literal used
+    to switch on no longer exists in build_task at all."""
     req = {"task_title": "x", "request_id": "r", "cycle_id": "c", "goal_id": "g"}
     prompt = build_task(req, "derived", "", max_iterations=23)
-    assert "23 tool iterations" in prompt
-    assert 'outcome: "skipped"' in prompt
-    assert "pick next priority from memory/MEMORY.md" not in prompt
-    assert "bookkeeping-only commits" in prompt
-    assert "python3 -m pytest <affected test file>" in prompt
-    assert "pytest is installed; run the tests you touch" in prompt
-    assert "pytest is not installed" not in prompt
-
-
-def test_task_prompt_uses_import_fallback_when_pytest_is_absent(monkeypatch):
-    monkeypatch.setattr(
-        "nanobot.runtime.bridge.importlib.util.find_spec",
-        lambda name: None if name == "pytest" else object(),
-    )
-    req = {"task_title": "x", "request_id": "r", "cycle_id": "c", "goal_id": "g"}
-    prompt = build_task(req, "derived", "")
-    assert "pytest is not installed — use python3 -c imports as smoke tests" in prompt
+    # The budget NUMBER stays: it is per-cycle data OPERATING.md can only
+    # point at ("given in the runtime context"), so build_task must still
+    # state it or the executor never learns its limit.
+    assert "Iteration budget this cycle: 23 tool iterations." in prompt
+    assert 'outcome: "skipped"' not in prompt
+    assert "bookkeeping-only commits" not in prompt
     assert "python3 -m pytest <affected test file>" not in prompt
+    assert "Rules: see OPERATING.md in your system prompt." in prompt
 
 
 def test_system_mission_pointer_does_not_duplicate_charter():

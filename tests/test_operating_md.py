@@ -126,3 +126,24 @@ def test_no_identity_values_or_charter_prose():
 def test_file_states_it_is_release_owned_and_not_committed_by_the_loop():
     text = _read()
     assert "release-owned" in text.lower()
+
+
+def test_json_contract_reaches_loop_profile_prompt_but_not_build_task(tmp_path: Path):
+    """#1723(b): once OPERATING.md is loaded into the system prompt (#1725),
+    build_task must not repeat the JSON contract as a literal -- it appears
+    exactly once, sourced from OPERATING.md, in the assembled loop-profile
+    system prompt."""
+    from nanobot.agent.context import ContextBuilder
+    from nanobot.runtime.bridge import build_task
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "AGENTS.md").write_text("# Instance AGENTS.md\n\nRepo layout.", encoding="utf-8")
+    prompt = ContextBuilder(workspace, release_root=RELEASE_ROOT).build_system_prompt(loop_profile=True)
+    assert prompt.count('"concrete_next_action"') == 1
+
+    req = {"task_title": "x", "request_id": "r", "cycle_id": "c", "goal_id": "g"}
+    task_prompt = build_task(req, "goal", "")
+    assert '"concrete_next_action"' not in task_prompt
+    assert '"action_taken"' not in task_prompt
+    assert "Rules: see OPERATING.md in your system prompt." in task_prompt
