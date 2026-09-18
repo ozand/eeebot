@@ -89,7 +89,34 @@ class ContextBuilder:
         Path(MUTATION_POLICY.read_paths[0]).stem.lower() if MUTATION_POLICY.read_paths else "bootstrap"
     )
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
-    MAX_SYSTEM_PROMPT_CHARS = 24000
+    # #1753: stated in tokens, enforced in chars (ADR-022 decision 7 — cite,
+    # don't restate). Derivation, measured on host eeepc 2026-09-15..18 over
+    # 2,876 executor llm_calls rows (closed #1754):
+    #   window                  98,304 tokens (the serving model's context;
+    #                           NOT AgentDefaults.context_window_tokens,
+    #                           whose 65,536 default is unrelated here).
+    #   completion ceiling       8,192 tokens, exact on every one of the
+    #                           2,876 calls, never above — the LiteLLM route
+    #                           sets no max_tokens, so the CLIENT's value
+    #                           passes through unchanged (nanobot.config.
+    #                           schema.AgentDefaults.max_tokens = 8192).
+    #                           The ceiling is `prompt + 8,192`, NOT the
+    #                           route's 32,768 — a change to that client
+    #                           default is a change to this ceiling.
+    #   observed max             prompt_tokens max 79,804; prompt+completion
+    #                           max 83,836 (the two maxima do not fall on the
+    #                           same call); headroom today 14,468 tokens
+    #                           against the 98,304 window.
+    #   ratio                   ~3.5 chars/token for this corpus (estimate,
+    #                           corroborated by the 7,099-token turn-1
+    #                           minimum; re-derive from `llm_calls.
+    #                           system_prompt_chars` once that column, added
+    #                           by #1729/PR #1743, is populated).
+    # A prefix grown from ~6,100 to ~10,000 tokens (35,000 chars / 3.5) adds
+    # ~3,900 tokens to the observed prompt+completion max: ~87,700 tokens
+    # used, ~10,600 headroom against the 98,304 window — comfortable, not a
+    # change to the worst case the loop already runs.
+    MAX_SYSTEM_PROMPT_CHARS = 35000
     #: Operator override of the cap (positive int). The cap is legitimate;
     #: the budget is the operator's to set, never the builder's to enforce by
     #: silently choosing which instructions survive.

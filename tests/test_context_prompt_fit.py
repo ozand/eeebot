@@ -223,6 +223,77 @@ def test_droppable_reserve_chars_is_zero_after_exhaustion(tmp_path, monkeypatch)
     assert builder.last_fit["droppable_reserve_chars"] == 0, "the record left for the caller matches the exception, even on failure"
 
 
+def _sized(heading: str, cap: int) -> str:
+    """A ``## heading`` section body padded to exactly *cap* chars."""
+    prefix = f"## {heading}\n\n"
+    body = "x" * max(0, cap - len(prefix))
+    return (prefix + body)[:cap]
+
+
+def _loop_builder_at_declared_caps(tmp_path, *, catalogue_lines: int = 40) -> ContextBuilder:
+    """#1753: every fixed-cap block sized to exactly its OWN declared cap —
+    the worst case the per-block caps allow, independent of any literal
+    restated here. Bypasses per-file loading the same way :func:`_loop_builder`
+    does; only the generic fit/reserve arithmetic is under test."""
+    builder = ContextBuilder(tmp_path)
+    release_caps = dict(ContextBuilder._RELEASE_BLOCK_CAPS)
+
+    def _stub_ontology_blocks():
+        sections = [
+            ("identity", _sized("IDENTITY.md", release_caps["IDENTITY.md"])),
+            ("soul", _sized("SOUL.md", release_caps["SOUL.md"])),
+            ("goals", _sized("goals.md", release_caps["goals.md"])),
+            ("user", _sized("USER.md", release_caps["USER.md"])),
+            ("operating", _sized("OPERATING.md", release_caps["OPERATING.md"])),
+            ("agents", _sized("AGENTS.md", ContextBuilder._WORKSPACE_BLOCK_CAP)),
+        ]
+        return sections, [], []
+
+    builder._load_ontology_blocks = _stub_ontology_blocks
+    # Trimmed to _RUNTIME_BLOCK_CAP by build_system_prompt itself (_trim_lines
+    # call) regardless of what this returns -- feeding something at least that
+    # long models the worst case without duplicating the cap value here.
+    builder._get_identity = lambda loop_profile=False: "## Runtime\n" + ("r" * ContextBuilder._RUNTIME_BLOCK_CAP)
+    builder.skills.get_always_skills = lambda: []
+    builder.skills.load_skills_for_context = lambda names: ""
+    builder.skills.build_skills_summary = lambda excluded_names=None, compact=False: (
+        "<skills>\n" + "  <skill><name>s</name></skill>\n" * catalogue_lines + "</skills>"
+    )
+    builder.memory.get_memory_context = lambda *, loop=False, max_chars=4000: (
+        "## Long-term Memory\n" + ("m" * (ContextBuilder._MEMORY_BLOCK_CAP - len("## Long-term Memory\n")))
+    )
+    return builder
+
+
+def test_worst_case_every_block_at_its_declared_cap_still_fits_with_reserve(tmp_path):
+    """#1753: the real default cap, not a monkeypatched test value. Every
+    fixed-size block simultaneously at its own maximum declared size must
+    still fit — no SystemPromptOverflowError -- and leave real headroom
+    (``MAX_SYSTEM_PROMPT_CHARS - chars``, derived from the constant, never a
+    second literal) of at least 3,000 chars, so a block that grows past its
+    typical size degrades instead of raising."""
+    builder = _loop_builder_at_declared_caps(tmp_path)
+    prompt = builder.build_system_prompt(loop_profile=True)
+
+    assert len(prompt) <= ContextBuilder.MAX_SYSTEM_PROMPT_CHARS
+    assert builder.last_fit["dropped"] == [], "every block fits at its own cap without needing to drop anything"
+    reserve = ContextBuilder.MAX_SYSTEM_PROMPT_CHARS - len(prompt)
+    assert reserve >= 3_000, f"only {reserve} chars of headroom left under the worst case"
+
+
+def test_overflow_still_raises_at_the_new_cap_rather_than_silently_trimming(tmp_path):
+    """#1753 must not have quietly disabled the overflow contract by simply
+    making the cap big enough that nothing ever hits it: content that
+    exceeds even the new, larger default cap must still raise
+    SystemPromptOverflowError, never silently trim a critical section."""
+    huge = _section("Working knowledge", 4000)  # far larger than any single declared cap
+    builder = _loop_builder(tmp_path, huge)
+    with pytest.raises(SystemPromptOverflowError) as info:
+        builder.build_system_prompt(loop_profile=True)
+    assert info.value.cap == ContextBuilder.MAX_SYSTEM_PROMPT_CHARS
+    assert info.value.over_by > 0
+
+
 def test_subagent_prompt_is_strict_and_exposes_the_fit(tmp_path, monkeypatch):
     from nanobot.agent import subagent as subagent_module
 
