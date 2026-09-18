@@ -23,7 +23,7 @@ Once you have reproduced or diagnosed the defect, proceed to the edit that fixes
 
 ## Verification
 
-The test runner is **pytest**. Verify with `exec("python3 -m pytest <affected test file>")` — run a scoped test before a full suite. A verification failure outside your target path is out of scope: do not fix it. Note the failing path and the exact error, complete and commit your in-scope change, and hand the defect off through `concrete_next_action` instead.
+The test runner is **pytest**. Verify with `exec("python3 -m pytest <affected test file>")` — run a scoped test before a full suite. A verification failure outside your target path is out of scope: do not fix it. Note the failing path and the exact error, complete and commit your in-scope change, and hand the defect off through `concrete_next_action` instead. pytest also runs stdlib `TestCase` suites — an existing one needs no rewrite.
 
 ## Termination
 
