@@ -97,6 +97,8 @@ Six things decided together, all implemented in PR #1731:
 
 **This is already implemented, in PR #1731.** It reverses #1188/#1193, which closed the `AGENTS.md` write path entirely after 20 autonomous integrations in five days whose only substantive change was appending to it. The reversal is safe here because the bound moved from "no write access" to "write access scoped and checked by the harness gate, not by a test the loop itself can edit" — the runtime rules the loop used to accumulate in `AGENTS.md` now live in the release-owned `OPERATING.md`, outside its reach. **This decision supersedes ADR-003 in part**, on the single point of whether the loop may commit `AGENTS.md` at all; ADR-003's consolidation tool, operator ownership of removal, and every other clause are unaffected. See the note added under ADR-003's Status section.
 
+**A bound introduced over existing content ships with either a migration commit or a ratchet clause (#1750).** PR #1731's absolute bound (`agents_md_max_lines`, the nine forbidden headings) was applied on the day the live instance `AGENTS.md` already violated it at 192 lines with all nine headings present. Checked only against the staged version at `HEAD`, the rule then rejected *every* commit that touched the file — including one that strictly improved it — because the only commit able to pass was a single atomic rewrite to full compliance, unlikely to fit inside one bounded executor turn. The file was frozen in its non-compliant state by the rule meant to make it compliant: **a bound that rejects the repair of the state it is diagnosing is a freeze, not a guard.** #1750 turns the check into a ratchet — reads the version at the gate's base sha alongside `HEAD`; while the base version is non-compliant, a staged version is accepted iff it does not regress (line count does not increase, no forbidden heading absent from the base version is reintroduced) rather than only when it reaches full compliance outright. Once the base version is itself compliant, the absolute bound applies exactly as before. The same trap recurs on any future bound tightened over content the tightening itself does not touch; the fix each time is the same shape — a migration commit that brings existing content into compliance in the same change that introduces the bound, or (when that commit cannot be guaranteed to land atomically, as here) a ratchet against the prior state instead of the absolute target.
+
 # Consequences
 
 ## What gets easier
@@ -152,6 +154,7 @@ All four items live in `tests/test_prompt_ontology.py` (#1726), which does not e
 - #1728 — `lessons_context` threshold.
 - #1729 — `roles/*.md`.
 - #1730 — operator priorities: instance `AGENTS.md` shrink, skills catalogue, droppable reserve.
+- #1750 — the `AGENTS.md` scope bound becomes a ratchet against the gate's base sha once `HEAD` is already non-compliant.
 - `ozand/eeebot-ops-dashboard#301` — `agent.html` rebuilt by this ontology.
 - PR #1731 — decision 6, already merged in code: `AGENTS.md` scope bound, `SOUL.md`/`USER.md`/`OPERATING.md` join the immutable-files list, `ops/` named in the rendered surface block.
 - ADR-003 — superseded in part by this record (AGENTS.md commit permission); its consolidation tool and operator-removal authority stand.

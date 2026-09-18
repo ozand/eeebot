@@ -132,14 +132,22 @@ class MutationPolicy:
         self.validate()
         return ", ".join(self.forbidden_dirs + self.immutable_files)
 
-    def agents_md_scope_violations(self, text: str) -> list[str]:
-        """Return why a staged ``AGENTS.md`` text is out of scope, or ``[]``.
+    def _agents_md_present_headings(self, text: str) -> set[str]:
+        """The subset of ``agents_md_runtime_headings`` present in *text*,
+        matched the same way as :meth:`_agents_md_absolute_violations`
+        (exact heading, or the heading with a parenthetical qualifier)."""
+        present: set[str] = set()
+        for line in text.splitlines():
+            stripped = line.strip()
+            for heading in self.agents_md_runtime_headings:
+                if stripped == heading or stripped.startswith(heading + " ("):
+                    present.add(heading)
+                    break
+        return present
 
-        The loop may commit ``AGENTS.md`` only as repository layout (ADR-022):
-        at most ``agents_md_max_lines`` lines and none of the runtime-rule
-        headings, which live in the release-owned ``OPERATING.md``.
-        """
-        self.validate()
+    def _agents_md_absolute_violations(self, text: str) -> list[str]:
+        """The bound applied to *text* on its own: at most
+        ``agents_md_max_lines`` lines, none of the runtime-rule headings."""
         lines = text.splitlines()
         violations: list[str] = []
         if len(lines) > self.agents_md_max_lines:
@@ -156,6 +164,59 @@ class MutationPolicy:
                         f"agents_md_scope: runtime heading belongs to OPERATING.md: {stripped}"
                     )
                     break
+        return violations
+
+    def agents_md_scope_violations(self, text: str, *, old_text: str | None = None) -> list[str]:
+        """Return why a staged ``AGENTS.md`` text is out of scope, or ``[]``.
+
+        The loop may commit ``AGENTS.md`` only as repository layout (ADR-022):
+        at most ``agents_md_max_lines`` lines and none of the runtime-rule
+        headings, which live in the release-owned ``OPERATING.md``.
+
+        #1750: when the bound was introduced, the live instance file already
+        violated it (192 lines, all nine headings) — the staged-only absolute
+        check then rejected *every* commit that touched the file, including
+        one that strictly improved it, freezing it in its non-compliant
+        state. ``old_text`` (the version at the gate's base sha, ``None`` when
+        there is none — a brand-new file, or the caller not passing it at
+        all) makes this a ratchet:
+
+        - ``old_text`` omitted, or the old version is itself compliant: the
+          absolute bound applies to *text* exactly as before #1750 — this
+          keeps the single-argument entry point (#1726's harness, and every
+          existing caller) working unchanged.
+        - ``old_text`` given and non-compliant: *text* is accepted iff it
+          does not regress on either axis — ``lines(text) <= lines(old_text)``
+          AND no forbidden heading present in *text* is absent from
+          ``old_text`` (no heading may be reintroduced once removed). A
+          regression is reported naming which axis moved the wrong way and
+          by how much, never a bare repeat of the absolute-bound message.
+        """
+        self.validate()
+        if old_text is None:
+            return self._agents_md_absolute_violations(text)
+        old_violations = self._agents_md_absolute_violations(old_text)
+        if not old_violations:
+            # HEAD was already compliant -- the absolute bound applies
+            # exactly as it does with no ratchet baseline at all.
+            return self._agents_md_absolute_violations(text)
+
+        violations: list[str] = []
+        lines_new = len(text.splitlines())
+        lines_old = len(old_text.splitlines())
+        if lines_new > lines_old:
+            violations.append(
+                f"agents_md_scope: lines regressed from {lines_old} to {lines_new} "
+                f"(ratchet requires <= {lines_old} while AGENTS.md is over "
+                f"{self.agents_md_max_lines})"
+            )
+        headings_old = self._agents_md_present_headings(old_text)
+        headings_new = self._agents_md_present_headings(text)
+        reintroduced = sorted(headings_new - headings_old)
+        for heading in reintroduced:
+            violations.append(
+                f"agents_md_scope: reintroduced forbidden heading absent from HEAD: {heading}"
+            )
         return violations
 
     def validate_rendered_surfaces(self, rendered: str) -> None:

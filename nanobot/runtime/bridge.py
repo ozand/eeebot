@@ -573,8 +573,9 @@ def _changed_files_and_violations(repo_root: 'Path', base_sha: str) -> 'tuple[li
     # the surface violations, so a malformed or duplicate skill never integrates.
     mutation = mutation + _gate._skill_hygiene_violations(repo_root, base_sha, files_changed)
     # ADR-022: AGENTS.md is commit-permitted only as repository layout — the
-    # staged HEAD must stay within the policy's line and heading bounds.
-    mutation = mutation + _gate._agents_md_scope_violations(repo_root, files_changed)
+    # staged HEAD must stay within the policy's line and heading bounds
+    # (#1750: a ratchet against base_sha once HEAD is already non-compliant).
+    mutation = mutation + _gate._agents_md_scope_violations(repo_root, base_sha, files_changed)
     return files_changed, blocked, mutation, tier
 
 
