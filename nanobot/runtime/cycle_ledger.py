@@ -257,6 +257,7 @@ def record_cycle_outcome(
     prompt_fit_rung: str | None = None,
     change_shape: str | None = None,
     main_sha_before: str | None = None,
+    real_result: dict | None = None,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
 
@@ -297,6 +298,20 @@ def record_cycle_outcome(
     whether ``origin/main`` moved (-> ``superseded``) or is unchanged
     (-> safe to redo the push -> ``pushed_late``) without re-deriving it.
     Omitted by every other caller — byte-identical row shape otherwise.
+
+    #1748: ``real_result`` (keyword-only, additive) carries the five inputs
+    ``bridge._is_real_result`` reads from a result artifact
+    (``result_status``, ``status``, ``terminal_reason``, ``materialized_from``,
+    a derived ``blocker_reason``) plus the derived ``is_real_result`` boolean
+    — see ``bridge._real_result_ledger_inputs``, which computes this from the
+    same values the caller already has rather than re-reading the artifact.
+    Written as a nested ``real_result`` dict only when given (never partial —
+    the caller always supplies every key); omitted entirely by any caller
+    that does not pass it, exactly like ``lesson_candidate`` above. Result
+    artifacts are pruned within ~29 days; this row is the only place this
+    question stays answerable afterward, and backfill for rows written
+    before this change is not possible (the artifacts they'd need are
+    already gone for the oldest of them).
     """
     if outcome not in VALID_OUTCOMES:
         outcome = "failed"
@@ -332,6 +347,15 @@ def record_cycle_outcome(
         row["change_shape"] = change_shape
     if main_sha_before:
         row["main_sha_before"] = str(main_sha_before)
+    if isinstance(real_result, dict) and real_result:
+        row["real_result"] = {
+            "result_status": real_result.get("result_status"),
+            "status": real_result.get("status"),
+            "terminal_reason": real_result.get("terminal_reason"),
+            "materialized_from": real_result.get("materialized_from"),
+            "blocker_reason": real_result.get("blocker_reason"),
+            "is_real_result": bool(real_result.get("is_real_result")),
+        }
     if files_changed is not None:
         try:
             from nanobot.runtime.demand import classify_change_tier

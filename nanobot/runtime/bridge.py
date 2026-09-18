@@ -205,6 +205,52 @@ def _is_real_result(result: dict) -> bool:
     return True
 
 
+def _real_result_ledger_inputs(
+    result_status: str,
+    *,
+    terminal_reason: str | None = None,
+    materialized_from: str = 'bridge_llm_execution',
+    blocker: dict | None = None,
+) -> dict:
+    """#1748: the same five inputs :func:`_is_real_result` reads from a result
+    artifact (``result_status``, ``status``, ``terminal_reason``,
+    ``materialized_from``, ``blocker.reason``), computed here from the values
+    a bridge call site already has -- not a second read of the artifact just
+    written -- and returned with the derived boolean for
+    ``cycle_ledger.record_cycle_outcome``. Every artifact this module writes
+    (:func:`_write_bridge_completed_result`) hardcodes
+    ``materialized_from='bridge_llm_execution'`` and never sets
+    ``terminal_reason``/``blocker`` -- those belong to the decommissioned
+    queued_request_terminalizer stub writer (see docs/changes/
+    641-remove-pi-dev-executor) -- recorded anyway (as ``None``) so the row
+    states every input the criterion reads, not just the ones a live writer
+    happens to set today.
+
+    Result artifacts are pruned within ~29 days; the ledger keeps this row
+    for the retention window instead, so "was this a real failure or a
+    blocked stub" stays answerable after the artifact is gone. Recording
+    only the derived boolean would make that unanswerable again the moment
+    the criterion changes -- the boolean is written ALONGSIDE the inputs it
+    was computed from, never in place of them.
+    """
+    candidate = {
+        'result_status': result_status,
+        'status': result_status,
+        'terminal_reason': terminal_reason,
+        'materialized_from': materialized_from,
+        'blocker': blocker or {},
+    }
+    blocker_reason = (blocker or {}).get('reason') if isinstance(blocker, dict) else None
+    return {
+        'result_status': result_status,
+        'status': result_status,
+        'terminal_reason': terminal_reason,
+        'materialized_from': materialized_from,
+        'blocker_reason': blocker_reason,
+        'is_real_result': _is_real_result(candidate),
+    }
+
+
 # #1040: Module-level cache of parsed result entries keyed by results_dir_str
 # to avoid repeated scandir passes across bridge invocation stages.
 _RESULT_ENTRIES_CACHE: dict[str, list[tuple[Path, dict, float]]] = {}
@@ -2739,6 +2785,7 @@ async def _main_impl_body():
                 record_cycle_outcome(
                     STATE_DIR, _cycle_id, 'failed', fail_reason, [], None,
                     verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                    real_result=_real_result_ledger_inputs('blocked'),
                 )
                 # #721: no cycle branch exists yet on this path — tag at current HEAD.
                 _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'failed')
@@ -2849,6 +2896,7 @@ async def _main_impl_body():
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done_tag', [], None,
                 verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                real_result=_real_result_ledger_inputs('already_done'),
             )
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-already-done')
             # #733: bulk-skip — bookkeeping done for this duplicate; move on to
@@ -2930,6 +2978,7 @@ async def _main_impl_body():
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'skipped-duplicate', 'recent_duplicate_failure', [], None,
                 verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                real_result=_real_result_ledger_inputs('blocked'),
             )
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-recent-failure')
@@ -3000,6 +3049,7 @@ async def _main_impl_body():
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'skipped-duplicate', 'existence_index_duplicate', [], None,
                 verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                real_result=_real_result_ledger_inputs('blocked'),
             )
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-existence-duplicate')
@@ -3114,6 +3164,7 @@ async def _main_impl_body():
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'failed', _cycle_setup['reason'], [], cycle_branch,
                 verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                real_result=_real_result_ledger_inputs('blocked'),
             )
             # #721: cycle branch setup itself failed — tag at main_sha_before
             # (may be '' if even the pre-checkout rev-parse failed; _tag_cycle_post
@@ -4445,6 +4496,7 @@ async def _main_impl_body():
         # merged against — _finish_pending_pushes reads this back to tell
         # "origin/main unchanged" (safe to redo) from "moved" (superseded).
         main_sha_before=(main_sha_before if _cycle_outcome == 'push_pending' else None),
+        real_result=_real_result_ledger_inputs(_bridge_status),
     )
     # #721: post-cycle tag at the terminal HEAD, same outcome value as the
     # ledger row above. Integrated -> main_sha_after (shared checkout stayed on

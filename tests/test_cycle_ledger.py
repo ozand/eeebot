@@ -199,6 +199,39 @@ class TestTypedHelpers:
         rows = _read_ledger(tmp_path)
         assert rows[0]["outcome"] == outcome
 
+    # ─── #1748: real_result carries bridge._is_real_result's own inputs ───
+
+    def test_record_cycle_outcome_without_real_result_omits_the_key(self, tmp_path):
+        """Every pre-#1748 call site keeps working byte-identically: omitting
+        ``real_result`` means the row carries no ``real_result`` key at all."""
+        cycle_ledger.record_cycle_outcome(tmp_path, "c1", "success", None, ["a.py"], "selfevo/cycle-1")
+        rows = _read_ledger(tmp_path)
+        assert "real_result" not in rows[0]
+
+    def test_record_cycle_outcome_real_result_carries_inputs_plus_boolean(self, tmp_path):
+        """The boolean is written ALONGSIDE the inputs, never in place of
+        them — a derived flag cannot be re-derived under a changed criterion."""
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c1", "failed", "recent_duplicate_failure", [], None,
+            real_result={
+                "result_status": "blocked",
+                "status": "blocked",
+                "terminal_reason": None,
+                "materialized_from": "bridge_llm_execution",
+                "blocker_reason": None,
+                "is_real_result": False,
+            },
+        )
+        row = _read_ledger(tmp_path)[0]["real_result"]
+        assert row == {
+            "result_status": "blocked",
+            "status": "blocked",
+            "terminal_reason": None,
+            "materialized_from": "bridge_llm_execution",
+            "blocker_reason": None,
+            "is_real_result": False,
+        }
+
     # ─── #1118: verdict is a NEW, purely additive, keyword-only field ─────
 
     def test_record_cycle_outcome_lesson_candidate_without_refusal_omits_reason(self, tmp_path):
