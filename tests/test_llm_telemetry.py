@@ -138,3 +138,49 @@ def test_record_llm_call_is_best_effort_on_bad_usage_shape(tmp_path, monkeypatch
 
     # usage is not a dict-like object at all -> .get() would raise AttributeError.
     record_llm_call(model="m", duration_ms=1.0, usage="not-a-dict", finish_reason="stop", retries=0)  # type: ignore[arg-type]
+
+
+# ─── #1755: context_window is written straight through, never guessed ──────
+
+
+def test_record_llm_call_carries_context_window_for_a_known_model(tmp_path, monkeypatch):
+    """The caller resolved a real window (e.g. via
+    nanobot.providers.model_window.resolve_context_window) -- it lands in the
+    row unchanged."""
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+
+    record_llm_call(
+        model="un/qwen3.8-27b-gguf", duration_ms=1.0, usage={}, finish_reason="stop",
+        retries=0, context_window=98304,
+    )
+
+    rec = _read_jsonl(next(tmp_path.glob("*.jsonl")))[0]
+    assert rec["context_window"] == 98304
+
+
+def test_record_llm_call_defaults_context_window_to_none(tmp_path, monkeypatch):
+    """A model whose window is unknown writes null, never a guess (e.g. never
+    falling back to AgentDefaults.context_window_tokens) -- the default value
+    of the parameter itself is None, and None round-trips as JSON null."""
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+
+    record_llm_call(model="unknown-model", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
+
+    rec = _read_jsonl(next(tmp_path.glob("*.jsonl")))[0]
+    assert "context_window" in rec
+    assert rec["context_window"] is None
+
+
+def test_record_llm_call_context_window_survives_a_registry_error(tmp_path, monkeypatch):
+    """A caller whose window-resolution failed (network error, non-200,
+    model absent from the registry response) passes context_window=None
+    explicitly -- the row is still written, with null, not dropped."""
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+
+    record_llm_call(
+        model="un/qwen3.8-27b-gguf", duration_ms=1.0, usage={}, finish_reason="stop",
+        retries=0, context_window=None,
+    )
+
+    rec = _read_jsonl(next(tmp_path.glob("*.jsonl")))[0]
+    assert rec["context_window"] is None

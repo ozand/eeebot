@@ -21,6 +21,7 @@ from nanobot.observability.llm_telemetry import (
     record_llm_call,
     record_llm_prompt,
 )
+from nanobot.providers.model_window import resolve_context_window
 from nanobot.runtime.model_registry import resolve_model
 
 _MAX_CYCLES = 3
@@ -538,7 +539,8 @@ def _default_llm(messages: list[dict[str, str]], model: str, cycle_id: str) -> s
     usage = {key: int(getattr(usage_obj, key, 0) or 0) for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
     with call_context(cycle_id, "reflector"):
         record_llm_call(model=model, duration_ms=(time.monotonic() - started) * 1000, usage=usage, finish_reason=getattr(choice, "finish_reason", ""), retries=0,
-                        system_prompt_chars=system_chars(messages))
+                        system_prompt_chars=system_chars(messages),
+                        context_window=resolve_context_window(model, base_url, api_key=api_key))
         record_llm_prompt(messages=messages, content=content, reasoning_content=None, finish_reason=getattr(choice, "finish_reason", ""), model=model, prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"])
     return content
 

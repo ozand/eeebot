@@ -133,6 +133,7 @@ def record_llm_call(
     retries: int,
     served_model: str | None = None,
     system_prompt_chars: int | None = None,
+    context_window: int | None = None,
 ) -> None:
     """Append one JSONL line describing an LLM call. Best-effort — never raises.
 
@@ -147,6 +148,12 @@ def record_llm_call(
     caller actually sent, measured from the built string -- never from the
     ``prompts/`` payload, which is capped well below a full prompt. ``None``
     when the caller did not measure it.
+
+    ``context_window`` (#1755) is the route's max input tokens, resolved by
+    the caller (typically via ``nanobot.providers.model_window.resolve_context_window``)
+    from the gateway's own ``/model/info``. ``None`` when the window is
+    unknown for that route -- this module never falls back to a guess (e.g.
+    ``AgentDefaults.context_window_tokens``) for a route it can't resolve.
     """
     try:
         ctx = _CALL_CONTEXT.get() or {}
@@ -165,6 +172,9 @@ def record_llm_call(
             "component": ctx.get("component") or "",
             "system_prompt_chars": (
                 int(system_prompt_chars) if system_prompt_chars is not None else None
+            ),
+            "context_window": (
+                int(context_window) if context_window is not None else None
             ),
         }
 

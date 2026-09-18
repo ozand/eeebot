@@ -313,6 +313,7 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> str:
     from openai import OpenAI
 
     from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
+    from nanobot.providers.model_window import resolve_context_window
     from nanobot.runtime.role_prompt import system_chars
     base_url, api_key = os.environ.get("LITELLM_BASE_URL", "").strip(), os.environ.get("LITELLM_API_KEY", "").strip()
     if not base_url or not api_key:
@@ -332,7 +333,8 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> str:
     with call_context(None, "strategist"):
         record_llm_call(model=model, duration_ms=(time.monotonic() - started) * 1000, usage=usage,
                         finish_reason=getattr(choice, "finish_reason", ""), retries=0,
-                        system_prompt_chars=system_chars(messages))
+                        system_prompt_chars=system_chars(messages),
+                        context_window=resolve_context_window(model, base_url, api_key=api_key))
         record_llm_prompt(messages=messages, content=content, reasoning_content=None,
                           finish_reason=getattr(choice, "finish_reason", ""), model=model,
                           prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"])
