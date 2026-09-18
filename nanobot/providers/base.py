@@ -291,7 +291,9 @@ class LLMProvider(ABC):
                     usage=response.usage,
                     finish_reason=response.finish_reason,
                     retries=retries,
-                    context_window=resolve_context_window(resolved_model, self.api_base),
+                    context_window=resolve_context_window(
+                        resolved_model, self.api_base, api_key=self.api_key,
+                    ),
                 )
             except Exception as exc:
                 logging.getLogger(__name__).warning("llm call telemetry recording failed: %s", exc)

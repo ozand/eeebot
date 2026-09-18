@@ -31,6 +31,8 @@ Design constraints (see issue #1755):
 
 from __future__ import annotations
 
+import os
+
 import logging
 from typing import Any
 
@@ -50,10 +52,29 @@ _cache: dict[tuple[str, str], int | None] = {}
 _logged_failures: set[tuple[str, str]] = set()
 
 
+def _gateway_api_key(explicit: str | None) -> str | None:
+    """The bearer token ``/model/info`` requires, or ``None``.
+
+    Measured on the live gateway 2026-09-18: an unauthenticated GET returns
+    401, so a resolver that sends no header records ``context_window: null``
+    on every row while looking exactly like a model whose window is unknown.
+    The key is the caller's own (the same one its completions use) or, when
+    the caller has none, the environment the bridge unit already loads.
+    """
+    if explicit:
+        return explicit
+    for name in ("LITELLM_API_KEY", "OPENAI_API_KEY"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return None
+
+
 def resolve_context_window(
     model: str | None,
     api_base: str | None,
     *,
+    api_key: str | None = None,
     timeout: float = _DEFAULT_TIMEOUT_SECS,
 ) -> int | None:
     """Return ``model``'s max input tokens per the gateway at ``api_base``, or ``None``.
@@ -85,7 +106,9 @@ def resolve_context_window(
     if key in _cache:
         return _cache[key]
 
-    window = _fetch_context_window(wire_model, api_base, timeout=timeout)
+    window = _fetch_context_window(
+        wire_model, api_base, api_key=_gateway_api_key(api_key), timeout=timeout,
+    )
     _cache[key] = window
     if window is None and key not in _logged_failures:
         _logged_failures.add(key)
@@ -104,11 +127,14 @@ def _wire_model_name(model: str) -> str:
     return model[len("openai/"):] if model.startswith("openai/") else model
 
 
-def _fetch_context_window(model: str, api_base: str, *, timeout: float) -> int | None:
+def _fetch_context_window(
+    model: str, api_base: str, *, api_key: str | None, timeout: float,
+) -> int | None:
     """Do the actual ``/model/info`` GET and pick out ``max_input_tokens``. Never raises."""
     try:
         url = api_base.rstrip("/") + "/model/info"
-        response = httpx.get(url, timeout=timeout)
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        response = httpx.get(url, timeout=timeout, headers=headers)
         if response.status_code != 200:
             return None
         payload = response.json()

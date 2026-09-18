@@ -1932,7 +1932,7 @@ def propose(
                     model=model, duration_ms=duration_ms, usage=usage,
                     finish_reason=finish_reason, retries=0,
                     system_prompt_chars=len(system_content),
-                    context_window=resolve_context_window(model, base_url),
+                    context_window=resolve_context_window(model, base_url, api_key=api_key),
                 )
                 record_llm_prompt(
                     messages=create_kwargs["messages"], content=content,

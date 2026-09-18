@@ -25,8 +25,13 @@ def _clear_model_window_cache():
 
 
 def _mock_get(monkeypatch, *, response=None, status_code=200, raise_exc=None):
-    """Patch ``model_window.httpx.get`` and record every URL it was called with."""
-    calls: list[str] = []
+    """Patch ``model_window.httpx.get``; record every URL and header map it saw."""
+    class _Calls(list):
+        """A list of URLs that also carries the header map seen per call."""
+        headers_seen: list[dict]
+
+    calls = _Calls()
+    headers_seen: list[dict] = []
 
     class FakeResponse:
         def __init__(self, body, code):
@@ -36,13 +41,15 @@ def _mock_get(monkeypatch, *, response=None, status_code=200, raise_exc=None):
         def json(self):
             return self._body
 
-    def fake_get(url, timeout=None):
+    def fake_get(url, timeout=None, headers=None):
         calls.append(url)
+        headers_seen.append(headers or {})
         if raise_exc is not None:
             raise raise_exc
         return FakeResponse(response, status_code)
 
     monkeypatch.setattr(model_window.httpx, "get", fake_get)
+    calls.headers_seen = headers_seen
     return calls
 
 
@@ -245,3 +252,41 @@ async def test_chat_with_retry_passes_none_when_no_api_base(monkeypatch):
 
     assert recorded[0]["context_window"] is None
     assert calls_seen == []
+
+
+# ─── the gateway requires a bearer token (#1755 review) ─────────────────────
+
+
+def _payload(name="un/qwen3.8-27b-gguf", window=98304):
+    return {"data": [{"model_name": name, "model_info": {"max_input_tokens": window}}]}
+
+
+def test_explicit_api_key_is_sent_as_a_bearer_header(monkeypatch):
+    """The live gateway answers /model/info with 401 when unauthenticated
+    (measured 2026-09-18), so a resolver that sends no Authorization header
+    records context_window: null on every row while looking exactly like a
+    model whose window is genuinely unknown."""
+    calls = _mock_get(monkeypatch, response=_payload())
+    assert model_window.resolve_context_window(
+        "openai/un/qwen3.8-27b-gguf", "http://gw:4001/v1", api_key="sk-live",
+    ) == 98304
+    assert calls.headers_seen[0].get("Authorization") == "Bearer sk-live"
+
+
+def test_api_key_falls_back_to_the_environment(monkeypatch):
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-env")
+    calls = _mock_get(monkeypatch, response=_payload())
+    assert model_window.resolve_context_window(
+        "un/qwen3.8-27b-gguf", "http://gw:4001/v1",
+    ) == 98304
+    assert calls.headers_seen[0].get("Authorization") == "Bearer sk-env"
+
+
+def test_no_key_anywhere_sends_no_header_and_still_never_raises(monkeypatch):
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    calls = _mock_get(monkeypatch, status_code=401, response={})
+    assert model_window.resolve_context_window(
+        "un/qwen3.8-27b-gguf", "http://gw:4001/v1",
+    ) is None
+    assert calls.headers_seen[0] == {}
