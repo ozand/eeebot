@@ -39,14 +39,15 @@ use a small hand-written target-shape ``AGENTS.md`` fixture, per the ADR-022
 orchestrator revision (2026-09-18): "until then the harness test must run
 against the fixture release root + a fixture instance AGENTS.md, with test
 2 xfail(strict) as agreed." This module additionally found, while proving
-assertion 4, that the ``search_memory`` status contract is ALSO restated in
-``nanobot/agent/memory.py``'s ``MemoryStore.MEMORY_SEARCH_POINTER`` (folded
-into the loop's memory block whenever ``memory/index.md`` is non-trivial),
-duplicating the same contract already stated in ``OPERATING.md``'s ``##
-Tools`` section -- a real ADR-022 rule 5 violation this module cannot fix
-without editing the protected ``OPERATING.md`` or the shared
-``nanobot/agent/memory.py``, so it is also `xfail(strict=True)`, flagged as
-a new finding in the PR body pending a follow-up issue.
+assertion 4, that the ``search_memory`` status contract was ALSO restated
+in ``nanobot/agent/memory.py``'s ``MemoryStore.MEMORY_SEARCH_POINTER``
+(folded into the loop's memory block whenever ``memory/index.md`` is
+non-trivial) and in ``OPERATING.md``'s ``## Tools`` section -- a real
+ADR-022 rule 5 violation, tracked and fixed as #1745: the contract now
+lives only in the tool's own description (``nanobot/agent/tools/
+memory_search.py``), which is sent to the model as a tool schema and never
+folded into the assembled system-prompt text this harness inspects, so the
+green assertion below expects the contract in NONE of the system blocks.
 """
 from __future__ import annotations
 
@@ -364,25 +365,20 @@ def test_prompt_prose_names_only_executor_registry_tools(tmp_path: Path):
     assert mentioned <= set(EXECUTOR_TOOL_NAMES), mentioned - set(EXECUTOR_TOOL_NAMES)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "search_memory contract duplicated: OPERATING.md's '## Tools' section "
-        "and nanobot/agent/memory.py's MemoryStore.MEMORY_SEARCH_POINTER both "
-        "restate 'complete/partial/unavailable' in the assembled loop memory "
-        "block; fixing needs the protected OPERATING.md or the shared memory.py "
-        "module (out of #1726 scope) -- new finding, tracked as #1745"
-    ),
-)
 def test_search_memory_status_contract_appears_only_in_operating_tools_block(tmp_path: Path):
     """AC (assertion 4, second half): the search_memory status contract
-    lives in the tool's own description, not restated in surrounding prose
-    -- specifically not in the memory block. Uses a workspace with a
-    populated memory/index.md so MemoryStore's MEMORY_SEARCH_POINTER is
-    actually exercised, not vacuously absent."""
+    lives in the tool's own description (nanobot/agent/tools/memory_search.py)
+    only -- that description is sent to the model as a tool schema, never
+    folded into the assembled system-prompt text this harness inspects, so
+    the contract must appear in NONE of the system blocks (#1745 removed
+    the restatements in OPERATING.md's '## Tools' section and
+    MemoryStore.MEMORY_SEARCH_POINTER). Uses a workspace with a populated
+    memory/index.md so MEMORY_SEARCH_POINTER is actually exercised, not
+    vacuously absent."""
     blocks = _build_prompt(tmp_path, with_memory=True)
     matches = [name for name, text in blocks.items() if text and _SEARCH_MEMORY_CONTRACT.search(text)]
-    assert matches == ["operating"], (
-        f"search_memory status contract found in {matches}; expected only 'operating' "
-        "(OPERATING.md's '## Tools' section) -- see this test's xfail reason"
+    assert matches == [], (
+        f"search_memory status contract found in {matches}; its only home is "
+        "the tool's own description (nanobot/agent/tools/memory_search.py), "
+        "outside the assembled system prompt entirely"
     )

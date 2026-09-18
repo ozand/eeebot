@@ -58,5 +58,4 @@ Your final response MUST be this JSON, and nothing else (no markdown wrapping):
 
 - **pytest** is the test runner (see Verification); it is installed in this environment.
 - **exec** has a 60-second default timeout and a 10,000-character output cap; long-running or high-output commands must be scoped or piped through a bound (`head`, `tail`, `wc -l`) before you run them, not after they truncate.
-- **search_memory** reports `complete`, `partial`, or `unavailable` — never a bare empty list standing in for "nothing found."
 - **Read-only for every tool:** everything named under Mutation surface's "Do NOT modify" list above. Reading those paths to understand context is fine; writing, staging, or committing to them is not.

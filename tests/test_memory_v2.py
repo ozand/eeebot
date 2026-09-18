@@ -57,8 +57,11 @@ def test_loop_memory_context_keeps_resident_rules_and_replaces_remainder_with_po
     assert "Brand New Fact" not in ctx
     assert "Old Fact 0" not in ctx
     assert "search_memory(query, limit)" in ctx
-    assert "complete with zero results is a real zero" in ctx
-    assert "unavailable is not empty memory" in ctx
+    # #1745: the status contract (complete/partial/unavailable, zero-results,
+    # outcome blocked) is capability guidance owned by the tool's own
+    # description (nanobot/agent/tools/memory_search.py), not restated here.
+    assert "complete with zero results is a real zero" not in ctx
+    assert "unavailable is not empty memory" not in ctx
     assert "[trimmed" not in ctx
     assert store.last_index_fit["remainder_kept_chars"] == 0
     assert store.last_index_fit["remainder_searchable_entries"] == 102
