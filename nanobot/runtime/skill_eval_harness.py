@@ -318,10 +318,10 @@ def _llm_runner(prompt: str, with_skill: bool, skill_path: Path, timeout: float)
 
     from nanobot.runtime.model_registry import resolve_harness_max_tokens, resolve_model
 
-    system = (
-        "You are the eeebot skill-eval executor. Complete the task directly "
-        "and concisely; output only the answer."
-    )
+    # #1729 (ADR-022 rule 2): identity (short form) + roles/skill-eval.md.
+    from nanobot.runtime.role_prompt import build_role_system_prompt
+
+    system, _role_fit = build_role_system_prompt("skill-eval")
     if with_skill:
         try:
             skill_text = Path(skill_path).read_text(encoding="utf-8")[:MAX_SKILL_TEXT_CHARS]

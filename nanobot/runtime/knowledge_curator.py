@@ -46,6 +46,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Iterable
 
 from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
+from nanobot.runtime.role_prompt import build_role_system_prompt, system_chars
 from nanobot.runtime.lesson_v2 import (
     append_curator_decision,
     atomic_write_yaml,
@@ -819,25 +820,8 @@ def _messages(lessons: list[dict[str, Any]], index: str, facts: str) -> list[dic
     body = json.dumps(lessons, ensure_ascii=False, separators=(",", ":"))
     if len(body) > MAX_INPUT_CHARS:
         raise ValueError("curator lesson batch was not fitted to complete items")
-    system = (
-        "You are the eeebot knowledge curator. Return ONLY a JSON array. "
-        "Each item must be one of: "
-        "{action:create,path,title,content,index_line,lesson_id,reason,support_claim}, "
-        "{action:update,path,content,lesson_id,reason,support_claim}, "
-        "{action:duplicate,lesson_id,duplicate_path,reason}, or "
-        "{action:unimportant,lesson_id,reason}. "
-        "Create/update paths must be memory/facts/*.md or docs/facts/*.md. Never delete or rewrite an index. "
-        "At most three create/update items; every item needs a one-line reason. "
-        "For create/update items, include support_claim: a brief quote or reference from the lesson "
-        "evidence that directly supports the fact being written. "
-        # #1403: the indexes carry one line per artifact. A one-line summary can
-        # show that a TOPIC is present while the artifact itself carries none of
-        # the lesson's operational content, so a duplicate claim must name the
-        # artifact and is verified against its body before it is recorded.
-        "For duplicate items, duplicate_path must be the exact KB path from the indexes whose body already "
-        "carries this lesson's content. If no existing artifact carries it, or the artifact only mentions the "
-        "same topic, use unimportant or create/update instead — never duplicate."
-    )
+    # #1729 (ADR-022 rule 2): identity (short form) + soul + roles/curator.md.
+    system, _role_fit = build_role_system_prompt("curator")
     user = f"NEW LESSONS:\n{body}\n\nKB INDEXES:\n{index[:24000]}\n\nCITED ARTIFACT BODIES:\n{facts[:12000]}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -1034,7 +1018,8 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> Any:
     # no cycle_id to attribute; "" is the honest value, not a gap.
     with call_context(None, "curator"):
         record_llm_call(model=model, duration_ms=(__import__("time").monotonic() - started) * 1000,
-                        usage=usage, finish_reason=getattr(choice, "finish_reason", ""), retries=0)
+                        usage=usage, finish_reason=getattr(choice, "finish_reason", ""), retries=0,
+                        system_prompt_chars=system_chars(messages))
         record_llm_prompt(messages=messages, content=content, reasoning_content=None,
                           finish_reason=getattr(choice, "finish_reason", ""), model=model,
                           prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"])

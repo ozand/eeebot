@@ -342,16 +342,15 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-_NARRATOR_SYSTEM_PROMPT = (
-    "You write plain, warm narration for a small autonomous project's daily "
-    "story, from the beats given to you and nothing else. Respond with ONLY "
-    "a JSON list, no markdown fences, no surrounding prose: one object per "
-    "beat, each {\"beat_id\", \"text\", \"sign\", \"terms\"}. The sign field "
-    "must repeat the beat's own sign exactly -- you may not change it, soften "
-    "it, or imply a different one in the text. Do not invent a beat_id that "
-    "was not given to you. \"terms\" is the list of glossary terms your text "
-    "uses, if any."
-)
+def _narrator_system_prompt() -> str:
+    """#1729 (ADR-022 rule 2): the narrator's role text lives in
+    ``roles/narrator.md`` at the release root, with identity (short form) and
+    soul prepended. ADR-016 rule 1 still holds by construction: the assembler
+    reads those release files and nothing else, so it has no reader for any
+    channel figure."""
+    from nanobot.runtime.role_prompt import build_role_system_prompt
+
+    return build_role_system_prompt("narrator")[0]
 
 
 def _default_narrator_llm(messages: list[dict[str, str]], model: str) -> str:
@@ -363,6 +362,7 @@ def _default_narrator_llm(messages: list[dict[str, str]], model: str) -> str:
     from openai import OpenAI
 
     from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
+    from nanobot.runtime.role_prompt import system_chars
 
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
     api_key = os.environ.get("LITELLM_API_KEY", "").strip()
@@ -382,7 +382,8 @@ def _default_narrator_llm(messages: list[dict[str, str]], model: str) -> str:
     # attribute, same reasoning as the strategist's own call site.
     with call_context(None, "narrator"):
         record_llm_call(model=model, duration_ms=(time.monotonic() - started) * 1000, usage=usage,
-                        finish_reason=getattr(choice, "finish_reason", ""), retries=0)
+                        finish_reason=getattr(choice, "finish_reason", ""), retries=0,
+                        system_prompt_chars=system_chars(messages))
         record_llm_prompt(messages=messages, content=content, reasoning_content=None,
                           finish_reason=getattr(choice, "finish_reason", ""), model=model,
                           prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"])
@@ -490,7 +491,7 @@ def run_narrator_job(
     model = _resolve_narrator_model()
     prompt = build_story_prompt(beats, glossary=glossary)
     messages = [
-        {"role": "system", "content": _NARRATOR_SYSTEM_PROMPT},
+        {"role": "system", "content": _narrator_system_prompt()},
         {"role": "user", "content": prompt},
     ]
     raw: Any = None

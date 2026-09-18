@@ -132,6 +132,7 @@ def record_llm_call(
     finish_reason: str | None,
     retries: int,
     served_model: str | None = None,
+    system_prompt_chars: int | None = None,
 ) -> None:
     """Append one JSONL line describing an LLM call. Best-effort — never raises.
 
@@ -141,6 +142,11 @@ def record_llm_call(
     ``model`` is the model the caller REQUESTED. ``served_model`` (#1660) is
     the one the gateway reported having served, or None when it reported
     none -- it is never derived from ``model``.
+
+    ``system_prompt_chars`` (#1729) is the length of the system message the
+    caller actually sent, measured from the built string -- never from the
+    ``prompts/`` payload, which is capped well below a full prompt. ``None``
+    when the caller did not measure it.
     """
     try:
         ctx = _CALL_CONTEXT.get() or {}
@@ -157,6 +163,9 @@ def record_llm_call(
             "retries": int(retries),
             "cycle_id": ctx.get("cycle_id") or "",
             "component": ctx.get("component") or "",
+            "system_prompt_chars": (
+                int(system_prompt_chars) if system_prompt_chars is not None else None
+            ),
         }
 
         out_dir = _llm_calls_dir()

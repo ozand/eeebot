@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from nanobot.runtime.role_prompt import build_role_system_prompt, system_chars
 from nanobot.observability.llm_telemetry import (
     MAX_LLM_PROMPT_PAYLOAD_BYTES,
     call_context,
@@ -415,14 +416,10 @@ def _build_prompt(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[s
     record is journaled with the reflection so an audit can answer "did this
     prompt lose content" from the row alone.
     """
-    system = (
-        "Analyze every message, skill, command, tool call/result, error, retry, and detour in this completed cycle. "
-        "Return ONLY strict JSON with keys cycle_id, summary, findings, recommendations, followed_previous, and optional mermaid. "
-        "finding kind must be wasted_steps, error_pattern, tool_misuse, or good_practice. "
-        "recommendation kind must be skill_candidate, instruction_change, or approach_hint. "
-        "Each finding has kind/detail; each recommendation has kind/detail/evidence; return at most three recommendations. "
-        "Recommendations are steering only: do not edit files, invent evidence, or claim scorecard value."
-    )
+    # #1729 (ADR-022 rule 2): identity (short form) + roles/reflector.md. No
+    # soul and no charter: this role runs under a tight input cap, so its
+    # growth is bounded by the first paragraph of IDENTITY.md.
+    system, _role_fit = build_role_system_prompt("reflector")
     transcript_kept, transcript_fit = _fit_transcript(transcript, _MAX_TRANSCRIPT_CHARS)
     protect = 1 if ledger and isinstance(ledger[0], dict) and ledger[0].get("phase") == "proposed" else 0
     ledger_kept, ledger_fit = _fit_rows(ledger, _MAX_LEDGER_CHARS, protect_head=protect)
@@ -540,7 +537,8 @@ def _default_llm(messages: list[dict[str, str]], model: str, cycle_id: str) -> s
     usage_obj = getattr(response, "usage", None)
     usage = {key: int(getattr(usage_obj, key, 0) or 0) for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
     with call_context(cycle_id, "reflector"):
-        record_llm_call(model=model, duration_ms=(time.monotonic() - started) * 1000, usage=usage, finish_reason=getattr(choice, "finish_reason", ""), retries=0)
+        record_llm_call(model=model, duration_ms=(time.monotonic() - started) * 1000, usage=usage, finish_reason=getattr(choice, "finish_reason", ""), retries=0,
+                        system_prompt_chars=system_chars(messages))
         record_llm_prompt(messages=messages, content=content, reasoning_content=None, finish_reason=getattr(choice, "finish_reason", ""), model=model, prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"])
     return content
 

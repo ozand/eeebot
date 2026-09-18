@@ -190,13 +190,11 @@ def _json_object(line: str) -> bool:
         return False
 
 def build_strategist_prompt(inputs: dict[str, Any], watermark: dict[str, Any]) -> tuple[str, str]:
-    system = (
-        "You are the eeebot strategist role. Review the bounded archive summary and return STRICT JSON only. "
-        "Use HADI: each hypothesis must be falsifiable, have a bounded action, data_to_collect, and an "
-        "insight_criterion stating what confirms or refutes it. Include no prose outside JSON. "
-        "Use this TRIZ lens: identify where improving one tracked metric degrades another or is caused by "
-        "the system's own activity, and prefer hypotheses that dissolve the contradiction rather than push the metric."
-    )
+    # #1729 (ADR-022 rule 2): identity (short form) + roles/strategist.md. No
+    # soul and no charter: this role runs under a tight payload cap.
+    from nanobot.runtime.role_prompt import build_role_system_prompt
+
+    system, _role_fit = build_role_system_prompt("strategist")
     watermark = _cap(watermark, 1_000) if isinstance(watermark, dict) else {}
     payload = {"schema": SCHEMA, "watermark": watermark, "archive": inputs, "output": {
         "schema": SCHEMA, "period_reviewed": "ISO period", "hypotheses": [{
@@ -315,6 +313,7 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> str:
     from openai import OpenAI
 
     from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
+    from nanobot.runtime.role_prompt import system_chars
     base_url, api_key = os.environ.get("LITELLM_BASE_URL", "").strip(), os.environ.get("LITELLM_API_KEY", "").strip()
     if not base_url or not api_key:
         raise RuntimeError("litellm credentials not configured; check the unit EnvironmentFile chain")
@@ -332,7 +331,8 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> str:
     # cycle_id to attribute; "" is the honest value, not a gap.
     with call_context(None, "strategist"):
         record_llm_call(model=model, duration_ms=(time.monotonic() - started) * 1000, usage=usage,
-                        finish_reason=getattr(choice, "finish_reason", ""), retries=0)
+                        finish_reason=getattr(choice, "finish_reason", ""), retries=0,
+                        system_prompt_chars=system_chars(messages))
         record_llm_prompt(messages=messages, content=content, reasoning_content=None,
                           finish_reason=getattr(choice, "finish_reason", ""), model=model,
                           prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"])
