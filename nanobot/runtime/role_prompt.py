@@ -7,7 +7,7 @@ a Python string literal. This module replaces those literals with files under
     IDENTITY.md (short form) -> SOUL.md (optional) -> goals.md (optional) -> roles/<role>.md
 
 with the same ``[missing: <name>]`` marker and per-block telemetry semantics as
-the executor loader (:meth:`nanobot.agent.context.ContextBuilder.load_block`).
+the executor loader (:func:`nanobot.agent.block_loader.load_block`).
 There is one convention for a block that is absent or over its cap, not two.
 
 Per-role flags (issue #1729, revision 2026-09-18):
@@ -27,7 +27,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.context import ContextBuilder
+from nanobot.agent.block_loader import load_block, trim_lines
 
 #: Default deployed release tree (mirrors ``bridge.RELEASE_ROOT`` /
 #: ``llm_proposer._RELEASE_ROOT_DEFAULT``); the systemd units for the side
@@ -164,7 +164,7 @@ def load_role_text(
     if len(body) <= budget:
         return body, {"missing": False, "truncated": False, "chars": len(body), "budget": budget}
     notice = f"\n\n[{name} truncated at {budget} chars; read the file for the rest]"
-    kept = ContextBuilder._trim_lines(body, max(0, budget - len(notice)))
+    kept = trim_lines(body, max(0, budget - len(notice)))
     text = kept + notice
     return text, {"missing": False, "truncated": True, "chars": len(text), "budget": budget}
 
@@ -177,7 +177,7 @@ def _identity_block(root: Path | None, *, short: bool) -> tuple[str, dict[str, A
         return marker, {"missing": True, "truncated": False, "chars": len(marker)}
     path = Path(root) / "IDENTITY.md"
     if not short:
-        return ContextBuilder.load_block("IDENTITY.md", path, IDENTITY_FULL_CAP, True)
+        return load_block("IDENTITY.md", path, IDENTITY_FULL_CAP, True)
     if not path.is_file():
         marker = "[missing: IDENTITY.md]"
         return marker, {"missing": True, "truncated": False, "chars": len(marker)}
@@ -264,7 +264,7 @@ def _load_release_file(root: Path | None, filename: str, cap: int) -> tuple[str,
     if root is None:
         marker = f"[missing: {filename}]"
         return marker, {"missing": True, "truncated": False, "chars": len(marker)}
-    return ContextBuilder.load_block(filename, Path(root) / filename, cap, True)
+    return load_block(filename, Path(root) / filename, cap, True)
 
 
 def system_chars(messages: list[dict[str, Any]] | None) -> int | None:

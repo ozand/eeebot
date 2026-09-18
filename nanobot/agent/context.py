@@ -10,6 +10,7 @@ from typing import Any
 
 from loguru import logger
 
+from nanobot.agent.block_loader import load_block, trim_lines
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
@@ -450,54 +451,11 @@ Skills with available="false" need dependencies installed first - you can try in
         fit["sections"] = self._section_sizes(names, sections)
         return prompt
 
-    @staticmethod
-    def _trim_lines(text: str, max_chars: int) -> str:
-        """Keep only complete lines that fit, never slicing a line or token."""
-        if len(text) <= max_chars:
-            return text
-        if max_chars <= 0:
-            return ""
-        kept: list[str] = []
-        used = 0
-        for line in text.splitlines(keepends=True):
-            if used + len(line) > max_chars:
-                break
-            kept.append(line)
-            used += len(line)
-        return "".join(kept)
-
-    @staticmethod
-    def load_block(name: str, path: "Path", cap: int, required: bool) -> tuple[str, dict[str, Any]]:
-        """#1725 (ADR-022): load one ontology block, never raising.
-
-        Returns ``(text, meta)``:
-
-        * File absent, ``required``: ``text`` is the marker
-          ``"[missing: <name>]"``; ``meta["missing"] is True`` — the ledger
-          flag this absence is seen through, never a silent empty section.
-        * File absent, not required: ``text`` is ``""``; ``meta["missing"]
-          is False`` (nothing was owed).
-        * File present, under cap: the full ``## <name>`` heading plus
-          content; ``meta["truncated"] is False``.
-        * File present, over cap: cut at a line boundary with a built-in
-          notice ("<name> truncated at N chars; read the file for the
-          rest"); ``meta["truncated"] is True``. The heading, kept body, and
-          notice together never exceed ``cap``.
-        """
-        heading = f"## {name}\n\n"
-        if not path.is_file():
-            if required:
-                return f"[missing: {name}]", {"missing": True, "truncated": False, "chars": len(f"[missing: {name}]")}
-            return "", {"missing": False, "truncated": False, "chars": 0}
-        raw = path.read_text(encoding="utf-8")
-        text = heading + raw
-        if len(text) <= cap:
-            return text, {"missing": False, "truncated": False, "chars": len(text)}
-        notice = f"\n\n[{name} truncated at {cap} chars; read the file for the rest]"
-        budget = max(0, cap - len(heading) - len(notice))
-        trimmed_body = ContextBuilder._trim_lines(raw, budget)
-        text = heading + trimmed_body + notice
-        return text, {"missing": False, "truncated": True, "chars": len(text)}
+    #: Block loading lives in :mod:`nanobot.agent.block_loader` so the role
+    #: prompts (#1729) can reuse it without importing this builder -- these
+    #: two names stay as the builder's own API for every existing caller.
+    _trim_lines = staticmethod(trim_lines)
+    load_block = staticmethod(load_block)
 
     def _cap(self) -> int:
         """The cap: :data:`SYSTEM_PROMPT_CAP_ENV` when it is a positive int, else the class default."""
