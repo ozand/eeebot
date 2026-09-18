@@ -371,7 +371,7 @@ def test_prompt_prose_names_only_executor_registry_tools(tmp_path: Path):
         "and nanobot/agent/memory.py's MemoryStore.MEMORY_SEARCH_POINTER both "
         "restate 'complete/partial/unavailable' in the assembled loop memory "
         "block; fixing needs the protected OPERATING.md or the shared memory.py "
-        "module (out of #1726 scope) -- new finding, follow-up issue not yet filed"
+        "module (out of #1726 scope) -- new finding, tracked as #1745"
     ),
 )
 def test_search_memory_status_contract_appears_only_in_operating_tools_block(tmp_path: Path):
