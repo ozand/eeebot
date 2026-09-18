@@ -42,6 +42,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from nanobot.runtime.role_prompt import (
+    build_role_system_prompt,
+    load_role_text,
+    system_chars,
+)
 from nanobot.observability.llm_telemetry import (
     call_context,
     current_cycle_id,
@@ -282,70 +287,35 @@ _DEFAULT_EDIT_BUDGET_M = 5
 
 _MUTATION_SURFACE_MARKER = "MUTATION_SURFACES=" + MUTATION_POLICY.render_commit_surfaces()
 
-_PROPOSER_SYSTEM_PROMPT = (
-    "You are proposing exactly ONE small, bounded engineering improvement for a "
-    "self-evolving codebase. Reply with ONLY a JSON object with keys "
-    "task_title, rationale, target_path, serves — no prose, no markdown code "
-    "fences. Optionally also include expected_outcome: {\"claim\": \"<short "
-    "falsifiable statement of what this change should achieve>\", \"check\": "
-    "{\"kind\": \"script_exit_zero\"|\"test_count_increase\"|\"file_exists\"|"
-    "\"free_text\", ...}} — omit it entirely if you cannot state a falsifiable "
-    "claim; it is never required. task_title must be non-empty and at most 120 characters, "
-    "describing a single behavior/bug (not a bundle). target_path must name "
-    "exactly ONE path (file or directory) under one of these mutable "
-    f"surfaces: {MUTATION_POLICY.render_commit_surfaces()} — no "
-    "other path is acceptable. serves must name what goal this task serves — "
-    "non-empty, at most 160 characters, starting with one of: 'priority <N>' "
-    "(a numbered goal_text priority, e.g. 'priority 5'), 'vector 1' or "
-    "'vector 2' (optionally followed by a colon and a short 3-8 word "
-    "justification, e.g. 'vector 1: reduces cycle disk writes'), or "
-    "'hypothesis <id-or-short-title>' naming an entry from the Hypothesis "
-    "backlog section below (e.g. 'hypothesis h3'). rationale must briefly "
-    "justify the change and must NOT repeat any already-done or recently-"
-    "failed work described in the context below. If the goal text lists "
-    "numbered 'Current priority targets', propose EXACTLY one of them (the "
-    "first not yet done) VERBATIM as the task, with serves naming that "
-    "priority number; only invent a new task when no numbered priorities "
-    "remain. The context lists existing scripts; do NOT propose a script "
-    "that duplicates one (same purpose under a different name) — extend the "
-    "existing file or pick a different task instead. If nothing you could "
-    "propose creates real value toward the goals — everything worthwhile is "
-    "done, queued, or listed as existing — you MAY instead reply with ONLY "
-    '{"no_valuable_task": true, "reason": "<short reason>"} instead of '
-    "inventing filler work."
-)
+# #1729 (ADR-022 rule 2): the role text lives in ``roles/proposer.md`` at the
+# release root. The module constant is kept because callers and tests pass it
+# around as "which role body is this"; it is now loaded, not authored here.
+_PROPOSER_SYSTEM_PROMPT = load_role_text("proposer")[0]
 
 # #760 demand-driven mode: the model SELECTS AND REFINES from presented
 # demand items — it never invents from a bare inventory. Vector 1/2 are no
 # longer offered as open-ended invention targets; serves must reference a
 # demand id (legacy forms still pass validation for one release, but the
 # prompt asks only for demand ids).
-_DEMAND_PROPOSER_SYSTEM_PROMPT = (
-    "You are selecting exactly ONE demand item from the '## Demand' section "
-    "of the context and proposing a small, bounded engineering task that "
-    "addresses it. You MUST NOT invent work that no demand item calls for. "
-    "Reply with ONLY a JSON object with keys task_title, rationale, "
-    "target_path, serves — no prose, no markdown code fences. Optionally also "
-    "include expected_outcome: {\"claim\": \"<short falsifiable statement of "
-    "what this change should achieve>\", \"check\": {\"kind\": \"script_exit_zero\"|"
-    "\"test_count_increase\"|\"file_exists\"|\"free_text\", ...}} — omit it entirely "
-    "if you cannot state a falsifiable claim; it is never required. task_title "
-    "must be non-empty and at most 120 characters, describing a single "
-    "behavior/bug (not a bundle). target_path must name exactly ONE path "
-    f"(file or directory) under one of these mutable surfaces: {MUTATION_POLICY.render_commit_surfaces()} — no other path is "
-    "acceptable. serves must be 'demand <id>' where <id> is the bracketed id "
-    "of the ONE demand item this task addresses (e.g. 'demand "
-    "defect-1a2b3c4d5e6f'). rationale must briefly explain how the task "
-    "resolves the selected demand item's evidence, and must NOT repeat any "
-    "already-done or recently-failed work described in the context. Prefer "
-    "'priority'-kind items first (operator-seeded), then 'defect', then "
-    "'hypothesis'. The context lists existing scripts; do NOT propose a "
-    "script that duplicates one (same purpose under a different name) — "
-    "extend the existing file or pick a different demand item instead. If "
-    "no presented demand item is addressable with a bounded task, reply "
-    'with ONLY {"no_valuable_task": true, "reason": "<short reason>"} '
-    "instead of inventing filler work."
-)
+_DEMAND_PROPOSER_SYSTEM_PROMPT = load_role_text("demand-proposer")[0]
+
+
+def _role_name_for(role_body: str) -> str:
+    """Which role a system-prompt body belongs to (#1729), for the per-role
+    identity/soul/charter flags. The three proposer-side roles share the same
+    flags, so an unrecognised body is attributed to the proposer."""
+    if role_body == _DEMAND_PROPOSER_SYSTEM_PROMPT:
+        return "demand-proposer"
+    if role_body == _PROPOSER_SYSTEM_PROMPT:
+        return "proposer"
+    try:
+        from nanobot.runtime import goal_review as _goal_review
+
+        if role_body == getattr(_goal_review, "_GOAL_REVIEW_SYSTEM_PROMPT", None):
+            return "goal-review"
+    except Exception:
+        pass
+    return "proposer"
 
 _FORCE_PROPOSAL_NOTE = (
     "IMPORTANT: you have already replied no_valuable_task for "
@@ -1920,12 +1890,18 @@ def propose(
             f"Your previous proposal was rejected: {rejection_reason}. "
             "Propose a different, valid one that fixes this problem."
         )
+    # #1729: identity (short form) + soul + charter are prepended once, from
+    # the release files; ``system_prompt`` carries only the role body.
+    role_body = system_prompt or _PROPOSER_SYSTEM_PROMPT
+    system_content, _role_fit = build_role_system_prompt(
+        _role_name_for(role_body), role_text=role_body
+    )
     try:
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         create_kwargs: dict[str, Any] = dict(
             model=_model_name(),
             messages=[
-                {"role": "system", "content": system_prompt or _PROPOSER_SYSTEM_PROMPT},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": user_content},
             ],
             max_tokens=400,
@@ -1954,6 +1930,7 @@ def propose(
                 record_llm_call(
                     model=model, duration_ms=duration_ms, usage=usage,
                     finish_reason=finish_reason, retries=0,
+                    system_prompt_chars=len(system_content),
                 )
                 record_llm_prompt(
                     messages=create_kwargs["messages"], content=content,
@@ -2106,7 +2083,12 @@ def validate_sizing(proposal: dict[str, Any] | None) -> tuple[bool, str]:
 # Fail closed if prompt constants drift from the policy object. This is checked
 # at import and again by tests that deliberately construct inconsistent policy.
 for _prompt in (_PROPOSER_SYSTEM_PROMPT, _DEMAND_PROPOSER_SYSTEM_PROMPT):
-    MUTATION_POLICY.validate_rendered_surfaces(_MUTATION_SURFACE_MARKER)
+    # #1729: a role file absent from the release tree renders its
+    # ``[missing: ...]`` marker instead of the prompt; there are no surfaces
+    # in a marker to disagree with the policy, and the marker is the signal.
+    if not _prompt.startswith("[missing: "):
+        MUTATION_POLICY.validate_rendered_surfaces(_prompt)
+        MUTATION_POLICY.validate_rendered_surfaces(_MUTATION_SURFACE_MARKER)
 
 
 _PERMANENT_DEDUP_MAX_COMMITS = 3000
