@@ -64,24 +64,185 @@ def test_agents_md_scope_bound() -> None:
     assert MUTATION_POLICY.agents_md_scope_violations("## Identity\n") != []
 
 
+# ---------------------------------------------------------------------------
+# #1750: the ratchet -- old_text turns the absolute bound into a
+# no-regression check once HEAD is already non-compliant, so a commit that
+# strictly improves a 192-line/9-heading file is not rejected forever by the
+# rule meant to fix it.
+# ---------------------------------------------------------------------------
+
+from pathlib import Path as _Path
+
+_REAL_INSTANCE_AGENTS_MD = (
+    _Path(__file__).resolve().parent / "fixtures" / "instance_agents_md" / "AGENTS.md"
+).read_text(encoding="utf-8")
+
+
+def test_ratchet_accepts_strict_improvement_over_noncompliant_head() -> None:
+    """HEAD non-compliant (192 lines, 9 headings) + staged version strictly
+    better (fewer lines, one forbidden heading removed, none reintroduced) ->
+    accepted."""
+    old = _REAL_INSTANCE_AGENTS_MD
+    lines = old.splitlines()
+    # Remove the first forbidden-heading section (its heading line plus the
+    # next two lines) to produce a shorter, strictly-improved version.
+    heading = MUTATION_POLICY.agents_md_runtime_headings[0]
+    idx = next(i for i, line in enumerate(lines) if line.strip() == heading)
+    new_lines = lines[:idx] + lines[idx + 3:]
+    new = "\n".join(new_lines) + "\n"
+    assert len(new_lines) < len(lines)
+    assert heading not in MUTATION_POLICY._agents_md_present_headings(new)
+
+    assert MUTATION_POLICY._agents_md_absolute_violations(old) != []  # HEAD non-compliant
+    assert MUTATION_POLICY.agents_md_scope_violations(new, old_text=old) == []
+
+
+def test_ratchet_accepts_same_line_count_and_same_heading_set() -> None:
+    """HEAD non-compliant + staged version the SAME length with the SAME
+    heading set (no improvement, but no regression either) -> accepted.
+
+    Decision (stated per the task): ``lines(new) <= lines(old)`` is the
+    literal bound the issue and the dispatch both specify -- equality
+    satisfies it, so a same-shape edit (e.g. a wording fix that changes no
+    line count and touches no heading) is accepted, not rejected for failing
+    to also improve. The ratchet's job is "no regression", not "forced
+    progress every single commit" -- a bounded executor may need more than
+    one cycle to whittle the file down.
+    """
+    old = _REAL_INSTANCE_AGENTS_MD
+    lines = old.splitlines()
+    # Reword one non-heading line without changing the line count or any heading.
+    idx = next(i for i, line in enumerate(lines) if line.strip() and not line.startswith("#"))
+    new_lines = list(lines)
+    new_lines[idx] = new_lines[idx] + " (reworded)"
+    new = "\n".join(new_lines) + "\n"
+    assert len(new_lines) == len(lines)
+    assert MUTATION_POLICY._agents_md_present_headings(new) == MUTATION_POLICY._agents_md_present_headings(old)
+
+    assert MUTATION_POLICY.agents_md_scope_violations(new, old_text=old) == []
+
+
+def test_ratchet_rejects_line_count_regression() -> None:
+    """HEAD non-compliant + staged version adds a line beyond lines(old) ->
+    violation naming the line regression."""
+    old = _REAL_INSTANCE_AGENTS_MD
+    new = old + "\n- one more line\n"
+    violations = MUTATION_POLICY.agents_md_scope_violations(new, old_text=old)
+    assert len(violations) == 1
+    assert violations[0].startswith("agents_md_scope: lines regressed from")
+    assert f"to {len(new.splitlines())}" in violations[0]
+
+
+def test_ratchet_rejects_reintroduced_heading() -> None:
+    """HEAD non-compliant but missing one forbidden heading + staged version
+    reintroduces exactly that heading -> violation naming it, even though the
+    line count does not regress."""
+    old_lines = _REAL_INSTANCE_AGENTS_MD.splitlines()
+    heading = MUTATION_POLICY.agents_md_runtime_headings[0]
+    idx = next(i for i, line in enumerate(old_lines) if line.strip() == heading)
+    # old is missing this one heading (but still non-compliant via the rest).
+    old = "\n".join(old_lines[:idx] + old_lines[idx + 1:]) + "\n"
+    assert heading not in MUTATION_POLICY._agents_md_present_headings(old)
+    assert MUTATION_POLICY._agents_md_absolute_violations(old) != []
+
+    # new reintroduces it, same line count as old (no line regression).
+    new_lines = old.splitlines()
+    new_lines.insert(idx, heading)
+    new = "\n".join(new_lines[: len(old_lines) - 1]) + "\n"  # keep <= old's length
+    assert heading in MUTATION_POLICY._agents_md_present_headings(new)
+
+    violations = MUTATION_POLICY.agents_md_scope_violations(new, old_text=old)
+    assert any(
+        v == f"agents_md_scope: reintroduced forbidden heading absent from HEAD: {heading}"
+        for v in violations
+    ), violations
+
+
+def test_ratchet_rejects_longer_new_even_with_fewer_headings() -> None:
+    """New longer than old -> rejected even though it removed a heading --
+    both axes must hold, neither alone is sufficient."""
+    old = _REAL_INSTANCE_AGENTS_MD
+    lines = old.splitlines()
+    heading = MUTATION_POLICY.agents_md_runtime_headings[0]
+    idx = next(i for i, line in enumerate(lines) if line.strip() == heading)
+    # Remove the heading's own line only (one fewer heading) but pad well
+    # past old's original length -- net longer overall.
+    new_lines = lines[:idx] + lines[idx + 1:] + [f"- padding {i}" for i in range(20)]
+    new = "\n".join(new_lines) + "\n"
+    assert len(new_lines) > len(lines)
+
+    violations = MUTATION_POLICY.agents_md_scope_violations(new, old_text=old)
+    assert any(v.startswith("agents_md_scope: lines regressed from") for v in violations)
+
+
+def test_absolute_bound_applies_when_head_is_already_compliant() -> None:
+    """HEAD compliant + staged version violating -> rejected under the
+    absolute bound, same behaviour as before #1750 (no ratchet applies)."""
+    compliant_old = "# AGENTS.md\n\n## Repository layout\n- x\n"
+    violating_new = compliant_old + "\n## Cycle contract\n- rules\n"
+    assert MUTATION_POLICY._agents_md_absolute_violations(compliant_old) == []
+
+    violations = MUTATION_POLICY.agents_md_scope_violations(violating_new, old_text=compliant_old)
+    assert violations == [
+        "agents_md_scope: runtime heading belongs to OPERATING.md: ## Cycle contract",
+    ]
+
+
 def test_gate_agents_md_scope_runs_only_when_agents_md_changed(tmp_path) -> None:
+    """No ratchet baseline here: AGENTS.md does not exist at ``base_sha``
+    (the initial commit, before it was added), so ``old_text=None`` and the
+    absolute bound applies exactly as before #1750 -- these assertions are
+    unchanged from pre-#1750 behaviour."""
     import subprocess
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "README.md").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=repo, check=True)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True,
+    ).stdout.strip()
     (repo / "AGENTS.md").write_text("# AGENTS.md\n\n## Cycle contract\n- rules\n", encoding="utf-8")
     subprocess.run(["git", "add", "AGENTS.md"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True)
-    assert gate._agents_md_scope_violations(repo, ["scripts/x.py"]) == []
-    assert gate._agents_md_scope_violations(repo, ["AGENTS.md"]) == [
+    assert gate._agents_md_scope_violations(repo, base_sha, ["scripts/x.py"]) == []
+    assert gate._agents_md_scope_violations(repo, base_sha, ["AGENTS.md"]) == [
         "agents_md_scope: runtime heading belongs to OPERATING.md: ## Cycle contract",
     ]
     subprocess.run(["git", "rm", "-q", "AGENTS.md"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "delete"], cwd=repo, check=True)
-    [missing] = gate._agents_md_scope_violations(repo, ["AGENTS.md"])
+    [missing] = gate._agents_md_scope_violations(repo, base_sha, ["AGENTS.md"])
     assert missing.startswith("agents_md_scope: AGENTS.md missing at HEAD")
+
+
+def test_gate_agents_md_scope_unreadable_base_fails_closed(tmp_path, monkeypatch) -> None:
+    """A base-sha read that raises (corrupt object, timeout, ...) fails
+    closed with a distinct message -- unlike a clean non-zero exit (the file
+    simply not existing at base, covered above), which is not a failure."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "AGENTS.md").write_text("# AGENTS.md\n\n## Repository layout\n- x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "AGENTS.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True)
+
+    real_run = subprocess.run
+
+    def _boom(cmd, *args, **kwargs):
+        if cmd[:2] == ["git", "show"] and cmd[2].startswith("deadbeef"):
+            raise TimeoutError("simulated git timeout reading base")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    [violation] = gate._agents_md_scope_violations(repo, "deadbeef" * 5, ["AGENTS.md"])
+    assert violation.startswith("agents_md_scope: unreadable at base deadbeef")
 
 
 def test_bridge_no_longer_renders_surfaces_and_points_to_operating_md() -> None:

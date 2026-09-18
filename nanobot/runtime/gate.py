@@ -386,13 +386,26 @@ def _git_show_many(repo_root: 'Path', ref: str, paths: 'list[str]') -> 'dict[str
     return out
 
 
-def _agents_md_scope_violations(repo_root: 'Path', changed_files: 'list[str]') -> 'list[str]':
+def _agents_md_scope_violations(repo_root: 'Path', base_sha: str, changed_files: 'list[str]') -> 'list[str]':
     """AGENTS.md scope violations for the staged HEAD (ADR-022, #1720 decision 6).
 
-    Only runs when the cycle changed ``AGENTS.md``. Reads the blob via
+    Only runs when the cycle changed ``AGENTS.md``. Reads the staged blob via
     ``git show HEAD:AGENTS.md`` so a deleted or unreadable file fails closed
     (the loop may shrink the file, never remove it). Reason strings share the
     ``agents_md_scope:`` prefix and block integration like a surface violation.
+
+    #1750: also reads the version at ``base_sha`` (the same pre-spawn sha
+    :func:`_skill_hygiene_violations` already receives) and passes both to
+    ``MutationPolicy.agents_md_scope_violations`` as ``old_text`` — this is
+    what turns the absolute bound into a ratchet once the file at HEAD is
+    already non-compliant, so a commit that strictly improves it (fewer or
+    equal lines, no reintroduced heading) is accepted instead of being
+    rejected forever by the state it is trying to repair. A ``base_sha`` read
+    failure (the command itself erroring — a corrupt object, a timeout) fails
+    closed the same way an unreadable HEAD does; ``AGENTS.md`` simply not
+    existing at ``base_sha`` (a newly created file, or a repo predating the
+    file) is not a failure — there is no old version to ratchet from, so the
+    absolute bound applies via ``old_text=None``.
     """
     if 'AGENTS.md' not in changed_files:
         return []
@@ -406,7 +419,21 @@ def _agents_md_scope_violations(repo_root: 'Path', changed_files: 'list[str]') -
         return [f'agents_md_scope: unreadable at HEAD: {exc}']
     if shown.returncode != 0:
         return ['agents_md_scope: AGENTS.md missing at HEAD (the loop may shrink it, not delete it)']
-    return MUTATION_POLICY.agents_md_scope_violations(shown.stdout)
+
+    old_text: 'str | None' = None
+    try:
+        shown_base = _sp.run(
+            ['git', 'show', f'{base_sha}:AGENTS.md'], capture_output=True, text=True,
+            cwd=str(repo_root), timeout=30,
+        )
+    except Exception as exc:
+        return [f'agents_md_scope: unreadable at base {base_sha[:12]}: {exc}']
+    if shown_base.returncode == 0:
+        old_text = shown_base.stdout
+    # else: AGENTS.md did not exist at base_sha -- no old version to ratchet
+    # from, old_text stays None and the absolute bound applies below.
+
+    return MUTATION_POLICY.agents_md_scope_violations(shown.stdout, old_text=old_text)
 
 
 def _skill_hygiene_violations(repo_root: 'Path', base_sha: str, changed_files: 'list[str]') -> 'list[str]':
