@@ -38,7 +38,7 @@ Once verification passes and the commit is made, the cycle is over: emit the fin
 
 ## Iteration budget
 
-The number of tool iterations available this cycle is given in the runtime context. Pace deliberately against it: read and edit early, verify once you have a candidate fix, and keep enough budget in reserve for the commit and the final response — do not spend the whole budget circling before committing.
+The number of tool iterations available this cycle is stated in your task message ("Iteration budget this cycle"). Pace deliberately against it: read and edit early, verify once you have a candidate fix, and keep enough budget in reserve for the commit and the final response — do not spend the whole budget circling before committing.
 
 ## Final response
 

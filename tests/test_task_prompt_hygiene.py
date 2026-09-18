@@ -144,7 +144,10 @@ def test_iteration_and_skip_contract_moved_to_operating_md():
     to switch on no longer exists in build_task at all."""
     req = {"task_title": "x", "request_id": "r", "cycle_id": "c", "goal_id": "g"}
     prompt = build_task(req, "derived", "", max_iterations=23)
-    assert "23 tool iterations" not in prompt
+    # The budget NUMBER stays: it is per-cycle data OPERATING.md can only
+    # point at ("given in the runtime context"), so build_task must still
+    # state it or the executor never learns its limit.
+    assert "Iteration budget this cycle: 23 tool iterations." in prompt
     assert 'outcome: "skipped"' not in prompt
     assert "bookkeeping-only commits" not in prompt
     assert "python3 -m pytest <affected test file>" not in prompt

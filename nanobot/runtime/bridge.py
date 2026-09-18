@@ -2118,10 +2118,14 @@ def build_task(req: dict, goal_text: str, report_source: str,
     # all moved to OPERATING.md (release root, loaded into the system prompt
     # by the loop-profile loader, #1725) -- kept here they were the same
     # ~2 300 chars repeated on every prompt this issue measured. One pointer
-    # line replaces them; declared_tool_names/max_iterations pacing notes now
-    # live in OPERATING.md's Tools/Iteration budget sections.
+    # line replaces them; declared_tool_names and the pacing advice now live
+    # in OPERATING.md's Tools/Iteration budget sections. The budget NUMBER is
+    # per-cycle data, not a rule: it is resolved per run (#578/#906) and
+    # OPERATING.md, a static file, can only point at it -- so it stays here,
+    # in the one place that knows it.
     del declared_tool_names
     lines += [
+        f'Iteration budget this cycle: {max_iterations} tool iterations.',
         'Rules: see OPERATING.md in your system prompt.',
         '',
     ]
