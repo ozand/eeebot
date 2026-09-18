@@ -37,7 +37,7 @@ Conventions:
 | [ADR-019](ADR-019-the-baseline-is-the-fastest-thing-this-host-can-do.md) | An optimisation is measured against the fastest implementation this host can run | proposed |
 | [ADR-020](ADR-020-direction-comes-from-reflection-over-a-span.md) | Direction comes from reflection over a span, never from an instantaneous error signal | proposed |
 | [ADR-021](ADR-021-whoever-sees-the-performance-may-change-the-capability.md) | Whoever sees the performance may change the capability, after measuring whether it was used | proposed |
-| [ADR-022](ADR-022-context-ontology.md) | Context ontology — one question, one file, one owner | proposed |
+| [ADR-022](ADR-022-context-ontology.md) | Context ontology — one question, one file, one owner | accepted |
 
 ## Acceptance
 
