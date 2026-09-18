@@ -11,6 +11,7 @@ from typing import Any
 from loguru import logger
 
 from nanobot.observability.llm_telemetry import record_llm_call, record_llm_prompt
+from nanobot.providers.model_window import resolve_context_window
 
 
 @dataclass
@@ -279,6 +280,10 @@ class LLMProvider(ABC):
             # None when the response carries none (error path, or a provider
             # that doesn't report one) -- never fabricated from the request.
             try:
+                # #1755: resolve the route's context window from the
+                # gateway's own /model/info (cached per api_base/model pair,
+                # never a guess) so llm_calls rows carry the fact needed to
+                # compute "how close did we come to the limit".
                 record_llm_call(
                     model=resolved_model,
                     served_model=response.served_model or None,
@@ -286,6 +291,7 @@ class LLMProvider(ABC):
                     usage=response.usage,
                     finish_reason=response.finish_reason,
                     retries=retries,
+                    context_window=resolve_context_window(resolved_model, self.api_base),
                 )
             except Exception as exc:
                 logging.getLogger(__name__).warning("llm call telemetry recording failed: %s", exc)

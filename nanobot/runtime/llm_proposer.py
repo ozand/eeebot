@@ -55,6 +55,7 @@ from nanobot.observability.llm_telemetry import (
     reset_call_context,
     set_call_context,
 )
+from nanobot.providers.model_window import resolve_context_window
 from nanobot.runtime import (
     archive,
     demand,
@@ -1931,6 +1932,7 @@ def propose(
                     model=model, duration_ms=duration_ms, usage=usage,
                     finish_reason=finish_reason, retries=0,
                     system_prompt_chars=len(system_content),
+                    context_window=resolve_context_window(model, base_url),
                 )
                 record_llm_prompt(
                     messages=create_kwargs["messages"], content=content,
