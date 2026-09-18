@@ -137,6 +137,8 @@ The gate's role as the sole enforcement point for the mutation surface. The scor
 
 All four items live in `tests/test_prompt_ontology.py` (#1726), which does not exist yet; this record stays `proposed` until it does and each item above resolves per the acceptance procedure in `docs/adr/README.md`.
 
+**Status (2026-09-18):** `tests/test_prompt_ontology.py` now exists — the fingerprint-once system-block check, the AGENTS.md-scope compliant-fixture check, and surface parity pass against the checked-in release files today, while the fingerprint-once user-message half (`xfail(strict)`, #1723 part (b) pending), the AGENTS.md-scope check against the real 192-line instance fixture (`xfail(strict)`, #1730 part 1 pending), and a newly found `search_memory` status-contract duplication between `OPERATING.md`'s `## Tools` section and `nanobot/agent/memory.py`'s `MEMORY_SEARCH_POINTER` (`xfail(strict)`, follow-up issue not yet filed) remain red by design until their blockers land.
+
 # References
 
 - #1720 — this record.
