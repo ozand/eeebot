@@ -224,14 +224,13 @@ def test_fingerprint_duplicate_is_caught_naming_both_blocks(tmp_path: Path):
     assert "2 block" in message
 
 
-@pytest.mark.xfail(strict=True, reason="#1723 part b pending")
 def test_fingerprint_user_message_only_budget_and_task():
     """AC (assertion 1, user-message half): build_task's user message may
     match only the budget number/phrase and the task -- every other rule
     literal (skip, mutation surface, branch, runner, final JSON) is
-    #1723(b)'s to remove from build_task. RED today (build_task still
-    carries its own copies); flips to a hard failure, not a silent pass,
-    the day #1723(b) lands and this marker is forgotten."""
+    #1723(b)'s to remove from build_task. GREEN since #1742 (`023a38f7`)
+    removed those literals; the xfail(strict) marker this test carried
+    while part (b) was open did its job and was dropped on the rebase."""
     req = {"task_title": "some task", "request_id": "r1", "cycle_id": "c1", "goal_id": "g1"}
     task = build_task(req, "mission text", "report_source.json")
 
