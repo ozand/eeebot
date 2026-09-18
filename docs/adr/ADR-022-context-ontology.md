@@ -1,15 +1,27 @@
 ---
 title: Context ontology — one question, one file, one owner
-status: proposed
+status: accepted
 date: 2026-09-18
 authors: [eeebot maintainers]
-related: ["#1720", "#1721", "#1722", "#1723", "#1724", "#1725", "#1726", "#1727", "#1728", "#1729", "#1730", "ozand/eeebot-ops-dashboard#301", "#1731", "#1188", "#1193"]
+related: ["#1720", "#1721", "#1722", "#1723", "#1724", "#1725", "#1726", "#1727", "#1728", "#1729", "#1730", "ozand/eeebot-ops-dashboard#301", "#1731", "#1188", "#1193", "#1745", "#1748", "#1750", "#1751", "#1752", "#1753", "#1754", "#1756"]
 tags: [prompt, architecture, ontology, runtime]
 ---
 
 # Status
 
-Proposed. Decision 6 is already code, in PR #1731; the rest of this record names the target state for the follow-up issues listed under References.
+**Accepted, 2026-09-18 (#1756).** Decision 6 was already code as of PR #1731 and is unchanged. The rest of this record's target state is now deployed rather than aspirational.
+
+Eleven of the original follow-ups are closed and deployed, as of release `20260918T002450Z-canonical-023a38f7`: `IDENTITY.md` trimmed to identity, `SOUL.md` and `USER.md` added at the release root, `OPERATING.md` created as the single owner of the cycle rules, `goals.md` trimmed, the file-driven loader with per-block telemetry (#1725), the prompt-ontology test harness (#1726), the `build_task` hygiene fixes (#1727), the lessons-context filter (#1728), the skills catalogue renderer, and the mutation-policy scope bound on `AGENTS.md` (PR #1731).
+
+Three more landed since the issue that requested this flip was written:
+
+- **#1729** (`roles/*.md` + `build_role_system_prompt`) — merged `824cac9e`, deployed in release `20260918T162023Z-canonical-824cac9e`, health gate CLEAN-EXIT. Live proof: the first post-flip ledger rows carry `system_prompt_chars` — proposer 6,550 (identity short + soul + charter + role), reflector 819 (identity short only).
+- **#1745** (the `search_memory` status contract was duplicated between `OPERATING.md`'s `## Tools` section and `nanobot/agent/memory.py`) — fixed in `d3dd4aa6`: the contract now lives only in the tool's own description.
+- **#1748** (outcome rows could not answer "was this a real failure") — fixed in `ada86014`.
+
+Closed since: **#1750** (the scope gate became a ratchet, merged `de20e708`; its principle is decision 10 below). Still open under this record, named rather than folded into "done": **#1751** (rule disposition: retire the nine procedural `AGENTS.md` sections and the four zero-read skills against `OPERATING.md`), **#1752** (rewrite the instance `AGENTS.md` to repository layout in one commit — the blocker for the one remaining `xfail(strict)` in the Test Contract below), **#1753** (raise the system-prompt budget from 24,000 to 35,000 chars, derived from the 98,304-token window).
+
+Live evidence, from a `phase: "system_prompt"` ledger row on 2026-09-18: the loop's prompt is assembled from `identity`, `soul`, `goals`, `user`, `operating`, `agents`, `skills_catalogue`, `memory`, `runtime` — the ontology's own order — with `missing: []`.
 
 # Context
 
@@ -63,7 +75,7 @@ Everything up to and including runtime facts is stable within a release; the vol
 
 # Decision
 
-**Six rules.**
+**Six rules, plus three decisions recorded at acceptance (7-9, added 2026-09-18 — see Status).**
 
 ## 1. One question, one file, one owner
 
@@ -96,6 +108,24 @@ Six things decided together, all implemented in PR #1731:
 - The executor receives the full charter (`goals.md`), never a summary or an excerpt chosen by code.
 
 **This is already implemented, in PR #1731.** It reverses #1188/#1193, which closed the `AGENTS.md` write path entirely after 20 autonomous integrations in five days whose only substantive change was appending to it. The reversal is safe here because the bound moved from "no write access" to "write access scoped and checked by the harness gate, not by a test the loop itself can edit" — the runtime rules the loop used to accumulate in `AGENTS.md` now live in the release-owned `OPERATING.md`, outside its reach. **This decision supersedes ADR-003 in part**, on the single point of whether the loop may commit `AGENTS.md` at all; ADR-003's consolidation tool, operator ownership of removal, and every other clause are unaffected. See the note added under ADR-003's Status section.
+
+## 7. Budget unit: stated in tokens, enforced in characters
+
+The system-prompt budget is *stated in tokens*, derived from the serving model's 98,304-token context window, but *enforced in characters* everywhere in the runtime — fit arithmetic, telemetry, and the Test Contract's own budgets (`OPERATING.md` ≤ 5,000 chars, `SOUL.md` ≤ 1,800, `IDENTITY.md` ≤ 1,500, `USER.md` ≤ 4,000, the system prompt overall ≤ 24,000) — because the i386 host serving the LLM carries no tokenizer. The chars/token ratio the cap was derived from has to travel with the number, or the next person who needs to move the cap re-derives a different ratio from the same window and gets a different answer.
+
+Measured on host `eeepc`, 2026-09-18, over 2,876 executor `llm_calls` rows: `prompt_tokens` max 79,804; `completion_tokens` capped at exactly 8,192 on every row (the client's own `max_tokens`, not a model limit — the LiteLLM route sets none); prompt + completion max 83,836 tokens against the 98,304-token window, leaving 14,468 tokens of headroom. This measurement closed #1754 and is the recorded derivation for this cap; #1753 (raising the character budget) is expected to cite it rather than re-measure.
+
+## 8. Scope of "code does not author": the loop profile only
+
+Rule 2 binds the loop-profile assembly path — `ContextBuilder._get_identity(loop_profile=True)` and its callers — not the interactive one. `ContextBuilder._get_identity(loop_profile=False)` deliberately keeps the original interactive nanobot template as a code literal: the "You are nanobot, a helpful AI assistant" role sentence, the Windows/POSIX `## Platform Policy` block, the five-line `## nanobot Guidelines` list (including "Ask for clarification" and the guidance about the `message`/`web_fetch`/`web_search` tools that rule 5 forbids for the loop), and the closing "Only use the 'message' tool…" sentence. This is a decision, not an unfinished migration: the interactive product has no release-root `IDENTITY.md`/`SOUL.md`/`OPERATING.md` to read — it is not the self-evolving loop, has no operator-authored files to assemble, and its persona is nanobot's own product surface, not this record's concern. `tests/test_ontology_loader.py::test_no_forbidden_loop_prose_in_context_or_subagent_source` checks the forbidden phrases are confined to the interactive branch of `_get_identity`, not absent from the file — proving the scoping, not a blanket ban.
+
+## 9. The `SOUL.md` / `USER.md` filename collision is kept, not resolved
+
+`nanobot/templates/SOUL.md` and `nanobot/templates/USER.md` are package-bundled workspace scaffolding for the interactive nanobot product — copied into a new interactive workspace by `sync_workspace_templates` only when the file is missing there. They carry different content and a different owner from the release-root `SOUL.md`/`USER.md` the loop profile reads (rule 1's table: operator-owned, immutable to the loop). The same two filenames now name two unrelated files depending on which profile is running, and a `grep -r SOUL.md` across the repo returns both without saying which is which.
+
+Decision: keep the collision rather than rename either pair — renaming `nanobot/templates/*` is a stated non-goal of this record. The two profiles never load both at once, and disambiguation already happens by directory and loader path, not filename: the loop reads release-root files named directly in `ContextBuilder.BOOTSTRAP_FILES`; the interactive profile reads workspace files via `MUTATION_POLICY.read_paths`, seeded once from `nanobot/templates/` by `sync_workspace_templates`. This matches the collision as the issue that requested this record described it; nothing here contradicts that description.
+
+## 10. A bound introduced over existing content ships with a migration commit or a ratchet clause
 
 **A bound introduced over existing content ships with either a migration commit or a ratchet clause (#1750).** PR #1731's absolute bound (`agents_md_max_lines`, the nine forbidden headings) was applied on the day the live instance `AGENTS.md` already violated it at 192 lines with all nine headings present. Checked only against the staged version at `HEAD`, the rule then rejected *every* commit that touched the file — including one that strictly improved it — because the only commit able to pass was a single atomic rewrite to full compliance, unlikely to fit inside one bounded executor turn. The file was frozen in its non-compliant state by the rule meant to make it compliant: **a bound that rejects the repair of the state it is diagnosing is a freeze, not a guard.** #1750 turns the check into a ratchet — reads the version at the gate's base sha alongside `HEAD`; while the base version is non-compliant, a staged version is accepted iff it does not regress (line count does not increase, no forbidden heading absent from the base version is reintroduced) rather than only when it reaches full compliance outright. Once the base version is itself compliant, the absolute bound applies exactly as before. The same trap recurs on any future bound tightened over content the tightening itself does not touch; the fix each time is the same shape — a migration commit that brings existing content into compliance in the same change that introduces the bound, or (when that commit cannot be guaranteed to land atomically, as here) a ratchet against the prior state instead of the absolute target.
 
@@ -132,14 +162,16 @@ The gate's role as the sole enforcement point for the mutation surface. The scor
 
 # Test Contract
 
-- **Fingerprint-once test** — `tests/test_prompt_ontology.py`, deferred (#1726): each named rule (skip, mutation surface, branch discipline, test runner, identity, iteration budget) is asserted to match exactly one block of the assembled prompt.
-- **AGENTS.md scope test** — `tests/test_prompt_ontology.py`, deferred (#1726): a release-side mirror of the `#1731` gate bound (`mutation_policy.agents_md_scope_violations`) — a fixture text of ≤ 150 lines with none of the runtime headings passes; a fixture over the line limit, or carrying a runtime heading, fails. A second case, run directly against the live instance `AGENTS.md` (192 lines today), is `xfail(strict=True)` until `#1730` part 1 shrinks it — the strict marker means the test starts failing loudly, not silently passing, the day the file actually gets under the bound and the marker should come off.
-- **Surface-parity test** — `tests/test_prompt_ontology.py`, deferred (#1726): the rendered "Allowed targets" / "Do NOT modify" prompt lines and the instance `AGENTS.md`'s own repository-layout section name the same paths, so the two lists PR #1731 reconciled cannot drift apart again silently.
-- **No-guidance-without-capability test** — `tests/test_prompt_ontology.py`, deferred (#1726): a fixture executor registry without `message`/`web_fetch`/`web_search` asserts none of those tool names appear anywhere in the assembled system prompt.
+- **Fingerprint-once test** — `tests/test_prompt_ontology.py`: each named rule (skip, mutation surface, branch discipline, test runner, identity, iteration budget) is asserted to match exactly one block of the assembled prompt.
+- **AGENTS.md scope test** — `tests/test_prompt_ontology.py`: a release-side mirror of the `#1731` gate bound (`mutation_policy.agents_md_scope_violations`) — a fixture text of ≤ 150 lines with none of the runtime headings passes; a fixture over the line limit, or carrying a runtime heading, fails. A second case, run directly against the live instance `AGENTS.md` (192 lines today), is `xfail(strict=True)` (`test_agents_md_scope_violations_against_real_instance_fixture`) until #1752 shrinks it — the strict marker means the test starts failing loudly, not silently passing, the day the file actually gets under the bound and the marker should come off.
+- **Surface-parity test** — `tests/test_prompt_ontology.py`: the rendered "Allowed targets" / "Do NOT modify" prompt lines and the instance `AGENTS.md`'s own repository-layout section name the same paths, so the two lists PR #1731 reconciled cannot drift apart again silently.
+- **No-guidance-without-capability test** — `tests/test_prompt_ontology.py`: a fixture executor registry without `message`/`web_fetch`/`web_search` asserts none of those tool names appear anywhere in the assembled system prompt.
+- **OPERATING.md structure and generation parity** — `tests/test_operating_md.py`: the file exists, carries its ten headings in the assembly order, renders the mutation-surface section byte-for-byte from `MUTATION_POLICY.render_bridge_surface_block()`, and names pytest (never unittest) as the one test runner.
+- **File-driven loader** — `tests/test_ontology_loader.py`: `identity → soul → goals → user → operating → AGENTS.md → skills → memory → runtime` load and assemble in that order with per-block telemetry, missing/truncated files degrade with a marker rather than raising, and no forbidden loop-profile prose (decision 8) appears outside the interactive branch of `_get_identity`.
 
-All four items live in `tests/test_prompt_ontology.py` (#1726), which does not exist yet; this record stays `proposed` until it does and each item above resolves per the acceptance procedure in `docs/adr/README.md`.
+`tests/test_prompt_ontology.py` was added by #1726 (merged `96a450a0`). Two items were `xfail(strict=True)` at that time and have since resolved: the fingerprint-once user-message half, once #1723 part (b) removed the `build_task` literals (`023a38f7`); and a `search_memory` status-contract duplication the harness found between `OPERATING.md` and `nanobot/agent/memory.py`, fixed by #1745 (`d3dd4aa6`) and now its own passing assertion, `test_search_memory_status_contract_appears_only_in_operating_tools_block`. One `xfail(strict=True)` remains by design — `test_agents_md_scope_violations_against_real_instance_fixture`, pending #1752 — and is not counted as a failure of this contract.
 
-**Status (2026-09-18):** `tests/test_prompt_ontology.py` now exists — the fingerprint-once system-block check, the AGENTS.md-scope compliant-fixture check, and surface parity pass against the checked-in release files today, while the fingerprint-once user-message half (`xfail(strict)`, #1723 part (b) pending), the AGENTS.md-scope check against the real 192-line instance fixture (`xfail(strict)`, #1730 part 1 pending), and a newly found `search_memory` status-contract duplication between `OPERATING.md`'s `## Tools` section and `nanobot/agent/memory.py`'s `MEMORY_SEARCH_POINTER` (`xfail(strict)`, follow-up issue not yet filed) remain red by design until their blockers land.
+`tests/test_release_ontology_files.py` (#1721, #1722) also passes today and is run alongside the contract above as part of this record's own acceptance check, though it predates this ADR and does not itself cite `ADR-022`, so it is not listed as a numbered contract item: it holds `SOUL.md`, `IDENTITY.md` and `USER.md` to their per-file budgets and checks `USER.md`'s directives are dated, sourced, and in Always/Never/Prefer form. Run it with the three files above; it is expected to pass with no `xfail`.
 
 # References
 
@@ -153,8 +185,14 @@ All four items live in `tests/test_prompt_ontology.py` (#1726), which does not e
 - #1727 — `build_task` defects (independent of this record's own dependency chain).
 - #1728 — `lessons_context` threshold.
 - #1729 — `roles/*.md`.
-- #1730 — operator priorities: instance `AGENTS.md` shrink, skills catalogue, droppable reserve.
-- #1750 — the `AGENTS.md` scope bound becomes a ratchet against the gate's base sha once `HEAD` is already non-compliant.
+- #1730 — operator priorities: instance `AGENTS.md` shrink, skills catalogue, droppable reserve. Open; #1752 is the current tracking issue for part 1 specifically.
+- #1745 — `search_memory` status-contract duplication. Closed, `d3dd4aa6`.
+- #1748 — outcome rows could not answer "was this a real failure". Closed, `ada86014`.
+- #1750 — closed, merged `de20e708`. A bound introduced over existing content ships with a migration commit or a ratchet clause; recorded as decision 10.
+- #1751 — open. Dispose the nine procedural `AGENTS.md` sections and the four zero-read skills against `OPERATING.md`.
+- #1752 — open. Rewrite the instance `AGENTS.md` to repository layout in one commit; blocks the one remaining `xfail(strict)` in the Test Contract.
+- #1753 — open. Raise the system-prompt budget from 24,000 to 35,000 chars; should cite decision 7's measurement rather than re-deriving it.
+- #1754 — closed. The tokens-vs-characters measurement decision 7 records.
 - `ozand/eeebot-ops-dashboard#301` — `agent.html` rebuilt by this ontology.
 - PR #1731 — decision 6, already merged in code: `AGENTS.md` scope bound, `SOUL.md`/`USER.md`/`OPERATING.md` join the immutable-files list, `ops/` named in the rendered surface block.
 - ADR-003 — superseded in part by this record (AGENTS.md commit permission); its consolidation tool and operator-removal authority stand.
