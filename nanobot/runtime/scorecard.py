@@ -639,6 +639,17 @@ def _loop_section(
     self_dedup_rejects = 0
     duplicate_failure_skips = 0
     failed_outcomes = 0
+    # #1765: 'paused-supplier' cycles (the LLM gateway/model provider could
+    # not serve us) are counted and timed SEPARATELY from failed_outcomes —
+    # they must never feed repeat_failure_rate/wasted_attempts. Duration is
+    # this cycle's own started.ts -> outcome.ts span; a cycle whose 'started'
+    # row fell outside this window (or was never written) has no computable
+    # duration and is counted in paused_supplier_seconds_unknown_count
+    # instead of silently reading as zero seconds.
+    paused_supplier_outcomes = 0
+    paused_supplier_seconds = 0.0
+    paused_supplier_seconds_unknown_count = 0
+    started_ts_by_cycle: dict[str, Any] = {}
     skips_by_class: dict[str, int] = {}
     skips_by_reason: dict[str, int] = {}
     # #800 churn split: cycles whose proposed row served a decay demand
@@ -668,6 +679,13 @@ def _loop_section(
         phase = row.get("phase")
         if phase == "idle":
             idle_rows += 1
+        elif phase == "started":
+            # #1765: write-ahead marker, always chronologically before its
+            # own cycle's terminal 'outcome' row — a single forward pass has
+            # this recorded by the time that outcome row is reached below.
+            _started_cycle_id = str(row.get("cycle_id") or "").strip()
+            if _started_cycle_id:
+                started_ts_by_cycle[_started_cycle_id] = row.get("ts")
         elif phase == "proposed":
             proposals += 1
             # #1510: `demand_id` is the canonical, persisted identity of the
@@ -737,6 +755,16 @@ def _loop_section(
                     duplicate_failure_skips += 1
             elif outcome == "failed":
                 failed_outcomes += 1
+            elif outcome == "paused-supplier":
+                # #1765: never folds into failed_outcomes/wasted_attempts —
+                # its own counter, reported as a distinct dashboard line.
+                paused_supplier_outcomes += 1
+                _paused_start = _parse_ts(started_ts_by_cycle.get(cycle_id))
+                _paused_end = _parse_ts(row.get("ts"))
+                if _paused_start is not None and _paused_end is not None and _paused_end >= _paused_start:
+                    paused_supplier_seconds += (_paused_end - _paused_start).total_seconds()
+                else:
+                    paused_supplier_seconds_unknown_count += 1
     cycleish = idle_rows + outcome_rows
     hypothesis_served_cycles = len(hypothesis_cycle_ids & terminal_cycle_ids)
     repeat_failures = duplicate_failure_skips + self_dedup_rejects
@@ -819,6 +847,21 @@ def _loop_section(
         "fallback_rejects": fallback_rejects if fallback_visibility else "unavailable",
         "fallback_rejects_by_reason": fallback_rejects_by_reason if fallback_visibility else "unavailable",
         "fallback_distinct_target_paths": len(fallback_target_paths) if fallback_visibility else "unavailable",
+        # #1765: cycles where the LLM gateway/model provider could not serve
+        # us — its own counter, reported as its own dashboard line, excluded
+        # from repeat_failure_rate/wasted_attempts entirely (never folded
+        # into failed_outcomes above). "unavailable" (not 0) when the ledger
+        # window itself could not be read, so "no outages" and "couldn't
+        # tell" never look alike — the same gating `fallback_rejects` uses.
+        "paused_supplier_outcomes": paused_supplier_outcomes if fallback_visibility else "unavailable",
+        "paused_supplier_seconds": paused_supplier_seconds if fallback_visibility else "unavailable",
+        # Of paused_supplier_outcomes, how many had no computable duration
+        # (their 'started' row fell outside this window, or was never
+        # written) — paused_supplier_seconds undercounts by exactly this
+        # many cycles' worth of unmeasured time, never silently as zero.
+        "paused_supplier_seconds_unknown_count": (
+            paused_supplier_seconds_unknown_count if fallback_visibility else "unavailable"
+        ),
     }
 
 

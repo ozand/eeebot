@@ -109,6 +109,17 @@ def read_cycle_progress(
     for row in reversed(rows):
         if row.get("outcome") == "success" and _parse_ledger_timestamp(row.get("ts")) is not None:
             break
+        # #1765: a supplier outage (LLM gateway/model provider could not
+        # serve us) is neither a success (does not reset the streak) nor
+        # evidence the loop itself is stalled (must not advance
+        # consecutive_non_integrating_cycles toward the alert threshold) --
+        # skip it and keep walking further back. hours_since_last_success
+        # is unaffected either way (derived from success rows only), so a
+        # sustained outage still trips the TIME alert; only the COUNT alert,
+        # which specifically means "the loop tried and failed N times", is
+        # exempted from counting attempts the loop never got to make.
+        if row.get("outcome") == "paused-supplier":
+            continue
         trailing.append(row)
     reasons: dict[str, int] = {}
     for row in trailing:

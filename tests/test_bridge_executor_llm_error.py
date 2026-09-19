@@ -13,6 +13,18 @@ spawn writes exactly the telemetry the real one writes on that failure, and
 asserts all three: the recorded status (and the gate seeing it), the exit
 code that becomes the streak failure, and the absence of the marker with a
 bounded retry.
+
+#1765: ``TRANSPORT_ERROR`` below (litellm.InternalServerError / "Connection
+error" — the exact 2026-09-04 incident text) is a SUPPLIER-side failure by
+#1765's own classifier and now correctly records ``outcome: "paused-supplier"``
+rather than ``"failed"`` — see ``tests/test_paused_supplier_1765.py`` for
+that behaviour (no error card, no retry counter ever, unconditional
+re-offer). The tests in ``TestExecutorLLMErrorIsAFailure`` below were
+rewritten to use ``CLIENT_DEFECT_ERROR`` instead, a genuine OUR-OWN-DEFECT
+shape (context length exceeded) that #1765 leaves classified ``"failed"`` —
+preserving their original intent (the bounded retry-then-retire contract,
+which #1765 explicitly keeps for the class it did not touch) against a
+fixture the new classifier still calls a real failure.
 """
 from __future__ import annotations
 
@@ -40,6 +52,15 @@ TRANSPORT_ERROR = (
     "OpenAIException - Connection error. No fallback model group found for original model group"
 )
 
+#: #1765: a genuine OUR-OWN-REQUEST defect — the supplier answered and
+#: rejected it — kept classified ``"failed"`` by the new classifier (no
+#: connection/timeout/5xx/rate-limit/not-found signal anywhere in the text).
+CLIENT_DEFECT_ERROR = (
+    "Error: LLM execution failed: Error calling LLM: litellm.BadRequestError: "
+    "OpenAIException - This model's maximum context length is 8192 tokens. "
+    "However, you requested 9214 tokens in the messages, please reduce."
+)
+
 
 class _LLMDeadSubagentManager:
     """The real manager on 2026-09-04: spawn registers a task, the task's LLM
@@ -47,6 +68,7 @@ class _LLMDeadSubagentManager:
     returns without touching the repo."""
 
     task_id = "0b221168"
+    error_text = TRANSPORT_ERROR
 
     def __init__(self, *, workspace, **_kwargs):
         self.workspace = workspace
@@ -58,8 +80,8 @@ class _LLMDeadSubagentManager:
         (telemetry_dir / f"{self.task_id}.json").write_text(json.dumps({
             "task_id": self.task_id,
             "status": "error",
-            "summary": TRANSPORT_ERROR,
-            "result": TRANSPORT_ERROR,
+            "summary": self.error_text,
+            "result": self.error_text,
             "started_at": "2026-09-04T04:01:31Z",
             "finished_at": "2026-09-04T04:04:45Z",
         }), encoding="utf-8")
@@ -70,6 +92,14 @@ class _LLMDeadSubagentManager:
         # bridge captures next(iter(mgr._running_tasks)) right after spawn.
         self._running_tasks[self.task_id] = asyncio.ensure_future(_done())
         return "fake subagent spawned (LLM dead)"
+
+
+class _LLMBadRequestSubagentManager(_LLMDeadSubagentManager):
+    """#1765: same transport (a dead LLM call, zero commits) but a genuine
+    OUR-OWN-REQUEST defect — stays classified ``"failed"``."""
+
+    task_id = "c3213aa1"
+    error_text = CLIENT_DEFECT_ERROR
 
 
 @pytest.fixture(autouse=True)
@@ -142,7 +172,7 @@ def _result_for(state_dir, request_id):
 
 class TestExecutorLLMErrorIsAFailure:
     def test_dead_llm_cycle_is_blocked_failed_unmarked_and_exits_nonzero(self, tmp_path, monkeypatch):
-        state_dir = _wire(tmp_path, monkeypatch, _LLMDeadSubagentManager)
+        state_dir = _wire(tmp_path, monkeypatch, _LLMBadRequestSubagentManager)
         # Production requests point at a proposal artifact; the result row's
         # backlog_title (what _recent_failure_match matches on) comes from its
         # next_bounded_candidate.title — seed one exactly like the proposer does.
@@ -166,7 +196,7 @@ class TestExecutorLLMErrorIsAFailure:
         assert res["rollback"]["reason"] == "executor_llm_error"
         assert res["commits_pushed"] == 0
         assert res["backlog_title"] == title
-        assert any("EXECUTOR LLM ERROR (#1280)" in s and "Connection error" in s for s in res.get("key_learnings") or [])
+        assert any("EXECUTOR LLM ERROR (#1280)" in s and "maximum context length" in s for s in res.get("key_learnings") or [])
         assert "model=" in res["key_learnings"][0] or any("model=" in s for s in res.get("key_learnings") or [])
         assert bridge._recent_failure_match(title, state_dir) is None
         assert bridge._llm_error_retries_exhausted("req-dead") is False
@@ -205,7 +235,7 @@ class TestExecutorLLMErrorIsAFailure:
         empty, the #716 suppression had nothing to match, and the retry passed
         for the wrong reason; with the artifact the review reproduced the
         request being retired on attempt 2 of 3 by the suppression branch."""
-        state_dir = _wire(tmp_path, monkeypatch, _LLMDeadSubagentManager)
+        state_dir = _wire(tmp_path, monkeypatch, _LLMBadRequestSubagentManager)
         monkeypatch.setattr(bridge, "LLM_ERROR_MAX_RETRIES", 3)
         title = "Add markdown catalog link path resolver to workspace_validation_helpers.py"
         artifact = tmp_path / "improvements" / "llm-proposed-cycle-loop.json"
@@ -256,7 +286,7 @@ class TestExecutorLLMErrorIsAFailure:
         the same direction the reader takes. Counter-only loss is NOT tested
         here because that case already retires via the suppression branch and
         would pass while proving nothing."""
-        state_dir = _wire(tmp_path, monkeypatch, _LLMDeadSubagentManager)
+        state_dir = _wire(tmp_path, monkeypatch, _LLMBadRequestSubagentManager)
         monkeypatch.setattr(bridge, "LLM_ERROR_MAX_RETRIES", 3)
         title = "Add markdown catalog link path resolver to workspace_validation_helpers.py"
         artifact = tmp_path / "improvements" / "llm-proposed-cycle-lost.json"

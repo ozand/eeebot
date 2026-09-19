@@ -23,7 +23,7 @@ from unittest.mock import patch
 import pytest
 
 from nanobot.runtime import bridge
-from tests.test_bridge_executor_llm_error import _LLMDeadSubagentManager
+from tests.test_bridge_executor_llm_error import _LLMBadRequestSubagentManager
 from tests.test_cycle_ledger import (
     _FakeSubagentManager,
     _init_selfevo_repo,
@@ -192,8 +192,16 @@ def test_error_card_recording_created_then_already_recorded_across_retries(tmp_p
     Real git flow (no _write_structured_error/_push_main_or_report mocking):
     attempt 1 creates and pushes the card; attempts 2 and 3 must read
     already_recorded -- never write_failed -- and every row carries the
-    attempt number that produced it, out of LLM_ERROR_MAX_RETRIES."""
-    state_dir = _wire(tmp_path, monkeypatch, _LLMDeadSubagentManager)
+    attempt number that produced it, out of LLM_ERROR_MAX_RETRIES.
+
+    #1765: uses the OUR-OWN-DEFECT fixture (_LLMBadRequestSubagentManager),
+    not the connection-error one -- a supplier-side error now classifies as
+    'paused-supplier' and writes no card at all (see
+    tests/test_paused_supplier_1765.py); this test's own subject, the
+    error-card-across-retries mechanism, only ever applied to the 'failed'
+    class to begin with.
+    """
+    state_dir = _wire(tmp_path, monkeypatch, _LLMBadRequestSubagentManager)
     monkeypatch.setattr(bridge, "LLM_ERROR_MAX_RETRIES", 3)
     title = "Retry same cycle three times, card recorded once"
     artifact = tmp_path / "improvements" / "llm-proposed-cycle-retry-card.json"

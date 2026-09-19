@@ -178,8 +178,18 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
     are neither a success nor a failure of the original work — origin/main
     moved, or the branch aged out, through no fault of this attempt — and
     are excluded from both counts entirely, the same as ``push_pending``.
+
+    #1765: an ``outcome: paused-supplier`` row (the LLM gateway/model
+    provider could not serve us) joins the same exclusion set, for the same
+    reason as ``push_pending`` — it is a terminal ledger row, but says
+    nothing about this attempt's own viability, so it must not spend the
+    demand's futility budget any more than it spends its rotation turn
+    (bridge.py) or its recent-failure suppression window (llm_proposer.py).
+    Named ``_NOT_YET_TERMINAL`` for the ledger-rotation cases it was coined
+    for; here it means "never counts as an attempt", not "will resolve
+    later" — a supplier outage has no analogous later resolution row.
     """
-    _NOT_YET_TERMINAL = frozenset({"push_pending", "superseded", "abandoned"})
+    _NOT_YET_TERMINAL = frozenset({"push_pending", "superseded", "abandoned", "paused-supplier"})
     lane = _lane(gap_id)
     if lane not in _FAMILY_PREFIXES:
         proposed: set[str] = set()
