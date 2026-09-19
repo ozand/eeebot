@@ -65,6 +65,20 @@ and 3 controls — **111 calls** for a baseline, 666 with every block ablated.
 unset, that block renders as missing, which the output's `sections` line
 reports rather than hiding.
 
+## Check the model line
+
+Without the host's preset environment loaded, the executor role falls back to
+its built-in default, which is **not** the model the loop actually runs. The
+report prints the resolved model on its first line for exactly this reason —
+read it before reading anything below it. Off the host, name the model
+explicitly:
+
+```bash
+python3 scripts/run_persona_harness.py --model un/qwen3.8-27b-gguf
+```
+
+A set answered by a different model measures a different character.
+
 ## What it does not do
 
 - It does not change the persona files. It says which traits work; the edit is

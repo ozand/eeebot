@@ -79,7 +79,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="completion cap per answer (default: the harness role's, 8192). The answer is one "
                              "word, but this model reasons before it: a cap too low truncates the thinking and "
                              "the reply parses as no-signal.")
-    parser.add_argument("--model", default="", help="override the model (default: the executor role's model)")
+    parser.add_argument("--model", default="",
+                        help="model to ask (default: the executor role's). Off the host, where the preset "
+                             "environment is not loaded, that role falls back to a built-in default which is "
+                             "NOT the model the loop runs — name it explicitly and check the model line in "
+                             "the report.")
     parser.add_argument("--max-calls", type=int, default=DEFAULT_MAX_CALLS,
                         help=f"refuse to start above this many model calls (default: {DEFAULT_MAX_CALLS})")
     parser.add_argument("--ablate", action="append", default=[], metavar="BLOCK",
