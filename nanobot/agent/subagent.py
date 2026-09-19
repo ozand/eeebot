@@ -51,6 +51,26 @@ def _attempted_skill_name(requested: str) -> str:
 # warning message is injected.  2×K triggers abort.  Env-tunable; default 3.
 _LOOP_BREAKER_K_DEFAULT = 3
 
+# ── #1774: truncated-response continuation ───────────────────────────────────
+#: How many consecutive truncated responses before the cycle stops with an
+#: explicit reason.  Three, because the measured behaviour is a single long
+#: reply that the ceiling cuts once -- 23 truncations over 9,714 executor calls,
+#: none of them consecutive -- so two continuations is already well past the
+#: observed need, and a fourth would mean the model is producing an unbounded
+#: answer that a fifth attempt will not finish either.  The bound exists to stop
+#: a spin, not to fund retries.
+_MAX_CONSECUTIVE_TRUNCATIONS = 3
+
+#: The turn that asks for the rest.  Written as an instruction about the work,
+#: not about the plumbing: the executor has no way to act on "the ceiling" and
+#: telling it about a limit it cannot control invites it to editorialise about
+#: the limit instead of finishing.
+_TRUNCATION_CONTINUATION_NOTE = (
+    "Your previous message was cut off before it finished. Continue from exactly "
+    "where it stopped -- do not restart it and do not repeat what you already "
+    "wrote. If you were issuing a tool call, issue it now as your whole reply."
+)
+
 
 def _loop_breaker_k() -> int:
     """Return K from NANOBOT_LOOP_BREAKER_K env (positive int, default 3)."""
@@ -365,6 +385,12 @@ class SubagentManager:
             _lbk = _loop_breaker_k()
             _lb_last_key: str | None = None
             _lb_count: int = 0
+            # #1774: truncation-continuation state. `count` is every truncated
+            # response this cycle, `consecutive` only the current run, and
+            # `continued` records that at least one continuation was followed by
+            # a response that was not truncated -- i.e. the recovery actually
+            # worked, which is the number that makes this change measurable.
+            _truncation = {"count": 0, "consecutive": 0, "continued": False}
             # #1101: wall-clock soft deadline (injectable for tests)
             _wall_deadline = _subagent_wall_deadline(_monotonic=getattr(self, '_monotonic', None))
 
@@ -411,6 +437,47 @@ class SubagentManager:
 
                 if response.finish_reason == "error":
                     raise RuntimeError(f"LLM execution failed: {response.content}")
+
+                # #1774: a response cut at the completion ceiling is a
+                # CONTINUATION SIGNAL, not a final answer. It is cut mid-stream,
+                # so it carries no complete tool call, `has_tool_calls` is False,
+                # and the branch below would have taken the fragment as the
+                # cycle's result -- measured on host eeepc over 9,714 executor
+                # calls, 21 of the 23 truncated responses were the last call of
+                # their cycle, with most of the iteration budget unspent.
+                #
+                # This is the OUTPUT ceiling, not context pressure: completion
+                # was exactly 8,192 on every one of the 23, never above, and one
+                # of them had ~33,000 tokens of input headroom left.
+                #
+                # Guarded on `has_tool_calls` as well: a response that did parse
+                # a complete tool call is usable whatever the finish reason, and
+                # must keep going down the normal path.
+                if response.finish_reason == "length" and not response.has_tool_calls:
+                    _truncation["count"] += 1
+                    _truncation["consecutive"] += 1
+                    if _truncation["consecutive"] >= _MAX_CONSECUTIVE_TRUNCATIONS:
+                        logger.warning(
+                            "Subagent [{}] abort: {} consecutive truncated responses (max={})",
+                            task_id, _truncation["consecutive"], _MAX_CONSECUTIVE_TRUNCATIONS,
+                        )
+                        stop_reason = "response_truncated"
+                        break
+                    # Keep the partial text: it is the first half of the thought
+                    # the model is being asked to finish, and discarding it would
+                    # make the continuation a retry from nothing.
+                    messages.append(build_assistant_message(
+                        response.content or "",
+                        reasoning_content=response.reasoning_content,
+                        thinking_blocks=response.thinking_blocks,
+                    ))
+                    messages.append({"role": "user", "content": _TRUNCATION_CONTINUATION_NOTE})
+                    continue
+                if _truncation["consecutive"]:
+                    # A response that was not truncated after one that was: the
+                    # continuation recovered the cycle.
+                    _truncation["continued"] = True
+                    _truncation["consecutive"] = 0
 
                 if response.has_tool_calls:
                     tool_call_dicts = [
@@ -517,6 +584,16 @@ class SubagentManager:
                     "I reached the wall-clock time limit before completing the task. "
                     "You can try breaking the task into smaller steps."
                 )
+            elif stop_reason == "response_truncated":
+                # #1774: distinguishable from a normal completion on purpose --
+                # before this, the same situation ended the cycle as a silent
+                # "partial: no artifact recorded".
+                final_result = (
+                    f"Task aborted: {_truncation['consecutive']} consecutive responses were cut "
+                    f"at the model's completion ceiling (stop_reason=response_truncated). "
+                    f"The reply is too long to finish; the next attempt should ask for a "
+                    f"smaller step."
+                )
             elif final_result is None:
                 final_result = "Task completed but no final response was generated."
 
@@ -540,6 +617,10 @@ class SubagentManager:
                     correlation_context=correlation_context,
                     stop_reason=stop_reason,
                     context_usage=context_usage,
+                    truncation={
+                        "count": _truncation["count"],
+                        "continued": _truncation["continued"],
+                    },
                 ),
             )
             peak = context_usage["peak_tokens"]
@@ -684,6 +765,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         correlation_context: dict[str, Any] | None = None,
         stop_reason: str | None = None,
         context_usage: dict[str, Any] | None = None,
+        truncation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = {
             "subagent_id": task_id,
@@ -706,6 +788,11 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
             payload.update(correlation_context)
         if context_usage is not None:
             payload["context_usage"] = context_usage
+        if truncation is not None:
+            # #1774: written unconditionally once the caller passes it, zeros
+            # included. A cycle that saw no truncation and a cycle from a
+            # release that could not record one must not read the same.
+            payload["truncation"] = truncation
         return payload
 
     def _utc_now(self) -> str:
