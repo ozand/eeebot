@@ -358,6 +358,71 @@ def _is_test_path(path: str) -> bool:
     return str(path).replace("\\", "/").strip().lstrip("/").startswith("tests/")
 
 
+# ─── #1764: a priority that names a file is not retired by a cycle that ──────
+#     never touched it.
+#
+# Audited all 39 operator priorities in ``completed.json`` against the cycle
+# that retired each and that cycle's real ``files_changed``: 34 titles name a
+# path, and **14 of those retiring commits never touched it** -- every one of
+# the 14 changed only a memory file, claiming completion rather than
+# performing it. ``_is_completed`` then suppresses the id permanently and no
+# re-offer mechanism exists, so the operator's request is gone.
+#
+# Replayed before building, per #1328: the rule blocks 14 of 39 retirements
+# and **zero** of the 24 that genuinely delivered. Narrowing it further to
+# only confidently-extracted paths keeps 12 of the 14, still with zero false
+# positives -- the cost of the narrowing is 2 missed bookkeeping closures,
+# which is the right side to err on when the failure mode is a priority
+# stranded forever.
+#
+#: Path-shaped tokens in a priority title. Deliberately anchored on a known
+#: extension rather than on "looks like a word with a dot": titles are prose
+#: and a looser pattern reads ordinary sentences as filenames. Measured on the
+#: 39 real titles, a bare-word pattern mis-extracts on 17 of them.
+_TITLE_PATH_RE = re.compile(
+    r"(?<![\w/.-])((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_-]+\.(?:py|md|json|sh|ya?ml|toml|txt))"
+    r"(?![\w])"
+)
+
+
+def paths_named_in_summary(summary: str) -> list[str]:
+    """Path-shaped tokens a priority title names, in order, de-duplicated.
+
+    Empty when the title names none -- 5 of the 39 audited priorities name a
+    function symbol with no file, and the rule below simply does not apply to
+    those.
+    """
+    return list(dict.fromkeys(_TITLE_PATH_RE.findall(str(summary or ""))))
+
+
+def title_path_touched(named: list[str], files_changed: list[str] | None) -> bool:
+    """True when a cycle's changed files touch ANY path the title named.
+
+    **Any**, not all: one audited title names two paths (``HISTORY.md
+    newest-first -- update cycle_logger.py to prepend``), and requiring both
+    would block a legitimate two-step delivery split across cycles.
+
+    A directory-prefixed name matches exactly or as a path suffix. A bare
+    filename matches on basename -- looser, and deliberately so: this rule
+    only ever *withholds* a retirement, so a looser match can under-block but
+    can never strand a priority that was really delivered. (6 of the 7 bare
+    filenames among the 39 resolve to exactly one file in the repo; only
+    ``MEMORY.md`` is ambiguous, and basename matching folds it either way.)
+    """
+    changed = {str(f).replace("\\", "/").strip().lstrip("/") for f in (files_changed or [])}
+    changed = {c for c in changed if c}
+    if not changed:
+        return False
+    basenames = {c.rsplit("/", 1)[-1] for c in changed}
+    for path in named:
+        if "/" in path:
+            if path in changed or any(c.endswith("/" + path) for c in changed):
+                return True
+        elif path in basenames:
+            return True
+    return False
+
+
 def classify_change_tier(files_changed: list[str] | None) -> str:
     """Classify an integration's changed files as ``'doc-only'`` or ``'code-bearing'``.
 
@@ -2439,10 +2504,40 @@ def completed_demand_ids(state_dir: Path) -> set[str]:
         return set()
 
 
+FOLD_WITHHELD_SUBPATH = ("demand", "fold_withheld.json")
+FOLD_WITHHELD_SCHEMA = "fold-withheld-v1"
+
+
+def _fold_withheld_path(state_dir: Path) -> Path:
+    return Path(state_dir).joinpath(*FOLD_WITHHELD_SUBPATH)
+
+
+def _write_fold_withheld(state_dir: Path, withheld: list[dict[str, Any]]) -> None:
+    """Record the retirements #1764 withheld this pass. Never raises.
+
+    Written on EVERY pass, empty list included. A guard that leaves no trace
+    when it does nothing reads exactly like one that never ran -- this project
+    has shipped that shape more than once (#1197, the systemd drop-in that was
+    never synced) and paid for it each time. ``last_pass_ts`` is what makes
+    "no withholdings" distinguishable from "the guard is not running".
+    """
+    try:
+        path = _fold_withheld_path(state_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(path, {
+            "schema": FOLD_WITHHELD_SCHEMA,
+            "last_pass_ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "withheld": withheld,
+        })
+    except Exception:
+        pass
+
+
 def _fold_completed(
     state_dir: Path,
     *,
     ledger_rows: list[dict[str, Any]] | None = None,
+    summaries_by_id: dict[str, str] | None = None,
 ) -> set[str]:
     """Fold (proposed(demand_id) → same-cycle terminal ``outcome: success``)
     ledger pairs into the completed-demand sidecar and return all completed
@@ -2533,6 +2628,7 @@ def _fold_completed(
                 "demand_id": None,
             }
             changed = True
+        withheld: list[dict[str, Any]] = []
         for cycle_id, demand_id in demand_by_cycle.items():
             if demand_id in entries:
                 continue  # append-only: never overwrite an existing entry
@@ -2540,6 +2636,21 @@ def _fold_completed(
             if success is None:
                 continue  # no terminal success for this cycle — not done
             files = success.get("files_changed")
+            # #1764: a priority whose title names a file is not retired by a
+            # cycle that never touched it. Only withholds when the title
+            # actually names a path; a title naming none (5 of the 39 audited)
+            # folds exactly as before, and an id with no known summary — not
+            # a priority, or suppressed elsewhere this pass — does too.
+            named = paths_named_in_summary((summaries_by_id or {}).get(demand_id, ""))
+            if named and not title_path_touched(named, files if isinstance(files, list) else []):
+                withheld.append({
+                    "demand_id": demand_id,
+                    "cycle_id": cycle_id,
+                    "ts": str(success.get("ts") or ""),
+                    "named_paths": named,
+                    "files_changed": files if isinstance(files, list) else [],
+                })
+                continue
             tier = success.get("change_tier")
             if tier is None:
                 tier = classify_change_tier(files if isinstance(files, list) else [])
@@ -2557,6 +2668,7 @@ def _fold_completed(
         if changed:
             data["entries"] = entries
             _write_json(_completed_path(state_dir), data)
+        _write_fold_withheld(state_dir, withheld)
         return set(entries.keys())
     except Exception:
         if ledger_rows is not None:
@@ -3183,7 +3295,20 @@ def collect_demand(
         # #925: validator-harness defects get the same treatment for the same
         # reason — their summary is constant per script, so permanent
         # suppression would silence a validator that breaks again later.
-        completed = _fold_completed(state_dir, ledger_rows=ledger_rows)
+        # #1764: the priority items' own summaries, so the fold can tell
+        # whether the retiring cycle touched the file the title named. Built
+        # from ``items`` rather than re-read from goal_text: these are the
+        # exact summaries the ids were minted from, so the lookup cannot drift
+        # from the id (the #815/#902 retagging trap, where a changed title
+        # silently becomes a different demand).
+        _priority_summaries = {
+            str(it.get("id") or ""): str(it.get("summary") or "")
+            for it in items
+            if it.get("kind") == "priority"
+        }
+        completed = _fold_completed(
+            state_dir, ledger_rows=ledger_rows, summaries_by_id=_priority_summaries,
+        )
         if completed:
             try:
                 from nanobot.runtime import reflector
