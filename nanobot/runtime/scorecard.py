@@ -948,6 +948,7 @@ def _quality_section(state_dir: Path, selfevo_repo: Path | None) -> dict[str, An
             "compile_clean": 0,
             "compile_clean_ratio": None,
             "retention_cost": None,
+            "artifact_graph": None,
         }
     try:
         repo = Path(selfevo_repo)
@@ -983,7 +984,45 @@ def _quality_section(state_dir: Path, selfevo_repo: Path | None) -> dict[str, An
         "compile_clean": clean,
         "compile_clean_ratio": _ratio(clean, script_count),
         "retention_cost": _retention_cost(repo),
+        "artifact_graph": _artifact_graph_section(state_dir, repo),
     }
+
+
+def _artifact_graph_section(state_dir: Path, repo: Path) -> dict[str, Any] | None:
+    """Publish (#1769, ADR-024) and summarize the typed-edge artifact graph.
+
+    A DIFFERENT, more precise consumer definition than ``retention_cost``
+    above (one word, one owner, per ADR-022 -- ADR-024 replaces
+    ``_retention_cost``'s private notion of "consumer" rather than adding a
+    second one). The two numbers are NOT comparable and will disagree during
+    the overlap window ADR-024's Consequences section calls for: this field,
+    not ``retention_cost``, is the one ADR-024 governs; ``retention_cost``
+    keeps publishing, unchanged, until it is retired in a later issue.
+    Fail-open to ``None`` (never a fabricated zero) -- this is a reporting
+    signal only, never a fitness target.
+    """
+    try:
+        from nanobot.runtime.artifact_graph import (
+            publish_artifact_graph,
+            read_latest_artifact_graph,
+        )
+
+        publish_artifact_graph(Path(state_dir), repo)
+        graph = read_latest_artifact_graph(Path(state_dir))
+        d = graph.to_dict()
+        oldest = graph.oldest_leaves(repo=repo, limit=10)
+        return {
+            "status": d["status"],
+            "counts": d["counts"],
+            "unit_scan_status": d["unit_scan_status"],
+            "oldest_leaves": [
+                {"id": nid, "path": graph.nodes[nid].path}
+                for nid in oldest
+                if nid in graph.nodes
+            ],
+        }
+    except Exception:
+        return None
 
 
 def _retention_cost(repo: Path) -> dict[str, int] | None:
