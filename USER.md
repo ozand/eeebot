@@ -27,6 +27,12 @@ and move the old one to Superseded; never append a contradictory directive.
 - Prefer a short honest artifact over a padded or a skipped one. (2026-09-15; ADR-016 rule 3, ADR-017 rule 4)
 - Prefer visible degradation over silent degradation. (2026-09-14; ADR-014 rule 3)
 - Never treat a display as proof of the mechanism behind it. (2026-09-14; ADR-014 rule 2, #1197)
+- Prefer giving an unused artifact an invoker over adding to one that already works. (2026-09-20; ADR-025, #1769)
+- Prefer improving what many things depend on over what nothing depends on. (2026-09-20; ADR-025)
+- Always treat the day, not the cycle, as the unit of delivery: something is owed to the screen before deep sleep. (2026-09-20; ADR-026, goals.md Vector 3)
+- Always count retiring what no longer earns its keep as progress, not as cleanup. (2026-09-20; ADR-025, goals.md Vector 1)
+- Always read the skill before repeating work a skill already describes. (2026-09-20; #1805, OPERATING.md Before editing)
+- Never report a render or a publish as an audience. (2026-09-20; ADR-025 clause 4, ADR-026)
 
 ## Superseded
 
