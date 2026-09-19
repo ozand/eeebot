@@ -309,8 +309,6 @@ _PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_\-./]*/[A-Za-z0-9_\-./]+|[A
 
 _DOC_ONLY_PREFIXES = ("docs/", "lessons/", "memory/")
 _DOC_ONLY_BASENAMES = {"AGENTS.md"}
-_DEFAULT_DOC_ONLY_24H_BUDGET = 5
-_DOC_ONLY_BUDGET_ENV_VAR = "EEEBOT_DOC_ONLY_24H_BUDGET"
 _LOG = logging.getLogger(__name__)
 
 
@@ -385,71 +383,99 @@ def classify_change_tier(files_changed: list[str] | None) -> str:
     return "code-bearing"
 
 
-def predict_item_change_tier(item: dict[str, Any] | None) -> str:
-    """Predict an item's output tier using the integration classifier.
+_LEARNING_PREFIXES = ("lessons/", "memory/")
+_DOCUMENTATION_PREFIXES = ("docs/",)
+_REPO_LAYOUT_BASENAMES = {"AGENTS.md"}
 
-    Demand items carry an explicit affected path when their producer knows one;
-    priority and goal-gap items may only mention paths in their bounded text.
-    Missing or ambiguous paths fail open as code-bearing, preserving demand.
+
+def classify_integration_class(files_changed: list[str] | None) -> str:
+    """Classify an integration into one of four REPORTING classes:
+    ``'documentation'`` (``docs/``), ``'learning'`` (``lessons/``, ``memory/``
+    -- the loop's own learning substrate, never documentation output),
+    ``'repository-layout'`` (``AGENTS.md``), or ``'code-bearing'``.
+
+    #1773: a finer breakdown than :func:`classify_change_tier` (kept as-is,
+    2-way doc-only/code-bearing, still stamped onto every ledger row and
+    ``completed.json`` entry). This is reporting-only -- it feeds the
+    dashboard's per-class integration share (#1773 item 4), never a gate or
+    a suppression decision, so widening it to four classes cannot change
+    ``change_tier``'s existing meaning for any caller that reads it.
+
+    Same all-or-nothing rule as ``classify_change_tier``: test files are
+    tier-neutral, and a change is only classified into one of the three
+    special classes when EVERY substantive path belongs to that same class
+    -- a change that mixes two of the three special classes, or touches
+    anything outside them, is ``'code-bearing'``. Classified from the real
+    changed-file list ONLY; there is no prediction path (#1773's cause 1:
+    the guard this replaces suppressed on a prediction scraped from free
+    text, which is exactly what this function structurally cannot do -- it
+    has no text-scraping branch at all).
     """
-    if not isinstance(item, dict):
+    if not files_changed:
         return "code-bearing"
-    paths: list[str] = []
-    affected = str(item.get("affected_path") or "").strip()
-    if affected:
-        paths.append(affected)
-    else:
-        for field in ("summary", "evidence"):
-            for match in _PATH_TOKEN_RE.findall(str(item.get(field) or ""))[:20]:
-                path = match.strip(".,;:()[]{}")
-                if path and path not in paths:
-                    paths.append(path)
-    return classify_change_tier(paths)
+    cleaned = [f for f in files_changed if str(f).strip()]
+    if not cleaned:
+        return "code-bearing"
+    substantive = [p for p in cleaned if not _is_test_path(p)]
+    if not substantive:
+        return "code-bearing"
+
+    def _class_of(path: str) -> str | None:
+        normalized = str(path).replace("\\", "/").strip().lstrip("/")
+        if any(normalized.startswith(prefix) for prefix in _DOCUMENTATION_PREFIXES):
+            return "documentation"
+        if any(normalized.startswith(prefix) for prefix in _LEARNING_PREFIXES):
+            return "learning"
+        if normalized.split("/")[-1] in _REPO_LAYOUT_BASENAMES:
+            return "repository-layout"
+        return None
+
+    classes = {_class_of(p) for p in substantive}
+    if len(classes) == 1:
+        (only,) = classes
+        if only is not None:
+            return only
+    return "code-bearing"
 
 
-def doc_only_budget_24h() -> int:
-    """Return the configured 24h budget for doc-only integrations (default 5)."""
-    raw = os.environ.get(_DOC_ONLY_BUDGET_ENV_VAR)
-    if raw is None:
-        return _DEFAULT_DOC_ONLY_24H_BUDGET
-    try:
-        val = int(raw.strip())
-        return max(0, val)
-    except Exception:
-        return _DEFAULT_DOC_ONLY_24H_BUDGET
+def integration_class_counts(
+    state_dir: Path, *, window_days: float = 1, now: datetime | None = None,
+) -> dict[str, Any]:
+    """#1773 item 4: per-class share of integrations in the trailing
+    ``window_days``, classified from the real changed-file list at read time
+    via :func:`classify_integration_class` -- never a prediction, never a
+    gate. Replaces the doc-only budget's predicted, two-class count as the
+    measurement the dashboard publishes.
 
-
-# #1238: the ``doc_only_budget`` ledger row was 27% of the live ledger because
-# ``collect_demand`` runs two-to-three times per bridge invocation (gate probe
-# + context build) and appended the row on every pass, restating an unchanged
-# state. What carries information is a *change* of state plus one heartbeat
-# per cycle, so the row is written when the state differs from the last row
-# written in this process, always when something was deferred, and once at
-# process start. The bridge is a ``Type=oneshot`` unit — one process per
-# invocation — so "this process" is "this cycle", the same reasoning as
-# ``llm_proposer._record_idle``. Process memory is the only thing cheaper than
-# the row it suppresses: no state file, no scan, no read on the write path.
-# Keyed by state_dir so independent state roots (test fixtures) never share
-# a memo. Value: ``[state_tuple, passes_folded_since_last_written_row]``.
-_doc_budget_last_row: dict[str, list] = {}
-
-
-def _doc_budget_row_due(state_dir: Path, state: tuple[bool, bool, bool]) -> int:
-    """Return the number of passes a row written now would stand for, or 0
-    when the pass restates the last row and should be folded into the next.
-
-    ``state`` is ``(doc_budget_exceeded, ledger_blind, doc_only_deferred > 0)``.
-    A pass that deferred anything is always due — a deferral is never a no-op.
+    ``status`` is :func:`state_access.evidence_status` for the window --
+    ``'complete'``, ``'partial'``, or ``'unavailable'`` -- the same
+    "no data" collapse ``_load_ledger_rows`` already applies (a window that
+    read zero files is unavailable regardless of its raw ``.status``, not a
+    genuine partial). An unreadable ledger is reported as ``'unavailable'``,
+    never folded into a zero count (#1773's own defect 5 in the guard this
+    replaces: an unreadable ledger must never silently read as "no doc-only
+    activity" or, worse, "budget reached"). Callers (the dashboard) must
+    render ``'unavailable'`` as "no data", distinct from a genuine zero
+    share.
     """
-    key = str(state_dir)
-    memo = _doc_budget_last_row.get(key)
-    deferred = state[2]
-    if memo is not None and not deferred and memo[0] == state:
-        memo[1] += 1
-        return 0
-    passes = 1 + (memo[1] if memo is not None else 0)
-    _doc_budget_last_row[key] = [state, 0]
-    return passes
+    now = now or datetime.now(timezone.utc)
+    window = ledger_window(
+        Path(state_dir), since_ts=_iso(now - timedelta(days=window_days)), phases=frozenset({"outcome"}),
+    )
+    counts = {"documentation": 0, "learning": 0, "repository_layout": 0, "code_bearing": 0}
+    total = 0
+    cutoff = now - timedelta(days=window_days)
+    for event in window.rows:
+        if event.get("outcome") != "success":
+            continue
+        event_ts = _parse_ts(event.get("ts"))
+        if event_ts is None or event_ts < cutoff:
+            continue
+        files = event.get("files_changed")
+        cls = classify_integration_class(files if isinstance(files, list) else [])
+        counts[cls.replace("-", "_")] += 1
+        total += 1
+    return {"status": evidence_status(window), "window_days": window_days, "total": total, **counts}
 
 
 def count_doc_only_integrations_24h(state_dir: Path, now: datetime | None = None) -> int:
@@ -3242,49 +3268,33 @@ def collect_demand(
             bounded_result.append(item)
         result = bounded_result
 
-        # #1090/#1108: suppress predicted doc-only items once the rolling
-        # budget is reached.  Prediction calls the same classifier used for
-        # integration-time counting, so the two decisions cannot drift.
-        doc_count_24h = count_doc_only_integrations_24h(state_dir, now=now)
-        doc_budget = doc_only_budget_24h()
-        # #1175 Class-A: a blind ledger (permission, I/O error, nothing
-        # readable) is not evidence that the budget is unspent. Fail toward
-        # not spending LLM budget on doc-only work; the lane reopens on the
-        # next cycle that can read its history. The shared 3-day window
-        # answers "can the ledger be read" for the 24 h window too.
-        ledger_blind = window_status(ledger_rows) == "unavailable"
-        doc_budget_exceeded = doc_count_24h >= doc_budget or ledger_blind
-        if ledger_blind:
-            _LOG.warning(
-                "doc-only budget: ledger window unavailable (%s); treating the budget as reached this cycle",
-                ",".join(getattr(ledger_rows, "notes", ())) or "-",
-            )
-            notice = (
-                f"Doc-only daily budget ({doc_budget}) treated as reached: the ledger could not be read. "
-                "Focus on code-bearing improvements (scripts/, runtime/, tests/)."
-            )
-        else:
-            notice = (
-                f"Doc-only daily budget ({doc_budget}) reached ({doc_count_24h} in 24h). "
-                "Focus on code-bearing improvements (scripts/, runtime/, tests/)."
-            )
-
-        post_doc_guard: list[dict[str, str]] = []
-        doc_only_deferred = 0
+        # #1773: the doc-only 24h quota (predicted classification, item
+        # suppression, and a "[STEERING NOTICE: ...]" string appended into
+        # ``summary``) is retired. It suppressed on a prediction scraped
+        # from free text (an item mentioning ``memory/`` in its evidence was
+        # treated as documentation before any file was ever touched), it
+        # mutated the exact field downstream dedup/existence-index lookups
+        # use as their key (a variable count embedded in the notice text
+        # minted a fresh lookup key every time the count moved), it never
+        # actually bounded integrations (only demand items), and its
+        # taxonomy was wrong (measured: of 16 "doc-only" integrations over
+        # 3 days, 1 touched ``docs/``, 15 touched only ``lessons/`` — the
+        # loop's own learning substrate, not documentation output). See
+        # ``classify_integration_class``/``integration_class_counts`` above
+        # for the taxonomy-correct, real-changed-file, reporting-only
+        # replacement (#1773 item 4), published on the dashboard.
+        #
+        # No suppression happens here today. A future, operator-authorized
+        # circuit breaker (#1773 item 5, NOT built by this issue — the
+        # operator has not ruled on it) would hook in at exactly this point:
+        # it would read ``integration_class_counts`` (already real-file,
+        # already reports 'unavailable' distinct from zero, already
+        # trip-condition-ready) rather than reintroducing a prediction, and
+        # would defer items only while tripped, never as an always-on
+        # quota. Nothing here needs to change to add it.
         for item in result:
             k = item.get("kind", "")
             affected = item.get("affected_path", "")
-            if doc_budget_exceeded and predict_item_change_tier(item) == "doc-only":
-                # Deferral only: leave completion/exhaustion state untouched.
-                doc_only_deferred += 1
-                continue
-            # Preserve #1090's reflection steering and extend the same bounded
-            # notice to every surviving lane under the reached budget.
-            if doc_budget_exceeded:
-                item["doc_budget_notice"] = notice
-                summary = item.get("summary", "")
-                if notice not in summary:
-                    item["summary"] = f"{summary} [STEERING NOTICE: {notice}]" if summary else notice
             if k == "reflection" and affected == "AGENTS.md":
                 operator_owned_note = (
                     "[OPERATOR-OWNED TARGET: encode this as a skill under skills/ "
@@ -3302,31 +3312,7 @@ def collect_demand(
                 summary = item.get("summary", "")
                 if steering_note not in summary:
                     item["summary"] = f"{summary} {steering_note}".strip()
-            post_doc_guard.append(item)
-        # #1108: the denominator is what entered *this* guard, so it is read
-        # before ``_apply_futile_surfaces`` runs — that filter drops items of its
-        # own (#1184), and counting after it would silently charge those to the
-        # doc-only budget's ledger row.
-        items_considered = len(post_doc_guard) + doc_only_deferred
-        result = _apply_futile_surfaces(state_dir, post_doc_guard)
-        # #1238: one row per state change, per deferral and per invocation —
-        # not per pass. ``passes`` says how many passes the row stands for.
-        passes = _doc_budget_row_due(
-            state_dir, (doc_budget_exceeded, ledger_blind, doc_only_deferred > 0)
-        )
-        if passes:
-            from nanobot.runtime.cycle_ledger import append_event
-
-            append_event(state_dir, {
-                "phase": "doc_only_budget",
-                "doc_only_deferred": doc_only_deferred,
-                "doc_only_integrations_24h": doc_count_24h,
-                "doc_only_budget_24h": doc_budget,
-                "ledger_blind": ledger_blind,
-                "doc_budget_exceeded": doc_budget_exceeded,
-                "items_considered": items_considered,
-                "passes": passes,
-            })
+        result = _apply_futile_surfaces(state_dir, result)
 
         # #815: best-effort, operator-visible V1-vs-V2 split of what's
         # actually presented — never affects the returned list. Opt-in

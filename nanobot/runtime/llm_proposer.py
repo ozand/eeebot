@@ -1263,11 +1263,10 @@ def _record_demand_cooling(
     ``_select_assigned_demand`` runs once per bridge invocation (one call site,
     inside ``maybe_propose``), so this is at most one row per cycle. While the
     ledger stays non-complete that is one row per cycle for as long as the
-    condition lasts — the same shape as ``doc_only_budget``'s ``ledger_blind``
-    rows (#1175): an unreadable ledger is the incident, and the row is how it
-    is seen. When everything is cooled this row is the evidence (ids, status)
-    and ``proposer_reject: all_cooled`` is the cycle outcome readers count;
-    they are two rows for one event by design."""
+    condition lasts (#1175): an unreadable ledger is the incident, and the row
+    is how it is seen. When everything is cooled this row is the evidence
+    (ids, status) and ``proposer_reject: all_cooled`` is the cycle outcome
+    readers count; they are two rows for one event by design."""
     with contextlib.suppress(Exception):
         attempt_cycle_id = current_cycle_id("proposer")
         append_event(state_dir, {
@@ -2762,8 +2761,8 @@ def _mint_cycle_id() -> str:
     ``demand_cooling`` rows, the ``proposed`` row and the request (hence the
     bridge's ``started``/``dedup``/``outcome`` rows). NOT carried by ``idle``
     (zero LLM calls, nothing to join) nor by ``collect_demand``'s
-    ``doc_only_budget`` / ``demand_vector_split`` rows (also written from the
-    ``should_propose`` gate probe, before an attempt exists)."""
+    ``demand_vector_split`` rows (also written from the ``should_propose``
+    gate probe, before an attempt exists)."""
     return f"cycle-{uuid.uuid4().hex[:12]}"
 
 

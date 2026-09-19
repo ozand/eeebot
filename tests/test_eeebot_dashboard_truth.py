@@ -1609,6 +1609,73 @@ def test_lessons_corpus_missing_instance_repo_reports_missing(tmp_path: Path) ->
     assert result["corpus_size"] is None
 
 
+def _write_ledger_rows(state_dir: Path, rows: list[dict]) -> None:
+    ledger_dir = state_dir / "ledger"
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    (ledger_dir / "cycles.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8",
+    )
+
+
+def test_integration_class_share_reports_real_counts(tmp_path: Path) -> None:
+    """#1773 item 4: the dashboard's per-class integration share, classified
+    from the real changed-file list (never a prediction)."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    _write_ledger_rows(tmp_path, [
+        {"phase": "outcome", "outcome": "success", "files_changed": ["docs/a.md"], "ts": (now - timedelta(hours=1)).isoformat()},
+        {"phase": "outcome", "outcome": "success", "files_changed": ["lessons/b.md"], "ts": (now - timedelta(hours=2)).isoformat()},
+        {"phase": "outcome", "outcome": "success", "files_changed": ["scripts/c.py"], "ts": (now - timedelta(hours=3)).isoformat()},
+    ])
+    result = DASHBOARD.scan_integration_class_share(tmp_path)
+    assert result["status"] == "complete"
+    assert result["total"] == 3
+    assert result["documentation"] == 1
+    assert result["learning"] == 1
+    assert result["code_bearing"] == 1
+
+
+def test_integration_class_share_unavailable_is_never_a_zero_tile(tmp_path: Path) -> None:
+    """'No data' must render as the status text, never a fabricated 0 --
+    the exact defect the retired doc-only budget's ledger_blind path had."""
+    tile = DASHBOARD.format_integration_class_tile({"status": "unavailable", "total": 0})
+    assert tile["integration_class_status"] == "unavailable"
+    assert tile["integration_class_total"] == "unavailable"
+    assert tile["integration_class_documentation"] == "unavailable"
+    assert tile["integration_class_learning"] == "unavailable"
+    assert tile["integration_class_repository_layout"] == "unavailable"
+    assert tile["integration_class_code_bearing"] == "unavailable"
+
+
+def test_integration_class_share_zero_is_distinct_from_unavailable(tmp_path: Path) -> None:
+    """A real, complete window with zero integrations of a class is a
+    genuine '0', not folded into 'unavailable'."""
+    tile = DASHBOARD.format_integration_class_tile({
+        "status": "complete", "total": 5, "documentation": 0, "learning": 0,
+        "repository_layout": 0, "code_bearing": 5,
+    })
+    assert tile["integration_class_status"] == "complete"
+    assert tile["integration_class_total"] == "5"
+    assert tile["integration_class_documentation"] == "0"
+    assert tile["integration_class_code_bearing"] == "5"
+
+
+def test_integration_class_share_broken_source_fails_open_to_unavailable(tmp_path: Path, monkeypatch) -> None:
+    """A failure inside nanobot.runtime.demand must never crash the
+    dashboard scan -- fail-open to 'unavailable', same contract as every
+    other scan_* function here."""
+    import nanobot.runtime.demand as demand_module
+
+    def broken(*args, **kwargs):
+        raise OSError("ledger unreadable")
+
+    monkeypatch.setattr(demand_module, "integration_class_counts", broken)
+    result = DASHBOARD.scan_integration_class_share(tmp_path)
+    assert result["status"] == "unavailable"
+    assert result["total"] == 0
+
+
 def test_hypotheses_sources_report_independent_per_file_status(tmp_path: Path) -> None:
     """One missing/malformed hypothesis source file must not blank out the
     other -- durable.json and lifecycle.json are read and classified

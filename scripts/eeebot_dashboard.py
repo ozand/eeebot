@@ -1710,6 +1710,41 @@ def scan_hypotheses_sources(state_dir: Path) -> dict[str, Any]:
     return {"sources": sources, "lifecycle_counts": lifecycle_counts}
 
 
+def scan_integration_class_share(state_dir: Path, *, window_days: float = 1) -> dict[str, Any]:
+    """#1773 item 4: per-class share of integrations (documentation/learning/
+    repository-layout/code-bearing), classified from the real changed-file
+    list at read time -- replaces the retired doc-only budget's predicted,
+    two-class count. ``status: 'unavailable'`` (never a fabricated zero) when
+    the ledger cannot be read; see ``nanobot.runtime.demand.integration_class_counts``.
+    """
+    try:
+        from nanobot.runtime.demand import integration_class_counts
+
+        return integration_class_counts(Path(state_dir), window_days=window_days)
+    except Exception:
+        return {
+            "status": "unavailable", "window_days": window_days, "total": 0,
+            "documentation": 0, "learning": 0, "repository_layout": 0, "code_bearing": 0,
+        }
+
+
+def format_integration_class_tile(data: dict[str, Any]) -> dict[str, Any]:
+    """'no data' (status != 'complete'/'partial') is reported as the status
+    text itself, never as a 0 share -- same "never zero for unavailable"
+    contract as ``format_lessons_tile``."""
+    status = str(data.get("status") or "unavailable")
+    total = data.get("total")
+    has_data = status in ("complete", "partial") and isinstance(total, int)
+    return {
+        "integration_class_status": status,
+        "integration_class_total": str(total) if has_data else status,
+        "integration_class_documentation": str(data.get("documentation", 0)) if has_data else status,
+        "integration_class_learning": str(data.get("learning", 0)) if has_data else status,
+        "integration_class_repository_layout": str(data.get("repository_layout", 0)) if has_data else status,
+        "integration_class_code_bearing": str(data.get("code_bearing", 0)) if has_data else status,
+    }
+
+
 def _format_prompt_fit_metric_value(metric: dict[str, Any] | None, key: str) -> str:
     if not isinstance(metric, dict):
         return "unavailable"
@@ -2082,6 +2117,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
     skill_fitness_scan = scan_skill_fitness(STATE_DIR)
     lessons_scan = scan_lessons_corpus(STATE_DIR)
     hypotheses_scan = scan_hypotheses_sources(STATE_DIR)
+    integration_class_scan = scan_integration_class_share(STATE_DIR)
     scorecard_snapshot = load_json(STATE_DIR / "scorecard" / "latest.json", None)
     goal_gaps_line = format_goal_gaps_line(scorecard_snapshot)
     scorecard_loop = scorecard_snapshot.get("loop", {}) if isinstance(scorecard_snapshot, dict) else {}
@@ -2337,6 +2373,9 @@ def collect_metrics_uncached() -> dict[str, Any]:
             _hyp_lifecycle_age, _hyp_sources.get("lifecycle", {}).get("source_status", "missing")
         ),
         **format_hypotheses_tile(hypotheses_scan),
+        # #1773: per-class integration share, replacing the retired doc-only
+        # budget's suppression with a published, taxonomy-correct measurement.
+        **format_integration_class_tile(integration_class_scan),
     })
 
 
@@ -2956,6 +2995,10 @@ _HTML_ESCAPE_KEYS: list[str] = [
     "skills_total_html", "skills_distinct_read_html", "skills_reads_in_window_html",
     "skills_never_read_count_html", "skills_top_html",
     "lessons_corpus_size_html", "lessons_indexed_count_html",
+    # #1773: per-class integration share (replaces the retired doc-only budget)
+    "integration_class_total_html", "integration_class_documentation_html",
+    "integration_class_learning_html", "integration_class_repository_layout_html",
+    "integration_class_code_bearing_html",
     "hypotheses_sources_text_html", "hypotheses_answered_lifecycle_count_html",
     "hypotheses_orphaned_lifecycle_count_html", "hypotheses_lifecycle_keys_text_html",
     "hypotheses_supported_lifecycle_count_html", "hypotheses_refuted_lifecycle_count_html",
@@ -3040,6 +3083,11 @@ _HTML_KEY_MAP: dict[str, str] = {
     "skills_top_html": "skills_top",
     "lessons_corpus_size_html": "lessons_corpus_size",
     "lessons_indexed_count_html": "lessons_indexed_count",
+    "integration_class_total_html": "integration_class_total",
+    "integration_class_documentation_html": "integration_class_documentation",
+    "integration_class_learning_html": "integration_class_learning",
+    "integration_class_repository_layout_html": "integration_class_repository_layout",
+    "integration_class_code_bearing_html": "integration_class_code_bearing",
     "hypotheses_sources_text_html": "hypotheses_sources_text",
     "hypotheses_answered_lifecycle_count_html": "hypotheses_answered_lifecycle_count",
     "hypotheses_orphaned_lifecycle_count_html": "hypotheses_orphaned_lifecycle_count",
@@ -3152,6 +3200,7 @@ def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
     ctx["hypotheses_durable_source_attrs"] = source_attrs(m.get("hypotheses_durable_source"))
     ctx["hypotheses_lifecycle_source_attrs"] = source_attrs(m.get("hypotheses_lifecycle_source"))
     ctx["lessons_index_status_html"] = escape_html_text(m.get("lessons_index_status", "missing"))
+    ctx["integration_class_status"] = escape_html_text(m.get("integration_class_status", "unavailable"))
     ctx["prompt_fit_status"] = escape_html_text(m.get("prompt_fit_status", "unavailable"))
     ctx["prompt_fit_rung_html"] = escape_html_text(str(m.get("prompt_fit_rung") or "unavailable"))
     ctx["skills_status"] = escape_html_text(m.get("skills_status", "unavailable"))
@@ -3505,6 +3554,20 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                         <span class="metric-label">Indexed count:</span>
                         <span class="metric-value" style="color: var(--accent-amber);">{lessons_indexed_count_html}</span>
                         <span class="status-badge" data-status="{lessons_index_status_html}">{lessons_index_status_html}</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Integration class share <span class="status-badge" data-status="{integration_class_status}">{integration_class_status}</span></h2>
+                <div class="metric">
+                    <div class="metric-item">
+                        <span class="metric-label">Total (trailing day):</span>
+                        <span class="metric-value">{integration_class_total_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Documentation / Learning / Layout / Code-bearing:</span>
+                        <span class="metric-value">{integration_class_documentation_html} / {integration_class_learning_html} / {integration_class_repository_layout_html} / {integration_class_code_bearing_html}</span>
                     </div>
                 </div>
             </div>
