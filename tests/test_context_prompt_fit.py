@@ -44,8 +44,12 @@ def _builder(tmp_path, bootstrap_body: str, *, catalogue_lines: int = 40, memory
 #: #1725: the loop profile's fixed (non-workspace) section keys, in build
 #: order, excluding "agents" (the one variable, droppable-carrying block in
 #: :func:`_loop_builder`) and "skills_catalogue" (computed from the others).
-LOOP_FIXED_SECTION_NAMES = ("identity", "soul", "goals", "user", "operating", "memory", "runtime")
-LOOP_SECTION_NAMES = ("identity", "soul", "goals", "user", "operating", "agents", "skills_catalogue", "memory", "runtime")
+#: #1766: "scorecard" joins the fixed set -- ``_loop_builder`` never stubs
+#: ``self.state_dir``, so it always renders the fixed, deterministic
+#: ``[missing: scorecard]`` marker (no state_dir means no scorecard read is
+#: even attempted), same as any other always-present fixed section.
+LOOP_FIXED_SECTION_NAMES = ("identity", "soul", "goals", "user", "operating", "memory", "runtime", "scorecard")
+LOOP_SECTION_NAMES = ("identity", "soul", "goals", "user", "operating", "agents", "skills_catalogue", "memory", "runtime", "scorecard")
 
 
 def _loop_builder(tmp_path, agents_md_body: str, *, catalogue_lines: int = 40, memory_lines: int = 20) -> ContextBuilder:
@@ -302,6 +306,7 @@ def test_subagent_prompt_is_strict_and_exposes_the_fit(tmp_path, monkeypatch):
     mgr = subagent_module.SubagentManager.__new__(subagent_module.SubagentManager)
     mgr.workspace = tmp_path
     mgr.release_root = None
+    mgr._skill_fitness_state_dir = None
     mgr._excluded_skill_names = []
     mgr.system_context = "# Immutable operator charter\n\ncharter"
     prompt = mgr._build_subagent_prompt()

@@ -868,7 +868,14 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         """
         from nanobot.agent.context import ContextBuilder
 
-        builder = ContextBuilder(self.workspace, release_root=self.release_root)
+        # #1766 (ADR-023): the scorecard block reads state/scorecard/latest.json
+        # from the same harness-owned state root skill_fitness already uses
+        # (skill_fitness_state_dir) — never self.workspace, and never a new
+        # env-derived path, so the loop-writable/harness-owned boundary this
+        # relies on is exactly the one already threaded through the bridge.
+        builder = ContextBuilder(
+            self.workspace, release_root=self.release_root, state_dir=self._skill_fitness_state_dir,
+        )
         # #1300: the loop profile is strict — a prompt that cannot hold every
         # critical AGENTS.md section raises SystemPromptOverflow here, and the
         # bridge records the cycle as failed instead of spawning on a prompt

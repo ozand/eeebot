@@ -1,6 +1,7 @@
 """Context builder for assembling agent prompts."""
 
 import base64
+import json
 import mimetypes
 import os
 import platform
@@ -14,6 +15,7 @@ from nanobot.agent.block_loader import load_block, trim_lines
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
+from nanobot.runtime.scorecard import SCORECARD_SCHEMA
 from nanobot.utils.helpers import (
     build_assistant_message,
     current_time_str,
@@ -66,6 +68,11 @@ class ContextBuilder:
     _WORKSPACE_BLOCK_CAP = 4000
     _MEMORY_BLOCK_CAP = 1000
     _RUNTIME_BLOCK_CAP = 400
+    #: #1766 (ADR-023): the loop's own last-N-days scorecard, read only from
+    #: the harness-owned ``state/scorecard/latest.json`` -- never the
+    #: instance repo. Rendered by :meth:`_load_scorecard_block`.
+    _SCORECARD_BLOCK_CAP = 600
+    _SCORECARD_MISSING = "[missing: scorecard]"
     #: #1725: ordered ``(root_kind, filename, cap, required)`` blocks —
     #: "release" root files are operator-owned and immutable to the loop;
     #: "workspace" files are loop-owned through the gate. Replaces the old
@@ -133,7 +140,7 @@ class ContextBuilder:
         "[skills catalogue truncated: omitted {count} skill(s) / {chars} chars]"
     )
 
-    def __init__(self, workspace: Path, release_root: "Path | None" = None):
+    def __init__(self, workspace: Path, release_root: "Path | None" = None, state_dir: "Path | None" = None):
         self.workspace = workspace
         #: #1725 (ADR-022): root the loop profile's release-owned blocks
         #: (IDENTITY.md, SOUL.md, goals.md, USER.md, OPERATING.md) are read
@@ -142,6 +149,15 @@ class ContextBuilder:
         #: graceful-degradation path a genuinely absent file takes, not a
         #: special case.
         self.release_root = release_root
+        #: #1766 (ADR-023): the harness-owned state root (``STATE_DIR`` on
+        #: the bridge; ``skill_fitness_state_dir`` already threads it through
+        #: ``SubagentManager``) the scorecard block reads
+        #: ``scorecard/latest.json`` from. Never the instance repo, never
+        #: ``self.workspace`` — that distinction is the entire safety
+        #: argument (ADR-023: provenance of the number, not ownership of the
+        #: file). ``None`` (every caller but the self-evolving bridge) always
+        #: renders the block as ``[missing: scorecard]``.
+        self.state_dir = state_dir
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
         #: What the last build kept and dropped: ``{"cap", "chars", "strict",
@@ -170,9 +186,10 @@ class ContextBuilder:
 
         The loop profile (#1725, ADR-022) instead assembles the ordered
         ontology blocks — identity -> soul -> goals -> user -> operating ->
-        instance AGENTS.md -> skills catalogue -> memory -> runtime facts —
-        each release/workspace block loaded by :meth:`load_block` under its
-        own per-block cap; see :meth:`_build_loop_system_prompt`.
+        instance AGENTS.md -> skills catalogue -> memory -> runtime facts ->
+        scorecard (#1766, ADR-023) — each release/workspace block loaded by
+        :meth:`load_block` under its own per-block cap; see
+        :meth:`_build_loop_system_prompt`.
 
         Under the cap (#1300):
 
@@ -259,6 +276,97 @@ Skills with available="false" need dependencies installed first - you can try in
                 truncated.append(filename)
         return sections, missing, truncated
 
+    @staticmethod
+    def _scorecard_number(section: Any, key: str) -> "int | float | None":
+        """A numeric (non-bool) field, or ``None`` for anything else —
+        missing, wrong type, or a legitimate ``null`` (``_ratio``'s own
+        zero-denominator case). Both are treated the same by the caller:
+        a figure that cannot be shown as a real number is not shown at all."""
+        if not isinstance(section, dict):
+            return None
+        value = section.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return value
+
+    def _load_scorecard_block(self) -> str:
+        """#1766 (ADR-023): the loop's own last-N-days results, sourced
+        strictly from the harness-computed ``state/scorecard/latest.json`` —
+        never from anything the loop's own commits can move.
+
+        ADR-023 ("a fact shown to the loop is one the loop cannot reach"):
+        the safety test is provenance of the number, not ownership of the
+        file — ``state/`` and the instance repo share a uid on this host, so
+        file permissions alone prove nothing. The four figures below all
+        come from ``scorecard.py``'s ``_loop_section``/``_cost_section``,
+        which read only ``state/ledger``, ``state/demand/completed.json``
+        and ``state/llm_calls/*.jsonl`` — neither function's signature takes
+        the instance repository as an input, so nothing the loop commits can
+        move any of the four (see ``tests/test_scorecard_block.py``, which
+        proves this by construction rather than trusting the signatures).
+        The issue's draft also wanted ``zero_static_consumers``; dropped
+        per ADR-023's own consequence for #1766 — it AST-scans
+        ``scripts/``, which the loop commits to, so the loop could move
+        that number.
+
+        Stated, not scored: no targets, no quota language, no instruction
+        to optimise anything. Freshness is part of the content, not a
+        staleness cutoff: the window and the computation timestamp are
+        printed verbatim from the file, so a stale scorecard names its own
+        age rather than reading as today's state.
+
+        A missing, unreadable, malformed, or incomplete scorecard renders
+        ``[missing: scorecard]`` whole — never zeros, never a partially
+        filled, healthy-looking row.
+        """
+        if self.state_dir is None:
+            return self._SCORECARD_MISSING
+        path = Path(self.state_dir) / "scorecard" / "latest.json"
+        try:
+            if not path.is_file():
+                return self._SCORECARD_MISSING
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return self._SCORECARD_MISSING
+        if not isinstance(data, dict) or data.get("schema_version") != SCORECARD_SCHEMA:
+            return self._SCORECARD_MISSING
+
+        computed_at = data.get("computed_at_utc")
+        window_start = data.get("window_start_utc")
+        window_end = data.get("window_end_utc")
+        window_days = data.get("window_days")
+        if (
+            not isinstance(computed_at, str) or not computed_at
+            or not isinstance(window_start, str) or not window_start
+            or not isinstance(window_end, str) or not window_end
+            or not isinstance(window_days, int) or isinstance(window_days, bool) or window_days <= 0
+        ):
+            return self._SCORECARD_MISSING
+
+        loop = data.get("loop")
+        cost = data.get("cost")
+        integrations = self._scorecard_number(loop, "integrations")
+        confirmed = self._scorecard_number(loop, "confirmed_integrations")
+        ratio = self._scorecard_number(loop, "confirmed_integration_ratio")
+        attempts = self._scorecard_number(loop, "attempts")
+        wasted = self._scorecard_number(loop, "wasted_attempts")
+        calls_per_integration = self._scorecard_number(cost, "calls_per_integration")
+        if (
+            integrations is None or confirmed is None or ratio is None
+            or attempts is None or wasted is None or calls_per_integration is None
+        ):
+            return self._SCORECARD_MISSING
+
+        text = (
+            f"## How the last {window_days} days went "
+            f"({window_start[:10]} to {window_end[:10]}, computed {computed_at})\n"
+            f"Changes that reached main: {int(integrations)}. "
+            f"Confirmed in use by something else: {int(confirmed)} ({round(ratio * 100)}%).\n"
+            f"Attempts that produced nothing: {int(wasted)} of {int(attempts)}.\n"
+            f"Cost of one integrated change: {round(calls_per_integration)} model calls."
+        )
+        return self._trim_lines(text, self._SCORECARD_BLOCK_CAP)
+
     def _build_loop_system_prompt(
         self,
         *,
@@ -267,10 +375,11 @@ Skills with available="false" need dependencies installed first - you can try in
         degrade_on_overflow: bool,
     ) -> str:
         """#1725 (ADR-022): the loop profile's own assembly — six ontology
-        blocks, skills catalogue, memory, then code-generated runtime facts
-        LAST. No ``active_skills`` section (dropped, #1725 item 3): the
-        loop's only always-skill, ``memory``, is already excluded from it,
-        so the section was always empty under this profile."""
+        blocks, skills catalogue, memory, code-generated runtime facts, then
+        the #1766 scorecard block LAST. No ``active_skills`` section
+        (dropped, #1725 item 3): the loop's only always-skill, ``memory``,
+        is already excluded from it, so the section was always empty under
+        this profile."""
         sections, missing, truncated = self._load_ontology_blocks()
 
         # #1732: the loop profile renders the catalogue one line per skill.
@@ -293,14 +402,21 @@ Skills with available="false" need dependencies installed first - you can try in
 
         runtime_section = self._trim_lines(self._get_identity(loop_profile=True), self._RUNTIME_BLOCK_CAP)
 
+        # #1766 (ADR-023): the loop's own last-N-days scorecard, harness-owned
+        # and last in assembly order — a fact block, same family as memory/
+        # runtime, not an instruction.
+        scorecard_section = self._load_scorecard_block()
+
         self._skills_catalogue_observation = None
         if skills_section:
             # Derive the catalogue budget from every other fixed section
-            # (#1725: six ontology blocks + memory + runtime, not the old
-            # four) built above. Memory/runtime are included at their
-            # (already-capped) actual size: the floor is not a frozen
-            # measurement from one day (#1563).
-            fixed_sections = [content for _, content in sections] + [memory_section, runtime_section]
+            # (#1725: six ontology blocks + memory + runtime; #1766 adds the
+            # scorecard block) built above. Memory/runtime/scorecard are
+            # included at their (already-capped) actual size: the floor is
+            # not a frozen measurement from one day (#1563).
+            fixed_sections = [content for _, content in sections] + [
+                memory_section, runtime_section, scorecard_section,
+            ]
             nonempty_fixed = [content for content in fixed_sections if content]
             fixed_floor = sum(len(content) for content in nonempty_fixed) + len(nonempty_fixed) * len(self.SECTION_SEPARATOR)
             catalogue_budget = max(0, self._cap() - fixed_floor)
@@ -310,6 +426,7 @@ Skills with available="false" need dependencies installed first - you can try in
         sections.append(("skills_catalogue", skills_section))
         sections.append(("memory", memory_section))
         sections.append(("runtime", runtime_section))
+        sections.append(("scorecard", scorecard_section))
         return self._fit_system_prompt(
             sections, strict=strict, degrade_on_overflow=degrade_on_overflow,
             memory_fit=self.memory.last_index_fit,
