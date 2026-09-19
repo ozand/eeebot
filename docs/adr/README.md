@@ -40,6 +40,7 @@ Conventions:
 | [ADR-022](ADR-022-context-ontology.md) | Context ontology — one question, one file, one owner | accepted |
 | [ADR-023](ADR-023-a-fact-shown-to-the-loop-is-one-the-loop-cannot-reach.md) | A figure shown to the loop as fact is one the loop cannot reach — provenance, not file ownership | accepted |
 | [ADR-024](ADR-024-an-artifact-graph-has-typed-edges.md) | An artifact graph has typed edges, and only production use makes a component | accepted |
+| [ADR-025](ADR-025-an-artifact-is-finished-when-something-depends-on-it.md) | An artifact is finished when something depends on its working — readiness by artifact kind, and how it reaches task selection | accepted |
 
 ## Acceptance
 
