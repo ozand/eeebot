@@ -802,6 +802,36 @@ class TestQualityAndValue:
 
         assert quality["retention_cost"] is None
 
+    def test_artifact_graph_is_published_and_summarized_alongside_retention_cost(self, tmp_path):
+        """#1769/ADR-024: a second, disagreeing consumer definition published
+        next to the old one during the overlap window -- not a replacement
+        in this PR (see ADR-024 Consequences)."""
+        state_dir = tmp_path / "state"
+        repo = tmp_path / "repo"
+        scripts = repo / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "consumer.py").write_text("import consumed\n", encoding="utf-8")
+        (scripts / "consumed.py").write_text("x = 1\n", encoding="utf-8")
+        (scripts / "unused.py").write_text("x = 1\n", encoding="utf-8")
+
+        quality = scorecard.compute_scorecard(state_dir, repo, force=True)["quality"]
+        graph = quality["artifact_graph"]
+
+        assert graph["status"] == "complete"
+        assert graph["counts"]["artifacts"] == 3
+        assert graph["counts"]["components"] == 1  # only "consumed" is used_by
+        assert graph["counts"]["leaves"] == 2
+        assert {leaf["id"] for leaf in graph["oldest_leaves"]} == {
+            "scripts/consumer", "scripts/unused",
+        }
+        # Harness-owned: publish_artifact_graph actually wrote the file.
+        assert (state_dir / "artifact_graph" / "latest.json").is_file()
+
+    def test_artifact_graph_is_none_without_repository(self, tmp_path):
+        quality = scorecard.compute_scorecard(tmp_path / "state", None, force=True)["quality"]
+
+        assert quality["artifact_graph"] is None
+
     def test_value_counts_from_761_sidecars(self, tmp_path):
         state_dir = tmp_path / "state"
         (state_dir / "demand").mkdir(parents=True)
