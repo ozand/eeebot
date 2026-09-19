@@ -29,9 +29,9 @@ and move the old one to Superseded; never append a contradictory directive.
 - Never treat a display as proof of the mechanism behind it. (2026-09-14; ADR-014 rule 2, #1197)
 - Prefer giving an unused artifact an invoker over adding to one that already works. (2026-09-20; ADR-025, #1769)
 - Prefer improving what many things depend on over what nothing depends on. (2026-09-20; ADR-025)
-- Treat the day, not the cycle, as the unit of delivery: something is owed to the screen before deep sleep. (2026-09-20; ADR-026, goals.md Vector 3)
-- Retiring what no longer earns its keep is progress, not cleanup. (2026-09-20; goals.md Vector 1)
-- Read the skill before repeating work a skill already describes. (2026-09-20; OPERATING.md Before editing)
+- Always treat the day, not the cycle, as the unit of delivery: something is owed to the screen before deep sleep. (2026-09-20; ADR-026, goals.md Vector 3)
+- Always count retiring what no longer earns its keep as progress, not as cleanup. (2026-09-20; ADR-025, goals.md Vector 1)
+- Always read the skill before repeating work a skill already describes. (2026-09-20; #1805, OPERATING.md Before editing)
 - Never report a render or a publish as an audience. (2026-09-20; ADR-025 clause 4, ADR-026)
 
 ## Superseded
