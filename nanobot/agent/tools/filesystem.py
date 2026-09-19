@@ -67,6 +67,16 @@ class ReadFileTool(_FsTool):
     file) as a single positional ``str`` argument.  Exceptions raised inside
     the callback are silently swallowed so an instrumentation bug can never
     break a subagent's file read.
+
+    *on_skill_read_failed* (#1767) is its mirror: invoked once when a read of
+    a path whose basename is ``SKILL.md`` does NOT return content -- missing
+    file, not a file, refused by the sandbox, or any other error.  It receives
+    the REQUESTED path as written by the caller, because a failed lookup has
+    no resolved path to report and the requested spelling is the thing worth
+    recording.  Without it, a cycle that asked for a skill and was refused is
+    indistinguishable from a cycle that never asked: both leave
+    ``skill_count: 0`` and nothing else.  Exceptions are swallowed on the same
+    grounds as above.
     """
 
     _MAX_CHARS = 128_000
@@ -78,9 +88,31 @@ class ReadFileTool(_FsTool):
         allowed_dir: Path | None = None,
         extra_allowed_dirs: list[Path] | None = None,
         on_skill_read: "Callable[[Path], None] | None" = None,
+        on_skill_read_failed: "Callable[[str], None] | None" = None,
     ):
         super().__init__(workspace, allowed_dir, extra_allowed_dirs)
         self._on_skill_read = on_skill_read
+        self._on_skill_read_failed = on_skill_read_failed
+
+    @staticmethod
+    def _is_skill_request(path: str) -> bool:
+        """True when *path* names a ``SKILL.md``, judged on the REQUESTED string.
+
+        Deliberately not `Path(path).name`: a failed read may never have
+        resolved, and the caller may have written either separator. Both are
+        normalised here so the failure recorder sees the same requests on
+        every platform.
+        """
+        return str(path).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] == "SKILL.md"
+
+    def _notify_skill_read_failed(self, path: str) -> None:
+        """Report a SKILL.md read that returned no content. Never raises."""
+        if self._on_skill_read_failed is None or not self._is_skill_request(path):
+            return
+        try:
+            self._on_skill_read_failed(str(path))
+        except Exception:
+            pass  # instrumentation bug must never break the read
 
     @property
     def name(self) -> str:
@@ -117,8 +149,10 @@ class ReadFileTool(_FsTool):
         try:
             fp = self._resolve(path)
             if not fp.exists():
+                self._notify_skill_read_failed(path)
                 return f"Error: File not found: {path}"
             if not fp.is_file():
+                self._notify_skill_read_failed(path)
                 return f"Error: Not a file: {path}"
 
             all_lines = fp.read_text(encoding="utf-8").splitlines()
@@ -159,8 +193,10 @@ class ReadFileTool(_FsTool):
                     pass  # instrumentation bug must never break the read
             return result
         except PermissionError as e:
+            self._notify_skill_read_failed(path)
             return f"Error: {e}"
         except Exception as e:
+            self._notify_skill_read_failed(path)
             return f"Error reading file: {e}"
 
 

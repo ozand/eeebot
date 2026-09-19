@@ -254,7 +254,7 @@ async def test_subagent_telemetry_tracks_context_usage(tmp_path):
     assert data["context_usage"]["iterations"] == [1500]
 
 
-def _fitness_manager(state_dir, *, reads=None):
+def _fitness_manager(state_dir, *, reads=None, failures=None):
     from nanobot.agent.subagent import SubagentManager
 
     manager = object.__new__(SubagentManager)
@@ -263,6 +263,7 @@ def _fitness_manager(state_dir, *, reads=None):
     manager._skill_fitness_cycle_id = "cycle-x"
     manager._skill_fitness_cycle_base_sha = ""
     manager._skill_reads_this_cycle = list(reads or [])
+    manager._skill_read_failures_this_cycle = list(failures or [])  # #1767
     return manager
 
 
@@ -310,3 +311,65 @@ def test_collect_skill_reads_no_op_when_instrumentation_not_configured(tmp_path)
     manager = _fitness_manager(None, reads=[])
     assert manager.collect_skill_reads() == 0
     assert not (tmp_path / "state" / skill_fitness.CYCLE_SCAN_REL).exists()
+
+
+# ---------------------------------------------------------------------------
+# #1767 -- failed skill lookups reach the per-cycle marker row
+# ---------------------------------------------------------------------------
+
+def test_collect_skill_reads_records_failed_lookups(tmp_path):
+    """A cycle that asked for two skills and got neither must be readable
+    as exactly that, not as a cycle that never asked (#1759's dead end)."""
+    import json
+
+    from nanobot.runtime import skill_fitness
+
+    state = tmp_path / "state"
+    manager = _fitness_manager(state, reads=[], failures=["skip-when-done", "nope"])
+
+    assert manager.collect_skill_reads() == 0
+    row = json.loads((state / skill_fitness.CYCLE_SCAN_REL).read_text(encoding="utf-8").splitlines()[0])
+    assert row["skill_count"] == 0
+    assert row["skills_attempted_not_found"] == ["nope", "skip-when-done"]
+    assert manager._skill_read_failures_this_cycle == []  # cleared after persisting
+
+
+def test_collect_skill_reads_records_a_mixed_cycle(tmp_path):
+    """One hit and one miss in the same cycle: both halves land, so the
+    attempt rate is the sum and the success rate is the ratio."""
+    import json
+
+    from nanobot.runtime import skill_fitness
+
+    state = tmp_path / "state"
+    manager = _fitness_manager(
+        state,
+        reads=[{"skill": "review", "path": "skills/review/SKILL.md"}],
+        failures=["gone"],
+    )
+
+    assert manager.collect_skill_reads() == 1
+    row = json.loads((state / skill_fitness.CYCLE_SCAN_REL).read_text(encoding="utf-8").splitlines()[0])
+    assert row["skills_read"] == ["review"]
+    assert row["skills_attempted_not_found"] == ["gone"]
+
+
+def test_attempted_skill_name_normalises_the_request():
+    """The success path records a bare skill name; the failure path must
+    use the same vocabulary or the two halves cannot be compared."""
+    from nanobot.agent.subagent import _attempted_skill_name
+
+    assert _attempted_skill_name("skills/run-tests/SKILL.md") == "run-tests"
+    assert _attempted_skill_name("./skills/run-tests/SKILL.md") == "run-tests"
+    assert _attempted_skill_name(r"skills\run-tests\SKILL.md") == "run-tests"
+    assert _attempted_skill_name("a/b/skills/deep/SKILL.md") == "deep"
+    # Not the convention -- kept verbatim, because the wrong spelling is
+    # the finding.
+    assert _attempted_skill_name("docs/thing/SKILL.md") == "docs/thing/SKILL.md"
+    assert _attempted_skill_name("SKILL.md") == "SKILL.md"
+
+
+def test_attempted_skill_name_is_bounded():
+    from nanobot.agent.subagent import _MAX_ATTEMPTED_NAME_CHARS, _attempted_skill_name
+
+    assert len(_attempted_skill_name("x" * 5000)) == _MAX_ATTEMPTED_NAME_CHARS

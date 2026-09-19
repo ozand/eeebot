@@ -137,6 +137,9 @@ def test_cycle_skill_scan_records_zero_reads(tmp_path: Path):
     rows = [json.loads(l) for l in (state / skill_fitness.CYCLE_SCAN_REL).read_text(encoding="utf-8").splitlines()]
     assert rows == [{
         "cycle_id": "cycle-empty", "ts": rows[0]["ts"], "skill_count": 0, "skills_read": [],
+        # #1767: always written, empty included -- the same reason the row
+        # itself is unconditional.
+        "skills_attempted_not_found": [],
     }]
 
 
@@ -164,3 +167,44 @@ def test_cycle_skill_scan_never_raises(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(Path, "mkdir", broken_mkdir)
     skill_fitness.record_cycle_skill_scan(tmp_path / "state", cycle_id="cycle-x", skills_read=["review"])
+
+
+# ---------------------------------------------------------------------------
+# #1767 -- the failure half of the skill-read question
+# ---------------------------------------------------------------------------
+
+def test_cycle_skill_scan_records_attempted_but_missing_skills(tmp_path: Path):
+    """#1767: `skill_count: 0` was ambiguous between "never asked" and
+    "asked and was refused" -- two findings whose fixes point in opposite
+    directions. The row now carries both halves."""
+    state = tmp_path / "state"
+    skill_fitness.record_cycle_skill_scan(
+        state,
+        cycle_id="cycle-miss",
+        skills_read=[],
+        skills_attempted_not_found=["skip-when-done", "skip-when-done", "targeted-test-discovery"],
+    )
+    rows = [json.loads(l) for l in (state / skill_fitness.CYCLE_SCAN_REL).read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["skill_count"] == 0
+    assert rows[0]["skills_read"] == []
+    assert rows[0]["skills_attempted_not_found"] == ["skip-when-done", "targeted-test-discovery"]
+
+
+def test_cycle_skill_scan_attempted_field_is_always_present(tmp_path: Path):
+    """Omitting the key when nothing failed would rebuild, in a new field,
+    exactly the no-data-versus-zero ambiguity this row exists to remove."""
+    state = tmp_path / "state"
+    skill_fitness.record_cycle_skill_scan(state, cycle_id="cycle-a", skills_read=["review"])
+    rows = [json.loads(l) for l in (state / skill_fitness.CYCLE_SCAN_REL).read_text(encoding="utf-8").splitlines()]
+    assert "skills_attempted_not_found" in rows[0]
+    assert rows[0]["skills_attempted_not_found"] == []
+
+
+def test_cycle_skill_scan_never_raises_on_bad_attempted_values(tmp_path: Path):
+    """Fail-open, same discipline as every other writer here."""
+    state = tmp_path / "state"
+    skill_fitness.record_cycle_skill_scan(
+        state, cycle_id="cycle-b", skills_read=[], skills_attempted_not_found=["", "  ", "ok"],
+    )
+    rows = [json.loads(l) for l in (state / skill_fitness.CYCLE_SCAN_REL).read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["skills_attempted_not_found"] == ["ok"]
