@@ -10,6 +10,8 @@ whole and largest first; anything else that does not fit raises.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from nanobot.agent import context as context_module
@@ -48,8 +50,14 @@ def _builder(tmp_path, bootstrap_body: str, *, catalogue_lines: int = 40, memory
 #: ``self.state_dir``, so it always renders the fixed, deterministic
 #: ``[missing: scorecard]`` marker (no state_dir means no scorecard read is
 #: even attempted), same as any other always-present fixed section.
-LOOP_FIXED_SECTION_NAMES = ("identity", "soul", "goals", "user", "operating", "memory", "runtime", "scorecard")
-LOOP_SECTION_NAMES = ("identity", "soul", "goals", "user", "operating", "agents", "skills_catalogue", "memory", "runtime", "scorecard")
+#: #1793: "position" joins it too -- ``_loop_builder`` stubs
+#: ``_load_position_block`` directly to a fixed string, since (unlike the
+#: scorecard block) the real position block always renders SOME
+#: wall-clock-dependent content (day position has no "missing" case -- the
+#: current time is always available), which the generic fit/strict/
+#: droppable ladder tests below have no reason to depend on.
+LOOP_FIXED_SECTION_NAMES = ("identity", "soul", "goals", "user", "operating", "memory", "runtime", "scorecard", "position")
+LOOP_SECTION_NAMES = ("identity", "soul", "goals", "user", "operating", "agents", "skills_catalogue", "memory", "runtime", "scorecard", "position")
 
 
 def _loop_builder(tmp_path, agents_md_body: str, *, catalogue_lines: int = 40, memory_lines: int = 20) -> ContextBuilder:
@@ -80,6 +88,9 @@ def _loop_builder(tmp_path, agents_md_body: str, *, catalogue_lines: int = 40, m
 
     builder._load_ontology_blocks = _stub_ontology_blocks
     builder._get_identity = lambda loop_profile=False: "## Runtime\nstub runtime facts."
+    # #1793: fixed, not the real wall-clock-dependent block -- see
+    # LOOP_FIXED_SECTION_NAMES's docstring above.
+    builder._load_position_block = lambda **kwargs: "## Position\nstub position facts."
     builder.skills.get_always_skills = lambda: []
     builder.skills.load_skills_for_context = lambda names: ""
     builder.skills.build_skills_summary = lambda excluded_names=None, compact=False: "<skills>\n" + "  <skill><name>s</name></skill>\n" * catalogue_lines + "</skills>"
@@ -258,6 +269,10 @@ def _loop_builder_at_declared_caps(tmp_path, *, catalogue_lines: int = 40) -> Co
     # call) regardless of what this returns -- feeding something at least that
     # long models the worst case without duplicating the cap value here.
     builder._get_identity = lambda loop_profile=False: "## Runtime\n" + ("r" * ContextBuilder._RUNTIME_BLOCK_CAP)
+    # #1793: worst case for the position block too -- _trim_lines caps
+    # whatever this returns to _POSITION_BLOCK_CAP the same way the real
+    # block's own content is capped.
+    builder._load_position_block = lambda **kwargs: "## Position\n" + ("p" * ContextBuilder._POSITION_BLOCK_CAP)
     builder.skills.get_always_skills = lambda: []
     builder.skills.load_skills_for_context = lambda names: ""
     builder.skills.build_skills_summary = lambda excluded_names=None, compact=False: (
@@ -307,6 +322,8 @@ def test_subagent_prompt_is_strict_and_exposes_the_fit(tmp_path, monkeypatch):
     mgr.workspace = tmp_path
     mgr.release_root = None
     mgr._skill_fitness_state_dir = None
+    mgr._skill_fitness_cycle_id = "cycle-test"
+    mgr.max_iterations = 80
     mgr._excluded_skill_names = []
     mgr.system_context = "# Immutable operator charter\n\ncharter"
     prompt = mgr._build_subagent_prompt()
@@ -419,3 +436,139 @@ def test_trimmed_entry_reports_the_characters_it_lost(tmp_path):
     lost = 10_000 - (1_000 - len(builder.TRIM_NOTE.format(n=0)))
     assert "[trimmed" in body and "chars]" in body
     assert str(lost)[:2] in body, "the note names how much went, not just that something did"
+
+
+# ─── #1793 (ADR-026): the step/cycle/day position block ─────────────────────
+
+
+def test_update_step_position_writes_the_harness_counter_not_the_prior_text():
+    """AC: the shown step position is harness-produced -- the model has no
+    surface that lets it set this value. Even a system prompt whose step
+    line was somehow tampered with (simulating an attempt to plant a
+    different count) is overwritten to whatever the CALLER's own iteration/
+    max_iterations says, since the substitution is keyed on the fixed
+    regex, not on the prior value."""
+    tampered = "## Position\nStep 999 of 999.\nCycle: c1.\n"
+    patched = ContextBuilder.update_step_position(tampered, iteration=3, max_iterations=10)
+    assert "Step 3 of 10." in patched
+    assert "999" not in patched
+
+
+def test_update_step_position_is_a_noop_without_a_step_line():
+    """A prompt built without ever calling _load_position_block (there is
+    no such path today, but interactive sessions never render one) is
+    returned unchanged -- nothing to patch, no error."""
+    prompt = "## IDENTITY.md\n\nno step line here.\n"
+    assert ContextBuilder.update_step_position(prompt, iteration=5, max_iterations=80) == prompt
+
+
+def test_step_position_matches_the_loops_own_counter_on_every_turn():
+    """AC: the shown step position cannot diverge from the loop's own
+    counter -- simulates the exact sequence subagent.py's spawn loop runs
+    (iteration incremented, then update_step_position called with that same
+    iteration/max_iterations) across several turns, and checks the rendered
+    step line agrees with the loop's counter every time."""
+    system_prompt = "## Position\nStep 1 of 5.\nCycle: c1.\n"
+    max_iterations = 5
+    messages = [{"role": "system", "content": system_prompt}]
+    iteration = 0
+    seen: list[str] = []
+    while iteration < max_iterations:
+        iteration += 1
+        messages[0]["content"] = ContextBuilder.update_step_position(
+            str(messages[0]["content"]), iteration, max_iterations,
+        )
+        match = ContextBuilder._STEP_LINE_RE.search(messages[0]["content"])
+        assert match is not None
+        seen.append(match.group(0))
+    assert seen == [f"Step {i} of 5." for i in range(1, 6)]
+
+
+def test_position_block_carries_the_mortality_passage(tmp_path):
+    """AC: the mortality passage (what survives a cycle boundary and a day
+    boundary, ADR-026) is present in the position block the assembled
+    prompt carries."""
+    builder = ContextBuilder(tmp_path)
+    text = builder._load_position_block(iteration=1, max_iterations=80, cycle_id="cycle-x")
+    assert "Nothing survives past a boundary" in text
+    assert "commit" in text and "memory" in text and "handoff" in text
+    assert "deep sleep" in text
+
+
+def test_position_block_has_no_verdict_word(tmp_path):
+    """AC: the day's actions are shown as actions, never a verdict (ADR-026
+    decision 2) -- none of day_clock.VERDICT_WORDS appears anywhere in the
+    rendered position block."""
+    from nanobot.runtime import day_clock
+
+    builder = ContextBuilder(tmp_path)
+    text = builder._load_position_block(iteration=1, max_iterations=80, cycle_id="cycle-x").lower()
+    for word in day_clock.VERDICT_WORDS:
+        assert word not in text, f"verdict word {word!r} leaked into the position block"
+
+
+def test_position_block_step_line_avoids_the_budget_fingerprint():
+    """ADR-022 rule 4: the step line must not restate the phrase already
+    fingerprinted to OPERATING.md's own '## Iteration budget' section
+    (tests/test_prompt_ontology.py's RULE_FINGERPRINTS['budget']) -- a
+    collision would give that rule two owners."""
+    import re
+
+    builder = ContextBuilder.__new__(ContextBuilder)
+    builder.state_dir = None
+    step_and_cycle_only = "\n".join(
+        ContextBuilder._load_position_block(
+            builder, iteration=1, max_iterations=80, cycle_id="",
+        ).splitlines()[:2]
+    )
+    assert not re.search(r"tool iterations", step_and_cycle_only, re.IGNORECASE)
+
+
+def test_resolve_max_tool_iterations_feeds_build_task_and_subagentmanager_from_one_call(tmp_path):
+    """Single-source pin (#1793 item 4 / #906): bridge.py's cycle-spawn path
+    resolves the iteration budget exactly once per spawn (``resolved_iterations
+    = resolve_max_tool_iterations(...)``) and passes that SAME variable into
+    both ``build_task(max_iterations=...)`` and
+    ``SubagentManager(max_iterations=...)`` -- a source-grep pin, in the
+    style of test_ontology_loader.py's
+    test_no_forbidden_loop_prose_in_context_or_subagent_source, so a future
+    edit that reintroduces a second, independently-resolved iteration number
+    fails loudly rather than silently drifting from the value the loop
+    itself enforces."""
+    import re
+
+    bridge_src = Path(__file__).resolve().parents[1] / "nanobot" / "runtime" / "bridge.py"
+    src = bridge_src.read_text(encoding="utf-8")
+
+    resolve_calls = list(re.finditer(r"resolve_max_tool_iterations\(", src))
+    assert len(resolve_calls) >= 1, "resolve_max_tool_iterations must anchor the iteration budget in bridge.py"
+
+    assign_matches = re.findall(r"(\w+)\s*=\s*resolve_max_tool_iterations\(", src)
+    assert assign_matches, "resolve_max_tool_iterations's result must be bound to a name, not inlined twice"
+    resolved_name = assign_matches[0]
+
+    # A bounded lookahead window rather than a "stop at the next `)`" regex:
+    # comment text inside these call blocks (e.g. "agents.defaults.
+    # maxToolIterations)") legitimately contains stray `)` characters that
+    # would otherwise truncate the match before max_iterations= is reached.
+    def _kwarg_after_call(call_prefix: str) -> list[str]:
+        return re.findall(rf"{call_prefix}\([\s\S]{{0,1500}}?max_iterations=(\w+)", src)
+
+    # A call site's max_iterations= is on-source either the bound name from
+    # the main spawn path's single resolve_max_tool_iterations() call, or
+    # (the repair path, a separate spawn) an inline call to the SAME
+    # resolver function -- either way there is no THIRD, independently
+    # derived iteration number anywhere in this file.
+    def _traces_to_resolver(name: str) -> bool:
+        return name == resolved_name or name == "resolve_max_tool_iterations"
+
+    build_task_max_iter = _kwarg_after_call("build_task")
+    subagent_mgr_max_iter = _kwarg_after_call("SubagentManager")
+    assert build_task_max_iter, "build_task's max_iterations= call site not found"
+    assert subagent_mgr_max_iter, "SubagentManager's max_iterations= call site not found"
+    assert all(_traces_to_resolver(name) for name in build_task_max_iter), (
+        f"build_task max_iterations must trace to resolve_max_tool_iterations, found {build_task_max_iter}"
+    )
+    assert all(_traces_to_resolver(name) for name in subagent_mgr_max_iter), (
+        f"SubagentManager max_iterations must trace to resolve_max_tool_iterations, found {subagent_mgr_max_iter}"
+    )

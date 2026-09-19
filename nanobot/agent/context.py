@@ -14,6 +14,7 @@ from loguru import logger
 from nanobot.agent.block_loader import load_block, trim_lines
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
+from nanobot.runtime import day_clock
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
 from nanobot.runtime.scorecard import SCORECARD_SCHEMA
 from nanobot.utils.helpers import (
@@ -179,6 +180,10 @@ class ContextBuilder:
         loop_profile: bool = False,
         strict: bool | None = None,
         degrade_on_overflow: bool = False,
+        *,
+        iteration: int = 1,
+        max_iterations: "int | None" = None,
+        cycle_id: str = "",
     ) -> str:
         """Build the system prompt.
 
@@ -218,6 +223,9 @@ class ContextBuilder:
                 excluded_skill_names=excluded_skill_names,
                 strict=strict,
                 degrade_on_overflow=degrade_on_overflow,
+                iteration=iteration,
+                max_iterations=max_iterations,
+                cycle_id=cycle_id,
             )
 
         # #1379: every section is always present in the list, empty content
@@ -370,18 +378,132 @@ Skills with available="false" need dependencies installed first - you can try in
         )
         return self._trim_lines(text, self._SCORECARD_BLOCK_CAP)
 
+    #: #1793 (ADR-026): the ONE thing in the whole assembled prompt that
+    #: changes mid-cycle -- everything else in this block, and every other
+    #: block, is fixed for the cycle's duration once built. Deliberately
+    #: does NOT contain "tool iterations" (OPERATING.md's "## Iteration
+    #: budget" section already owns that fingerprint per ADR-022 rule 4 --
+    #: tests/test_prompt_ontology.py's RULE_FINGERPRINTS["budget"] would
+    #: fail if a second block matched it).
+    _STEP_LINE_RE = re.compile(r"Step \d+ of \d+\.")
+
+    _POSITION_BLOCK_CAP = 1200
+
+    @classmethod
+    def update_step_position(cls, system_prompt: str, iteration: int, max_iterations: int) -> str:
+        """#1793: patch ONLY the step line of an already-assembled system
+        prompt in place, for the harness (the subagent loop) to call once
+        per turn without rebuilding the rest of the prompt -- rereading
+        release files, memory, and the skills catalogue on every single
+        turn would be wasteful and would let unrelated content drift mid-
+        cycle for no reason. The value patched in is whatever the CALLER's
+        own loop counter says, so this can never diverge from the value
+        that decides when the loop actually stops (there is only one
+        variable; this only renders it a second time, into text).
+
+        A prompt with no step line (constructed via a path that never
+        called :meth:`_load_position_block`, or in interactive sessions)
+        is returned unchanged -- there is nothing to patch.
+        """
+        return cls._STEP_LINE_RE.sub(f"Step {iteration} of {max_iterations}.", system_prompt, count=1)
+
+    def _load_position_block(
+        self, *, iteration: int, max_iterations: "int | None", cycle_id: str,
+    ) -> str:
+        """#1793 (ADR-026 decisions 1-2, 4): the step/cycle/day clocks and
+        the day's own actions, harness-owned and computed fresh at
+        assembly time -- last block in the prompt, after the #1766
+        scorecard block.
+
+        Step position uses whatever ``max_iterations`` the caller (the
+        subagent loop, which enforces the SAME value as its own
+        ``while iteration < max_iterations`` condition) passes; there is no
+        second literal for this PR to introduce -- ``max_iterations``
+        already flows from one place, ``resolve_max_tool_iterations``,
+        into both the loop's own enforcement and ``build_task``'s
+        "Iteration budget this cycle" line (see
+        ``tests/test_day_clock.py``/``tests/test_prompt_ontology.py`` for
+        the pinning tests).
+
+        Day position and day actions come from :mod:`nanobot.runtime.day_clock`
+        -- the one shared definition of the day boundary a future deep-sleep
+        job (not built by this issue) will import rather than re-derive.
+        Actions are reported as actions, never a verdict (ADR-026 decision
+        2): commit counts and file paths only, no adjective about whether
+        the work was good.
+
+        The mortality passage (what survives a cycle boundary and a day
+        boundary) is code-generated here rather than added to OPERATING.md
+        or IDENTITY.md: both release files are at or past their current
+        per-file budget as of this PR (OPERATING.md within single digits of
+        its cap; the combined SOUL.md+IDENTITY.md ceiling has ~4 chars of
+        slack) -- see the PR body for the exact figures. This block draws
+        from the shared prompt-cap pool the same way the scorecard block
+        already does, so it does not compete for release-file budget at
+        all. It states facts about what data persists, the same register
+        as the existing ``## Runtime`` block's "Memory index: ... (catalog;
+        read facts on demand)" -- not an operator directive.
+        """
+        total = max_iterations if isinstance(max_iterations, int) and max_iterations > 0 else 1
+        step_line = f"Step {iteration} of {total}."
+        cycle_line = f"Cycle: {cycle_id}." if cycle_id else "Cycle: unknown."
+
+        day_pos = day_clock.day_position()
+        stage = day_clock.deliverable_stage()
+        day_line = (
+            f"Day: {day_pos['hours_elapsed']}h elapsed, {day_pos['hours_to_deep_sleep']}h to "
+            f"deep sleep. Deliverable stage today: {stage}."
+        )
+
+        state_dir = getattr(self, "state_dir", None)
+        if state_dir is None:
+            actions_line = "Integrated today: unavailable (no state root)."
+        else:
+            actions = day_clock.day_actions(state_dir)
+            if actions["status"] == "unavailable":
+                actions_line = "Integrated today: unavailable (ledger could not be read)."
+            else:
+                commits = actions["commits_integrated_today"]
+                files = actions["files_touched_today"]
+                total_files = actions["files_touched_today_total"]
+                if commits == 0:
+                    actions_line = "Integrated today: 0 commits so far."
+                else:
+                    shown = ", ".join(files)
+                    more = total_files - len(files)
+                    if more > 0:
+                        shown += f", and {more} more"
+                    actions_line = f"Integrated today: {commits} commit(s), touching {total_files} file(s): {shown}."
+
+        mortality_line = (
+            "Nothing survives past a boundary except what crosses it: only your commit, "
+            "memory/ or lessons/ writes, and your handoff carry past the end of a cycle; "
+            "only the day's integrated commits, curated memory/lessons, its report, and "
+            "tomorrow's handoff carry past deep sleep. No reasoning and no unfinished work "
+            "carries past either."
+        )
+
+        text = "## Position\n" + "\n".join(
+            [step_line, cycle_line, day_line, actions_line, mortality_line],
+        )
+        return self._trim_lines(text, self._POSITION_BLOCK_CAP)
+
     def _build_loop_system_prompt(
         self,
         *,
         excluded_skill_names: list[str] | None,
         strict: bool,
         degrade_on_overflow: bool,
+        iteration: int = 1,
+        max_iterations: "int | None" = None,
+        cycle_id: str = "",
     ) -> str:
         """#1725 (ADR-022): the loop profile's own assembly — six ontology
-        blocks, skills catalogue, memory, code-generated runtime facts, then
-        the #1766 scorecard block LAST. No ``active_skills`` section
-        (dropped, #1725 item 3): the loop's only always-skill, ``memory``,
-        is already excluded from it, so the section was always empty under
+        blocks, skills catalogue, memory, code-generated runtime facts, the
+        #1766 scorecard block, then the #1793 position block LAST. No
+        ``active_skills`` section (dropped, #1725 item 3): the loop's only
+        always-skill, ``memory``, is already excluded from it, so the
+        section was always empty under
         this profile."""
         sections, missing, truncated = self._load_ontology_blocks()
 
@@ -410,15 +532,25 @@ Skills with available="false" need dependencies installed first - you can try in
         # runtime, not an instruction.
         scorecard_section = self._load_scorecard_block()
 
+        # #1793 (ADR-026): step/cycle/day position, harness-owned and last of
+        # all -- the step count in this block is the ONE thing in the whole
+        # prompt that changes mid-cycle (see update_step_position, called by
+        # the subagent loop once per turn to patch this block's own step
+        # line in place, never rebuilding the rest of the prompt).
+        position_section = self._load_position_block(
+            iteration=iteration, max_iterations=max_iterations, cycle_id=cycle_id,
+        )
+
         self._skills_catalogue_observation = None
         if skills_section:
             # Derive the catalogue budget from every other fixed section
             # (#1725: six ontology blocks + memory + runtime; #1766 adds the
-            # scorecard block) built above. Memory/runtime/scorecard are
-            # included at their (already-capped) actual size: the floor is
-            # not a frozen measurement from one day (#1563).
+            # scorecard block; #1793 adds the position block) built above.
+            # Memory/runtime/scorecard/position are included at their
+            # (already-capped) actual size: the floor is not a frozen
+            # measurement from one day (#1563).
             fixed_sections = [content for _, content in sections] + [
-                memory_section, runtime_section, scorecard_section,
+                memory_section, runtime_section, scorecard_section, position_section,
             ]
             nonempty_fixed = [content for content in fixed_sections if content]
             fixed_floor = sum(len(content) for content in nonempty_fixed) + len(nonempty_fixed) * len(self.SECTION_SEPARATOR)
@@ -430,6 +562,7 @@ Skills with available="false" need dependencies installed first - you can try in
         sections.append(("memory", memory_section))
         sections.append(("runtime", runtime_section))
         sections.append(("scorecard", scorecard_section))
+        sections.append(("position", position_section))
         return self._fit_system_prompt(
             sections, strict=strict, degrade_on_overflow=degrade_on_overflow,
             memory_fit=self.memory.last_index_fit,

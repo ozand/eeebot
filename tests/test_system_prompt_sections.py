@@ -108,6 +108,10 @@ Skills with available="false" need dependencies installed first - you can try in
     # #1766: state_dir is never stubbed by this helper's callers, so this is
     # always the fixed, deterministic "[missing: scorecard]" marker.
     texts["scorecard"] = builder._load_scorecard_block()
+    # #1793: this helper's only caller uses _loop_builder, which stubs
+    # _load_position_block to a fixed string (see that stub's own docstring
+    # for why -- the real block is always wall-clock-dependent).
+    texts["position"] = builder._load_position_block(iteration=1, max_iterations=80, cycle_id="")
     return texts
 
 
@@ -270,6 +274,10 @@ def test_all_empty_sections_are_zero_except_identity(tmp_path):
     # "[missing: scorecard]" marker -- stubbed to true empty like every
     # other producer here, to keep this test's "everything empty" premise.
     builder._load_scorecard_block = lambda: ""
+    # #1793: the position block is always wall-clock-dependent content
+    # (never truly empty in the real implementation) -- stubbed to true
+    # empty for the same reason as scorecard above.
+    builder._load_position_block = lambda **kwargs: ""
 
     prompt = builder.build_system_prompt(loop_profile=True)
     fit = builder.last_fit
@@ -302,6 +310,7 @@ HEALTHY_SECTIONS["agents"] = (
 OVERFLOW_SECTIONS = {
     "identity": 1_446, "soul": 1_200, "goals": 2_800, "user": 3_500, "operating": 4_800,
     "agents": 0, "skills_catalogue": 6_951, "memory": 4_030, "runtime": 320, "scorecard": 21,
+    "position": 478,
 }
 OVERFLOW_SECTIONS["agents"] = (
     _OVERFLOW_TOTAL - sum(OVERFLOW_SECTIONS.values()) - len(ContextBuilder.SECTION_SEPARATOR) * (len(OVERFLOW_SECTIONS) - 1)

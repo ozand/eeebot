@@ -406,6 +406,21 @@ class SubagentManager:
                 iteration += 1
                 _iter_msg_start = len(messages)
 
+                # #1793 (ADR-026): patch the step line of the already-built
+                # system prompt in place for this turn -- cheap (a single
+                # regex substitution, no re-read of any file) and reads the
+                # SAME `iteration`/`max_iterations` this loop's own
+                # condition tests, so the two can never diverge. A no-op on
+                # a system prompt built without a step line (there is
+                # always one here, since _build_subagent_prompt always
+                # calls build_system_prompt with iteration=1 above).
+                if messages and messages[0].get("role") == "system":
+                    from nanobot.agent.context import ContextBuilder as _CtxBuilder
+
+                    messages[0]["content"] = _CtxBuilder.update_step_position(
+                        str(messages[0].get("content") or ""), iteration, max_iterations,
+                    )
+
                 if self._telemetry_component:
                     from nanobot.observability.llm_telemetry import call_context, current_cycle_id
 
@@ -886,6 +901,14 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
                 excluded_skill_names=self._excluded_skill_names or None,
                 loop_profile=True,
                 degrade_on_overflow=True,
+                # #1793 (ADR-026): step 1 of this cycle's budget -- the loop
+                # (below, in the spawn loop) patches this in place on every
+                # later turn via ContextBuilder.update_step_position, using
+                # the SAME self.max_iterations this prompt is built with, so
+                # the two can never diverge.
+                iteration=1,
+                max_iterations=self.max_iterations,
+                cycle_id=self._skill_fitness_cycle_id,
             )
         finally:
             self.last_prompt_fit = builder.last_fit
