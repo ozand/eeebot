@@ -39,6 +39,16 @@ _AGENTS_MD_RUNTIME_HEADINGS = (
     "## Staging protocol", "## Forbidden operational paths", "## Execution protocol",
     "## Cycle termination", "## Turn budget checkpoints",
 )
+# #1768 Part 1: the executor is not the curator (#1188/#1193 precedent — the
+# loop already edited its own standing context in its own favour once).
+# ``memory/`` and ``lessons/`` are ordinary commit surfaces above, but a
+# bounded executor may only add to them, never delete or rewrite what a
+# prior cycle wrote; consolidating, merging and retiring stays a separate,
+# wider-view actor's job (#1768 Part 2's curator). ``memory/HISTORY.md`` is
+# additionally append-only at the line level: no existing line may vanish,
+# not just no whole-file delete/rename.
+_APPEND_ONLY_PREFIXES = ("memory/", "lessons/")
+_APPEND_ONLY_NO_SHRINK_FILES = ("memory/HISTORY.md",)
 
 
 class MutationPolicyError(ValueError):
@@ -56,6 +66,8 @@ class MutationPolicy:
     forbidden_dirs: tuple[str, ...] = _FORBIDDEN_DIRS
     agents_md_max_lines: int = _AGENTS_MD_MAX_LINES
     agents_md_runtime_headings: tuple[str, ...] = _AGENTS_MD_RUNTIME_HEADINGS
+    append_only_prefixes: tuple[str, ...] = _APPEND_ONLY_PREFIXES
+    append_only_no_shrink_files: tuple[str, ...] = _APPEND_ONLY_NO_SHRINK_FILES
 
     def validate(self) -> None:
         """Validate structure and the read/commit separation, fail closed."""
@@ -93,6 +105,14 @@ class MutationPolicy:
             raise MutationPolicyError("a forbidden directory cannot also be a commit prefix")
         if not isinstance(self.agents_md_max_lines, int) or self.agents_md_max_lines <= 0:
             raise MutationPolicyError("agents_md_max_lines must be a positive int")
+        if not isinstance(self.append_only_prefixes, tuple) or not all(
+            isinstance(path, str) and path.endswith("/") for path in self.append_only_prefixes
+        ):
+            raise MutationPolicyError("append_only_prefixes must be a tuple of slash-terminated strings")
+        if not isinstance(self.append_only_no_shrink_files, tuple) or not all(
+            isinstance(path, str) and path for path in self.append_only_no_shrink_files
+        ):
+            raise MutationPolicyError("append_only_no_shrink_files must be a tuple of strings")
 
     @property
     def commit_surfaces(self) -> tuple[str, ...]:

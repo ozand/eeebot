@@ -576,7 +576,43 @@ def _changed_files_and_violations(repo_root: 'Path', base_sha: str) -> 'tuple[li
     # staged HEAD must stay within the policy's line and heading bounds
     # (#1750: a ratchet against base_sha once HEAD is already non-compliant).
     mutation = mutation + _gate._agents_md_scope_violations(repo_root, base_sha, files_changed)
+    # #1768 Part 1: the executor is not the curator — memory/ and lessons/ may
+    # only be added to, never deleted, renamed, or shrunk (memory/HISTORY.md
+    # line removal). The curator's own commit path (_pickup_staged_promotions)
+    # validates only via _validate_mutation_surfaces and never reaches this
+    # function, so it is unaffected.
+    mutation = mutation + _gate._memory_lessons_append_only_violations(repo_root, base_sha, files_changed)
     return files_changed, blocked, mutation, tier
+
+
+def _write_post_cycle_censuses(state_dir: 'Path', selfevo_repo: 'Path') -> None:
+    """Report-only, harness-side censuses written every cycle. Never a gate
+    input, never written by the loop.
+
+    - #1342: zero-read skill census (``state/demand/skill_census.json``).
+    - #1768 Part 2: zero-citation lesson census
+      (``state/demand/lesson_census.json``) — the lesson-side sibling, same
+      fail-open contract; not gated on whether THIS cycle integrated, since
+      the census reads the citation-scan ledger directly, not this cycle's
+      own commit.
+
+    Extracted to one call site so both writers are exercised together by a
+    single, direct unit test (``tests/test_bridge_post_cycle_censuses.py``)
+    instead of only being reachable through a full, untestable cycle run —
+    same as every other helper ``_evaluate_candidate`` calls here. Fail-open:
+    each writer is already fail-open internally; guarded again here so a
+    census write error can never interrupt the cycle it is reporting on.
+    """
+    try:
+        from nanobot.runtime.skill_fitness import write_zero_read_census
+        write_zero_read_census(state_dir, selfevo_repo)
+    except Exception:
+        pass
+    try:
+        from nanobot.runtime.lesson_v2 import write_lesson_citation_census
+        write_lesson_citation_census(state_dir)
+    except Exception:
+        pass
 
 
 def _check_test_weakening(repo_root: 'Path', base_sha: str) -> 'tuple[bool, list[str], list[str]]':
@@ -4052,13 +4088,7 @@ async def _main_impl_body():
                         print(f'skill-fitness: recorded {_sf_count} SKILL.md read(s) for cycle {_cycle_id}')
             except Exception:
                 pass  # skill-fitness write errors are non-blocking
-            # #1342: zero-read skill census — report only (state/demand/skill_census.json),
-            # never a gate input. Fail-open inside; guarded again here.
-            try:
-                from nanobot.runtime.skill_fitness import write_zero_read_census
-                write_zero_read_census(STATE_DIR, _selfevo_repo)
-            except Exception:
-                pass
+            _write_post_cycle_censuses(STATE_DIR, _selfevo_repo)
 
             if _integrated and backlog_title and not _is_proposer_request(req):
                 marked = _try_mark_backlog_done(

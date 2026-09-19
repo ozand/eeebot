@@ -158,6 +158,42 @@ def test_ratchet_rejects_reintroduced_heading() -> None:
     ), violations
 
 
+def test_append_only_surfaces_are_memory_and_lessons() -> None:
+    """#1768 Part 1: the append-only rule's declared scope. gate.py reads
+    these two fields directly (never a literal), so this is the one place
+    the surface list is pinned."""
+    assert MUTATION_POLICY.append_only_prefixes == ("memory/", "lessons/")
+    assert MUTATION_POLICY.append_only_no_shrink_files == ("memory/HISTORY.md",)
+    # Every no-shrink file lives under a declared append-only prefix -- the
+    # per-line rule is a refinement of the per-file rule, not a separate one.
+    for path in MUTATION_POLICY.append_only_no_shrink_files:
+        assert any(path.startswith(prefix) for prefix in MUTATION_POLICY.append_only_prefixes)
+
+
+def test_append_only_prefixes_must_be_slash_terminated() -> None:
+    from nanobot.runtime.mutation_policy import MutationPolicy, MutationPolicyError
+
+    with pytest.raises(MutationPolicyError, match="append_only_prefixes"):
+        MutationPolicy(
+            read_paths=("AGENTS.md",),
+            commit_path_prefixes=("scripts/",),
+            commit_exact_paths=frozenset(),
+            append_only_prefixes=("memory",),  # missing trailing slash
+        ).validate()
+
+
+def test_append_only_no_shrink_files_must_be_non_empty_strings() -> None:
+    from nanobot.runtime.mutation_policy import MutationPolicy, MutationPolicyError
+
+    with pytest.raises(MutationPolicyError, match="append_only_no_shrink_files"):
+        MutationPolicy(
+            read_paths=("AGENTS.md",),
+            commit_path_prefixes=("scripts/",),
+            commit_exact_paths=frozenset(),
+            append_only_no_shrink_files=("",),
+        ).validate()
+
+
 def test_ratchet_rejects_longer_new_even_with_fewer_headings() -> None:
     """New longer than old -> rejected even though it removed a heading --
     both axes must hold, neither alone is sufficient."""

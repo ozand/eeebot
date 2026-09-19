@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -384,6 +385,102 @@ def _git_show_many(repo_root: 'Path', ref: str, paths: 'list[str]') -> 'dict[str
             pos += size + 1  # trailing newline after the blob
         # 'missing' / 'ambiguous' lines have no body
     return out
+
+
+def _memory_lessons_append_only_violations(
+    repo_root: 'Path', base_sha: str, changed_files: 'list[str]',
+) -> 'list[str]':
+    """Append-only violations for ``memory/`` and ``lessons/`` (#1768 Part 1).
+
+    The executor is not the curator (#1188/#1193 precedent: the loop already
+    edited its own standing context in its own favour once). A cycle commit
+    touching either prefix may add files and add lines; it may not delete or
+    rename a file under those prefixes, and it may not remove an existing
+    line from ``memory/HISTORY.md``. Reason strings share the
+    ``memory_lessons_append_only:`` prefix and block integration exactly
+    like a surface violation, the same shape :func:`_skill_hygiene_violations`
+    and :func:`_agents_md_scope_violations` already use.
+
+    Structural and deterministic, per the issue: the delete/rename check is
+    git's own ``--name-status`` diff code (``D``/``R``), never a heuristic on
+    file content. The one place this necessarily reads content is the
+    ``HISTORY.md`` no-shrink rule — git's status code for a modified file
+    (``M``) does not say whether lines were added, removed, or both, so the
+    only way to enforce "no existing line disappears" is to compare the old
+    and new line multisets directly. That comparison is still exact and
+    deterministic (a `~collections.Counter` containment check, not a
+    similarity/heuristic diff) — it is answering a question ``--name-status``
+    structurally cannot answer, not substituting a heuristic for one it can.
+
+    Unscoped by design: the full ``base_sha..HEAD`` diff status is read (not
+    scoped to ``-- memory/ lessons/`` via pathspec) so a rename that moves a
+    path INTO one of these prefixes is caught even though ``git diff
+    --name-only`` (what ``changed_files`` comes from) lists only a rename's
+    destination. Symmetrically with :func:`_skill_hygiene_violations`
+    (scoped to ``skills/`` only), a rename that moves a path OUT of
+    ``memory/``/``lessons/`` to some other allowed prefix is not separately
+    flagged as an escape from THIS surface's protection — its destination is
+    still bound by the ordinary allowed-prefix/tier classification for
+    wherever it lands, and closing that further is not attempted here.
+
+    Only intended to be wired into the EXECUTOR's cycle-branch gate decision
+    (:func:`nanobot.runtime.bridge._changed_files_and_violations`, alongside
+    the two calls already there for skill hygiene and AGENTS.md scope) —
+    never into the curator's own commit path
+    (:func:`nanobot.runtime.bridge._pickup_staged_promotions`), which
+    already validates only via ``_validate_mutation_surfaces`` and must stay
+    free to delete and merge. This module does not choose which path calls
+    it; the separation is by call site, the same way the other two
+    executor-only checks above are never called from the curator's pickup
+    function today.
+
+    Fail-closed on a git failure: an unreadable diff blocks with a single
+    "unverifiable" violation rather than silently passing every deletion.
+    """
+    prefixes = MUTATION_POLICY.append_only_prefixes
+    if not prefixes:
+        return []
+    touched = [f for f in changed_files if any(f.startswith(p) for p in prefixes)]
+    if not touched:
+        return []
+    lines = _git_lines(repo_root, ['diff', '--name-status', '-M', base_sha, 'HEAD'])
+    if lines is None:
+        return [
+            f'memory_lessons_append_only: cannot read diff status {base_sha[:12]}..HEAD '
+            f'— {len(touched)} path(s) unverifiable'
+        ]
+    violations: list[str] = []
+    for line in lines:
+        parts = line.split('\t')
+        code = parts[0]
+        if code[:1] == 'D' and len(parts) == 2:
+            path = parts[1]
+            if any(path.startswith(p) for p in prefixes):
+                violations.append(
+                    f'memory_lessons_append_only: delete blocked under append-only surface: {path}'
+                )
+        elif code[:1] == 'R' and len(parts) == 3:
+            old, new = parts[1], parts[2]
+            if any(old.startswith(p) for p in prefixes) or any(new.startswith(p) for p in prefixes):
+                violations.append(
+                    f'memory_lessons_append_only: rename blocked under append-only surface: {old} -> {new}'
+                )
+    for no_shrink in MUTATION_POLICY.append_only_no_shrink_files:
+        if no_shrink not in changed_files:
+            continue
+        old_text = _git_show_many(repo_root, base_sha, [no_shrink])[no_shrink]
+        if old_text is None:
+            continue  # did not exist at base_sha -- no existing line to have removed
+        new_text = _git_show_many(repo_root, 'HEAD', [no_shrink])[no_shrink]
+        if new_text is None:
+            violations.append(f'memory_lessons_append_only: unreadable at HEAD: {no_shrink}')
+            continue
+        removed = Counter(old_text.splitlines()) - Counter(new_text.splitlines())
+        if removed:
+            violations.append(
+                f'memory_lessons_append_only: {sum(removed.values())} existing line(s) removed from {no_shrink}'
+            )
+    return violations
 
 
 def _agents_md_scope_violations(repo_root: 'Path', base_sha: str, changed_files: 'list[str]') -> 'list[str]':
