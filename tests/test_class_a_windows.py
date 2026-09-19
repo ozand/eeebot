@@ -68,10 +68,14 @@ def _success(cycle: str, hours_ago: float, files: list[str], **extra: object) ->
     return {"phase": "outcome", "cycle_id": cycle, "outcome": "success", "files_changed": files, "ts": _iso(hours_ago), **extra}
 
 
-# ─── doc-only 24 h budget ─────────────────────────────────────────────────────
+# ─── doc-only 24 h count (measurement only, #1773 retired the budget) ────────
 
 def test_doc_only_count_spans_the_rotation_boundary(tmp_path, monkeypatch):
-    """Pre-fix: count_doc_only_integrations_24h read the live file only -> 0 here, budget open."""
+    """Pre-fix: count_doc_only_integrations_24h read the live file only -> 0 here.
+
+    #1773: the budget this count used to feed is retired -- collect_demand no
+    longer suppresses on it, so both items pass through regardless of the
+    count's value."""
     state = _state(tmp_path)
     _write_gz(state, 1, [_success(f"g{i}", 18 + i, ["docs/a.md"]) for i in range(5)])
     _write_live(state, [{"phase": "started", "cycle_id": "c-live", "ts": _iso(0.5)},
@@ -82,10 +86,11 @@ def test_doc_only_count_spans_the_rotation_boundary(tmp_path, monkeypatch):
     doc_item = demand._make_item("priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md")
     code_item = demand._make_item("priority", "Priority 2 — scripts/worker.py", "Improve scripts/worker.py")
     monkeypatch.setattr(demand, "_priority_items", lambda *a, **k: [doc_item, code_item])
-    monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
     items = demand.collect_demand(state, None, now=NOW)
-    assert [i["id"] for i in items] == [code_item["id"]], "the 5 archived doc-only integrations close the lane"
-    assert "Doc-only daily budget (5) reached (5 in 24h)" in items[0]["doc_budget_notice"]
+    assert {i["id"] for i in items} == {doc_item["id"], code_item["id"]}, (
+        "#1773: no suppression -- a high doc-only count no longer closes any lane"
+    )
+    assert "doc_budget_notice" not in items[0] and "doc_budget_notice" not in items[1]
 
 
 def test_doc_only_count_uses_recorded_tier_and_the_24h_edge(tmp_path):
@@ -98,8 +103,12 @@ def test_doc_only_count_uses_recorded_tier_and_the_24h_edge(tmp_path):
     assert demand.count_doc_only_integrations_24h(state, now=NOW) == 1
 
 
-def test_blind_ledger_closes_the_doc_lane_and_touches_no_sidecar(tmp_path, monkeypatch, caplog):
-    """Pre-fix: an unreadable ledger read as 0 doc-only integrations and the lane stayed open."""
+def test_blind_ledger_suppresses_nothing_and_integration_class_counts_reports_unavailable(tmp_path, monkeypatch, caplog):
+    """Pre-fix: an unreadable ledger read as 0 doc-only integrations and the
+    lane stayed open, then post-#1090 read as budget-reached and closed the
+    lane. #1773: neither -- collect_demand suppresses nothing on a blind
+    ledger, and the measurement that replaced the budget
+    (integration_class_counts) reports 'unavailable', never a silent zero."""
     state = _state(tmp_path)
     _corrupt_gz(state, 0)  # the only source; no live file -> nothing readable
     (state / "demand").mkdir()
@@ -111,15 +120,16 @@ def test_blind_ledger_closes_the_doc_lane_and_touches_no_sidecar(tmp_path, monke
     doc_item = demand._make_item("priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md")
     code_item = demand._make_item("priority", "Priority 2 — scripts/worker.py", "Improve scripts/worker.py")
     monkeypatch.setattr(demand, "_priority_items", lambda *a, **k: [doc_item, code_item])
-    monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
 
     with caplog.at_level(logging.WARNING, logger="nanobot.runtime.demand"):
         items = demand.collect_demand(state, None, now=NOW)
-    assert [i["id"] for i in items] == [code_item["id"]]
-    assert "treated as reached: the ledger could not be read" in items[0]["doc_budget_notice"]
+    assert {i["id"] for i in items} == {doc_item["id"], code_item["id"]}
     assert (exhausted.read_bytes(), futility.read_bytes()) == before
     journal = [r.message for r in caplog.records if "doc-only budget" in r.message]
-    assert len(journal) == 1 and "unavailable" in journal[0], journal
+    assert journal == [], "the retired guard's blind-ledger warning must never fire again"
+
+    result = demand.integration_class_counts(state, now=NOW)
+    assert result["status"] == "unavailable"
 
 
 def test_evidence_status_separates_no_history_from_blind(tmp_path):

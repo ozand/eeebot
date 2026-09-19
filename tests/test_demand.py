@@ -3384,7 +3384,16 @@ class TestIssue1038DemandLanesReproduction:
         assert artifacts[0]["id"] == item2["id"]
 
 class TestIssue1090DocGuard:
-    """Issue #1090: doc-only classification, daily budget, and steering."""
+    """Issue #1090: doc-only classification and steering.
+
+    #1773: the daily budget (suppression + steering-notice-into-summary) is
+    retired -- see ``TestIssue1773RetireDocOnlyBudget`` below for the tests
+    proving no suppression happens and no guard writes into ``summary``.
+    The classification helpers (``classify_change_tier``,
+    ``count_doc_only_integrations_24h``) and the unrelated reflection
+    steering (operator-owned AGENTS.md target, non-confirmable-target) stay
+    -- they are not part of what #1773 removed.
+    """
 
     def test_classify_change_tier_doc_only(self):
         assert demand.classify_change_tier(["docs/specs/foo.md"]) == "doc-only"
@@ -3424,37 +3433,6 @@ class TestIssue1090DocGuard:
                 f.write(json.dumps(ev) + "\n")
 
         assert demand.count_doc_only_integrations_24h(state_dir, now=now) == 2
-
-    def test_reflection_doc_only_suppression_and_budget_notice(self, tmp_path, monkeypatch):
-        state_dir = _state_dir(tmp_path)
-        reflector_dir = state_dir / "reflector"
-        reflector_dir.mkdir(parents=True, exist_ok=True)
-        reflections = [
-            {"cycle_id": "c1", "created_at": _now_iso(5), "recommendations": [{"status": "active", "detail": "Improve docs/specs/a.md with more detail", "evidence": "good"}]},
-            {"cycle_id": "c2", "created_at": _now_iso(10), "recommendations": [{"status": "active", "detail": "Improve scripts/test_runner.py speed", "evidence": "slow"}]},
-        ]
-        (reflector_dir / "reflections.jsonl").write_text(
-            "\n".join(json.dumps(r) for r in reflections) + "\n",
-            encoding="utf-8",
-        )
-
-        # Budget = 1, current doc count = 0 -> not suppressed, no notice
-        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda s, now=None: 0)
-        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "1")
-        items = demand.collect_demand(state_dir, None)
-        refl_items = [i for i in items if i["kind"] == "reflection"]
-        assert len(refl_items) == 2
-        assert not any(i.get("doc_budget_notice") for i in refl_items)
-
-        # Budget = 1, current doc count = 1 -> doc-only reflection suppressed, code-bearing gets notice
-        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda s, now=None: 1)
-        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "1")
-        items = demand.collect_demand(state_dir, None)
-        refl_items = [i for i in items if i["kind"] == "reflection"]
-        assert len(refl_items) == 1
-        assert "scripts/test_runner.py" in refl_items[0]["summary"]
-        assert "Doc-only daily budget (1) reached" in refl_items[0].get("doc_budget_notice", "")
-        assert "[STEERING NOTICE: Doc-only daily budget (1) reached" in refl_items[0]["summary"]
 
     def test_completed_integrations_fold_preserves_change_tier(self, tmp_path):
         state_dir = _state_dir(tmp_path)
@@ -3517,144 +3495,202 @@ class TestIssue1090DocGuard:
         (ledger_dir / "cycles.jsonl").write_text("not json\n{bad\n", encoding="utf-8")
         assert demand.count_doc_only_integrations_24h(state_dir) == 0
 
-    def test_over_budget_suppresses_doc_only_items_across_lanes(self, tmp_path, monkeypatch):
+
+class TestIssue1773RetireDocOnlyBudget:
+    """#1773: the daily doc-only budget (prediction-based suppression +
+    steering-notice-into-summary) is retired. Its removal map:
+
+    DELETE (suppression + notice): ``doc_only_budget_24h``,
+    ``predict_item_change_tier``, ``_doc_budget_row_due``,
+    ``_doc_budget_last_row``, and the deferral/notice/``phase:
+    "doc_only_budget"`` block in ``collect_demand``.
+    KEEP (measurement + classification): ``_DOC_ONLY_PREFIXES``,
+    ``_DOC_ONLY_BASENAMES``, ``is_doc_only_path``, ``classify_change_tier``
+    (``cycle_ledger.py`` stamps ``change_tier`` from it),
+    ``count_doc_only_integrations_24h``.
+
+    Its four measured defects: (1) it suppressed on a prediction scraped
+    from free text, before any file was ever touched; (2) it mutated
+    ``summary``, the exact field downstream dedup/existence-index lookups
+    use as their key -- a variable count embedded in the notice text minted
+    a fresh lookup key every time the count moved; (3) it deferred demand
+    items, not integrations, so it never delivered the ceiling it was
+    credited with; (4) its taxonomy was wrong -- measured over 3 days, of
+    16 "doc-only" integrations, 1 touched ``docs/`` and 15 touched only
+    ``lessons/`` (the loop's own learning substrate, not documentation
+    output). A fifth: an unreadable ledger set ``ledger_blind`` and the
+    budget was then treated as reached -- an I/O problem silently became
+    total suppression of a whole class of work.
+    """
+
+    def _reflection_fixture(self, state_dir):
+        reflector_dir = state_dir / "reflector"
+        reflector_dir.mkdir(parents=True, exist_ok=True)
+        reflections = [
+            {"cycle_id": "c1", "created_at": _now_iso(5), "recommendations": [{"status": "active", "detail": "Improve docs/specs/a.md with more detail", "evidence": "good"}]},
+            {"cycle_id": "c2", "created_at": _now_iso(10), "recommendations": [{"status": "active", "detail": "Improve scripts/test_runner.py speed", "evidence": "slow"}]},
+        ]
+        (reflector_dir / "reflections.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in reflections) + "\n",
+            encoding="utf-8",
+        )
+
+    def test_no_item_is_deferred_regardless_of_doc_only_volume(self, tmp_path, monkeypatch):
+        """AC: no demand item is deferred by the doc-only guard in normal
+        operation. A count that would have exceeded any historical budget
+        (well past the old default of 5) changes nothing."""
         state_dir = _state_dir(tmp_path)
-        doc_priority = demand._make_item(
-            "priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md"
-        )
-        code_priority = demand._make_item(
-            "priority", "Priority 2 — scripts/worker.py", "Improve scripts/worker.py"
-        )
-        doc_gap = demand._make_item(
-            "goal-gap", "goal gap: docs_coverage", "Improve docs/coverage.md"
-        )
-        code_gap = demand._make_item(
-            "goal-gap", "goal gap: runtime_health", "Improve nanobot/runtime/health.py"
-        )
-        doc_decay = demand._make_item(
-            "decay", "Propose archiving docs/old.md", "archive", affected_path="docs/old.md"
-        )
-        code_decay = demand._make_item(
-            "decay", "Propose archiving scripts/old.py", "archive", affected_path="scripts/old.py"
-        )
-        monkeypatch.setattr(demand, "_priority_items", lambda *args, **kwargs: [doc_priority, code_priority])
-        monkeypatch.setattr(demand, "_goal_gap_items", lambda *args, **kwargs: [doc_gap, code_gap])
-        monkeypatch.setattr(demand, "_decay_items", lambda *args, **kwargs: [doc_decay, code_decay])
-        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: 5)
-        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
+        self._reflection_fixture(state_dir)
+        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda s, now=None: 999)
 
         items = demand.collect_demand(state_dir, None)
-        ids = {item["id"] for item in items}
-        assert doc_priority["id"] not in ids
-        assert doc_gap["id"] not in ids
-        assert doc_decay["id"] not in ids
-        assert {code_priority["id"], code_gap["id"], code_decay["id"]} <= ids
-        assert all("Doc-only daily budget (5) reached" in item["summary"] for item in items)
+        refl_items = [i for i in items if i["kind"] == "reflection"]
+        assert len(refl_items) == 2, "both reflections survive -- nothing is deferred"
 
-    def test_doc_only_selection_is_byte_identical_below_budget(self, tmp_path, monkeypatch):
+    def test_no_guard_writes_into_summary_lookup_key_stays_byte_identical(self, tmp_path, monkeypatch):
+        """AC (tested exactly as written): the text used as a dedup or
+        existence-index lookup key must be byte-identical to the item's own
+        summary. No ``[STEERING NOTICE: ...]`` suffix, no ``doc_budget_notice``
+        field, regardless of doc-only volume."""
         state_dir = _state_dir(tmp_path)
         doc_item = demand._make_item("priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md")
         code_item = demand._make_item("priority", "Priority 2 — scripts/worker.py", "Improve scripts/worker.py")
+        original_doc_summary = doc_item["summary"]
+        original_code_summary = code_item["summary"]
         monkeypatch.setattr(demand, "_priority_items", lambda *args, **kwargs: [doc_item, code_item])
-        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: 0)
-        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
+        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: 999)
 
-        baseline = demand.collect_demand(state_dir, None)
-        again = demand.collect_demand(state_dir, None)
-        assert again == baseline
-        assert doc_item in again and code_item in again
+        items = demand.collect_demand(state_dir, None)
+        by_id = {item["id"]: item for item in items}
 
-    def test_doc_only_deferral_does_not_change_lifecycle_or_counters(self, tmp_path, monkeypatch):
+        assert by_id[doc_item["id"]]["summary"] == original_doc_summary
+        assert by_id[code_item["id"]]["summary"] == original_code_summary
+        assert "STEERING NOTICE" not in by_id[doc_item["id"]]["summary"]
+        assert "STEERING NOTICE" not in by_id[code_item["id"]]["summary"]
+        assert "doc_budget_notice" not in by_id[doc_item["id"]]
+        assert "doc_budget_notice" not in by_id[code_item["id"]]
+
+    def test_unreadable_ledger_suppresses_nothing_reports_unavailable(self, tmp_path, monkeypatch):
+        """AC: an unreadable ledger no longer implies "budget reached" --
+        the doc-only item survives collect_demand exactly like the
+        code-bearing one; only the measurement (integration_class_counts)
+        reports the condition, as 'unavailable', not collect_demand as a
+        suppression trigger."""
         state_dir = _state_dir(tmp_path)
         doc_item = demand._make_item("priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md")
         monkeypatch.setattr(demand, "_priority_items", lambda *args, **kwargs: [doc_item])
-        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: 5)
-        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
-        exhausted = state_dir / "demand" / "exhausted.json"
-        exhausted.parent.mkdir(parents=True, exist_ok=True)
-        before = {
-            "schema_version": "demand-exhausted-v1",
-            "entries": {doc_item["id"]: {"status": "active", "rejects": 1}},
-        }
-        exhausted.write_text(json.dumps(before), encoding="utf-8")
-
-        assert demand.collect_demand(state_dir, None) == []
-        assert json.loads(exhausted.read_text(encoding="utf-8")) == before
-
-    def test_doc_only_deferrals_are_recorded_with_budget_state(self, tmp_path, monkeypatch):
-        state_dir = _state_dir(tmp_path)
-        doc_priority = demand._make_item(
-            "priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md"
-        )
-        code_priority = demand._make_item(
-            "priority", "Priority 2 — scripts/worker.py", "Improve scripts/worker.py"
-        )
-        monkeypatch.setattr(demand, "_priority_items", lambda *args, **kwargs: [doc_priority, code_priority])
-        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: 5)
-        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
-
-        items = demand.collect_demand(state_dir, None)
-
-        assert [item["id"] for item in items] == [code_priority["id"]]
-        ledger_path = state_dir / "ledger" / "cycles.jsonl"
-        assert ledger_path.is_file()
-        ledger_text = ledger_path.read_text(encoding="utf-8")
-        records = [json.loads(line) for line in ledger_text.splitlines() if line.strip()]
-        records = [event for event in records if event.get("phase") == "doc_only_budget"]
-        record = records[-1]
-        assert record["phase"] == "doc_only_budget"
-        assert record["doc_only_deferred"] == 1
-        assert record["doc_only_integrations_24h"] == 5
-        assert record["doc_only_budget_24h"] == 5
-        assert record["ledger_blind"] is False
-        assert record["doc_budget_exceeded"] is True
-        assert record["items_considered"] == 2
-        assert record["ts"]
-
-    def test_ledger_blind_budget_deferral_is_recorded_as_distinct_cause(self, tmp_path, monkeypatch):
-        state_dir = _state_dir(tmp_path)
-        doc_item = demand._make_item(
-            "priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md"
-        )
-        monkeypatch.setattr(demand, "_priority_items", lambda *args, **kwargs: [doc_item])
-        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: 0)
         blind_rows = demand.LedgerRows()
         blind_rows.status = "unavailable"
         blind_rows.notes = ("test",)
         monkeypatch.setattr(demand, "_load_ledger_rows", lambda *args, **kwargs: blind_rows)
-        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
 
-        assert demand.collect_demand(state_dir, None) == []
+        items = demand.collect_demand(state_dir, None)
+        assert [item["id"] for item in items] == [doc_item["id"]], "not suppressed by a blind ledger"
+
+    def test_removed_functions_no_longer_exist(self):
+        """Pin the removal map: these are gone, not merely unused."""
+        for name in (
+            "doc_only_budget_24h", "predict_item_change_tier",
+            "_doc_budget_row_due", "_doc_budget_last_row",
+        ):
+            assert not hasattr(demand, name), f"{name} should have been removed by #1773"
+
+    def test_kept_functions_still_exist(self):
+        """Pin the removal map's other half: these stay."""
+        for name in (
+            "_DOC_ONLY_PREFIXES", "_DOC_ONLY_BASENAMES", "is_doc_only_path",
+            "classify_change_tier", "count_doc_only_integrations_24h",
+        ):
+            assert hasattr(demand, name), f"{name} must not have been removed by #1773"
+
+    def test_no_doc_only_budget_ledger_phase_is_ever_written(self, tmp_path, monkeypatch):
+        state_dir = _state_dir(tmp_path)
+        doc_item = demand._make_item("priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md")
+        monkeypatch.setattr(demand, "_priority_items", lambda *args, **kwargs: [doc_item])
+        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: 999)
+
+        for _ in range(3):
+            demand.collect_demand(state_dir, None)
+
         ledger_path = state_dir / "ledger" / "cycles.jsonl"
-        assert ledger_path.is_file()
-        ledger_text = ledger_path.read_text(encoding="utf-8")
-        records = [json.loads(line) for line in ledger_text.splitlines() if line.strip()]
-        records = [event for event in records if event.get("phase") == "doc_only_budget"]
-        assert records[-1]["doc_only_deferred"] == 1
-        assert records[-1]["doc_only_integrations_24h"] == 0
-        assert records[-1]["doc_only_budget_24h"] == 5
-        assert records[-1]["ledger_blind"] is True
-        assert records[-1]["doc_budget_exceeded"] is True
+        if not ledger_path.is_file():
+            return
+        records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert not any(r.get("phase") == "doc_only_budget" for r in records)
 
-    def test_doc_budget_count_and_prediction_use_shared_classifier(self, tmp_path, monkeypatch):
+
+class TestIssue1773IntegrationClassCounts:
+    """#1773 item 3/4: taxonomy-correct classification (from the real
+    changed-file list, never a prediction) and the daily per-class
+    measurement the dashboard publishes."""
+
+    def test_classify_integration_class_three_special_classes(self):
+        assert demand.classify_integration_class(["docs/spec.md"]) == "documentation"
+        assert demand.classify_integration_class(["lessons/card.md"]) == "learning"
+        assert demand.classify_integration_class(["memory/facts/x.md"]) == "learning"
+        assert demand.classify_integration_class(["AGENTS.md"]) == "repository-layout"
+
+    def test_lessons_and_memory_are_never_documentation(self):
+        """The taxonomy fix at the center of #1773: lessons/ and memory/
+        are the loop's learning substrate, not documentation output."""
+        assert demand.classify_integration_class(["lessons/x.md"]) != "documentation"
+        assert demand.classify_integration_class(["memory/x.md"]) != "documentation"
+
+    def test_mixed_or_code_touching_changes_are_code_bearing(self):
+        assert demand.classify_integration_class(["docs/a.md", "scripts/b.py"]) == "code-bearing"
+        assert demand.classify_integration_class(["docs/a.md", "lessons/b.md"]) == "code-bearing"
+        assert demand.classify_integration_class([]) == "code-bearing"
+        assert demand.classify_integration_class(None) == "code-bearing"
+
+    def test_test_files_are_class_neutral(self):
+        assert demand.classify_integration_class(["lessons/x.md", "tests/test_x.py"]) == "learning"
+
+    def test_integration_class_counts_from_real_files_not_prediction(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         ledger_dir = state_dir / "ledger"
         ledger_dir.mkdir(parents=True, exist_ok=True)
-        (ledger_dir / "cycles.jsonl").write_text(json.dumps({
-            "phase": "outcome", "outcome": "success", "files_changed": ["docs/a.md"],
-            "ts": _now_iso(1),
-        }) + "\n", encoding="utf-8")
-        calls = []
-        original = demand.classify_change_tier
-        def tracking(files):
-            calls.append(tuple(files or []))
-            return original(files)
-        monkeypatch.setattr(demand, "classify_change_tier", tracking)
-        assert demand.count_doc_only_integrations_24h(state_dir) == 1
-        assert demand.predict_item_change_tier(
-            demand._make_item("priority", "Priority 1 — docs/a.md", "Update docs/a.md")
-        ) == "doc-only"
-        assert len(calls) >= 2
+        now = datetime.now(timezone.utc)
+        events = [
+            {"phase": "outcome", "outcome": "success", "files_changed": ["docs/a.md"], "ts": (now - timedelta(hours=1)).isoformat()},
+            {"phase": "outcome", "outcome": "success", "files_changed": ["lessons/b.md"], "ts": (now - timedelta(hours=2)).isoformat()},
+            {"phase": "outcome", "outcome": "success", "files_changed": ["memory/c.md"], "ts": (now - timedelta(hours=3)).isoformat()},
+            {"phase": "outcome", "outcome": "success", "files_changed": ["scripts/d.py"], "ts": (now - timedelta(hours=4)).isoformat()},
+            {"phase": "outcome", "outcome": "failed", "files_changed": ["docs/e.md"], "ts": (now - timedelta(hours=1)).isoformat()},
+        ]
+        with open(ledger_dir / "cycles.jsonl", "w", encoding="utf-8") as f:
+            for ev in events:
+                f.write(json.dumps(ev) + "\n")
+
+        result = demand.integration_class_counts(state_dir, window_days=1, now=now)
+        assert result["status"] == "complete"
+        assert result["total"] == 4
+        assert result["documentation"] == 1
+        assert result["learning"] == 2
+        assert result["code_bearing"] == 1
+        assert result["repository_layout"] == 0
+
+    def test_unavailable_status_distinct_from_zero(self, tmp_path, monkeypatch):
+        """'No data' must never be reported the same as a genuine zero
+        share -- the exact defect the retired guard's ledger_blind path had."""
+        import types
+
+        state_dir = _state_dir(tmp_path)
+        blind_window = types.SimpleNamespace(rows=(), status="partial", notes=("gz_corrupt",), files_read=0)
+        monkeypatch.setattr(demand, "ledger_window", lambda *args, **kwargs: blind_window)
+
+        result = demand.integration_class_counts(state_dir, now=datetime.now(timezone.utc))
+        assert result["status"] == "unavailable"
+        assert result["total"] == 0  # zero rows counted, but status says why
+
+    def test_widening_the_taxonomy_does_not_change_classify_change_tier(self):
+        """classify_change_tier (kept, still stamps every ledger row's
+        change_tier and every completed.json entry) keeps its own 2-way
+        doc-only/code-bearing meaning -- adding the 4-way reporting
+        classifier alongside it must not change what any existing reader
+        of change_tier sees."""
+        assert demand.classify_change_tier(["lessons/x.md"]) == "doc-only"
+        assert demand.classify_change_tier(["memory/x.md"]) == "doc-only"
+        assert demand.classify_change_tier(["AGENTS.md"]) == "doc-only"
 
 
 class TestIssue1166RotatedLedger:
@@ -3734,187 +3770,6 @@ class TestIssue1040DemandIODiet:
         items = demand.collect_demand(state_dir, None)
         assert items
         assert load_count == 1
-
-
-class TestIssue1108DenominatorExcludesLaterFilters:
-    """The doc-only ledger row's ``items_considered`` is a denominator.
-
-    ``_apply_futile_surfaces`` (#1184) drops items of its own *after* the doc-only
-    guard has run. Reading the count from the list it returns charges those drops
-    to the doc-only budget: the row then reports fewer items considered than the
-    guard actually saw, which understates every ratio taken from it. The original
-    #1108 test could not see this — its fixture has no futile surface, so the
-    filter is a pass-through and both computations agree.
-    """
-
-    def test_futile_surface_drops_do_not_shrink_the_denominator(self, tmp_path, monkeypatch):
-        state_dir = _state_dir(tmp_path)
-        doc_item = demand._make_item(
-            "priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md"
-        )
-        kept_item = demand._make_item(
-            "priority", "Priority 2 — scripts/worker.py", "Improve scripts/worker.py"
-        )
-        futile_item = demand._make_item(
-            "priority", "Priority 3 — scripts/checker.py", "Improve scripts/checker.py"
-        )
-        monkeypatch.setattr(
-            demand,
-            "_priority_items",
-            lambda *args, **kwargs: [doc_item, kept_item, futile_item],
-        )
-        monkeypatch.setattr(demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: 5)
-        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
-
-        from nanobot.runtime import goal_gap_futility
-
-        monkeypatch.setattr(
-            goal_gap_futility,
-            "futile_surfaces",
-            lambda *args, **kwargs: [{"gap_id": "gap-x", "surface": ["scripts/checker.py"]}],
-        )
-
-        items = demand.collect_demand(state_dir, None)
-
-        # One deferred by the doc-only budget, one dropped by the futile surface.
-        assert [item["id"] for item in items] == [kept_item["id"]]
-
-        records = [
-            json.loads(line)
-            for line in (state_dir / "ledger" / "cycles.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-            if line.strip()
-        ]
-        record = [r for r in records if r.get("phase") == "doc_only_budget"][-1]
-
-        assert record["doc_only_deferred"] == 1
-        assert record["items_considered"] == 3, (
-            "the futile-surface drop was charged to the doc-only budget's denominator"
-        )
-
-
-class TestIssue1238DocBudgetRowVolume:
-    """The ``doc_only_budget`` row is written when it says something, not on
-    every pass (#1238). ``collect_demand`` runs two-to-three times per bridge
-    invocation; before this the row was appended each time and became 27% of
-    the live ledger. The constraint is two-sided: fewer rows, but "reached and
-    deferring nothing" must stay visible (#1108), so the first pass of a
-    process always writes and any deferral always writes.
-    """
-
-    @staticmethod
-    def _doc_rows(state_dir: Path) -> list[dict]:
-        path = state_dir / "ledger" / "cycles.jsonl"
-        if not path.is_file():
-            return []
-        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        return [r for r in rows if r.get("phase") == "doc_only_budget"]
-
-    @staticmethod
-    def _arrange(monkeypatch, *, items, integrations_24h, blind=False):
-        monkeypatch.setattr(demand, "_priority_items", lambda *args, **kwargs: list(items))
-        monkeypatch.setattr(
-            demand, "count_doc_only_integrations_24h", lambda *args, **kwargs: integrations_24h
-        )
-        monkeypatch.setenv("EEEBOT_DOC_ONLY_24H_BUDGET", "5")
-        rows = demand.LedgerRows()
-        if blind:
-            rows.status = "unavailable"
-            rows.notes = ("test",)
-        monkeypatch.setattr(demand, "_load_ledger_rows", lambda *args, **kwargs: rows)
-
-    def test_unchanged_state_deferring_nothing_writes_one_row_per_process(self, tmp_path, monkeypatch):
-        state_dir = _state_dir(tmp_path)
-        code_item = demand._make_item("priority", "Priority 1 — scripts/worker.py", "Improve scripts/worker.py")
-        self._arrange(monkeypatch, items=[code_item], integrations_24h=5)
-
-        for _ in range(3):
-            assert [i["id"] for i in demand.collect_demand(state_dir, None)] == [code_item["id"]]
-
-        rows = self._doc_rows(state_dir)
-        assert len(rows) == 1
-        assert rows[0]["doc_only_deferred"] == 0
-        assert rows[0]["doc_budget_exceeded"] is True
-        assert rows[0]["passes"] == 1
-
-    def test_every_deferring_pass_writes_with_the_count(self, tmp_path, monkeypatch):
-        state_dir = _state_dir(tmp_path)
-        doc_item = demand._make_item("priority", "Priority 1 — docs/runbook.md", "Update docs/runbook.md")
-        self._arrange(monkeypatch, items=[doc_item], integrations_24h=5)
-
-        for _ in range(3):
-            assert demand.collect_demand(state_dir, None) == []
-
-        rows = self._doc_rows(state_dir)
-        assert len(rows) == 3
-        assert [r["doc_only_deferred"] for r in rows] == [1, 1, 1]
-        assert [r["passes"] for r in rows] == [1, 1, 1]
-
-    def test_every_transition_direction_writes(self, tmp_path, monkeypatch):
-        state_dir = _state_dir(tmp_path)
-        code_item = demand._make_item("priority", "Priority 1 — scripts/worker.py", "Improve scripts/worker.py")
-
-        # exceeded 0 -> 1 -> 0, then blind 0 -> 1 -> 0, each step run twice so
-        # the second pass of every state is the one that must be folded.
-        steps = [
-            dict(integrations_24h=0, blind=False),  # first pass: heartbeat
-            dict(integrations_24h=5, blind=False),  # exceeded 0 -> 1
-            dict(integrations_24h=0, blind=False),  # exceeded 1 -> 0
-            dict(integrations_24h=0, blind=True),   # blind 0 -> 1 (exceeded follows)
-            dict(integrations_24h=0, blind=False),  # blind 1 -> 0
-        ]
-        for step in steps:
-            self._arrange(monkeypatch, items=[code_item], **step)
-            demand.collect_demand(state_dir, None)
-            demand.collect_demand(state_dir, None)
-
-        rows = self._doc_rows(state_dir)
-        assert [(r["doc_budget_exceeded"], r["ledger_blind"]) for r in rows] == [
-            (False, False),
-            (True, False),
-            (False, False),
-            (True, True),
-            (False, False),
-        ]
-        # Each written row stands for itself plus the one folded pass before it.
-        assert [r["passes"] for r in rows] == [1, 2, 2, 2, 2]
-
-    def test_reached_and_deferring_nothing_is_distinct_from_never_reached_and_no_data(self, tmp_path, monkeypatch):
-        # Never reached: no collect_demand pass -> no row at all.
-        untouched = _state_dir(tmp_path / "untouched")
-        assert self._doc_rows(untouched) == []
-
-        # Reached, deferring nothing: exactly one row saying so.
-        reached = _state_dir(tmp_path / "reached")
-        code_item = demand._make_item("priority", "Priority 1 — scripts/worker.py", "Improve scripts/worker.py")
-        self._arrange(monkeypatch, items=[code_item], integrations_24h=5)
-        demand.collect_demand(reached, None)
-        [row] = self._doc_rows(reached)
-        assert row["doc_only_deferred"] == 0
-        assert row["doc_budget_exceeded"] is True
-        assert row["ledger_blind"] is False
-
-        # No data: the ledger could not be read — its own row, its own flag.
-        blind = _state_dir(tmp_path / "blind")
-        self._arrange(monkeypatch, items=[code_item], integrations_24h=0, blind=True)
-        demand.collect_demand(blind, None)
-        [row] = self._doc_rows(blind)
-        assert row["ledger_blind"] is True
-        assert row["doc_budget_exceeded"] is True
-
-    def test_dashboard_fields_are_unchanged_and_passes_is_additive(self, tmp_path, monkeypatch):
-        """ozand/eeebot-ops-dashboard #201 reads these six names by ``.get``."""
-        state_dir = _state_dir(tmp_path)
-        code_item = demand._make_item("priority", "Priority 1 — scripts/worker.py", "Improve scripts/worker.py")
-        self._arrange(monkeypatch, items=[code_item], integrations_24h=2)
-        demand.collect_demand(state_dir, None)
-        [row] = self._doc_rows(state_dir)
-        assert {
-            "doc_only_deferred", "doc_only_integrations_24h", "doc_only_budget_24h",
-            "ledger_blind", "doc_budget_exceeded", "items_considered",
-        } <= set(row)
-        assert row["passes"] == 1
 
 
 class TestPublishDerivedView:
