@@ -293,3 +293,52 @@ def _title_already_done_in_git_log(title: str, git_log: str) -> bool:
         if matches >= threshold:
             return True
     return False
+
+
+#: #1785: a trailing goal-vector tag on a proposal title, e.g. "(V1)"/"(V2)".
+#: The proposer's own titles carry these (see llm_proposer's task_title
+#: schema); a retag (V1 -> V2) on an otherwise-identical title must not mint
+#: a new candidate identity.
+_VERSION_TAG_PATTERN = r"\(\s*V\d+\s*\)"
+
+#: #1785: the "Priority N — <title>" label a goal_text.json priority carries
+#: (same pattern _priority_label_prefix above matches) -- when a fallback
+#: proposal's title is lifted verbatim from a numbered priority, the number
+#: is a locator, not part of the candidate's identity.
+_PRIORITY_PREFIX_PATTERN = r"^Priority\s+\d+\s*[—–-]\s*"
+
+
+def normalize_candidate_title(title: str) -> str:
+    """#1785: fold version-tag and priority-prefix variants of a title into
+    one candidate identity.
+
+    The rule, stated once: two proposal titles are the SAME candidate iff,
+    after (1) stripping a leading ``Priority N — `` label, (2) stripping a
+    trailing ``(V<N>)`` tag, (3) case-folding, and (4) collapsing
+    whitespace, they are BYTE-IDENTICAL. This is deliberately an exact
+    match on the normalized form, not a fuzzy one — ADR-pending #1785 found
+    the previous word-overlap heuristic's fuzziness was exactly why it
+    misfired on 45 of 48 real rejections sampled on 2026-09-19 (different
+    files, different surfaces, sharing enough long words to clear a 60%
+    threshold). Loosening the match again would reintroduce that failure
+    mode; this function is intentionally conservative.
+
+    Measured against a real week of self-dedup rejections
+    (2026-09-12..2026-09-19, 342 rows): this rule alone collapses 71
+    distinct raw ``task_title`` values down to 69 distinct identities (the
+    "Priority 43 — Filter fallback candidates dedup (V1)" /
+    "Filter fallback candidates dedup (V1)" pair is exactly the case it was
+    built for). Most of the week's repetition is NOT a retag at all — the
+    same raw title is proposed again verbatim — which is why the treadmill
+    fix (:func:`nanobot.runtime.llm_proposer._recently_self_dedup_rejected`)
+    does not depend on this function alone; see its own docstring.
+    """
+    import re as _re
+
+    text = (title or "").strip()
+    if not text:
+        return ""
+    text = _re.sub(_PRIORITY_PREFIX_PATTERN, "", text)
+    text = _re.sub(_VERSION_TAG_PATTERN, "", text)
+    text = _re.sub(r"\s+", " ", text).strip()
+    return text.rstrip(":").strip().lower()

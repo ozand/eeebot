@@ -561,9 +561,10 @@ def _write_ledger_row(state_dir: Path, row: dict) -> None:
 def test_proposer_e2e_retry_then_self_dedup_on_recent_proposed_title(tmp_path, monkeypatch):
     """End-to-end retry branch: the first proposal is deferred as
     ``enhancement_without_caller`` (dead script); the retry, told the
-    rejection reason, comes back with a normal-target proposal whose title
-    duplicates a recently-``proposed`` ledger row — ``maybe_propose`` returns
-    None with a ``self_dedup`` reject and no ``detail`` key."""
+    rejection reason, comes back with a normal-target proposal that repeats
+    a candidate ALREADY self-dedup-rejected (#1785: the treadmill guard,
+    not the old recent-proposed-titles text match) — ``maybe_propose``
+    returns None with a ``self_dedup`` reject and no ``detail`` key."""
     state = tmp_path / "state"
     (state / "goals").mkdir(parents=True)
     (state / "ledger").mkdir()
@@ -572,10 +573,14 @@ def test_proposer_e2e_retry_then_self_dedup_on_recent_proposed_title(tmp_path, m
     product = _make_product_root(tmp_path)
     instance = _make_instance_repo(tmp_path, scripts={"dead.py": "pass\n"})
 
-    _write_ledger_row(state, {"phase": "proposed", "task_title": "Harden the widget parser"})
-
     enhancement_proposal = _proposal("Add --json output to scripts/dead.py", "scripts/dead.py")
     dup_proposal = _proposal("Harden the widget parser", "docs/notes.md")
+    llm_proposer._record_proposer_reject(
+        state, "self_dedup",
+        task_title=dup_proposal["task_title"],
+        target_path=dup_proposal["target_path"],
+        demand_id=llm_proposer._candidate_identity(dup_proposal),
+    )
 
     monkeypatch.setenv("SELFEVO_LLM_PROPOSER_ENABLED", "1")
     monkeypatch.setenv("SELFEVO_DEMAND_DRIVEN_ENABLED", "0")
@@ -594,7 +599,6 @@ def test_proposer_e2e_retry_then_self_dedup_on_recent_proposed_title(tmp_path, m
         return dict(dup_proposal)
 
     monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
-    monkeypatch.setattr(llm_proposer, "_recent_git_log", lambda *a, **k: "")
     monkeypatch.setattr(enhancement_gate, "product_root", lambda: product)
 
     assert llm_proposer.maybe_propose(state, instance) is None
