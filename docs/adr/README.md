@@ -41,6 +41,8 @@ Conventions:
 | [ADR-023](ADR-023-a-fact-shown-to-the-loop-is-one-the-loop-cannot-reach.md) | A figure shown to the loop as fact is one the loop cannot reach — provenance, not file ownership | accepted |
 | [ADR-024](ADR-024-an-artifact-graph-has-typed-edges.md) | An artifact graph has typed edges, and only production use makes a component | accepted |
 | [ADR-025](ADR-025-an-artifact-is-finished-when-something-depends-on-it.md) | An artifact is finished when something depends on its working — readiness by artifact kind, and how it reaches task selection | accepted |
+| [ADR-026](ADR-026-the-day-is-a-cycle.md) | The day is a cycle — three clocks, a daily deliverable, and deep sleep as a named boundary | accepted |
+| [ADR-027](ADR-027-work-is-ranked-by-rung-gained-per-measured-cost.md) | Work is ranked by rung gained per measured cost, and estimates are audited against outcomes rather than re-scored | accepted |
 
 ## Acceptance
 
