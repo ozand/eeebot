@@ -1261,17 +1261,31 @@ class TestSelfDedup:
         assert reject_rows[-1]["demand_id"] == candidate_id
         assert "repeat:" in reject_rows[-1]["matched_against"]
 
-    def test_a_candidate_with_a_genuine_completed_chain_is_rejected_as_a_duplicate(
+    def test_a_completed_chain_match_is_observed_and_does_not_reject(
         self, tmp_path, monkeypatch,
     ):
-        """The OTHER real signal (not the treadmill): this candidate's own
-        demand_id was `proposed` and later reached a same-cycle `outcome:
-        success` — folded into `demand.completed_demand_ids`, exactly the
-        sidecar the completion fold (#748/#769/#773) already trusts. Of a
-        real week's 339 self_dedup rejections, only 7 had this chain; this
-        is one of them (`defect-c2d7044a8332`, "Write
-        scripts/validate_skill_name.py..." — independently adjudicated as
-        the single real duplicate in the 2026-09-19 day-sample too)."""
+        """#1801: the chain is recorded, NOT acted on.
+
+        This candidate's own demand_id was `proposed` and later reached a
+        same-cycle `outcome: success`, folded into
+        `demand.completed_demand_ids` — the sidecar the completion fold
+        (#748/#769/#773) trusts. Of a real week's 339 self_dedup rejections
+        only 7 had that chain, so it is rare and it is authoritative about
+        what it states.
+
+        What it states is "some cycle proposing this demand_id succeeded",
+        which is not "this work was done". All 7 were audited by hand:
+        **1 real duplicate, 6 not.** This very pairing is one of the 6 —
+        `defect-c2d7044a8332` covers a CLASS of defect, several distinct
+        proposals are minted under it, and the first success stands for all
+        of them. (An earlier revision of this test asserted the opposite,
+        calling this pair the sample's single real duplicate; the by-hand
+        audit says otherwise and the test now follows the audit.)
+
+        Since #1785 removed the word-overlap matcher, this is the only
+        duplicate signal left, so a 1-in-7 precision must not terminate a
+        proposal. It records and lets the proposal through until #1801
+        narrows it to ids that name one piece of work."""
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "no priority section, so should_propose is True")
 
@@ -1302,16 +1316,28 @@ class TestSelfDedup:
         monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
         result = llm_proposer.maybe_propose(state_dir, None)
 
-        assert result is None
-        assert len(calls) == 2  # retry-once contract; both hit the completed-chain match
+        # The proposal survives: a class-scoped chain match is not grounds
+        # to spend the cycle's only proposal on nothing.
+        assert result is not None
+        assert len(calls) == 1  # no retry -- nothing rejected it
 
-        reject_rows = [
-            r for r in llm_proposer._load_ledger_rows(state_dir)
+        rows = llm_proposer._load_ledger_rows(state_dir)
+        # Nothing terminated it.
+        assert not [
+            r for r in rows
             if r.get("phase") == "proposer_reject" and r.get("reason") == "self_dedup"
         ]
-        assert len(reject_rows) == 1
-        assert reject_rows[0]["demand_id"] == demand_id
-        assert reject_rows[0]["matched_against"] == f"completed:{demand_id}"
+        # But the match IS on the record, with the evidence #1801's replay
+        # needs -- no artifact holds this today.
+        observed = [
+            r for r in rows
+            if r.get("phase") == "proposer_reject"
+            and r.get("reason") == "self_dedup_observed"
+        ]
+        assert len(observed) == 1
+        assert observed[0]["demand_id"] == demand_id
+        assert observed[0]["matched_against"] == f"completed:{demand_id}"
+        assert "#1801" in observed[0].get("detail", "")
 
     def test_retagged_title_is_the_same_repeated_candidate(self, tmp_path, monkeypatch):
         """#1785 AC: a version-tag retag of an already-rejected title is the
