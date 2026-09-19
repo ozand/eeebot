@@ -1195,145 +1195,232 @@ class TestProposeRetryOnce(object):
 
 
 class TestSelfDedup:
+    """#1785: the git-log/recent-proposed/recent-failed-title word-overlap
+    matcher that used to terminate proposals here is REMOVED. Adjudicated
+    against a real full day (2026-09-19, 48 self_dedup rejections): 45 were
+    false matches (different file, different surface), 1 a genuine
+    duplicate, 2 undecidable. The tests below cover what replaced it: a
+    candidate refused once is not re-proposed unchanged
+    (:func:`llm_proposer._recently_self_dedup_rejected`, keyed by
+    :func:`llm_proposer._candidate_identity`), and a text-similar-but-
+    unrelated proposal is no longer blocked on first sight."""
+
     @pytest.fixture(autouse=True)
     def _enable(self, monkeypatch):
         monkeypatch.setenv(ENV_VAR, "1")
 
-    def test_duplicate_via_git_log_retries_then_writes_novel_title(self, tmp_path, monkeypatch):
-        """A proposal whose title matches an already-committed piece of work
-        (the #575 heuristic, via the temp git repo) is rejected pre-write;
-        the retry prompt carries explicit duplicate feedback, and a novel
-        retry title is written."""
+    def test_repeated_fallback_candidate_is_rejected_again(self, tmp_path, monkeypatch):
+        """The treadmill fix: a candidate already self-dedup-rejected once
+        (planted here exactly as a prior cycle would have recorded it) is
+        rejected again — the retry (this mock always returns the same
+        candidate, same as the real treadmill) hits the SAME cheap identity
+        check rather than the removed text matcher, and the new reject row
+        carries a derived demand_id (fallback mode has no real one),
+        satisfying the "every row" requirement."""
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "no priority section, so should_propose is True")
-        repo = _make_git_repo_with_commit(
-            tmp_path,
-            "feat: implement lightweight memory and cpu profiling script for eeepc host",
+
+        candidate_id = llm_proposer._candidate_identity({
+            "task_title": "Assert doc integration structure (V1)",
+            "target_path": "scripts/validate_doc_structure.py",
+        })
+        llm_proposer._record_proposer_reject(
+            state_dir, "self_dedup",
+            task_title="Assert doc integration structure (V1)",
+            target_path="scripts/validate_doc_structure.py",
+            matched_against="some earlier reject",
+            demand_id=candidate_id,
         )
 
         calls = []
 
         def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
             calls.append(rejection_reason)
-            if rejection_reason is None:
-                return {
-                    "task_title": "Implement lightweight memory and CPU profiling script",
-                    "rationale": "Tracks resource usage.",
-                    "target_path": "scripts/profile.py",
-                    "serves": "priority 2",
-                }
             return {
-                "task_title": "Add a smoke test for the loop metrics report",
-                "rationale": "Closes an unrelated coverage gap.",
-                "target_path": "tests/test_loop_metrics_extra.py",
-                "serves": "priority 2",
-            }
-
-        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
-        result = llm_proposer.maybe_propose(state_dir, repo)
-
-        assert result is not None
-        assert "loop metrics report" in result
-        assert len(calls) == 2
-        assert calls[0] is None
-        assert "duplicates already-done" in calls[1]
-        assert "DIFFERENT area" in calls[1]
-
-        req_dir = state_dir / "subagents" / "requests"
-        written = [json.loads(p.read_text(encoding="utf-8")) for p in req_dir.glob("*.json")]
-        assert len(written) == 1
-        assert "loop metrics report" in written[0]["task_title"]
-        assert result == written[0]["task_title"]
-
-    def test_duplicate_via_recent_proposed_titles_rejected(self, tmp_path, monkeypatch):
-        """A title never committed to git (no selfevo repo at all here) but
-        matching a recent 'proposed' ledger row is still caught — this is
-        the case the canary hit: 6 clones in a row, each correctly bridge-
-        skipped as a duplicate, so no commit for any of them ever landed."""
-        state_dir = _state_dir(tmp_path)
-        _write_goal_text(state_dir, "no priority section, so should_propose is True")
-        _append_proposed(state_dir, "c-old", "Implement lightweight memory usage monitor for eeepc")
-
-        calls = []
-
-        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
-            calls.append(rejection_reason)
-            if rejection_reason is None:
-                return {
-                    "task_title": "Implement lightweight memory usage tracker",
-                    "rationale": "Tracks memory usage.",
-                    "target_path": "scripts/mem.py",
-                    "serves": "priority 4",
-                }
-            return {
-                "task_title": "Document the release checklist",
-                "rationale": "Fills a documentation gap.",
-                "target_path": "docs/release.md",
+                "task_title": "Assert doc integration structure (V1)",
+                "rationale": "Checks AGENTS.md wiring.",
+                "target_path": "scripts/validate_doc_structure.py",
                 "serves": "priority 4",
             }
 
         monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
         result = llm_proposer.maybe_propose(state_dir, None)
-
-        assert result is not None
-        assert "release checklist" in result
-        assert len(calls) == 2
-        assert calls[1] is not None
-
-    def test_both_duplicate_gives_up_without_writing(self, tmp_path, monkeypatch):
-        state_dir = _state_dir(tmp_path)
-        _write_goal_text(state_dir, "no priority section, so should_propose is True")
-        repo = _make_git_repo_with_commit(
-            tmp_path,
-            "feat: implement lightweight memory and cpu profiling script for eeepc host",
-        )
-
-        calls = []
-
-        def _always_clone(context, *, rejection_reason=None, timeout=120.0):
-            calls.append(rejection_reason)
-            return {
-                "task_title": "Implement lightweight memory and CPU profiling script",
-                "rationale": "Tracks resource usage.",
-                "target_path": "scripts/profile.py",
-                "serves": "priority 2",
-            }
-
-        monkeypatch.setattr(llm_proposer, "propose", _always_clone)
-        result = llm_proposer.maybe_propose(state_dir, repo)
 
         assert result is None
-        assert len(calls) <= 3
-        assert len(calls) == 2  # sizing passes both times; only the dedup retry is spent
-        assert not (state_dir / "subagents" / "requests").exists()
+        assert len(calls) == 2  # the retry-once contract is unchanged; both hit the repeat
 
-    def test_duplicate_via_recent_failed_title_rejected(self, tmp_path, monkeypatch):
-        """#716: a title never committed to git and never itself
-        re-proposed, but matching a recent attempt that FAILED (never
-        integrated), is still caught pre-write — this is the #716 loop-
-        health defect: the proposer kept re-proposing themes it had already
-        tried and failed at, because neither git log nor its own recent-
-        proposed-titles list carries a failed attempt's title."""
+        # Confirm via the ledger directly: the new reject row's demand_id
+        # is populated (fallback mode has no real one, so this is the
+        # derived candidate_id) -- AC3, "every row".
+        reject_rows = [
+            r for r in llm_proposer._load_ledger_rows(state_dir)
+            if r.get("phase") == "proposer_reject" and r.get("reason") == "self_dedup"
+        ]
+        assert len(reject_rows) == 2  # the planted one + this cycle's (final) reject
+        assert all(r.get("demand_id") for r in reject_rows)
+        assert reject_rows[-1]["demand_id"] == candidate_id
+        assert "repeat:" in reject_rows[-1]["matched_against"]
+
+    def test_a_candidate_with_a_genuine_completed_chain_is_rejected_as_a_duplicate(
+        self, tmp_path, monkeypatch,
+    ):
+        """The OTHER real signal (not the treadmill): this candidate's own
+        demand_id was `proposed` and later reached a same-cycle `outcome:
+        success` — folded into `demand.completed_demand_ids`, exactly the
+        sidecar the completion fold (#748/#769/#773) already trusts. Of a
+        real week's 339 self_dedup rejections, only 7 had this chain; this
+        is one of them (`defect-c2d7044a8332`, "Write
+        scripts/validate_skill_name.py..." — independently adjudicated as
+        the single real duplicate in the 2026-09-19 day-sample too)."""
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "no priority section, so should_propose is True")
-        _append_proposed(state_dir, "c-old", "Implement lightweight memory usage monitor for eeepc")
-        _append_outcome(state_dir, "c-old", "failed")
+
+        demand_id = "defect-c2d7044a8332"
+        cycle_ledger.append_event(state_dir, {
+            "phase": "proposed", "cycle_id": "cycle-earlier",
+            "task_title": "Add is_valid_skill_name to scripts/validate_skill_format.py",
+            "demand_id": demand_id, "serves": f"demand {demand_id}",
+        })
+        _append_outcome(state_dir, "cycle-earlier", "success")
+        # The proposed->success pair is folded into demand/completed.json by
+        # demand._fold_completed (normally run on demand.py's own cadence,
+        # not by this proposer module) -- called directly here so the test
+        # exercises the same sidecar completed_demand_ids() reads.
+        demand._fold_completed(state_dir)
 
         calls = []
 
         def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
             calls.append(rejection_reason)
-            if rejection_reason is None:
-                return {
-                    "task_title": "Implement lightweight memory usage tracker",
-                    "rationale": "Tracks memory usage.",
-                    "target_path": "scripts/mem.py",
-                    "serves": "priority 4",
-                }
             return {
-                "task_title": "Document the release checklist",
-                "rationale": "Fills a documentation gap.",
-                "target_path": "docs/release.md",
+                "task_title": "Write scripts/validate_skill_name.py to validate skill name format",
+                "rationale": "Same demand item, different wording.",
+                "target_path": "scripts/validate_skill_name.py",
+                "serves": f"demand {demand_id}",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        result = llm_proposer.maybe_propose(state_dir, None)
+
+        assert result is None
+        assert len(calls) == 2  # retry-once contract; both hit the completed-chain match
+
+        reject_rows = [
+            r for r in llm_proposer._load_ledger_rows(state_dir)
+            if r.get("phase") == "proposer_reject" and r.get("reason") == "self_dedup"
+        ]
+        assert len(reject_rows) == 1
+        assert reject_rows[0]["demand_id"] == demand_id
+        assert reject_rows[0]["matched_against"] == f"completed:{demand_id}"
+
+    def test_retagged_title_is_the_same_repeated_candidate(self, tmp_path, monkeypatch):
+        """#1785 AC: a version-tag retag of an already-rejected title is the
+        SAME candidate — (V1) -> (V2) must not mint a fresh identity that
+        escapes the repeat guard."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        candidate_id = llm_proposer._candidate_identity({
+            "task_title": "Filter fallback candidates dedup (V1)",
+            "target_path": "scripts/filter_fallback_targets.py",
+        })
+        llm_proposer._record_proposer_reject(
+            state_dir, "self_dedup",
+            task_title="Filter fallback candidates dedup (V1)",
+            target_path="scripts/filter_fallback_targets.py",
+            demand_id=candidate_id,
+        )
+
+        calls = []
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            calls.append(rejection_reason)
+            return {
+                "task_title": "Filter fallback candidates dedup (V2)",  # retag
+                "rationale": "Second attempt at the same idea.",
+                "target_path": "scripts/filter_fallback_targets.py",
+                "serves": "priority 4",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        result = llm_proposer.maybe_propose(state_dir, None)
+
+        assert result is None
+        assert len(calls) == 2  # retry-once contract; both hit the repeat
+        reject_rows = [
+            r for r in llm_proposer._load_ledger_rows(state_dir)
+            if r.get("phase") == "proposer_reject"
+        ]
+        assert reject_rows[-1]["reason"] == "self_dedup"
+        assert "repeat:" in reject_rows[-1]["matched_against"]
+
+    def test_priority_prefix_retag_is_the_same_repeated_candidate(self, tmp_path, monkeypatch):
+        """The OTHER retag shape measured in the real corpus: a "Priority N
+        — " label prefix minted on an otherwise-identical title (118 of a
+        real 7-day window's 342 rejects were exactly this pair)."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        candidate_id = llm_proposer._candidate_identity({
+            "task_title": "Filter fallback candidates dedup (V1)",
+            "target_path": "scripts/filter_fallback_targets.py",
+        })
+        llm_proposer._record_proposer_reject(
+            state_dir, "self_dedup",
+            task_title="Filter fallback candidates dedup (V1)",
+            target_path="scripts/filter_fallback_targets.py",
+            demand_id=candidate_id,
+        )
+
+        calls = []
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            calls.append(rejection_reason)
+            return {
+                "task_title": "Priority 43 — Filter fallback candidates dedup (V1)",
+                "rationale": "Same idea, priority-labeled.",
+                "target_path": "scripts/filter_fallback_targets.py",
+                "serves": "priority 4",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        result = llm_proposer.maybe_propose(state_dir, None)
+
+        assert result is None
+        assert len(calls) == 2  # retry-once contract; both hit the repeat
+        reject_rows = [
+            r for r in llm_proposer._load_ledger_rows(state_dir)
+            if r.get("phase") == "proposer_reject"
+        ]
+        assert reject_rows[-1]["reason"] == "self_dedup"
+        assert "repeat:" in reject_rows[-1]["matched_against"]
+
+    def test_different_target_path_is_not_the_same_candidate(self, tmp_path, monkeypatch):
+        """The identity includes target_path, not title text alone — two
+        genuinely different files must not collapse into one candidate just
+        because a title fragment repeats."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        candidate_id = llm_proposer._candidate_identity({
+            "task_title": "Add fail-fast option to scripts/run_all_tests.py",
+            "target_path": "scripts/run_all_tests.py",
+        })
+        llm_proposer._record_proposer_reject(
+            state_dir, "self_dedup",
+            task_title="Add fail-fast option to scripts/run_all_tests.py",
+            target_path="scripts/run_all_tests.py",
+            demand_id=candidate_id,
+        )
+
+        calls = []
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            calls.append(rejection_reason)
+            return {
+                "task_title": "Add fail-fast option to scripts/run_smoke_tests.py",
+                "rationale": "Different script entirely.",
+                "target_path": "scripts/run_smoke_tests.py",
                 "serves": "priority 4",
             }
 
@@ -1341,14 +1428,49 @@ class TestSelfDedup:
         result = llm_proposer.maybe_propose(state_dir, None)
 
         assert result is not None
-        assert "release checklist" in result
-        assert len(calls) == 2
-        assert calls[1] is not None
-        assert "recently-failed" in calls[1]
+        assert len(calls) == 1
+
+    def test_word_overlap_with_unrelated_past_work_no_longer_blocks_a_first_sighting(
+        self, tmp_path, monkeypatch,
+    ):
+        """The false-positive class the adjudication found (45 of 48 real
+        rejections on 2026-09-19): a proposal sharing several long words
+        with an unrelated committed subject, on DIFFERENT files, used to be
+        rejected outright. It is not a repeat (nothing self-dedup-rejected
+        it before), so it must now be written on the first try."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+        # create_files pre-creates the target on disk (an EDIT, not a new
+        # file) so the unrelated #834 permanent-novelty guard — which reuses
+        # the SAME substring heuristic but is out of this issue's scope —
+        # cannot also fire and confound this test.
+        repo = _make_git_repo_with_commit(
+            tmp_path,
+            "test(agents_structure): register remaining AGENTS.md sections and add key requirement assertions",
+            create_files=("scripts/validate_doc_structure.py",),
+        )
+
+        calls = []
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            calls.append(rejection_reason)
+            return {
+                "task_title": "Assert doc integration structure (V1)",
+                "rationale": "Checks AGENTS.md wiring on a different surface.",
+                "target_path": "scripts/validate_doc_structure.py",
+                "serves": "priority 4",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        result = llm_proposer.maybe_propose(state_dir, repo)
+
+        assert result is not None
+        assert len(calls) == 1
+        assert calls[0] is None
 
     def test_genuinely_new_work_is_not_flagged_as_duplicate(self, tmp_path, monkeypatch):
-        """Sanity check for #716: a proposal unrelated to any recent failure
-        (or duplicate) passes through untouched on the first try."""
+        """Sanity check: a proposal unrelated to anything in the ledger
+        passes through untouched on the first try."""
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "no priority section, so should_propose is True")
         _append_proposed(state_dir, "c-old", "Add a memory-leak detector script")
@@ -1373,39 +1495,36 @@ class TestSelfDedup:
         assert len(calls) == 1
         assert calls[0] is None
 
-    def test_old_failure_outside_window_does_not_block_retry(self, tmp_path, monkeypatch):
-        """#716 policy: the recency window means an old (aged-out) failure
-        does not permanently ban a retry of the same theme. Filler cycles
-        are BOTH 'proposed' and 'outcome' rows so the old title also ages
-        out of the (unrelated, pre-existing) recent-proposed-titles window
-        — otherwise that separate mechanism would still catch it and the
-        test would not isolate the new #716 behavior."""
+    def test_demand_mode_repeat_uses_the_real_demand_id_not_a_derived_one(self, tmp_path, monkeypatch):
+        """A demand-mode proposal (real ``serves``) already has an
+        authoritative id; the repeat guard must key on THAT id, not derive
+        a separate fallback one that would fork the identity space."""
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "no priority section, so should_propose is True")
-        _append_proposed(state_dir, "c-old", "Implement lightweight memory usage monitor for eeepc")
-        _append_outcome(state_dir, "c-old", "failed")
-        for i in range(llm_proposer._RECENT_FAILED_WINDOW_CYCLES):
-            _append_proposed(state_dir, f"filler-{i}", f"Unrelated filler task {i}")
-            _append_outcome(state_dir, f"filler-{i}", "success")
+
+        llm_proposer._record_proposer_reject(
+            state_dir, "self_dedup",
+            task_title="Add is_valid_skill_name helper to scripts/validate_skill_format.py",
+            target_path="scripts/validate_skill_format.py",
+            demand_id="priority-290ae2dc0224",
+        )
 
         calls = []
 
         def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
             calls.append(rejection_reason)
             return {
-                "task_title": "Implement lightweight memory usage tracker",
-                "rationale": "Tracks memory usage.",
-                "target_path": "scripts/mem.py",
-                "serves": "priority 4",
+                "task_title": "Add is_valid_skill_name to scripts/validate_skill_format.py",  # reworded
+                "rationale": "Same demand item, reworded title.",
+                "target_path": "scripts/validate_skill_format.py",
+                "serves": "demand priority-290ae2dc0224",
             }
 
         monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
         result = llm_proposer.maybe_propose(state_dir, None)
 
-        assert result is not None
-        assert "memory usage tracker" in result
-        assert len(calls) == 1
-        assert calls[0] is None
+        assert result is None
+        assert len(calls) == 2  # retry-once contract; both hit the repeat
 
 
 # ─── prompt: prefer numbered "Current priority targets" ────────────────────
@@ -2570,11 +2689,23 @@ class TestProposerRejectLedger:
         assert "rationale is empty" in rows[0]["detail"]
 
     def test_double_self_dedup_records_reject_with_matched_against(self, tmp_path, monkeypatch):
-        """The live-saturation case: both dedup checks flag the proposal.
-        The reject row must carry the rejected title AND what it matched."""
+        """#1785: the live-saturation case — a candidate already known
+        self-dedup-rejected is proposed again and rejected again on both
+        the first attempt and the retry (this mock always returns the same
+        candidate, same as the real treadmill). The reject row must carry
+        the rejected title AND what it matched."""
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "no priority section, so should_propose is True")
-        _append_proposed(state_dir, "c-old", "Implement lightweight memory usage monitor for eeepc")
+        candidate_id = llm_proposer._candidate_identity({
+            "task_title": "Implement lightweight memory usage tracker",
+            "target_path": "scripts/mem.py",
+        })
+        llm_proposer._record_proposer_reject(
+            state_dir, "self_dedup",
+            task_title="Implement lightweight memory usage tracker",
+            target_path="scripts/mem.py",
+            demand_id=candidate_id,
+        )
 
         def _always_clone(context, *, rejection_reason=None, timeout=120.0):
             return {
@@ -2589,13 +2720,13 @@ class TestProposerRejectLedger:
         assert not (state_dir / "subagents" / "requests").exists()
 
         rows = _reject_rows(state_dir)
-        assert len(rows) == 1
-        assert rows[0]["reason"] == "self_dedup"
-        assert rows[0]["task_title"] == "Implement lightweight memory usage tracker"
-        assert rows[0]["target_path"] == "scripts/mem.py"
-        # matched_against records what the heuristic actually matched (the
-        # prior proposed title), not an echo of the proposal's own title.
-        assert rows[0]["matched_against"] == "Implement lightweight memory usage monitor for eeepc"
+        assert len(rows) == 2  # the planted one + this cycle's
+        assert rows[-1]["reason"] == "self_dedup"
+        assert rows[-1]["task_title"] == "Implement lightweight memory usage tracker"
+        assert rows[-1]["target_path"] == "scripts/mem.py"
+        # matched_against records what it actually matched (the earlier
+        # reject's own identity), not an echo of the proposal's own title.
+        assert rows[-1]["matched_against"].startswith(f"repeat:{candidate_id} first-rejected")
 
     def test_self_dedup_via_forced_tuple_records_matched_against(self, tmp_path, monkeypatch):
         """Drive the dedup exit deterministically by monkeypatching
@@ -2885,9 +3016,17 @@ class TestDemandDrivenMode:
         assert captured.get("system_prompt") == llm_proposer._DEMAND_PROPOSER_SYSTEM_PROMPT
 
     def test_self_dedup_reject_row_carries_demand_id(self, tmp_path, monkeypatch):
+        """#1785: demand_id is carried on EVERY proposer_reject row now,
+        not just when the old text matcher happened to fire — here via a
+        real demand-mode candidate already known self-dedup-rejected."""
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
-        _append_proposed(state_dir, "c-old", "Implement lightweight memory usage monitor for eeepc")
+        llm_proposer._record_proposer_reject(
+            state_dir, "self_dedup",
+            task_title="Implement lightweight memory usage tracker",
+            target_path="scripts/mem.py",
+            demand_id="defect-1a2b3c4d5e6f",
+        )
 
         def _always_clone(context, *, rejection_reason=None, timeout=120.0, **kwargs):
             return {
@@ -2901,9 +3040,9 @@ class TestDemandDrivenMode:
         assert llm_proposer.maybe_propose(state_dir, None) is None
 
         rows = _reject_rows(state_dir)
-        assert len(rows) == 1
-        assert rows[0]["reason"] == "self_dedup"
-        assert rows[0]["demand_id"] == "defect-1a2b3c4d5e6f"
+        assert len(rows) == 2  # the planted one + this cycle's
+        assert rows[-1]["reason"] == "self_dedup"
+        assert rows[-1]["demand_id"] == "defect-1a2b3c4d5e6f"
 
     def test_anti_stacking_guard_still_blocks_before_demand_gate(self, tmp_path):
         """The existing gates are kept: a queued unhandled proposer request

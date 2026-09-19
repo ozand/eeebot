@@ -66,9 +66,9 @@ from nanobot.runtime import (
 )
 from nanobot.runtime.cycle_ledger import append_event
 from nanobot.runtime.goal_text_utils import (
-    _recent_git_log,
     _title_already_done_in_git_log,
     filter_completed_priorities_from_goal_text,
+    normalize_candidate_title,
 )
 from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
@@ -2026,6 +2026,80 @@ def _demand_id_from_serves(serves: Any) -> str:
         return ""
 
 
+def _candidate_identity(proposal: dict[str, Any] | None) -> str:
+    """#1785: a stable identity for ANY proposal, demand-mode or fallback.
+
+    Demand-mode proposals already carry an authoritative id (``serves``'s
+    ``demand <id>``, derived by real demand-queue selection) -- returned
+    unchanged. A FALLBACK-mode proposal (no ``serves`` at all) has no such
+    id, which is exactly why 34 of 2026-09-19's 48 self_dedup rejections
+    (all ``fallback-*`` cycles) carried ``demand_id: null`` and why
+    :func:`_dedup_exhausted`'s existing demand_id-keyed treadmill guard
+    (built for demand mode, #760) never applied to them at all. This
+    derives an equally stable surrogate the same way: a hash of the
+    version-tag/priority-prefix-NORMALIZED title
+    (:func:`goal_text_utils.normalize_candidate_title`) plus the target
+    path, via the same :func:`nanobot.runtime.demand.item_id` the real
+    demand queue uses -- so a retagged or trivially-reworded repeat of a
+    fallback proposal hashes to the SAME id, exactly like a real demand
+    item's id survives the model refining its title (the property the
+    completion fold already relies on, #748/#769).
+
+    ``""`` only when the proposal is malformed (no title at all) -- never a
+    fabricated identity for an empty candidate.
+    """
+    if not isinstance(proposal, dict):
+        return ""
+    real = _demand_id_from_serves(proposal.get("serves"))
+    if real:
+        return real
+    normalized_title = normalize_candidate_title(str(proposal.get("task_title") or ""))
+    if not normalized_title:
+        return ""
+    target_path = str(proposal.get("target_path") or "").strip()
+    return demand.item_id("fallback", f"{normalized_title}\x00{target_path}")
+
+
+def _recently_self_dedup_rejected(
+    state_dir: Path,
+    candidate_id: str,
+    *,
+    days: int = _LEDGER_HORIZON_DAYS,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    """#1785: has THIS candidate (by :func:`_candidate_identity`) already
+    been self-dedup-rejected within the window? This is the treadmill fix:
+    "Assert doc integration structure (V1)" was proposed and rejected 34
+    times across three fallback cycles on 2026-09-19 because nothing
+    remembered the first refusal. Unlike :func:`_dedup_exhausted` (demand
+    mode only, requires ``SELFEVO_DEDUP_EXHAUSTION_K`` >= 2 prior rejects
+    before it stops presenting an item), this fires on the FIRST prior
+    reject -- "a candidate refused by self-dedup is not re-proposed
+    unchanged" (the issue's own AC) means the SECOND occurrence, not the
+    third, is where it must stop. Applies uniformly to demand-mode and
+    fallback-mode candidates alike, since :func:`_candidate_identity`
+    already normalizes both to one namespace.
+
+    Returns ``(matched, detail)`` -- ``detail`` names the earlier reject's
+    timestamp so a ``proposer_reject`` row's own ``matched_against`` shows
+    which prior rejection this one repeats, the same "what it actually
+    matched" discipline #757 established for the old text matcher.
+    """
+    if not candidate_id:
+        return False, ""
+    try:
+        ref = now or datetime.now(timezone.utc)
+        for row in _load_ledger_rows(state_dir, days=days, now=ref):
+            if row.get("phase") != "proposer_reject" or row.get("reason") != "self_dedup":
+                continue
+            if str(row.get("demand_id") or "").strip() != candidate_id:
+                continue
+            return True, f"repeat:{candidate_id} first-rejected {row.get('ts', '')}"
+        return False, ""
+    except Exception:
+        return False, ""
+
+
 def validate_sizing(proposal: dict[str, Any] | None) -> tuple[bool, str]:
     """Pre-spawn checkable sizing (#707 C2; extended by #751's ``serves``
     goal-alignment field). Returns ``(ok, reason)``."""
@@ -2419,23 +2493,20 @@ def _refuted_hypothesis_titles(state_dir: Path) -> list[str]:
 def _is_duplicate_proposal(
     state_dir: Path, selfevo_repo: Path | None, proposal: dict[str, Any]
 ) -> tuple[bool, str, str]:
-    """Pre-write self-dedup (#707 canary novelty collapse; extended by #716).
+    """Pre-write self-dedup (#707 canary novelty collapse; extended by #716;
+    re-founded on the ledger's demand_id chain by #1785).
 
-    Reuses the SAME per-line proportional word-overlap heuristic the bridge
-    and deterministic planner already use for "is this title already done"
-    (``goal_text_utils._title_already_done_in_git_log``), fed with three
-    sources concatenated: the recent git log (already-DONE work), this
-    proposer's own recent ``'proposed'`` ledger titles (already-REJECTED-as-
-    duplicate work, which never reaches git log since no commit is ever made
-    for it), and (#716) recent titles that WERE attempted but never
-    integrated — failed, timed out, or gate-blocked
-    (:func:`_recent_failed_titles`), which also never reach git log. Any
-    source matching is sufficient to flag a duplicate.
-
-    #716 policy note: :func:`_recent_failed_titles` only looks back a small,
-    recent window, so this is a temporary "don't immediately re-hit the same
-    dead end" guard, not a permanent ban — an old failure ages out and a
-    retry is allowed again once it exits the window.
+    Two checks decide "is this a duplicate", neither of them text
+    similarity: :func:`nanobot.runtime.demand.completed_demand_ids`
+    membership for "this candidate's own demand_id already reached a
+    completed cycle" (an authoritative, ledger-chain fact — the same one
+    the completion fold trusts, #748/#769/#773), and
+    :func:`_recently_self_dedup_rejected` for "this exact candidate was
+    already self-dedup-rejected" (the treadmill). See the #1785 comment
+    inline below for the replay that retired the previous word-overlap
+    heuristic (:func:`goal_text_utils._title_already_done_in_git_log`,
+    still used by the UNRELATED #834/#878 guards below, which this issue
+    did not touch).
 
     #878: a harness-VERDICT-refuted hypothesis title (:func:`_refuted_hypothesis_titles`)
     is checked separately, unconditionally (not gated on new-file creation
@@ -2485,33 +2556,48 @@ def _is_duplicate_proposal(
         )
         if deferral:
             return True, deferral[0], deferral[1]
-        git_log = _recent_git_log(Path(selfevo_repo)) if selfevo_repo else ""
-        ledger_rows = _load_ledger_rows(state_dir)
-        recent_titles = _recent_proposed_titles(ledger_rows)
-        recent_failed_titles = _recent_failed_titles(ledger_rows)
-        combined_log = (
-            "\n".join([git_log] + recent_titles + recent_failed_titles)
-            if (git_log or recent_titles or recent_failed_titles)
-            else ""
-        )
-        if combined_log and _title_already_done_in_git_log(title, combined_log):
-            # The heuristic is per-line (>= a proportional share of the
-            # title's words on ONE line), so re-running it line-by-line
-            # recovers exactly which line matched.
-            matched_against = next(
-                (
-                    line.strip()
-                    for line in combined_log.splitlines()
-                    if line.strip() and _title_already_done_in_git_log(title, line)
-                ),
-                "",
-            )
+        # #1785: the git-log/ledger-title word-overlap check that used to run
+        # here is REMOVED as the self-dedup terminator, replaced by the two
+        # checks below. Bounding its corpus to a recency window (a fix this
+        # issue's own dispatch first proposed) was MEASURED and REJECTED,
+        # not merely skipped: replayed at 7/14/30-day windows against a real
+        # 7-day sample of 339 self_dedup rejections, ALL THREE windows left
+        # 339 of 339 rejects standing and all 8 of 8 sampled false matches
+        # surviving. The false matches are collisions against commits and
+        # ledger titles from the SAME 24-48h, not stale history aging back
+        # in -- a fresher, still-growing corpus produces them just as
+        # reliably as an old, larger one. Narrowing the window is not a
+        # lever here; do not reintroduce it without a replay that shows
+        # otherwise.
+        #
+        # What replaces it, per the same replay: of 339 self_dedup rejects,
+        # exactly 7 have a genuine ledger chain -- THIS candidate's own
+        # demand_id was `proposed` and later reached a same-cycle `outcome:
+        # success` (folded into `demand.completed_demand_ids`, the same
+        # sidecar the completion fold already trusts, #748/#769/#773). That
+        # authoritative chain, not text similarity, decides "already done":
+        candidate_id = _candidate_identity(proposal)
+        if candidate_id and candidate_id in demand.completed_demand_ids(state_dir):
             return True, (
-                f"your proposal '{title}' duplicates already-done, "
-                "recently-rejected, or recently-failed (non-integrated) "
-                "work; propose something from a DIFFERENT area, preferring "
-                "the numbered Current priority targets"
-            ), matched_against
+                f"your proposal '{title}' duplicates work already completed "
+                f"under demand {candidate_id}; propose something from a "
+                "DIFFERENT area, preferring the numbered Current priority "
+                "targets"
+            ), f"completed:{candidate_id}"
+        # The treadmill (a candidate refused by self-dedup being re-proposed
+        # unchanged, or under a version-tag/priority-prefix retag) is a
+        # SEPARATE failure mode from "already done" -- 34 of the same day's
+        # 48 rejections were one candidate proposed and refused three times
+        # in 32 minutes, none of them a completed-chain match. Caught here
+        # by an EXACT repeat on the same candidate_id, not by text
+        # similarity either:
+        repeated, repeat_detail = _recently_self_dedup_rejected(state_dir, candidate_id)
+        if repeated:
+            return True, (
+                f"your proposal '{title}' repeats a candidate self-dedup "
+                "already rejected; propose something from a DIFFERENT area, "
+                "preferring the numbered Current priority targets"
+            ), repeat_detail
 
         # #878 permanent refuted-hypothesis guard: applies unconditionally
         # (not gated on _proposal_creates_new_file — a hypothesis experiment
@@ -3169,7 +3255,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                 task_title=str((proposal or {}).get("task_title") or "") if isinstance(proposal, dict) else "",
                 target_path=str((proposal or {}).get("target_path") or "") if isinstance(proposal, dict) else "",
                 detail=detail,
-                demand_id=_proposal_demand_id(proposal),
+                demand_id=_candidate_identity(proposal),
             )
             return None
 
@@ -3196,7 +3282,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                     task_title=str((proposal or {}).get("task_title") or "") if isinstance(proposal, dict) else "",
                     target_path=str((proposal or {}).get("target_path") or "") if isinstance(proposal, dict) else "",
                     detail=_sizing_detail(reason, proposal),
-                    demand_id=_proposal_demand_id(proposal),
+                    demand_id=_candidate_identity(proposal),
                 )
                 return None
             dup, dup_reason, dup_matched = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
@@ -3219,7 +3305,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                 # #1335: the deferral's steer names the caller index it read
                 # (files scanned, roots), so a row proves what was looked at.
                 detail=dup_reason if reject_reason == enhancement_gate.REASON else "",
-                demand_id=_proposal_demand_id(proposal),
+                demand_id=_candidate_identity(proposal),
             )
             return None
 
