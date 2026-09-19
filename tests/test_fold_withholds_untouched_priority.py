@@ -138,8 +138,12 @@ def test_a_title_naming_no_path_folds_as_before(tmp_path: Path):
 
 
 def test_an_unknown_id_folds_as_before(tmp_path: Path):
-    """Not a priority, or suppressed elsewhere this pass -- no summary, no
-    rule. Every other demand kind is unaffected by this change."""
+    """No summary available at fold time (a kind the caller does not pass
+    into ``summaries_by_id`` at all, or one this pass could not
+    regenerate) -- no rule. #1801 widens the caller's kind set to include
+    defect and skill-candidate (see
+    ``test_fold_withholds_untouched_defect_and_skill_candidate.py``); a
+    reflection id, used here, stays outside it."""
     completed = demand._fold_completed(
         tmp_path,
         ledger_rows=_rows("reflection-123", ["memory/MEMORY.md"]),
