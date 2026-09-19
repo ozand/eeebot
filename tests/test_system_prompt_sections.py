@@ -105,6 +105,9 @@ Skills with available="false" need dependencies installed first - you can try in
     texts["skills_catalogue"] = skills_catalogue
     texts["memory"] = memory_section
     texts["runtime"] = runtime_section
+    # #1766: state_dir is never stubbed by this helper's callers, so this is
+    # always the fixed, deterministic "[missing: scorecard]" marker.
+    texts["scorecard"] = builder._load_scorecard_block()
     return texts
 
 
@@ -263,6 +266,10 @@ def test_all_empty_sections_are_zero_except_identity(tmp_path):
     builder.skills.load_skills_for_context = lambda names: ""
     builder.skills.build_skills_summary = lambda excluded_names=None, compact=False: ""
     builder.memory.get_memory_context = lambda *, loop=False, max_chars=4000: ""
+    # #1766: no state_dir on this builder would otherwise render the fixed
+    # "[missing: scorecard]" marker -- stubbed to true empty like every
+    # other producer here, to keep this test's "everything empty" premise.
+    builder._load_scorecard_block = lambda: ""
 
     prompt = builder.build_system_prompt(loop_profile=True)
     fit = builder.last_fit
@@ -294,7 +301,7 @@ HEALTHY_SECTIONS["agents"] = (
 )
 OVERFLOW_SECTIONS = {
     "identity": 1_446, "soul": 1_200, "goals": 2_800, "user": 3_500, "operating": 4_800,
-    "agents": 0, "skills_catalogue": 6_951, "memory": 4_030, "runtime": 320,
+    "agents": 0, "skills_catalogue": 6_951, "memory": 4_030, "runtime": 320, "scorecard": 21,
 }
 OVERFLOW_SECTIONS["agents"] = (
     _OVERFLOW_TOTAL - sum(OVERFLOW_SECTIONS.values()) - len(ContextBuilder.SECTION_SEPARATOR) * (len(OVERFLOW_SECTIONS) - 1)

@@ -5,7 +5,8 @@ cap, required)`` block list — release-owned (IDENTITY.md, SOUL.md,
 goals.md, USER.md, OPERATING.md) then workspace-owned (AGENTS.md) — loaded
 by ``ContextBuilder.load_block`` and assembled by
 ``ContextBuilder._build_loop_system_prompt`` in that order, followed by the
-skills catalogue, memory, and code-generated runtime facts. These tests
+skills catalogue, memory, code-generated runtime facts, and (#1766) the
+harness-owned scorecard block. These tests
 exercise the loader itself (missing/truncated handling, block order,
 telemetry) against a real fixture release root + workspace — the generic
 fit/strict/droppable ladder has its own tests in
@@ -67,7 +68,7 @@ def test_block_order_identity_to_runtime_each_with_its_own_heading(tmp_path):
 
     assert list(builder.last_fit["sections"]) == [
         "identity", "soul", "goals", "user", "operating", "agents",
-        "skills_catalogue", "memory", "runtime",
+        "skills_catalogue", "memory", "runtime", "scorecard",
     ]
 
 
