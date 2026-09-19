@@ -1423,3 +1423,60 @@ def lesson_zero_citation_census(
         }
     except Exception:
         return {"ok": False, "reason": "census_error", "lessons_offered": 0, "zero_citation": []}
+
+
+# ── #1768 Part 2: lesson-citation census, written by the harness ────────────
+# The lesson-side sibling of skill_fitness.write_zero_read_census -- same
+# file shape (schema, written_at, window_days, ok/reason, the candidate
+# rows), same fail-open contract, so a retirement candidate list exists for
+# lessons the same shape skills already have. Report-only: this never gates
+# a commit, and retirement itself stays the curator's action (ADR-021 rule
+# 3) -- nothing here deletes a lesson card.
+LESSON_CENSUS_SCHEMA = "lesson-citation-census-v1"
+LESSON_CENSUS_REL = "demand/lesson_census.json"
+
+
+def write_lesson_citation_census(
+    state_dir: Path, *, now: "datetime | None" = None, window_days: int = CITATION_SCAN_RETENTION_DAYS,
+) -> dict[str, object]:
+    """Write the harness-side zero-citation census for lessons (#1768).
+
+    Thin persistence wrapper around :func:`lesson_zero_citation_census`,
+    written to ``state_dir/demand/lesson_census.json`` -- the same directory
+    and shape :func:`nanobot.runtime.skill_fitness.write_zero_read_census`
+    already uses for ``skill_census.json``, so the operator (or a dashboard
+    reading ``state/demand/``) finds both the same way.
+
+    Evidence discipline (non-negotiable, this project has shipped the
+    opposite defect more than once): "no data" must never be published as
+    "never cited". ``lesson_zero_citation_census`` already yields
+    ``ok: False`` with an EMPTY ``zero_citation`` list when its source is
+    missing or unreadable -- this function writes that same ``ok: False``
+    row rather than silently dropping the write or writing an empty list
+    under ``ok: True``, so a reader can always tell "no data" from "measured
+    and found nothing idle".
+
+    Never called by the loop -- only the harness may write this file (the
+    same separation :func:`write_zero_read_census` already enforces for
+    skills). Fail-open on a write error: returns ``{"ok": False, "written":
+    0, ...}`` rather than raising, matching the sibling function.
+    """
+    result = lesson_zero_citation_census(state_dir, now=now, window_days=window_days)
+    payload = {
+        "schema": LESSON_CENSUS_SCHEMA,
+        "written_at": _citation_now(now).isoformat().replace("+00:00", "Z"),
+        "window_days": window_days,
+        "ok": result["ok"],
+        "reason": result.get("reason"),
+        "lessons_offered": result["lessons_offered"],
+        "zero_citation": result["zero_citation"],
+    }
+    path = Path(state_dir) / LESSON_CENSUS_REL
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        return {"ok": False, "written": 0, "path": str(path)}
+    return {"ok": result["ok"], "written": len(result["zero_citation"]), "path": str(path)}
