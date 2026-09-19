@@ -124,6 +124,27 @@ def _llm_calls_dir() -> Path:
     return Path.home() / ".nanobot" / "llm_calls"
 
 
+def system_chars(messages: list[dict[str, Any]] | None) -> int | None:
+    """Length of the system message a caller BUILT, for ``system_prompt_chars``.
+
+    Measured from the messages list, never from the capped ``prompts/``
+    payload, which truncates around 6.5 KB.
+
+    #1784: this lives here, beside the field it feeds, rather than in
+    ``nanobot.runtime.role_prompt`` where #1729 first put it. The executor's
+    only telemetry site is ``providers.base``, and a provider importing a
+    runtime module would invert the dependency direction -- the same import
+    closure that broke ``test_trainer_no_direct_mutation`` in #1743.
+    ``role_prompt`` re-exports it, so its four existing callers are unchanged.
+    """
+    if not messages:
+        return None
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "system":
+            return len(str(message.get("content", "")))
+    return None
+
+
 def record_llm_call(
     *,
     model: str | None,
