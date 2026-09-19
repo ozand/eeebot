@@ -98,7 +98,10 @@ class ContextBuilder:
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
     # #1753: stated in tokens, enforced in chars (ADR-022 decision 7 — cite,
     # don't restate). Derivation, measured on host eeepc 2026-09-15..18 over
-    # 2,876 executor llm_calls rows (closed #1754):
+    # 2,876 executor llm_calls rows (closed #1754). #1776: the window figure
+    # below is prose describing this same measurement, not a second
+    # authoritative source — nanobot.runtime.context_compaction.WINDOW_TOKENS
+    # is the one place that number is actually defined and consumed as code.
     #   window                  98,304 tokens (the serving model's context;
     #                           NOT AgentDefaults.context_window_tokens,
     #                           whose 65,536 default is unrelated here).
