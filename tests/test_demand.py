@@ -1750,7 +1750,15 @@ class TestCompletedSidecar:
         items = demand.collect_demand(state_dir, None)
         target = [i for i in items if i["kind"] == "priority"][0]
         _append_proposed(state_dir, "c-done", target["id"], ts=_now_iso(20))
-        _append_outcome(state_dir, "c-done", "success", ts=_now_iso(10))
+        # #1764: this test is about ROTATION, so it needs a retirement that
+        # genuinely happens. The success previously carried no files_changed
+        # at all, which is now exactly the bookkeeping shape the fold
+        # withholds -- the priority names cycle_logger.py, so the retiring
+        # cycle has to have touched it, as the sibling test above already does.
+        _append_outcome(
+            state_dir, "c-done", "success", ts=_now_iso(10),
+            files_changed=["scripts/cycle_logger.py"],
+        )
         assert not any(i["id"] == target["id"] for i in demand.collect_demand(state_dir, None))
 
         # Midnight rotation: the active ledger file is emptied.
