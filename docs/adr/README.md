@@ -38,6 +38,8 @@ Conventions:
 | [ADR-020](ADR-020-direction-comes-from-reflection-over-a-span.md) | Direction comes from reflection over a span, never from an instantaneous error signal | proposed |
 | [ADR-021](ADR-021-whoever-sees-the-performance-may-change-the-capability.md) | Whoever sees the performance may change the capability, after measuring whether it was used | proposed |
 | [ADR-022](ADR-022-context-ontology.md) | Context ontology — one question, one file, one owner | accepted |
+| [ADR-023](ADR-023-a-fact-shown-to-the-loop-is-one-the-loop-cannot-reach.md) | A figure shown to the loop as fact is one the loop cannot reach — provenance, not file ownership | accepted |
+| [ADR-024](ADR-024-an-artifact-graph-has-typed-edges.md) | An artifact graph has typed edges, and only production use makes a component | accepted |
 
 ## Acceptance
 
