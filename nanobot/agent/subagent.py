@@ -24,6 +24,28 @@ from nanobot.providers.base import LLMProvider
 from nanobot.runtime import context_compaction as _ctx_compact
 from nanobot.utils.helpers import build_assistant_message
 
+#: #1767 -- longest requested path kept verbatim in a failure row. A
+#: pathological request must not be able to inflate the bounded scan file.
+_MAX_ATTEMPTED_NAME_CHARS = 120
+
+
+def _attempted_skill_name(requested: str) -> str:
+    """The skill name a failed ``SKILL.md`` read was asking for.
+
+    A request that looks like ``skills/<name>/SKILL.md`` (with either
+    separator, optionally prefixed) yields ``<name>`` -- the same vocabulary
+    the success path records, so the two halves of the question can be
+    compared without a join. Anything else is kept as the requested string,
+    because a request that does not follow the convention is exactly the
+    kind of mistake worth reading verbatim.
+    """
+    norm = str(requested).replace("\\", "/").strip().rstrip("/")
+    parts = [p for p in norm.split("/") if p not in ("", ".")]
+    if len(parts) >= 3 and parts[-1] == "SKILL.md" and parts[-3] == "skills":
+        return parts[-2][:_MAX_ATTEMPTED_NAME_CHARS]
+    return norm[:_MAX_ATTEMPTED_NAME_CHARS]
+
+
 # ── #1101: identical-tool-call loop breaker ───────────────────────────────────
 # Number of consecutive identical (tool_name, canonical_args) calls before the
 # warning message is injected.  2×K triggers abort.  Env-tunable; default 3.
@@ -174,6 +196,8 @@ class SubagentManager:
         # Collected in memory during the spawn window; written by the bridge
         # after the subagent finishes (harness-side, protected by sidecar guard).
         self._skill_reads_this_cycle: list[dict] = []
+        #: #1767 -- names the executor asked for and did not get this cycle.
+        self._skill_read_failures_this_cycle: list[str] = []
         # #939 Part E: excluded skill names for the loop summary
         self._excluded_skill_names: list[str] = list(excluded_skill_names or [])
         self._telemetry_component = str(telemetry_component or "").strip()
@@ -259,6 +283,11 @@ class SubagentManager:
             extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
             # #939 Part C: wire SKILL.md read instrumentation callback.
             _on_skill_read = None
+            # #1767: the failure mirror. A SKILL.md read the executor asked
+            # for and did not get is recorded as the requested spelling --
+            # that string is the whole evidence, since a failed lookup
+            # resolves to nothing.
+            _on_skill_read_failed = None
             if self._skill_fitness_state_dir is not None:
                 workspace_skills = (self.workspace / "skills").resolve()
 
@@ -271,11 +300,17 @@ class SubagentManager:
                         self._skill_reads_this_cycle.append(
                             {"skill": rel.parts[0], "path": f"skills/{rel.as_posix()}"}
                         )
+
+                def _on_skill_read_failed(requested: str) -> None:  # noqa: E301
+                    self._skill_read_failures_this_cycle.append(
+                        _attempted_skill_name(requested)
+                    )
             tools.register(ReadFileTool(
                 workspace=self.workspace,
                 allowed_dir=allowed_dir,
                 extra_allowed_dirs=extra_read,
                 on_skill_read=_on_skill_read,
+                on_skill_read_failed=_on_skill_read_failed,
             ))
             def _record_prevented_access(p: Path) -> None:
                 self.prevented_access_attempts.append(str(p))
@@ -780,6 +815,11 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         Returns the count of rows persisted (0 when instrumentation is not
         configured or no reads accumulated).  Fail-open.
 
+        #1767: the marker row also carries the SKILL.md reads that FAILED,
+        so ``skill_count: 0`` stops being ambiguous between "the executor
+        never asked for a skill" and "it asked and the lookup failed" --
+        two findings whose fixes point in opposite directions.
+
         #1666 phase 1 / #1654: also records ONE per-cycle marker row
         (``skill_fitness.record_cycle_skill_scan``) regardless of whether
         any skill was read this cycle -- a cycle that read zero skills must
@@ -790,6 +830,12 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         """
         if self._skill_fitness_state_dir is None:
             return 0
+        # Read outside the try: the enclosing `except` exists to swallow a
+        # failed WRITE, and folding the attribute access into it would turn
+        # a missing field into a silently empty one -- the exact
+        # no-data-as-zero confusion this row exists to prevent.
+        attempted = list(self._skill_read_failures_this_cycle)
+        self._skill_read_failures_this_cycle.clear()
         try:
             from nanobot.runtime.skill_fitness import record_cycle_skill_scan
             record_cycle_skill_scan(
@@ -798,6 +844,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
                 skills_read=[
                     str(r.get("skill") or "") for r in self._skill_reads_this_cycle if r.get("skill")
                 ],
+                skills_attempted_not_found=attempted,
             )
         except Exception:
             pass

@@ -227,7 +227,13 @@ def _read_cycle_scans(state_dir: Path) -> list[dict[str, Any]]:
         return []
 
 
-def record_cycle_skill_scan(state_dir: Path, *, cycle_id: str, skills_read: list[str]) -> None:
+def record_cycle_skill_scan(
+    state_dir: Path,
+    *,
+    cycle_id: str,
+    skills_read: list[str],
+    skills_attempted_not_found: list[str] | None = None,
+) -> None:
     """One row per cycle naming which skills were read -- possibly none.
 
     #1666 phase 1 / #1654: ``record_skill_reads`` (above) is only ever
@@ -237,6 +243,19 @@ def record_cycle_skill_scan(state_dir: Path, *, cycle_id: str, skills_read: list
     release, a crash). This is the lesson-side ``scans.jsonl`` shape
     (``scan_ran``/``marker_count``, including zero) applied to skills: a row
     always exists once this is called, whether or not anything was read.
+
+    *skills_attempted_not_found* (#1767) carries the other half of the
+    same question: a ``SKILL.md`` read the executor asked for and did not
+    get. Until #1767 the success path was instrumented and the failure
+    path was not, so ``skill_count: 0`` was ambiguous between "did not
+    try" and "tried and the lookup failed" -- two findings that call for
+    opposite fixes. The field is always written, empty list included, for
+    the same reason the row itself is unconditional.
+
+    Rows written before #1767 carry no ``skills_attempted_not_found`` key
+    at all. A reader must treat an ABSENT key as unknown, never as zero:
+    absent means the release predates the instrumentation, and the
+    distinction this field exists to draw cannot be drawn for that row.
 
     Bounded append, same discipline as ``_write_sidecar_atomic`` above.
     Fail-open: any error is swallowed, never raised into the caller -- a
@@ -251,6 +270,9 @@ def record_cycle_skill_scan(state_dir: Path, *, cycle_id: str, skills_read: list
             "ts": _utc_now(),
             "skill_count": len(skills_read),
             "skills_read": sorted({str(s).strip() for s in skills_read if str(s).strip()}),
+            "skills_attempted_not_found": sorted(
+                {str(s).strip() for s in (skills_attempted_not_found or ()) if str(s).strip()}
+            ),
         }
         rows = _read_cycle_scans(state_dir)
         rows.append(row)

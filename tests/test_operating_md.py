@@ -147,3 +147,71 @@ def test_json_contract_reaches_loop_profile_prompt_but_not_build_task(tmp_path: 
     assert '"concrete_next_action"' not in task_prompt
     assert '"action_taken"' not in task_prompt
     assert "Rules: see OPERATING.md in your system prompt." in task_prompt
+
+
+# ---------------------------------------------------------------------------
+# #1767 -- the Tools section names the registry and its triggers
+# ---------------------------------------------------------------------------
+
+def test_tools_section_names_every_tool_in_the_executor_registry():
+    """#1767: the section is the executor's only statement about tooling, so
+    a tool it carries and the section never mentions is a capability the
+    loop does not know it has -- which is how `search_memory` went 43 of 48
+    cycles unused."""
+    from nanobot.agent.tools.toolsets import EXECUTOR_TOOL_NAMES
+
+    section = _section(_read(), "Tools")
+    missing = [name for name in EXECUTOR_TOOL_NAMES if f"`{name}`" not in section]
+    assert not missing, f"Tools section never names: {missing}"
+
+
+def test_tools_section_describes_no_tool_the_executor_does_not_carry():
+    """ADR-022: state guidance only where the capability exists. Describing
+    `web_search` to a subagent whose registry has no such tool is an
+    instruction it can only fail to follow."""
+    from nanobot.agent.tools import toolsets
+
+    section = _section(_read(), "Tools")
+    known = set(toolsets.INTERACTIVE_TOOL_NAMES)
+    absent = known - set(toolsets.EXECUTOR_TOOL_NAMES)
+    described = sorted(name for name in absent if f"`{name}`" in section)
+    assert not described, (
+        f"Tools section describes tools absent from EXECUTOR_TOOL_NAMES: {described}"
+    )
+
+
+def test_tools_section_is_pinned_to_the_registry():
+    """Adding or removing a tool without updating the text must fail here.
+
+    Both directions in one assertion: the set of registry names the section
+    mentions is exactly the registry. A new tool nobody documented fails the
+    test above; a tool documented after its removal from the registry fails
+    the one above that. This pins the pair so neither can drift silently."""
+    from nanobot.agent.tools.toolsets import EXECUTOR_TOOL_NAMES
+
+    section = _section(_read(), "Tools")
+    mentioned = {name for name in EXECUTOR_TOOL_NAMES if f"`{name}`" in section}
+    assert mentioned == set(EXECUTOR_TOOL_NAMES)
+
+
+def test_search_memory_and_the_skills_catalogue_each_state_a_trigger():
+    """#1767's finding: the catalogue lists what exists and nothing states
+    when to go and get it. A name without a condition is the failure mode,
+    not the fix, so both get an explicit trigger sentence."""
+    section = _section(_read(), "Tools")
+
+    search_line = next(ln for ln in section.splitlines() if "`search_memory`" in ln)
+    assert "index" in search_line.lower(), search_line
+    assert "when" in search_line.lower(), search_line
+
+    skills_line = next(ln for ln in section.splitlines() if "**Skills**" in ln)
+    assert "SKILL.md" in skills_line, skills_line
+    assert "before starting" in skills_line, skills_line
+
+
+def test_exec_bounds_survive_the_rewrite():
+    """The 60s/10,000-char bounds are the one piece of the old section that
+    states a fact the executor cannot get anywhere else."""
+    section = _section(_read(), "Tools")
+    assert "60-second" in section
+    assert "10,000-character" in section

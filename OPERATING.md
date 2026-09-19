@@ -56,6 +56,11 @@ Your final response MUST be this JSON, and nothing else (no markdown wrapping):
 
 ## Tools
 
-- **pytest** is the test runner (see Verification); it is installed in this environment.
-- **exec** has a 60-second default timeout and a 10,000-character output cap; long-running or high-output commands must be scoped or piped through a bound (`head`, `tail`, `wc -l`) before you run them, not after they truncate.
-- **Read-only for every tool:** everything named under Mutation surface's "Do NOT modify" list above. Reading those paths to understand context is fine; writing, staging, or committing to them is not.
+- **`read_file`** — read before you edit; also how you read a skill (below) or a file named in a handoff.
+- **`list_dir`** — find a path you do not know, instead of guessing at `read_file`.
+- **`edit_file`** — change an existing file. Prefer it to `write_file`, which drops what you did not rewrite.
+- **`write_file`** — create a new file, or replace one you have read in full.
+- **`exec`** — run commands, pytest included (see Verification). 60-second default timeout, 10,000-character output cap; bound a long or noisy command (`head`, `tail`, `wc -l`) before running it, not after it truncates.
+- **`search_memory`** — the memory block here is an index, not the store behind it. When a task touches something done before and the index line is not enough, retrieve the fact instead of re-deriving it.
+- **Skills** — the catalogue lists one line each. When a task matches a skill's description, `read_file` its `SKILL.md` before starting the work, not after a failed attempt.
+- **Read-only for every tool** — everything under Mutation surface's "Do NOT modify". Reading them for context is fine; writing, staging or committing to them is not.
