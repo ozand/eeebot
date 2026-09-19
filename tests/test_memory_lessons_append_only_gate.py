@@ -13,10 +13,12 @@ REAL function the curator's commit path already uses in production
 (``gate._validate_mutation_surfaces``, called by
 ``bridge._pickup_staged_promotions`` — never
 ``_changed_files_and_violations``/this new check) rather than a fabricated
-role flag: the new append-only rule is wired only into the executor's
-cycle-branch gate (see the PR body for the exact one-line bridge.py call
-site, skipped here per the #1765 file boundary), so the curator's existing,
-unchanged commit path is the honest proof of "not blocked".
+role flag: the new append-only rule is wired ONLY into the executor's
+cycle-branch gate (``bridge._changed_files_and_violations``, proven below
+against that real function, the same way
+``test_skill_hygiene_gate.py::test_bridge_changed_files_carries_skill_hygiene_into_mutation_violations``
+proves the sibling check's wiring), so the curator's existing, unchanged
+commit path is the honest proof of "not blocked".
 """
 from __future__ import annotations
 
@@ -248,3 +250,25 @@ def test_executor_path_blocks_what_curator_path_allows(tmp_path):
 
     assert executor_violations != []
     assert curator_violations == []
+
+
+# ─── bridge wiring: production actually reaches the check ───────────────────
+
+
+def test_bridge_changed_files_carries_append_only_violation_into_mutation(tmp_path):
+    """Not just "the function works" (proven above) -- that the executor's
+    real cycle-branch gate decision (``bridge._changed_files_and_violations``,
+    the function ``_evaluate_candidate`` actually calls to decide whether to
+    integrate) carries this violation through. Same shape as
+    ``test_skill_hygiene_gate.py``'s equivalent wiring test for the sibling
+    check."""
+    from nanobot.runtime import bridge
+
+    repo, base = _repo_with(tmp_path, {"memory/facts/x.md": "a fact\n"})
+    changed = _cycle_commit(repo, base, {"memory/facts/x.md": None})
+
+    files, blocked, mutation, tier = bridge._changed_files_and_violations(repo, base)
+    assert files == changed
+    assert blocked == []
+    assert tier == "script"
+    assert any(v.startswith("memory_lessons_append_only:") for v in mutation), mutation

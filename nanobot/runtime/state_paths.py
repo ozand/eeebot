@@ -63,6 +63,7 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.runtime.demand:record_escalation",
         "nanobot.runtime.goal_gap_futility:_save",
         "nanobot.runtime.skill_fitness:write_zero_read_census",  # #1342 skill_census.json
+        "nanobot.runtime.lesson_v2:write_lesson_citation_census",  # #1768 Part 2 lesson_census.json
     ),
     # derived_priorities.json is live (goal_review); goal_text.json is the
     # operator's canon and, since #1222, the only source of the active goal id
