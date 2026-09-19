@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.agent.block_loader import load_block, trim_lines
+from nanobot.observability.llm_telemetry import system_chars as _system_chars
 
 #: Default deployed release tree (mirrors ``bridge.RELEASE_ROOT`` /
 #: ``llm_proposer._RELEASE_ROOT_DEFAULT``); the systemd units for the side
@@ -267,13 +268,10 @@ def _load_release_file(root: Path | None, filename: str, cap: int) -> tuple[str,
     return load_block(filename, Path(root) / filename, cap, True)
 
 
-def system_chars(messages: list[dict[str, Any]] | None) -> int | None:
-    """Length of the system message a caller BUILT (for ``llm_calls``
-    ``system_prompt_chars``). Measured from the messages list, never from the
-    capped ``prompts/`` payload, which truncates around 6.5 KB."""
-    if not messages:
-        return None
-    for message in messages:
-        if isinstance(message, dict) and message.get("role") == "system":
-            return len(str(message.get("content", "")))
-    return None
+#: Re-export (#1784). The definition moved to
+#: :mod:`nanobot.observability.llm_telemetry`, beside the field it feeds, so
+#: ``providers.base`` can measure the executor's own system prompt without a
+#: provider importing a runtime module -- the dependency inversion that broke
+#: ``test_trainer_no_direct_mutation`` in #1743. This name stays for the four
+#: callers that already import it from here.
+system_chars = _system_chars

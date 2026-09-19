@@ -10,7 +10,11 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.observability.llm_telemetry import record_llm_call, record_llm_prompt
+from nanobot.observability.llm_telemetry import (
+    record_llm_call,
+    record_llm_prompt,
+    system_chars,
+)
 from nanobot.providers.model_window import resolve_context_window
 
 
@@ -294,6 +298,14 @@ class LLMProvider(ABC):
                     context_window=resolve_context_window(
                         resolved_model, self.api_base, api_key=self.api_key,
                     ),
+                    # #1784: measured here, from the messages actually sent.
+                    # This is the ONLY telemetry site the executor passes
+                    # through, and it was the one caller omitting the field --
+                    # 797 of 797 executor rows carried null while every other
+                    # role carried a real number, so the one role whose prompt
+                    # budget was raised to 35,000 (#1753) was the one not
+                    # measured.
+                    system_prompt_chars=system_chars(sent_messages),
                 )
             except Exception as exc:
                 logging.getLogger(__name__).warning("llm call telemetry recording failed: %s", exc)

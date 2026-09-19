@@ -215,3 +215,42 @@ def test_exec_bounds_survive_the_rewrite():
     section = _section(_read(), "Tools")
     assert "60-second" in section
     assert "10,000-character" in section
+
+
+# ---------------------------------------------------------------------------
+# #1783 -- headroom for the #1770 migration
+# ---------------------------------------------------------------------------
+
+def test_iteration_budget_section_keeps_all_four_rules():
+    """#1783 compressed this section by 94 chars rather than raise a cap.
+    Compression may not quietly drop a rule, so each is pinned."""
+    section = _section(_read(), "Iteration budget")
+    # where the number is stated
+    assert "Iteration budget this cycle" in section
+    assert "task section" in section
+    # ADR-022 rule 4: the prompt-ontology harness fingerprints this block on
+    # the literal phrase "tool iterations". A compression that paraphrases it
+    # away leaves the rule with no owner -- caught by
+    # test_fingerprint_once_per_system_block, and pinned here too so the
+    # constraint is visible at the place a future edit happens.
+    assert "tool iterations" in section
+    # pace early
+    assert "early" in section
+    # verify on a candidate
+    assert "candidate fix" in section
+    # keep reserve for the commit and the final response
+    assert "reserve" in section
+    assert "final response" in section
+    # do not circle
+    assert "circle" in section
+
+
+def test_operating_md_has_headroom_for_the_soul_migration():
+    """#1770 must move two rules out of SOUL.md into this file (+153 chars).
+    Measured here so the migration cannot discover mid-PR that it does not
+    fit -- which is exactly what #1783 was filed about."""
+    slack = MAX_CHARS - len(_read())
+    assert slack >= 153, (
+        f"only {slack} chars of headroom; #1770's migration needs 153. "
+        f"Compress a section rather than raise the cap (#1783)."
+    )
