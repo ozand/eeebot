@@ -2530,6 +2530,29 @@ def completed_demand_ids(state_dir: Path) -> set[str]:
         return set()
 
 
+def completed_demand_ids_path_verified(state_dir: Path) -> set[str]:
+    """#1801: the SUBSET of :func:`completed_demand_ids` this fold actually
+    verified against a named path — ``entries[id]["path_verified"] is
+    True``, written only for a priority/defect/skill-candidate id whose
+    summary named a path AND whose retiring cycle was confirmed to touch it
+    (see :func:`_fold_completed`). Every id folded before this field
+    existed, every unwidened kind (goal-gap, hypothesis, decay,
+    reflection, fallback), and every widened-kind id whose summary named no
+    path are absent from this set even though they ARE in
+    ``completed_demand_ids`` — a legacy or class-scoped entry gains no new
+    trust it was never actually checked against.
+
+    Callers that need "is this id safe to treat as an exact, single-artifact
+    done-fact" (as opposed to "some cycle proposing this id succeeded") read
+    this set, not :func:`completed_demand_ids`, alone. Fail-open: any error
+    reads as "nothing verified"."""
+    try:
+        entries = _load_completed(Path(state_dir))["entries"]
+        return {did for did, entry in entries.items() if isinstance(entry, dict) and entry.get("path_verified") is True}
+    except Exception:
+        return set()
+
+
 FOLD_WITHHELD_SUBPATH = ("demand", "fold_withheld.json")
 FOLD_WITHHELD_SCHEMA = "fold-withheld-v1"
 
@@ -2695,6 +2718,22 @@ def _fold_completed(
                 # (or predates this field) — is_optimization_claim("") is
                 # False, so older/serves-less entries are unaffected.
                 "serves": serves_by_cycle.get(cycle_id, ""),
+                # #1801: True iff this entry reached here BECAUSE its summary
+                # named a path and the retiring cycle was confirmed to touch
+                # it (an entry that named a path but did NOT touch it was
+                # withheld above, never reaching this assignment at all).
+                # False when the kind is unwidened or the summary named no
+                # path -- "class-scoped", per the audit that motivated this:
+                # a `defect-*`/`skill-candidate-*` id can name a CLASS of
+                # work with several distinct proposals minted under it, and
+                # an id this fold could not verify against one specific
+                # artifact must not be trusted as if it had been. Absent
+                # entirely on every entry folded before this field existed
+                # (append-only; never backfilled) -- read as unverified by
+                # :func:`completed_demand_ids_path_verified`, which is the
+                # conservative default: a legacy entry gains no new trust it
+                # was never actually checked against.
+                "path_verified": bool(named),
             }
             changed = True
         if changed:

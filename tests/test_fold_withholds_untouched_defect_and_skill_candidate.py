@@ -38,12 +38,12 @@ bookkeeping-claim pattern #1764 found for priorities.)
 
 Directly confirmed against LIVE, currently-regenerable summaries (the two
 of the seven chain-fired ids whose underlying source condition still
-exists today) -- the two ends of the acceptance criteria, on the exact
-motivating example:
+exists today) -- on the exact motivating example:
 
-    defect-c2d7044a8332 (the ONE real duplicate of the seven): live
-    summary is "subagent result error: 5593622b" -- names no path, so the
-    widened rule does not apply and this stays correctly retired.
+    defect-c2d7044a8332 (NOT the real duplicate -- see the correction
+    below): live summary is "subagent result error: 5593622b" -- names no
+    path, so the widened rule cannot judge it and it stays retired,
+    unaffected either way.
 
     skill-candidate-3684831689ac (one of the six false matches -- the
     issue's own quoted example, "created skills/verify-lessons-integrity/
@@ -54,6 +54,36 @@ motivating example:
     ``files_changed`` (``skills/verify-lessons-integrity/SKILL.md``,
     ``tests/test_verify_lessons_integrity_skill.py``) never touches that
     exact file, so the widened rule WOULD have withheld it.
+
+CORRECTION: an earlier revision of this file called
+``defect-c2d7044a8332`` "the ONE real duplicate of the seven", inherited
+from #1785's own mislabeling (that PR matched the same rejected proposal's
+title against a DIFFERENT mechanism -- the retired text matcher's own git-
+log hit -- and never checked it against ITS OWN chain match). Re-examined
+against each id's ACTUAL retiring cycle: the real duplicate is
+``defect-791431b59fa3`` (rejected "Add companion test suite for test
+existence validator in tests/test_validate_test_existence.py"; retiring
+cycle touched ``scripts/validate_test_existence.py`` AND
+``tests/test_validate_test_existence.py`` -- the same file, a genuine
+match). ``defect-c2d7044a8332`` is one of the six false ones, exactly like
+the issue's own quoted pair. 1 real / 6 false stands; only which one is
+real changes.
+
+#1801 does not make the chain reject again for any of the 7 audited
+historical fires -- see #1801's own PR (`chain-log-only`, PR #1807, merged
+first) for why the chain now only OBSERVES a completed-chain match
+(``reason: "self_dedup_observed"``) instead of terminating the proposal.
+What THIS PR restores is narrower and additive: reject power for a
+candidate_id whose completed-chain entry the fold ITSELF verified against
+a named path (``entries[id]["path_verified"] is True`` --
+:func:`demand.completed_demand_ids_path_verified`). Every one of the 7
+audited ids folded before this field existed and (being append-only) never
+gains it retroactively, so all 7 stay observe-only under the actual
+mechanism today, matching the "6 of 7 -- those where the id is class-
+scoped" expectation as the SAFE limit case (7 of 7, since none of the 7
+are ever retroactively re-verified): no historical entry can ever
+spuriously regain reject power; only a FUTURE completion the fold directly
+checks against a named path can.
 """
 from __future__ import annotations
 
@@ -109,12 +139,15 @@ def test_a_skill_candidate_bookkeeping_close_is_withheld(tmp_path: Path):
     assert "skill-candidate-3684831689ac" not in completed
 
 
-def test_the_one_real_duplicate_is_unaffected_because_its_summary_names_no_path(tmp_path: Path):
-    """defect-c2d7044a8332 -- the ONE real duplicate of the seven chain-
-    fired rejects. Its live summary ("subagent result error: 5593622b")
-    names no path, so the rule must not apply -- it stays correctly
-    retired, exactly as AC2 requires ("must not apply where it cannot
-    judge")."""
+def test_an_opaque_summary_naming_no_path_is_unaffected_either_way(tmp_path: Path):
+    """defect-c2d7044a8332 -- one of the six FALSE chain matches (see the
+    file docstring's correction; this is not the real duplicate). Its live
+    summary ("subagent result error: 5593622b") names no path, so the rule
+    cannot judge it -- it stays retired regardless, exactly as AC2 requires
+    ("must not apply where it cannot judge"). This is the id the widened
+    rule structurally CANNOT protect against: the false match survives
+    #1801 too, which is exactly why #1801 does not, by itself, restore
+    reject power for it (see path_verified below)."""
     completed = demand._fold_completed(
         tmp_path,
         ledger_rows=_rows("defect-c2d7044a8332", ["scripts/scan_archive.py", "tests/test_scan_archive.py"]),
@@ -152,6 +185,78 @@ def test_goal_gap_is_not_widened_here(tmp_path: Path):
         summaries_by_id={},
     )
     assert "goal-gap-abc" in completed
+
+
+# ---------------------------------------------------------------------------
+# path_verified -- the additive fix on top of chain-log-only (#1807): reject
+# power for the SUBSET of completed ids the fold itself checked against a
+# named path, restored ADDITIVELY, never retroactively for a pre-existing
+# entry (see the file docstring's correction for why that matters).
+# ---------------------------------------------------------------------------
+
+def test_a_genuine_delivery_is_marked_path_verified(tmp_path: Path):
+    demand._fold_completed(
+        tmp_path,
+        ledger_rows=_rows("defect-real", ["scripts/validate_skill_name.py", "tests/test_x.py"]),
+        summaries_by_id={"defect-real": "validator scripts/validate_skill_name.py fails when run"},
+    )
+    assert "defect-real" in demand.completed_demand_ids_path_verified(tmp_path)
+
+
+def test_a_summary_naming_no_path_is_not_path_verified(tmp_path: Path):
+    """defect-c2d7044a8332's own case: folds (nothing to withhold — the
+    rule cannot judge it) but must NOT be trusted as if it had been
+    checked. This is what keeps a class-scoped, opaque-summary id from
+    ever regaining reject power."""
+    demand._fold_completed(
+        tmp_path,
+        ledger_rows=_rows("defect-c2d7044a8332", ["scripts/scan_archive.py"]),
+        summaries_by_id={"defect-c2d7044a8332": "subagent result error: 5593622b"},
+    )
+    assert "defect-c2d7044a8332" in demand.completed_demand_ids(tmp_path)
+    assert "defect-c2d7044a8332" not in demand.completed_demand_ids_path_verified(tmp_path)
+
+
+def test_an_unwidened_kind_is_not_path_verified(tmp_path: Path):
+    """goal-gap (and every other kind #1801 does not widen) folds exactly
+    as before AND is never path_verified, even when its own summary
+    happens to name a path -- the caller never puts its summary into
+    summaries_by_id at all, so the fold never gets a chance to check it."""
+    demand._fold_completed(
+        tmp_path,
+        ledger_rows=_rows("goal-gap-abc", ["scripts/foo.py"]),
+        summaries_by_id={},
+    )
+    assert "goal-gap-abc" in demand.completed_demand_ids(tmp_path)
+    assert "goal-gap-abc" not in demand.completed_demand_ids_path_verified(tmp_path)
+
+
+def test_a_pre_existing_entry_never_becomes_path_verified_retroactively(tmp_path: Path):
+    """Append-only: an id already in completed.json from BEFORE this field
+    existed is left exactly as it was. A later fold pass that could now
+    verify it does not rewrite the existing entry -- this is the guarantee
+    that makes "all 7 historical chain-fires stay observe-only, forever"
+    true by construction, not by a one-time migration that could drift."""
+    completed_path = tmp_path / "demand" / "completed.json"
+    completed_path.parent.mkdir(parents=True)
+    completed_path.write_text(json.dumps({
+        "schema_version": "demand-completed-v1",
+        "entries": {
+            "defect-legacy": {
+                "cycle_id": "cycle-old", "ts": "2026-01-01T00:00:00Z",
+                "files_changed": ["scripts/legacy.py"], "change_tier": "code-bearing", "serves": "",
+            },
+        },
+    }), encoding="utf-8")
+
+    demand._fold_completed(
+        tmp_path,
+        ledger_rows=_rows("defect-legacy", ["scripts/legacy.py"], cycle="cycle-old"),
+        summaries_by_id={"defect-legacy": "validator scripts/legacy.py fails when run"},
+    )
+
+    assert "defect-legacy" in demand.completed_demand_ids(tmp_path)
+    assert "defect-legacy" not in demand.completed_demand_ids_path_verified(tmp_path)
 
 
 # ---------------------------------------------------------------------------
