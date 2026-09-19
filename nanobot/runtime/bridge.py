@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -129,12 +130,31 @@ EXIT_EXECUTOR_LLM_ERROR = 3
 # not the request's fault), and the process exits with this code so
 # exit_streak / the bridge health dimension / the deploy gate all see it.
 EXIT_SYSTEM_PROMPT_OVERFLOW = 4
+# #1765: distinct from EXIT_EXECUTOR_LLM_ERROR on purpose. That code's own
+# comment above says a non-zero exit moves `consecutive_failures` in
+# exit_streak.json — correct for OUR OWN defect, wrong for a supplier
+# outage: the loop did not fail, the supplier did not answer. The __main__
+# guard below recognizes this code and skips the crash_record.record_exit
+# call entirely for it (neither "success" nor "failure" — record_exit's
+# outcome is a strict binary with no third state, and forcing either box
+# would be the same misclassification this issue exists to fix, just moved
+# to a different file). The process still exits non-zero (systemd sees a
+# non-clean run; the deploy gate still cannot certify a release built
+# during an outage), so nothing here hides the outage — it is simply not
+# counted as evidence the LOOP is stuck.
+EXIT_SUPPLIER_PAUSED = 5
 # How many times a request whose subagent died on the LLM call is re-offered
 # before it is retired with the handled_ marker like any other request. Bounded
 # so a permanently-bad request (bad model name, oversize prompt) cannot spin
 # through every cycle forever; 3 covers an outage of two or three cycles and
 # leaves the rest to the next proposal.
 LLM_ERROR_MAX_RETRIES = int(os.environ.get('SUBAGENT_BRIDGE_LLM_ERROR_MAX_RETRIES', '3'))
+# #1765: distinct rollback reason for "the supplier could not serve us" —
+# kept apart from 'executor_llm_error' (which stays reserved for "the
+# supplier rejected OUR request", our own defect) so every reason-keyed
+# consumer (recent-failure suppression, futility, the error-card writer,
+# the verdict deriver) can tell the two apart without a second lookup.
+LLM_SUPPLIER_PAUSED_REASON = 'llm_supplier_paused'
 BRIDGE_ENABLED =os.environ.get('SUBAGENT_BRIDGE_ENABLED', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
 FORCE_PROFILE = os.environ.get('SUBAGENT_BRIDGE_FORCE_PROFILE', '').strip()
 FORCE_BUDGET = os.environ.get('SUBAGENT_BRIDGE_FORCE_BUDGET', '').strip()
@@ -3530,11 +3550,23 @@ async def _main_impl_body():
             # auto-commit above captured real work and the normal gate decides
             # (cycle 3cbcc1f77d25 on 2026-09-04 integrated exactly that way);
             # the error text still rides along in the result's learnings.
+            # #1765: a supplier-side error (gateway outage, not our defect)
+            # gets the distinct `llm_supplier_paused` reason instead, and
+            # bypasses the retry counter entirely (see _decide_handled_marker)
+            # so an outage never burns the request's retry budget.
+            _llm_error_class = (
+                _classify_llm_error(_executor_llm_error_text)
+                if (_executor_llm_error_text and cycle_commit_count == 0) else ''
+            )
             if _executor_llm_error_text and cycle_commit_count == 0:
-                _rollback_reason = _rollback_reason or 'executor_llm_error'
+                _rollback_reason = _rollback_reason or (
+                    LLM_SUPPLIER_PAUSED_REASON if _llm_error_class == 'paused-supplier'
+                    else 'executor_llm_error'
+                )
             _decide_handled_marker(
                 handled_marker, req_path,
                 llm_error=bool(_executor_llm_error_text and cycle_commit_count == 0),
+                supplier_paused=(_llm_error_class == 'paused-supplier'),
                 state_dir=STATE_DIR, cycle_id=_cycle_id,
             )
 
@@ -4346,7 +4378,7 @@ async def _main_impl_body():
     _bridge_status = 'completed'
     if _revision_record and _revision_record['outcome'] == 'blocked':
         _bridge_status = 'blocked'
-    if _rollback_reason in ('executor_llm_error', 'system_prompt_overflow'):
+    if _rollback_reason in ('executor_llm_error', 'system_prompt_overflow', LLM_SUPPLIER_PAUSED_REASON):
         # #1280 / #1300: the executor's LLM call never returned, or no
         # executor was spawned because the prompt could not hold its critical
         # sections, and nothing was committed — this is `blocked`, not a new
@@ -4357,6 +4389,11 @@ async def _main_impl_body():
         # context see the outage cycle; a fresh status would have been
         # invisible to every reader, which is how twelve such cycles read
         # `completed` on 2026-09-04.
+        # #1765: `llm_supplier_paused` joins this list for the artifact's own
+        # `result_status` only — the reason string itself (not `blocked`) is
+        # what `_recent_failure_match`/`_SKIP_ROLLBACK_REASONS` key on, and
+        # that path explicitly EXEMPTS this reason from ever seeding
+        # suppression (see `_SKIP_ROLLBACK_REASONS` below).
         _bridge_status = 'blocked'
     _rollback = {
         'integrated': _integrated,
@@ -4425,6 +4462,12 @@ async def _main_impl_body():
         # failed — distinct from 'failed' so exit_streak/futility/cooling
         # (see their own call sites) don't count it as one.
         _cycle_outcome = 'push_pending'
+    elif _rollback_reason == LLM_SUPPLIER_PAUSED_REASON:
+        # #1765: the supplier (gateway/model provider) could not serve us —
+        # distinct from 'failed' so repeat_failure_rate, wasted_attempts,
+        # demand cooling and futility (see their own call sites) never count
+        # an outage as a defect of the work or the proposal.
+        _cycle_outcome = 'paused-supplier'
     elif _rollback_reason in ('internal_error', 'executor_llm_error', 'system_prompt_overflow'):
         # #1280: an executor whose LLM call never returned is a failure with
         # zero commits, not a `partial` no-op — `partial` is what eleven
@@ -4528,6 +4571,16 @@ async def _main_impl_body():
         # "origin/main unchanged" (safe to redo) from "moved" (superseded).
         main_sha_before=(main_sha_before if _cycle_outcome == 'push_pending' else None),
         real_result=_real_result_ledger_inputs(_bridge_status),
+        # #1765: the classifier's decision AND the raw error text, together,
+        # so a misclassification is auditable after the fact — never just
+        # the derived outcome/reason with the evidence discarded.
+        llm_error_classification=(
+            {
+                "class": _classify_llm_error(_executor_llm_error_text),
+                "raw_error": _executor_llm_error_text[:400],
+            }
+            if _executor_llm_error_text else None
+        ),
     )
     # #721: post-cycle tag at the terminal HEAD, same outcome value as the
     # ledger row above. Integrated -> main_sha_after (shared checkout stayed on
@@ -4569,7 +4622,12 @@ async def _main_impl_body():
     except Exception:
         pass
 
-    if _rollback_reason:
+    if _rollback_reason and _rollback_reason != LLM_SUPPLIER_PAUSED_REASON:
+        # #1765: a supplier outage produces no error card — it is not a
+        # pitfall of the task, and #1728's infra-class exclusion exists
+        # precisely to keep gateway weather out of executor-facing lessons;
+        # not writing the card at all is simpler and stronger than writing
+        # one and excluding it downstream.
         # #1041 Part 2: record structured error on gate rejection/rollback into lessons/errors.yaml
         # #1662: track structured error recording outcomes in cycle ledger
         # The card is written, committed and pushed from an ISOLATED checkout
@@ -4719,14 +4777,22 @@ async def _main_impl_body():
         # class, so exit_streak, the bridge health dimension and the deploy
         # gate all see a loop that cannot build its own prompt.
         return EXIT_SYSTEM_PROMPT_OVERFLOW
+    if _rollback_reason == LLM_SUPPLIER_PAUSED_REASON:
+        # #1765: a DISTINCT code from EXIT_EXECUTOR_LLM_ERROR — see
+        # EXIT_SUPPLIER_PAUSED's own comment. The __main__ guard recognizes
+        # this code and does not feed it to crash_record.record_exit's
+        # binary success/failure streak at all, so a supplier outage cannot
+        # move consecutive_failures the way OUR OWN executor defect still
+        # does below. The process still exits non-zero.
+        return EXIT_SUPPLIER_PAUSED
     if _rollback_reason == 'executor_llm_error':
         # #1280: say it with the exit status. The __main__ guard records any
-        # non-zero code as a `failure` in bridge/exit_streak.json, so an
-        # outage moves consecutive_failures; systemd shows the unit failed;
-        # and the deploy health gate — which reads both — will not certify a
-        # release whose executor cannot reach its model. That last effect is
-        # deliberate: a deploy during a model outage cannot be verified, and
-        # "cannot certify" must not read as "green".
+        # other non-zero code as a `failure` in bridge/exit_streak.json, so
+        # an outage of OUR OWN making moves consecutive_failures; systemd
+        # shows the unit failed; and the deploy health gate — which reads
+        # both — will not certify a release whose executor cannot reach its
+        # model. That last effect is deliberate: a deploy during an outage
+        # cannot be verified, and "cannot certify" must not read as "green".
         return EXIT_EXECUTOR_LLM_ERROR
     return 0
 
@@ -5002,6 +5068,9 @@ _INCONCLUSIVE_REASONS = frozenset({
     'out_of_band_main_detected', 'switch_base_gate_error',
     'switch_base_gate_blocked', 'head_on_main_precondition_failed',
     'no_commit', 'internal_error', 'executor_llm_error',
+    # #1765: a supplier outage is infra trouble by definition — never
+    # upgraded to accept/reject.
+    LLM_SUPPLIER_PAUSED_REASON,
 })
 
 
@@ -5049,6 +5118,64 @@ def _authoritative_subagent_task_id(
         if _subagent_own_status(state_dir, candidate) == 'ok':
             return candidate
     return primary_task_id
+
+
+# #1765: patterns that mean "the supplier could not serve us" — connection
+# refused/reset, a timeout with no response, HTTP 429/500/502/503/504, "no
+# deployments available", or a route missing for a configured model. Matched
+# case-insensitively against the raw LLM-call error text. Deliberately an
+# ALLOWLIST, not a denylist: only these positive signals promote a cycle to
+# 'paused-supplier'; everything else (context length exceeded, malformed
+# tool-call payload, invalid model parameters, our own schema errors) stays
+# 'failed' by falling through to the default — the conservative direction
+# the issue asks for, and the only way this stays a real distinction instead
+# of a catch-all.
+_SUPPLIER_UNAVAILABLE_RX = re.compile(
+    r'connection (?:refused|reset|error)'
+    r'|connect(?:ion)? timed? ?out'
+    r'|\btimed? ?out\b'
+    r'|\btimeout\b'
+    r'|\bread timeout\b'
+    r'|\berror code:\s*(?:429|500|502|503|504)\b'
+    r'|\b(?:429|500|502|503|504)\b.{0,20}\berror\b'
+    r'|ratelimiterror'
+    r'|internalservererror'
+    r'|serviceunavailableerror'
+    r'|apiconnectionerror'
+    r'|notfounderror'
+    r'|no deployments available'
+    r'|no healthy deployment'
+    r'|try again in \d'
+    # #1765 review: a genuine supplier-side unavailability observed in the
+    # wild carries HTTP 400 (litellm.BadRequestError) — the local gateway's
+    # own model daemon has no model loaded yet, not a malformed request of
+    # ours. Classified on the MESSAGE, never on the status code alone (a
+    # bare "400" stays unmatched — see the client-defect test fixtures) —
+    # this is exactly why the allowlist below matches phrasing, not codes.
+    r'|model.{0,20}not loaded'
+    r'|/inference/load\b'
+    r'|load first\b',
+    re.IGNORECASE,
+)
+
+
+def _classify_llm_error(error_text: str) -> str:
+    """#1765: 'paused-supplier' (the gateway/model provider could not serve
+    us) or 'failed' (the supplier rejected OUR request — our own defect,
+    must keep failing loudly), from the raw executor LLM-call error text.
+
+    Positive-match only (see :data:`_SUPPLIER_UNAVAILABLE_RX`) — when the
+    text does not clearly say "supplier unavailable", this returns 'failed',
+    the conservative default the issue specifies. The raw text is recorded
+    alongside this decision on the ledger row (see
+    ``cycle_ledger.record_cycle_outcome``'s ``llm_error_classification``)
+    so a misclassification is auditable after the fact, never silently lost.
+    """
+    if not error_text:
+        return 'failed'
+    if _SUPPLIER_UNAVAILABLE_RX.search(error_text):
+        return 'paused-supplier'
+    return 'failed'
 
 
 def _executor_llm_error(state_dir: Path, task_id: 'str | None') -> str:
@@ -5141,6 +5268,7 @@ def _recorded_llm_error_attempts(state_dir: 'Path | str', cycle_id: 'str | None'
 
 def _decide_handled_marker(
     handled_marker: Path, req_path: 'Path | str', *, llm_error: bool,
+    supplier_paused: bool = False,
     state_dir: 'Path | str | None' = None, cycle_id: 'str | None' = None,
 ) -> str:
     """#1280: write the ``handled_`` marker — retiring the request forever —
@@ -5161,12 +5289,27 @@ def _decide_handled_marker(
     unreadable counter is always "previously live" (someone wrote it).
     A missing counter with no recorded attempt is a genuine first attempt.
 
-    Returns ``"handled"``, ``"retry"``, ``"retired_after_retries"`` or
-    ``"retired_state_lost"`` for the journal, and prints the lost-state
-    case so it is distinguishable from an ordinary retirement. Fail-open:
-    any error writes the marker, the pre-#1280 behaviour.
+    #1765: ``supplier_paused`` (a gateway-outage classification, not our own
+    defect) bypasses all of the above unconditionally — no marker, no retry
+    counter touched at all. A supplier outage must not spend the request's
+    bounded retry budget (that budget exists for OUR bugs, not the
+    supplier's uptime) and must not retire the request either: every later
+    cycle's ``find_pending_request`` finds this exact request again,
+    unchanged, for as long as the outage lasts, with zero bookkeeping cost.
+
+    Returns ``"handled"``, ``"retry"``, ``"retired_after_retries"``,
+    ``"retired_state_lost"`` or ``"supplier_paused"`` for the journal, and
+    prints the lost-state case so it is distinguishable from an ordinary
+    retirement. Fail-open: any error writes the marker, the pre-#1280
+    behaviour.
     """
     try:
+        if supplier_paused:
+            print(
+                'llm_supplier_paused: leaving request pending indefinitely '
+                '(#1765) — not counted toward the LLM-error retry budget'
+            )
+            return 'supplier_paused'
         if not llm_error:
             handled_marker.write_text(str(req_path), encoding='utf-8')
             return 'handled'
@@ -5333,6 +5476,12 @@ _SKIP_ROLLBACK_REASONS = frozenset({
     # matcher and suppress a re-proposal of the same (already-integrated,
     # once main catches up) title.
     'push_pending',
+    # #1765: a supplier outage says nothing about the proposal's own
+    # viability — never let it seed the recent-failure matcher (which would
+    # otherwise cool the SAME demand's next attempt once this reason's
+    # request finally exhausts, and would suppress a fresh re-proposal of
+    # the same title in the meantime).
+    LLM_SUPPLIER_PAUSED_REASON,
 })
 
 
@@ -6208,14 +6357,22 @@ if __name__ == '__main__':
     # (uncaught exceptions are recorded by the sys.excepthook armed in
     # nanobot/__init__). A disabled bridge still never touches STATE_DIR.
     if BRIDGE_ENABLED:
-        try:
-            from nanobot import crash_record as _crash_record
+        # #1765: a supplier outage exits non-zero (systemd still sees a
+        # non-clean run) but is deliberately NEVER handed to record_exit —
+        # its outcome is a strict success|failure binary with no third
+        # state, and forcing either box would move exit_streak's
+        # consecutive_failures for a supplier's uptime, not the loop's own
+        # defect (see EXIT_SUPPLIER_PAUSED's own comment).
+        _skip_exit_record = _exit_code == EXIT_SUPPLIER_PAUSED
+        if not _skip_exit_record:
+            try:
+                from nanobot import crash_record as _crash_record
 
-            _crash_record.record_exit(
-                STATE_DIR,
-                outcome="success" if _exit_code == 0 else "failure",
-                exit_status=_exit_code,
-            )
-        except Exception as _record_exc:  # already printed by the recorder; keep the run's own code
-            print(f"bridge: exit record not written: {_record_exc!r}", file=sys.stderr)
+                _crash_record.record_exit(
+                    STATE_DIR,
+                    outcome="success" if _exit_code == 0 else "failure",
+                    exit_status=_exit_code,
+                )
+            except Exception as _record_exc:  # already printed by the recorder; keep the run's own code
+                print(f"bridge: exit record not written: {_record_exc!r}", file=sys.stderr)
     raise SystemExit(_exit_code)

@@ -63,9 +63,19 @@ _DEFAULT_RETENTION_DAYS = 90
 # moved past the row's recorded base — never merged/rebased automatically)
 # and 'abandoned' (the branch no longer exists) are neither a success nor a
 # failure of the original work; excluded from futility's attempt counting.
+#: 'paused-supplier' (#1765): the executor's LLM call died with zero commits
+#: and the classifier (nanobot.runtime.bridge._classify_llm_error) found a
+#: supplier-side signal (connection refused/reset, timeout, HTTP
+#: 429/500/502/503/504, "no deployments available", a missing route) rather
+#: than evidence of OUR OWN defect. Distinct from 'failed' so
+#: repeat_failure_rate, wasted_attempts, demand cooling and futility (each at
+#: their own call site) never count a supplier outage as a defect of the
+#: work or the proposal. A supplier REJECTING our request (context length,
+#: malformed tool call, invalid params, our own schema errors) still records
+#: 'failed' — that class is our defect and must keep failing loudly.
 VALID_OUTCOMES = frozenset({
     "success", "partial", "failed", "skipped-duplicate", "promotion_candidate",
-    "push_pending", "pushed_late", "superseded", "abandoned",
+    "push_pending", "pushed_late", "superseded", "abandoned", "paused-supplier",
 })
 VALID_DEDUP_DECISIONS = frozenset({"proceeded", "skipped_duplicate", "skipped_recent_failure"})
 
@@ -258,6 +268,7 @@ def record_cycle_outcome(
     change_shape: str | None = None,
     main_sha_before: str | None = None,
     real_result: dict | None = None,
+    llm_error_classification: dict | None = None,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
 
@@ -312,6 +323,15 @@ def record_cycle_outcome(
     question stays answerable afterward, and backfill for rows written
     before this change is not possible (the artifacts they'd need are
     already gone for the oldest of them).
+
+    #1765: ``llm_error_classification`` (keyword-only, additive) carries the
+    classifier's decision (``"class": "paused-supplier"|"failed"``) and the
+    raw executor LLM-call error text it read, together, whenever the cycle
+    carried one — see ``bridge._classify_llm_error``. Recorded so a
+    misclassification is auditable after the fact even though the ledger is
+    append-only and the row itself cannot be corrected in place. Written as
+    a nested dict only when given and non-empty; omitted entirely otherwise,
+    the same additive convention as ``real_result``/``lesson_candidate``.
     """
     if outcome not in VALID_OUTCOMES:
         outcome = "failed"
@@ -355,6 +375,14 @@ def record_cycle_outcome(
             "materialized_from": real_result.get("materialized_from"),
             "blocker_reason": real_result.get("blocker_reason"),
             "is_real_result": bool(real_result.get("is_real_result")),
+        }
+    if isinstance(llm_error_classification, dict) and llm_error_classification:
+        # #1765: the classifier's decision AND the raw error text it read,
+        # together — so a misclassification is auditable after the fact
+        # instead of just a bare outcome/reason with the evidence discarded.
+        row["llm_error_classification"] = {
+            "class": str(llm_error_classification.get("class") or ""),
+            "raw_error": str(llm_error_classification.get("raw_error") or "")[:400],
         }
     if files_changed is not None:
         try:

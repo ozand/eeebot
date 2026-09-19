@@ -56,6 +56,16 @@ RUNS_SCHEMA = "bridge-run-v1"
 STREAK_SCHEMA = "bridge-exit-streak-v1"
 MERGE_WINDOW_S = 300.0
 RUN_RETENTION_DAYS = 90
+# #1765: mirrors the bridge's own EXIT_SUPPLIER_PAUSED (nanobot/runtime/
+# bridge.py) — kept as a literal here because this module must not import
+# the bridge (see module docstring). A supplier outage (the LLM gateway or
+# model provider could not serve us) exits non-zero, so systemd's own
+# SERVICE_RESULT still reads it as an unsuccessful unit run, but neither
+# this CLI's systemd-source record nor the process-source record in
+# bridge.py's __main__ guard may count it toward consecutive_failures —
+# that counter exists to detect the LOOP crash-looping (#1197's own 9h20m
+# incident), not the supplier's uptime.
+SUPPLIER_PAUSED_EXIT_CODE = 5
 _armed = False
 _run_metadata: dict[str, Any] = {}
 
@@ -359,7 +369,17 @@ def main(argv: list[str] | None = None) -> int:
     systemd --exit-code ${EXIT_CODE} --exit-status ${EXIT_STATUS}
     --service-result ${SERVICE_RESULT}``. Outcome is ``success`` iff
     ``SERVICE_RESULT`` is ``success``; ``exit-status`` may be a number or a
-    signal name. Exit 0 on a written record, 2 when it could not be written."""
+    signal name. Exit 0 on a written record, 2 when it could not be written.
+
+    #1765: ``exit-status == SUPPLIER_PAUSED_EXIT_CODE`` is recognized here
+    too — not just in the bridge's own process-source guard — because
+    systemd's ``ExecStopPost=`` fires independently of that guard and would
+    otherwise write its own ``source="systemd"`` failure row for the same
+    exit (the merge window exists for the CONCORDANT case, not this one:
+    with no process-source row for this exit at all, nothing merges into,
+    and the systemd row would count alone). No record is written for this
+    code from either source; the CLI still exits 0 (a skip is not an error).
+    """
     parser = argparse.ArgumentParser(description="Record one bridge invocation exit (#1197)")
     parser.add_argument("--source", default="systemd")
     parser.add_argument("--exit-status", default="")
@@ -369,10 +389,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--error", default="")
     args = parser.parse_args(argv)
     root = Path(args.state_dir) if args.state_dir else state_dir()
-    outcome = "success" if args.service_result == "success" else "failure"
     status: Any = args.exit_status
     if str(status).isdigit():
         status = int(status)
+    if status == SUPPLIER_PAUSED_EXIT_CODE:
+        print(json.dumps({"outcome": "skipped_supplier_paused", "consecutive_failures": None}))
+        return 0
+    outcome = "success" if args.service_result == "success" else "failure"
     try:
         streak = record_exit(root, outcome=outcome, exit_status=status, source=args.source,
                              service_result=args.service_result, exit_code=args.exit_code, error=args.error)
