@@ -2496,17 +2496,20 @@ def _is_duplicate_proposal(
     """Pre-write self-dedup (#707 canary novelty collapse; extended by #716;
     re-founded on the ledger's demand_id chain by #1785).
 
-    Two checks decide "is this a duplicate", neither of them text
-    similarity: :func:`nanobot.runtime.demand.completed_demand_ids`
-    membership for "this candidate's own demand_id already reached a
-    completed cycle" (an authoritative, ledger-chain fact — the same one
-    the completion fold trusts, #748/#769/#773), and
-    :func:`_recently_self_dedup_rejected` for "this exact candidate was
-    already self-dedup-rejected" (the treadmill). See the #1785 comment
-    inline below for the replay that retired the previous word-overlap
-    heuristic (:func:`goal_text_utils._title_already_done_in_git_log`,
-    still used by the UNRELATED #834/#878 guards below, which this issue
-    did not touch).
+    ONE check currently terminates a proposal for duplication:
+    :func:`_recently_self_dedup_rejected`, "this exact candidate was already
+    self-dedup-rejected" (the treadmill).
+
+    The completed-chain check (:func:`nanobot.runtime.demand.completed_demand_ids`
+    membership) **observes without terminating** as of #1801. It remains an
+    authoritative ledger fact — the same one the completion fold trusts,
+    #748/#769/#773 — but it answers "some cycle proposing this demand_id
+    succeeded", which is not the same question as "this work was done":
+    audited over 7 days it fired 7 times and was right once. See the inline
+    comment at the call site for the audit and for the #1785 replay that
+    retired the previous word-overlap heuristic
+    (:func:`goal_text_utils._title_already_done_in_git_log`, still used by
+    the UNRELATED #834/#878 guards below, which neither issue touched).
 
     #878: a harness-VERDICT-refuted hypothesis title (:func:`_refuted_hypothesis_titles`)
     is checked separately, unconditionally (not gated on new-file creation
@@ -2578,12 +2581,46 @@ def _is_duplicate_proposal(
         # authoritative chain, not text similarity, decides "already done":
         candidate_id = _candidate_identity(proposal)
         if candidate_id and candidate_id in demand.completed_demand_ids(state_dir):
-            return True, (
-                f"your proposal '{title}' duplicates work already completed "
-                f"under demand {candidate_id}; propose something from a "
-                "DIFFERENT area, preferring the numbered Current priority "
-                "targets"
-            ), f"completed:{candidate_id}"
+            # #1801: the chain OBSERVES, it does not terminate -- yet.
+            #
+            # #1785 replaced a matcher that rejected 339 times with ~271 of
+            # them false. The chain rejects 7. That is the aggregate, and it
+            # is a real improvement. But the other number is precision WHEN
+            # IT FIRES, and all 7 were audited by hand: **1 real duplicate,
+            # 6 not.** 14%.
+            #
+            #   rejected : Write scripts/validate_markdown_format.py
+            #   matched  : cycle-399e0232 created
+            #              skills/verify-lessons-integrity/SKILL.md
+            #
+            # The chain says "some cycle proposing this demand_id reached a
+            # success", not "this work was done". A `defect-*` or
+            # `skill-candidate-*` id names a CLASS, several distinct
+            # proposals are minted under it, and the first success then
+            # stands for all of them -- #1764's failure (one success retiring
+            # a whole demand) in a kind #1764 did not cover.
+            #
+            # Since #1785 removed the text matcher, this is now the ONLY and
+            # therefore authoritative duplicate signal. A signal that is
+            # wrong 6 times in 7 when it fires must not be the last word, so
+            # until #1801 narrows it to ids that name one piece of work it
+            # records the would-be rejection and lets the proposal through.
+            # The rows it leaves are also the replay corpus #1801 needs,
+            # which no artifact currently holds.
+            _record_proposer_reject(
+                state_dir,
+                "self_dedup_observed",
+                task_title=title,
+                target_path=str(proposal.get("target_path") or ""),
+                matched_against=f"completed:{candidate_id}",
+                detail=(
+                    "observed only (#1801): the completed-chain match is "
+                    "class-scoped and was measured at 1-in-7 precision; "
+                    "not rejecting until the id is known to name one piece "
+                    "of work"
+                ),
+                demand_id=candidate_id,
+            )
         # The treadmill (a candidate refused by self-dedup being re-proposed
         # unchanged, or under a version-tag/priority-prefix retag) is a
         # SEPARATE failure mode from "already done" -- 34 of the same day's
