@@ -38,6 +38,24 @@ def test_diary_relpath_defaults_to_todays_utc_date():
     assert len(path) == len("diary/YYYY-MM-DD.md")
 
 
+def test_the_day_boundary_is_decided_in_exactly_one_place():
+    """ADR-029 (#1831): the clock choice must be visible and singular so
+    the migration is a one-line edit -- pinned at the source level: the
+    ONLY datetime.now()/date.today() call in this module lives inside
+    _today(); diary_relpath() and new_day_file() must never gain their own
+    (that would make #1831's migration a hunt instead of a one-line edit)."""
+    import re
+
+    src = Path(day_diary.__file__).read_text(encoding="utf-8")
+    clock_calls = list(re.finditer(r"datetime\.now\([^)]*\)|date\.today\(\)", src))
+    assert clock_calls, "expected at least one clock call (inside _today())"
+
+    today_start = src.index("def _today(")
+    today_end = src.index("def diary_relpath(")
+    outside_today = [m.group(0) for m in clock_calls if not (today_start <= m.start() < today_end)]
+    assert not outside_today, f"a clock call bypasses _today(): {outside_today}"
+
+
 def test_diary_is_a_recognised_versioned_commit_surface():
     """AC 1: diary/ appears in the mutation policy's allowed targets."""
     assert "diary/" in MUTATION_POLICY.commit_path_prefixes

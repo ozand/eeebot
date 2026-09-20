@@ -90,7 +90,11 @@ class TestBulkSkipDrainsInOneRun:
         for cid in ("cycle-dup-1", "cycle-dup-2", "cycle-dup-3"):
             crows = _rows_for_cycle(rows, cid)
             phases = [r["phase"] for r in crows]
-            assert phases == ["started", "dedup", "outcome"], f"{cid}: {phases}"
+            # #1811 (ADR-028): the diary's opening entry is written at the
+            # cycle-start boundary, before the dedup check runs -- every
+            # candidate request gets one, including one that turns out to
+            # be a duplicate.
+            assert phases == ["started", "diary_open_entry", "dedup", "outcome"], f"{cid}: {phases}"
             assert crows[-1]["outcome"] == "skipped-duplicate"
 
         novel_rows = _rows_for_cycle(rows, "cycle-novel")

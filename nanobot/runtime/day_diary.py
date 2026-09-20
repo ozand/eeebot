@@ -40,10 +40,28 @@ DIARY_DIR = "diary"
 DIARY_MARKER = "<!-- diary: append new entries above this line -->"
 
 
+def _today() -> date:
+    """ADR-029 (#1831) migration point -- the ONE clock call this whole
+    module uses to decide "what day is it".
+
+    Currently UTC. ADR-029 found systemd timers and ``bridge.py``'s own
+    ``date.today()`` running on LOCAL time (MSK) while the ledger,
+    telemetry, and ``action_index`` rotation/naming run on UTC -- the two
+    halves disagree on the date for 3 hours a day (21:00-24:00 UTC ==
+    00:00-03:00 MSK). The diary is one of the ``%Y-%m-%d``-keyed writers
+    #1831's migration must revisit (see PR body's census entry for this
+    line). :func:`diary_relpath` and :func:`new_day_file` both call this
+    function rather than each deciding their own clock, so that migration
+    is a one-line edit here -- not a hunt across every caller.
+    """
+    return datetime.now(timezone.utc).date()
+
+
 def diary_relpath(day: "date | None" = None) -> str:
     """Workspace-relative path for *day*'s diary file: ``diary/YYYY-MM-DD.md``
-    (ADR-028 rule 1). *day* defaults to the current UTC date."""
-    day = day or datetime.now(timezone.utc).date()
+    (ADR-028 rule 1). *day* defaults to :func:`_today` -- see its docstring
+    for which clock that is and why it is centralized there."""
+    day = day or _today()
     return f"{DIARY_DIR}/{day.isoformat()}.md"
 
 
@@ -71,8 +89,11 @@ def new_day_file(day: "date | None" = None) -> str:
     reader: an entry records intent -- what a cycle is attempting and
     why -- not a report of what happened. The cycle ledger already holds
     that (see ``nanobot.runtime.state_access``).
+
+    *day* defaults to :func:`_today` -- see its docstring for which clock
+    (ADR-029/#1831 migration point).
     """
-    day = day or datetime.now(timezone.utc).date()
+    day = day or _today()
     return (
         f"# Diary — {day.isoformat()}\n\n"
         "Entries below record intent: what a cycle is attempting and why, "

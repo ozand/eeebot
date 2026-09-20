@@ -2626,6 +2626,119 @@ def _pickup_staged_promotions(repo_root: 'Path', state_dir: 'Path') -> int:
         return 0
 
 
+def _write_diary_open_entry(repo_root: 'Path', state_dir: 'Path', cycle_id: str, task_title: str) -> dict:
+    """ADR-028 rules 2-3 (#1811): write and durably integrate this cycle's
+    opening diary entry BEFORE the cycle branch exists.
+
+    Called at the same safe cycle-start boundary as
+    :func:`_pickup_staged_promotions` (bridge lock held, HEAD on clean
+    ``main``) -- immediately after it, per the architect's review: #1811
+    does not need a carve-out in the INTEGRATION step at all. The curator's
+    staged-pickup function already solved "survive whatever happens to the
+    cycle branch" the same way #1209 fixed it for fact/lesson promotions —
+    commit on main, push immediately, roll back on push failure — and that
+    solution generalizes here without change in shape.
+
+    Rule 2 (entry written at step one, not step nine) and rule 3 (the diary
+    path integrates independently of the code verdict) both fall out of
+    WHERE this runs, not from special-casing WHAT happens to it: there is no
+    cycle branch, no gate, and no code commit yet when this executes, so
+    there is no verdict for the diary write to ride alongside or need
+    protecting from. This is why AC 2/3/5 (survives gate rejection, survives
+    truncated/gateway-failed/dead-on-LLM-call, and the code verdict is
+    unaffected) hold by construction rather than by measurement — see the
+    PR body for the replay this issue's AC 7 still asks for.
+
+    ``_is_blocked_filename`` — the same filename scan
+    :func:`_auto_commit_uncommitted_work` already performs, reused unchanged
+    per ADR-028 rule 3's own text — is checked before anything is written;
+    a diary path that somehow matched it is refused, not silently skipped.
+
+    Returns ``{"outcome": str, "commit_sha": str | None}``; ``outcome`` is
+    one of ``cycle_ledger.VALID_DIARY_OPEN_OUTCOMES``. Never raises and
+    never blocks the cycle -- every branch is fail-open and journalled
+    (#1811 AC: "a silent no-op path is a defect, not an acceptable branch").
+    """
+    import subprocess as _sp_diary
+
+    from nanobot.runtime import day_diary
+    from nanobot.runtime.cycle_ledger import record_diary_open_entry
+
+    # ADR-029 (#1831): "what day is it" for the diary is decided in exactly
+    # ONE place -- day_diary._today() (nanobot/runtime/day_diary.py) --
+    # currently UTC. This call site does not decide a clock itself and must
+    # not gain its own date.today()/datetime.now() call; #1831's migration
+    # changes day_diary._today() alone.
+    relpath = day_diary.diary_relpath()
+    if _is_blocked_filename(relpath):
+        record_diary_open_entry(state_dir, cycle_id, 'refused', None, f'blocked filename pattern: {relpath}')
+        print(f'bridge: diary open entry: refused ({relpath} matches a blocked filename pattern)')
+        return {'outcome': 'refused', 'commit_sha': None}
+
+    target = repo_root / relpath
+    try:
+        existing = target.read_text(encoding='utf-8') if target.is_file() else None
+        base_content = existing if existing is not None else day_diary.new_day_file()
+        entry_text = (task_title or '').strip() or '(no task title)'
+        new_content = day_diary.append_entry(base_content, entry_text)
+    except ValueError as exc:
+        record_diary_open_entry(state_dir, cycle_id, 'malformed', None, str(exc))
+        print(f'bridge: diary open entry: skipped ({exc})')
+        return {'outcome': 'malformed', 'commit_sha': None}
+    except Exception as exc:
+        record_diary_open_entry(state_dir, cycle_id, 'malformed', None, f'unexpected error reading diary: {exc}')
+        return {'outcome': 'malformed', 'commit_sha': None}
+
+    git = _git_cmd(repo_root)
+    try:
+        pre_sha = _sp_diary.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(new_content, encoding='utf-8')
+        add_r = _sp_diary.run(git + ['add', '--', relpath], capture_output=True, text=True)
+        if add_r.returncode != 0:
+            if existing is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.write_text(existing, encoding='utf-8')
+            record_diary_open_entry(state_dir, cycle_id, 'commit_failed', None, f'git add failed: {add_r.stderr[:200]}')
+            return {'outcome': 'commit_failed', 'commit_sha': None}
+        commit_msg = f'diary: cycle {cycle_id} opening entry (ADR-028)'
+        commit_r = _sp_diary.run(git + ['commit', '-m', commit_msg], capture_output=True, text=True)
+        if commit_r.returncode != 0:
+            # Unstage AND restore the working tree -- a failed commit must
+            # not leave main dirty, or the very next cycle's
+            # _setup_cycle_branch fails its own clean-tree precondition.
+            _sp_diary.run(git + ['reset', 'HEAD', '--', relpath], capture_output=True, text=True)
+            if existing is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.write_text(existing, encoding='utf-8')
+            record_diary_open_entry(state_dir, cycle_id, 'commit_failed', None, f'git commit failed: {commit_r.stderr[:200]}')
+            return {'outcome': 'commit_failed', 'commit_sha': None}
+        remote_r = _sp_diary.run(git + ['remote', 'get-url', 'origin'], capture_output=True, text=True)
+        if remote_r.returncode != 0:
+            push_error = 'no origin remote configured'
+        else:
+            push_r = _sp_diary.run(git + ['push', 'origin', 'main'], capture_output=True, text=True)
+            push_error = '' if push_r.returncode == 0 else (
+                (push_r.stderr or push_r.stdout).strip().splitlines()[-1:] or [f'exit {push_r.returncode}']
+            )[0][:200]
+        if push_error:
+            if pre_sha:
+                _sp_diary.run(git + ['reset', '--hard', pre_sha], capture_output=True, text=True)
+            record_diary_open_entry(state_dir, cycle_id, 'push_failed', None, f'push to origin/main failed: {push_error}')
+            print(f'bridge: diary open entry: push failed ({push_error}); commit dropped')
+            return {'outcome': 'push_failed', 'commit_sha': None}
+        new_sha = _sp_diary.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+        record_diary_open_entry(state_dir, cycle_id, 'integrated', new_sha, '')
+        print(f'bridge: diary open entry: pushed to origin/main {new_sha[:12]} (#1810/#1811)')
+        return {'outcome': 'integrated', 'commit_sha': new_sha}
+    except Exception as exc:
+        record_diary_open_entry(state_dir, cycle_id, 'commit_failed', None, f'unexpected error: {exc}')
+        print(f'bridge: diary open entry: unexpected error ({exc})')
+        return {'outcome': 'commit_failed', 'commit_sha': None}
+
+
 async def _main_impl_body():
     _clear_result_entries_cache()
     set_config_path(CONFIG_PATH)
@@ -2856,6 +2969,14 @@ async def _main_impl_body():
             # #1709 increment 2: same safe boundary — finish any push a prior
             # cycle's exhausted transient retries left as push_pending.
             _finish_pending_pushes(_selfevo_repo_check, STATE_DIR)
+            # ADR-028 rules 2-3 (#1811): this cycle's opening diary entry,
+            # written and pushed to origin/main HERE — before the cycle
+            # branch is even cut — so it needs no protection from the gate
+            # verdict this cycle's own code will later receive.
+            _write_diary_open_entry(
+                _selfevo_repo_check, STATE_DIR, _cycle_id,
+                req.get('task_title') or req.get('semantic_task_id') or 'subagent review task',
+            )
 
         # #944: read executor mission from immutable goals.md at the release
         # root when available; fall back to the legacy goal_text.json chain.

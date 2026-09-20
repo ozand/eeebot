@@ -238,7 +238,16 @@ class TestBridgeCycleTagIntegration:
         assert "pre-cycle-cycle-tags" in tags
         assert "cycle-cycle-tags-success" in tags
 
-        assert _run(work, "rev-parse", "pre-cycle-cycle-tags").stdout.strip() == main_sha_before
+        # #1811 (ADR-028): the diary's opening entry is committed and pushed
+        # to main BEFORE the cycle branch is cut, so the pre-cycle tag now
+        # anchors to that (later) tip rather than the pre-test sha -- assert
+        # ancestry (the original base is still in the pre-cycle tag's
+        # history) rather than exact equality.
+        pre_tag_sha = _run(work, "rev-parse", "pre-cycle-cycle-tags").stdout.strip()
+        base_ancestor = subprocess.run(
+            _git(work) + ["merge-base", "--is-ancestor", main_sha_before, pre_tag_sha], capture_output=True,
+        )
+        assert base_ancestor.returncode == 0, "pre-cycle tag must build on the original base"
 
         # The post tag is written right after the terminal ledger row — before
         # the (separate, best-effort) structured-lesson commit that may land
@@ -273,10 +282,12 @@ class TestBridgeCycleTagIntegration:
 
         rows = _read_ledger(state_dir)
         phases = [r["phase"] for r in rows]
-        assert phases == ["started", "dedup", "outcome"]
-        assert rows[1]["decision"] == "skipped_duplicate"
-        assert rows[1]["matched_against"] == "tag:cycle-cycle-dup-success"
-        assert rows[2]["outcome"] == "skipped-duplicate"
+        # #1811 (ADR-028): the diary's opening entry is written at the
+        # cycle-start boundary, before the tag-first dedup check runs.
+        assert phases == ["started", "diary_open_entry", "dedup", "outcome"]
+        assert rows[2]["decision"] == "skipped_duplicate"
+        assert rows[2]["matched_against"] == "tag:cycle-cycle-dup-success"
+        assert rows[3]["outcome"] == "skipped-duplicate"
 
     @pytest.mark.skipif(sys.platform == "win32", reason="NTFS ignores chmod 0o500 directory permissions")
     def test_fail_open_tag_failure_never_breaks_a_green_cycle(self, tmp_path, monkeypatch):
