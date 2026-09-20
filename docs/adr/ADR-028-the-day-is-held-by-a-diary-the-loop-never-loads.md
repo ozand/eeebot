@@ -134,12 +134,45 @@ attempt*.
 calls, so the read rate is a number, not a hope. It ships with the instruction,
 not after it. Every instruction in this system that is not measured drifts.
 
-## 6. The reflector folds the day at the boundary, and the fold is an index
+## 6. The knowledge curator folds the day at the boundary, and the fold is an index
 
-At the day boundary the reflector reduces the day file to one line in
+**Corrected 2026-09-20, after this record was accepted.** The first version of
+this rule gave the fold to the reflector, on the grounds that the reflector is
+live. Aliveness is not the criterion; owning the boundary and having a durable
+write path are. Both belong to the knowledge curator.
+
+The boundary is not a thing to choose — it already exists and already has an
+order. `eeebot-knowledge-curator.timer` is `OnCalendar=daily`, which is midnight,
+and it is the job that already consolidates lessons into the bounded knowledge
+base. `eeebot-action-index.timer` follows at `00:05:00`, described in its own
+unit as running *before prompt rotation*, and the cycle ledger rotates at the
+same moment. So the day already closes as a short sequence, and the fold slots
+into it rather than inventing a boundary of its own.
+
+The reflector is the wrong owner on both counts. It runs on
+`OnUnitActiveSec=30m`, so it has no notion that a day has ended — it wakes forty
+eight times a day and every waking looks the same. And it has already been moved
+off direct working-tree writes once: its v2 mint used to write into the checkout,
+where the next cycle's `git reset --hard` erased it, measured at a lifetime of
+2 minutes 45 seconds (#1209).
+
+The curator carries the write protocol that episode produced, and the diary fold
+needs exactly it: the curator never touches the repo checkout, it stages to
+`state/curator/staged/`, and the bridge picks the staging up at a cycle-start
+boundary on clean `main`, commits, and **pushes to `origin/main`** before the
+cycle branch is cut — because a commit left on local `main` is orphaned by the
+integration step (#986 measured six of seven pickup commits dangling). The
+watermark advances only after staging is durably written, so a failed fold is
+retried rather than lost.
+
+Ordering inside the boundary is part of the rule: if the fold reads any ledger
+fact about the day, it runs **before** rotation at `00:05`, not after. A reader
+that runs after rotation sees an empty file and reports a quiet day — this
+system has produced that exact false reading before.
+
+At the boundary the curator reduces the day file to one line in
 `diary/YYYY-MM.md`, and the month file is one line per day. A top-level index
-carries one line per month. The reflector is live — 36 to 79 calls a day since
-2026-09-16 — so this needs no new role.
+carries one line per month.
 
 The index shape is what makes rule 5's permission real. Freedom to read any
 horizon is worth nothing if finding the right file costs thirty reads: a cycle's
@@ -190,8 +223,8 @@ repository.
 ## What it costs
 
 One instruction in the operating rules. One carve-out in the bridge's
-integration step. One fold job on the reflector. Zero characters of prompt, now
-and permanently.
+integration step. One fold step inside the curator's existing daily job. Zero
+characters of prompt, now and permanently.
 
 ## How we would know it failed
 
