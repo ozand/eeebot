@@ -13,6 +13,12 @@ Allowed targets: surfaces/, scripts/, memory/, lessons/, docs/, tests/, skills/,
 Creating or improving skills for repeated patterns is valuable work.
 Do NOT modify: state/, ops/, goals.md, IDENTITY.md, SOUL.md, USER.md, OPERATING.md, secrets, or systemd units.
 
+## Day diary
+
+Read today's diary as the first action of the cycle.
+
+You may also read any earlier day's diary, or a month's fold, whenever the task points there — study what was done at any depth; nothing bounds how far back you can look.
+
 ## Before editing: skip check
 
 Before any edit, check the Recent activity list and the codebase for whether this task is already done or not applicable. If it is, stop immediately: report `outcome: "skipped"`, make no bookkeeping commit, and spend no further tool calls. A skip is a valid, complete outcome, not a failure to work around.

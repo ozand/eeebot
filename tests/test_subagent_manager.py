@@ -354,6 +354,44 @@ def test_collect_skill_reads_records_a_mixed_cycle(tmp_path):
     assert row["skills_attempted_not_found"] == ["gone"]
 
 
+# ---------------------------------------------------------------------------
+# ADR-028 rule 5 (#1812) -- collect_day_file_reads
+#
+# This method deliberately does NOT persist anything itself (unlike
+# collect_skill_reads above): ADR-028 rule 4 keeps subagent.py's source
+# free of the module name that does that persisting, so this is a plain
+# collect-and-clear, and the bridge (tested separately, since it is not
+# subject to that restriction) does the interpretation and the write.
+# ---------------------------------------------------------------------------
+
+def _day_file_manager(state_dir, *, reads=None):
+    from nanobot.agent.subagent import SubagentManager
+
+    manager = object.__new__(SubagentManager)
+    manager._skill_fitness_state_dir = state_dir
+    manager._skill_fitness_cycle_id = "cycle-x"
+    manager._day_file_reads_this_cycle = list(reads or [])
+    return manager
+
+
+def test_collect_day_file_reads_returns_empty_when_nothing_read(tmp_path):
+    manager = _day_file_manager(tmp_path / "state", reads=[])
+    assert manager.collect_day_file_reads() == []
+
+
+def test_collect_day_file_reads_returns_and_clears_the_accumulated_reads(tmp_path):
+    manager = _day_file_manager(tmp_path / "state", reads=[{"day": "2026-09-20", "position": 2}])
+
+    reads = manager.collect_day_file_reads()
+    assert reads == [{"day": "2026-09-20", "position": 2}]
+    assert manager._day_file_reads_this_cycle == []  # cleared after collection
+
+
+def test_collect_day_file_reads_no_op_when_instrumentation_not_configured(tmp_path):
+    manager = _day_file_manager(None, reads=[{"day": "2026-09-20", "position": 1}])
+    assert manager.collect_day_file_reads() == []
+
+
 def test_attempted_skill_name_normalises_the_request():
     """The success path records a bare skill name; the failure path must
     use the same vocabulary or the two halves cannot be compared."""

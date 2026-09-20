@@ -42,6 +42,7 @@ def _release_pool_used() -> int:
 EXPECTED_HEADINGS = [
     "Cycle contract",
     "Mutation surface",
+    "Day diary",
     "Before editing: skip check",
     "Execution",
     "Verification",
@@ -265,6 +266,54 @@ def test_iteration_budget_section_keeps_all_four_rules():
     assert "final response" in section
     # do not circle
     assert "circle" in section
+
+
+# ---------------------------------------------------------------------------
+# ADR-028 rule 5 (#1812) -- the diary instruction separates obligation from
+# permission, and a later edit cannot quietly soften the obligation into a
+# conditional trigger (that softening is exactly the #1805 failure mode
+# rule 5 exists to prevent).
+# ---------------------------------------------------------------------------
+
+#: Words that turn an instruction into "read it when it would help" -- the
+#: shape ADR-028 rule 5 names as the failure mode. Checked only against the
+#: OBLIGATION clause; the permission clause is conditional by design.
+_CONDITIONAL_QUALIFIERS = ("if ", "when", "relevant", "helpful", "as needed", "should you")
+
+
+def _day_diary_clauses() -> list[str]:
+    section = _section(_read(), "Day diary")
+    return [p.strip() for p in section.split("\n\n") if p.strip()]
+
+
+def test_day_diary_section_carries_exactly_two_clauses():
+    clauses = _day_diary_clauses()
+    assert len(clauses) == 2, clauses
+
+
+def test_day_diary_obligation_clause_is_unconditional():
+    """AC 3: the obligation contains no relevance condition."""
+    obligation = next(c for c in _day_diary_clauses() if "first action" in c)
+    lowered = obligation.lower()
+    for qualifier in _CONDITIONAL_QUALIFIERS:
+        assert qualifier not in lowered, (
+            f"obligation clause carries a conditional qualifier {qualifier!r}: {obligation!r}"
+        )
+    assert "today" in lowered
+
+
+def test_day_diary_permission_clause_names_the_horizons():
+    """AC: the permission clause names the horizons available (today,
+    earlier days, months) and states plainly that the loop may study any
+    of them -- and it is worded separately from the obligation clause."""
+    clauses = _day_diary_clauses()
+    obligation = next(c for c in clauses if "first action" in c)
+    permission = next(c for c in clauses if c is not obligation)
+    lowered = permission.lower()
+    assert "may" in lowered
+    assert "earlier day" in lowered
+    assert "month" in lowered
+    assert permission != obligation
 
 
 def test_operating_md_has_headroom_for_the_soul_migration():

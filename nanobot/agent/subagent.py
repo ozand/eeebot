@@ -218,6 +218,14 @@ class SubagentManager:
         self._skill_reads_this_cycle: list[dict] = []
         #: #1767 -- names the executor asked for and did not get this cycle.
         self._skill_read_failures_this_cycle: list[str] = []
+        #: ADR-028 rule 5 (#1812) -- every day-file read this cycle, any
+        #: day, each tagged with the tool-call position (the loop's own
+        #: ``iteration`` counter) it happened at. Collected (and cleared)
+        #: by :meth:`collect_day_file_reads` after the spawn window closes;
+        #: the bridge, not this class, turns it into a persisted row --
+        #: ADR-028 rule 4 keeps this file free of the module name that
+        #: would do that persisting.
+        self._day_file_reads_this_cycle: list[dict] = []
         # #939 Part E: excluded skill names for the loop summary
         self._excluded_skill_names: list[str] = list(excluded_skill_names or [])
         self._telemetry_component = str(telemetry_component or "").strip()
@@ -325,12 +333,29 @@ class SubagentManager:
                     self._skill_read_failures_this_cycle.append(
                         _attempted_skill_name(requested)
                     )
+            # ADR-028 rule 5 (#1812): wire the day-file read instrumentation
+            # the same way. `iteration` is this method's own loop counter
+            # (defined below, before the while loop runs) -- the closure
+            # reads its CURRENT value at call time, which is exactly the
+            # tool-call position the obligation needs to be checkable
+            # against, not merely asserted. The path check (is this under
+            # the day-file directory, which day) already happened inside
+            # ReadFileTool, which owns that check -- this method only
+            # receives the day string a real read resolved to. Deliberately
+            # kept nameless of the module's own vocabulary here: ADR-028
+            # rule 4 forbids that word from this file's source altogether.
+            _on_day_file_read = None
+            if self._skill_fitness_state_dir is not None:
+
+                def _on_day_file_read(day: str) -> None:  # noqa: E301
+                    self._day_file_reads_this_cycle.append({"day": day, "position": iteration})
             tools.register(ReadFileTool(
                 workspace=self.workspace,
                 allowed_dir=allowed_dir,
                 extra_allowed_dirs=extra_read,
                 on_skill_read=_on_skill_read,
                 on_skill_read_failed=_on_skill_read_failed,
+                on_day_file_read=_on_day_file_read,
             ))
             def _record_prevented_access(p: Path) -> None:
                 self.prevented_access_attempts.append(str(p))
@@ -980,6 +1005,29 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
             return n
         except Exception:
             return 0
+
+    def collect_day_file_reads(self) -> list[dict]:
+        """Return and clear this cycle's day-file reads (ADR-028 rule 5 /
+        #1812): a list of ``{"day": str, "position": int}``, any day, in
+        the order they were read.
+
+        Called by the bridge after the spawn window closes, for EVERY
+        cycle regardless of that cycle's integration outcome -- the
+        obligation is to read today's day file as the first action of the
+        cycle, not a condition of the cycle's code being accepted. The
+        bridge (not this class) turns this into a persisted row: ADR-028
+        rule 4 keeps this file, and the prompt-assembly path it shares
+        with :meth:`_build_subagent_prompt`, free of the module name that
+        would do that persisting.
+
+        Returns ``[]`` when instrumentation is not configured or nothing
+        was read.
+        """
+        if self._skill_fitness_state_dir is None:
+            return []
+        reads = list(self._day_file_reads_this_cycle)
+        self._day_file_reads_this_cycle.clear()
+        return reads
 
     async def cancel_by_session(self, session_key: str) -> int:
         """Cancel all subagents for the given session. Returns count cancelled."""
