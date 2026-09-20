@@ -54,15 +54,76 @@ class SystemPromptOverflowError(RuntimeError):
 class ContextBuilder:
     """Builds the context (system prompt + messages) for the agent."""
 
-    # #1725 (ADR-022): release-owned ontology files, in assembly order, with
-    # their per-block char caps. Operator-authored, immutable to the loop.
-    _RELEASE_BLOCK_CAPS: tuple[tuple[str, int], ...] = (
-        ("IDENTITY.md", 1500),
-        ("SOUL.md", 1800),
-        ("goals.md", 3200),
-        ("USER.md", 4000),
-        ("OPERATING.md", 5000),
+    # #1725 (ADR-022): release-owned ontology files, in assembly order.
+    # Operator-authored, immutable to the loop.
+    #
+    # #1802: the per-block caps that used to sit here are GONE. They were
+    # 1500/1800/3200/4000/5000, and the measurement that retired them is
+    # this:
+    #
+    #   file           used    old cap   spare
+    #   IDENTITY.md    1,228    1,500      272
+    #   SOUL.md        1,578    1,800      222
+    #   goals.md       3,125    3,200       75
+    #   USER.md        2,527    4,000    1,473
+    #   OPERATING.md   4,997    5,000        3
+    #   total         13,455   15,500    2,045
+    #
+    # 2,045 characters spare across the ontology and OPERATING.md holds
+    # three of them, while the operator profile sits on 1,473 it is not
+    # using and the whole prompt is at 59% of its 35,000 ceiling. That is a
+    # distribution problem wearing a scarcity costume.
+    #
+    # The cost was real and was paid in content: fitting the charter's
+    # ladder and the operating-rule edits required deleting history from
+    # Vector 1, the parenthetical in the handoff rule, and the reason
+    # ``exec`` output is capped. None of it redundant -- rent to a fuse
+    # unrelated to the prompt's actual size.
+    #
+    # And a per-block cap does its damage BEFORE anything is written: an
+    # edit that would not fit is simply not made, and never appears in the
+    # ``truncated`` list. "Nothing was truncated in 7 days" is a reading of
+    # a fuse that is HOLDING, not evidence that it is harmless -- the error
+    # I made closing #1783 by compression.
+    _RELEASE_BLOCK_NAMES: tuple[str, ...] = (
+        "IDENTITY.md",
+        "SOUL.md",
+        "goals.md",
+        "USER.md",
+        "OPERATING.md",
     )
+    #: #1802: one pooled budget for the whole release ontology, replacing the
+    #: five per-block caps. Derived, not chosen: it is the sum the five caps
+    #: already added up to, so this change reallocates and does not widen.
+    #: Stated here, next to :attr:`MAX_SYSTEM_PROMPT_CHARS`, so the two
+    #: numbers cannot drift the way the block caps drifted from the total.
+    #:
+    #: NO PER-BLOCK CEILING SURVIVES. Not an oversight: none was
+    #: load-bearing. The one risk a ceiling covered -- an early block
+    #: running away and starving a later one, since blocks draw from the
+    #: pool in assembly order -- is covered better by the truncation alarm
+    #: (#1802 AC 4), which reports the actual event instead of pre-emptively
+    #: rationing against it.
+    _RELEASE_POOL_CHARS = 15_500
+    #: #1802: a FLOOR, not a ceiling -- the distinction is the whole point.
+    #:
+    #: Blocks draw from the pool in assembly order, and the order ends
+    #: IDENTITY -> SOUL -> goals -> USER -> OPERATING. So the LAST block
+    #: absorbs everyone else's growth, and the last block is the cycle
+    #: rules. USER.md, two positions ahead of it, is exactly the file the
+    #: operator appends directives to. Left alone, the rules are what gets
+    #: cut first, quietly, by whoever wrote above them.
+    #:
+    #: A ceiling forbids writing and does its damage BEFORE anything is
+    #: written -- that is the defect this issue removes, and re-adding one
+    #: here would reintroduce it in mirror image. A floor forbids nothing.
+    #: It only decides WHO absorbs the pressure: a reserved block keeps its
+    #: minimum, and the overflow lands on the blocks with slack instead.
+    #:
+    #: Reserved for OPERATING.md only, at its pre-pool size. Every other
+    #: file draws freely. If a second file ever needs a floor, that is a
+    #: decision to take then, with the measurement that motivates it.
+    _RELEASE_BLOCK_FLOORS: dict[str, int] = {"OPERATING.md": 5_000}
     #: Loop-owned, gate-bounded workspace files. Sourced from the read policy
     #: (not a literal) so this list and MUTATION_POLICY.read_paths cannot
     #: drift apart — see tests/test_mutation_policy.py.
@@ -84,8 +145,25 @@ class ContextBuilder:
     # A genexpr referencing another class-body name lives in its own scope
     # and cannot see it (a real NameError, not just a lint nit) -- built with
     # plain list literals instead.
+    #: #1802: the ``cap`` a release entry carries is the POOL, not a
+    #: per-block allowance. ``_load_ontology_blocks`` narrows it to what the
+    #: pool has left when each block is loaded, so a block may take whatever
+    #: it needs while there is room. Workspace blocks keep their own 4,000 --
+    #: that one IS load-bearing: it bounds a file the loop can commit to,
+    #: which is a different question from budgeting operator-authored text.
+    # The pool rides in the ITERABLE, not the comprehension body: a class-body
+    # comprehension cannot see another class-body name from its body, only
+    # from its outermost iterable (the same real NameError the note above
+    # warns about, which the old `for name, cap in _RELEASE_BLOCK_CAPS` form
+    # happened to avoid by accident).
     BOOTSTRAP_FILES: tuple[tuple[str, str, int, bool], ...] = tuple(
-        [("release", name, cap, True) for name, cap in _RELEASE_BLOCK_CAPS]
+        [
+            ("release", name, pool, True)
+            for name, pool in zip(
+                _RELEASE_BLOCK_NAMES,
+                [_RELEASE_POOL_CHARS] * len(_RELEASE_BLOCK_NAMES),
+            )
+        ]
         + [("workspace", name, 4000, True) for name in MUTATION_POLICY.read_paths]
     )
     #: The one workspace block name, used as the strict-fit "declared
@@ -146,6 +224,13 @@ class ContextBuilder:
 
     def __init__(self, workspace: Path, release_root: "Path | None" = None, state_dir: "Path | None" = None):
         self.workspace = workspace
+        #: #1802: per-file occupancy of the release pool from the last
+        #: assembly, and what was left. Published on the ``system_prompt``
+        #: ledger row so a file approaching the pool is visible BEFORE it
+        #: truncates rather than after -- the whole point of replacing five
+        #: silent fuses with one watched budget.
+        self._release_pool_usage: dict[str, int] = {}
+        self._release_pool_left: int = self._RELEASE_POOL_CHARS
         #: #1725 (ADR-022): root the loop profile's release-owned blocks
         #: (IDENTITY.md, SOUL.md, goals.md, USER.md, OPERATING.md) are read
         #: from. ``None`` (every caller but the self-evolving bridge) makes
@@ -273,18 +358,39 @@ Skills with available="false" need dependencies installed first - you can try in
         sections: list[tuple[str, str]] = []
         missing: list[str] = []
         truncated: list[str] = []
+        # #1802: the release ontology draws from one pool instead of five
+        # per-block caps. Each block's effective cap is what the pool has
+        # left, so a file may take whatever it needs while there is room --
+        # OPERATING.md is no longer stopped at 5,000 while USER.md sits on
+        # 1,473 unused characters.
+        pool_left = self._RELEASE_POOL_CHARS
+        pool_usage: dict[str, int] = {}
+        #: Characters still owed to floors not yet loaded. Subtracted from
+        #: what an earlier block may take, so a reserved block cannot be
+        #: starved by whoever sits above it in the assembly order.
+        floors_ahead = dict(self._RELEASE_BLOCK_FLOORS)
         for root_kind, filename, cap, required in self.BOOTSTRAP_FILES:
             root = self.release_root if root_kind == "release" else self.workspace
             key = Path(filename).stem.lower()
+            if root_kind == "release":
+                floors_ahead.pop(filename, None)  # this block's own floor is not withheld from it
+                effective_cap = min(cap, max(0, pool_left - sum(floors_ahead.values())))
+            else:
+                effective_cap = cap
             if root is None:
                 text, meta = f"[missing: {filename}]", {"missing": True, "truncated": False}
             else:
-                text, meta = self.load_block(filename, Path(root) / filename, cap, required)
+                text, meta = self.load_block(filename, Path(root) / filename, effective_cap, required)
+            if root_kind == "release":
+                pool_usage[filename] = len(text)
+                pool_left = max(0, pool_left - len(text))
             sections.append((key, text))
             if meta.get("missing"):
                 missing.append(filename)
             if meta.get("truncated"):
                 truncated.append(filename)
+        self._release_pool_usage = pool_usage
+        self._release_pool_left = pool_left
         return sections, missing, truncated
 
     @staticmethod
@@ -959,6 +1065,30 @@ Skills with available="false" need dependencies installed first - you can try in
             # touched by the strict/uniform_trim/names_only branches below.
             "missing": list(missing or []), "truncated": list(truncated or []),
         }
+        # #1802: the pool's occupancy, so a file approaching it is visible
+        # BEFORE it truncates. The five per-block caps it replaces were
+        # silent by construction -- an edit that would not fit was never
+        # made, so it never appeared in ``truncated`` and the fuse read as
+        # harmless while it was holding.
+        pool_usage = dict(getattr(self, "_release_pool_usage", {}) or {})
+        if pool_usage:
+            fit["release_pool"] = {
+                "cap": self._RELEASE_POOL_CHARS,
+                "used": sum(pool_usage.values()),
+                "left": getattr(self, "_release_pool_left", 0),
+                "per_file": pool_usage,
+            }
+        # #1802 AC 4: a truncated or dropped block is a condition someone is
+        # told about, not a field nobody reads. The first block to truncate
+        # will be the one carrying the cycle rules.
+        if fit["truncated"] or fit["dropped"]:
+            logger.warning(
+                "system prompt blocks cut: truncated={} dropped={} "
+                "(release pool {}/{} used) -- ADR-022 rules may be reaching "
+                "the executor incomplete",
+                fit["truncated"], fit["dropped"],
+                fit.get("release_pool", {}).get("used"), self._RELEASE_POOL_CHARS,
+            )
         # #1447: copy the whole record rather than an allowlist of keys. The
         # allowlist silently dropped `resident_matched` / `resident_missing`
         # the moment #1443 added them, so the signal that a rule entry stopped

@@ -251,17 +251,23 @@ def _loop_builder_at_declared_caps(tmp_path, *, catalogue_lines: int = 40) -> Co
     restated here. Bypasses per-file loading the same way :func:`_loop_builder`
     does; only the generic fit/reserve arithmetic is under test."""
     builder = ContextBuilder(tmp_path)
-    release_caps = dict(ContextBuilder._RELEASE_BLOCK_CAPS)
+    # #1802: the release ontology no longer has five per-block caps, so the
+    # worst case it permits is the POOL fully consumed -- however it is
+    # distributed across the five files. Split evenly here (remainder onto
+    # the last) so the total is exactly the pool and the section structure
+    # is unchanged; the arithmetic under test is the total, not the split.
+    names = ContextBuilder._RELEASE_BLOCK_NAMES
+    share = ContextBuilder._RELEASE_POOL_CHARS // len(names)
+    remainder = ContextBuilder._RELEASE_POOL_CHARS - share * len(names)
+    release_caps = {name: share for name in names}
+    release_caps[names[-1]] += remainder
+    assert sum(release_caps.values()) == ContextBuilder._RELEASE_POOL_CHARS
 
     def _stub_ontology_blocks():
         sections = [
-            ("identity", _sized("IDENTITY.md", release_caps["IDENTITY.md"])),
-            ("soul", _sized("SOUL.md", release_caps["SOUL.md"])),
-            ("goals", _sized("goals.md", release_caps["goals.md"])),
-            ("user", _sized("USER.md", release_caps["USER.md"])),
-            ("operating", _sized("OPERATING.md", release_caps["OPERATING.md"])),
-            ("agents", _sized("AGENTS.md", ContextBuilder._WORKSPACE_BLOCK_CAP)),
-        ]
+            (Path(name).stem.lower(), _sized(name, release_caps[name]))
+            for name in names
+        ] + [("agents", _sized("AGENTS.md", ContextBuilder._WORKSPACE_BLOCK_CAP))]
         return sections, [], []
 
     builder._load_ontology_blocks = _stub_ontology_blocks
