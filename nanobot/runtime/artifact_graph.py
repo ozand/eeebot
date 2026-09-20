@@ -1,4 +1,4 @@
-"""The artifact dependency graph (#1769, ADR-024).
+"""The artifact dependency graph (#1769, ADR-024, ADR-025).
 
 Nodes are the loop's own artifacts in the instance repository: top-level
 `scripts/*.py`, `surfaces/*` files, and `skills/*/SKILL.md`. Edges are
@@ -15,6 +15,22 @@ this module, never restates it):
 - `tested_by`    — a test imports or executes it. Coverage, not use.
 - `mentioned_in` — named in prose, a catalogue, a comment or a docstring.
                     Never promotes a leaf, by construction (rule 2 below).
+
+Does `tested_by` raise the rung? **No — ADR-024 and ADR-025 agree, they do
+not conflict.** ADR-024 names only `used_by` as promoting; ADR-025 decision
+2 makes this explicit and gives the reason: readiness ("does anything need
+this") and testedness ("does it work") are two independent axes, and 90 of
+114 leaves measured tested-and-unused proves the signal does not
+discriminate — treating it as a half-step was considered and rejected in
+ADR-025's own alternatives section. `is_component` implements exactly this:
+only `used_by` is ever inspected.
+
+`used_by` itself excludes an artifact manufacturing its own promotion — a
+self-loop, or a mutual pair with no anchor outside itself (a wrapper or
+skill minted purely to hand its target an edge, and vice versa). See
+:meth:`ArtifactGraph.is_component` for the mechanism and the incident that
+motivated it (the validity ladder's rung 2 read literally by the proposer
+within hours of shipping, 2026-09-20).
 
 Resolution is conservative by design (ADR-024 rule 5): an edge that cannot
 be proven from a literal path is not an edge. Ambiguous stems (the same
@@ -122,17 +138,70 @@ class ArtifactGraph:
     unit_scan_status: str = "unavailable"  # "scanned" | "unavailable"
     notes: list[str] = field(default_factory=list)
 
-    # ─── the rung (ADR-024 decision 2, stated once) ────────────────────────
+    # ─── the rung (ADR-024 decision 2, extended by #1801-adjacent hardening
+    #     against self-reference; stated once) ───────────────────────────
+
+    def _node_id_by_path(self) -> dict[str, str]:
+        return {n.path: nid for nid, n in self.nodes.items()}
 
     def is_component(self, node_id: str) -> bool:
-        """True iff at least one ``used_by`` edge targets *node_id*.
+        """True iff at least one GENUINE ``used_by`` edge targets *node_id*.
 
         This is THE rung definition. Every consumer (scorecard, dashboard,
         demand pipeline) calls this — or :meth:`rung` — rather than
         re-deriving it from ``edges`` directly, so the definition changes
         in exactly one place if it ever needs to.
+
+        "Genuine" excludes two shapes an artifact can manufacture for
+        itself, measured live 2026-09-20 (the ladder's rung 2 read
+        literally by the proposer within hours of shipping): a
+        self-loop (a script importing/invoking itself — ``source`` and
+        ``target`` resolve to the same node), and a mutual pair (node A's
+        only edge into node B is reciprocated by B's only edge into A —
+        "give a script self-invocation", a wrapper/skill minted purely to
+        hand its target a `used_by` edge, and the target is the wrapper's
+        or skill's only reason to exist). Neither is "something ELSE
+        depends on it" (ADR-025's own rung sentence) — it is the artifact
+        depending on itself through one extra hop.
+
+        A source that is not itself a graph node at all — a doc's run
+        instruction, a systemd unit, an operator procedure — cannot form
+        either shape (it has no reciprocal edge to receive) and always
+        promotes, unchanged from before this hardening.
+
+        An edge excluded here as part of a mutual pair does not vanish —
+        it is simply not counted as PROMOTING. If either side of the pair
+        also has a genuine edge from outside the pair, that side still
+        promotes on that edge; only the manufactured reciprocal link is
+        inert. This is why a real two-way dependency between two
+        independently-used modules is never wrongly stranded — only a
+        pair with no anchor outside itself is.
         """
-        return any(e.kind == "used_by" and e.target == node_id for e in self.edges)
+        node_by_path = self._node_id_by_path()
+        for e in self.edges:
+            if e.kind != "used_by" or e.target != node_id:
+                continue
+            source_node_id = node_by_path.get(e.source)
+            if source_node_id is None:
+                return True  # not a graph node -- cannot self-reference
+            if source_node_id == node_id:
+                continue  # self-loop
+            if self._has_used_by_edge(node_id, source_node_id):
+                continue  # mutual pair: target's own edge reaches back to source
+            return True
+        return False
+
+    def _has_used_by_edge(self, source_node_id: str, target: str) -> bool:
+        """True iff some ``used_by`` edge whose source resolves to
+        *source_node_id* targets *target* -- used only for the mutual-pair
+        check above, never as a public entry point (call :meth:`is_component`
+        instead, which applies the self-reference exclusion this helper
+        does not)."""
+        node_by_path = self._node_id_by_path()
+        return any(
+            e.kind == "used_by" and e.target == target and node_by_path.get(e.source) == source_node_id
+            for e in self.edges
+        )
 
     def rung(self, node_id: str) -> str:
         return "component" if self.is_component(node_id) else "leaf"
