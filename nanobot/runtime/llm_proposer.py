@@ -58,7 +58,9 @@ from nanobot.observability.llm_telemetry import (
 from nanobot.providers.model_window import resolve_context_window
 from nanobot.runtime import (
     archive,
+    artifact_graph,
     demand,
+    demand_ranking,
     enhancement_gate,
     existence_index,
     hypothesis_backlog,
@@ -241,6 +243,12 @@ _PRIORITY_PATTERN = re.compile(
 )
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
+# #1796: the array counterpart, for propose_multi's several-candidates
+# reply. A fenced array is preferred over a bare regex match the same way
+# _JSON_FENCE_RE is preferred over _JSON_OBJ_RE above -- a reply's own
+# prose can easily contain an unrelated "[...]" before the real payload.
+_JSON_ARRAY_FENCE_RE = re.compile(r"```(?:json)?\s*(\[.*?\])\s*```", re.DOTALL)
+_JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 # #760: 'demand ' is the primary form under demand-driven mode; the pre-#760
 # prefixes are kept as accepted legacy forms for one release so a model
 # replying in the old vocabulary is not hard-rejected during rollout.
@@ -285,6 +293,16 @@ _SUBJECT_DEDUP_MAX_GLOB = 200
 # #903: per-file edit budget without confirmed use. M <= 0 disables the check.
 _EDIT_BUDGET_M_ENV = "SELFEVO_EDIT_BUDGET_M"
 _DEFAULT_EDIT_BUDGET_M = 5
+
+# #1796 (ADR-027): several-candidates-one-call ranked proposal. Off by
+# default -- a new, additive entry point (:func:`maybe_propose_ranked`)
+# alongside the existing :func:`maybe_propose`, not a replacement of it;
+# wiring it in as the default cycle path is a separate, later decision,
+# the same rollout shape #760's demand-driven mode and #1785's chain check
+# both used (a new mechanism ships behind its own switch before anything
+# is asked to trust it by default).
+_RANKED_PROPOSAL_ENABLED_ENV = "SELFEVO_RANKED_PROPOSAL_ENABLED"
+_RANKED_PROPOSAL_CANDIDATES_N = 3
 
 _MUTATION_SURFACE_MARKER = "MUTATION_SURFACES=" + MUTATION_POLICY.render_commit_surfaces()
 
@@ -1948,6 +1966,128 @@ def propose(
     return _extract_json_object(reply)
 
 
+def propose_multi(
+    context: str,
+    *,
+    n: int = _RANKED_PROPOSAL_CANDIDATES_N,
+    timeout: float = 120.0,
+    system_prompt: str | None = None,
+) -> list[dict[str, Any]] | None:
+    """#1796 (ADR-027 decision 7): ``n`` scored-later candidates from ONE
+    chat completion, not one call per candidate -- the cost discipline the
+    ADR states explicitly. Sibling to :func:`propose`, not a replacement:
+    same gateway, same telemetry, same fail-open-to-``None`` contract;
+    the only difference is the reply shape asked for and parsed.
+
+    Returns ``None`` (never an empty list) on any gateway/parse failure,
+    matching :func:`propose`'s own contract -- an empty list would read as
+    "the model proposed nothing", which is a different, false claim from
+    "the call failed"; :data:`_last_propose_failure` still distinguishes
+    them for the caller exactly as it does for :func:`propose`.
+    """
+    global _last_propose_failure
+    _last_propose_failure = None
+    try:
+        from openai import OpenAI
+    except Exception as exc:
+        _last_propose_failure = type(exc).__name__
+        return None
+    base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
+    api_key = os.environ.get("LITELLM_API_KEY", "").strip()
+    if not base_url or not api_key:
+        _last_propose_failure = "MissingGatewayConfiguration"
+        return None
+    user_content = (
+        f"{context}\n\n"
+        f"Propose {n} DIFFERENT candidate tasks, not variations on one idea. "
+        "Reply with a JSON array of exactly that many objects, each shaped "
+        "like the single-object schema described above."
+    )
+    role_body = system_prompt or _PROPOSER_SYSTEM_PROMPT
+    system_content, _role_fit = build_role_system_prompt(
+        _role_name_for(role_body), role_text=role_body
+    )
+    try:
+        client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        create_kwargs: dict[str, Any] = dict(
+            model=_model_name(),
+            messages=[
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content},
+            ],
+            # #1796: n candidates in one reply costs proportionally more
+            # completion tokens than one candidate -- budgeted, not
+            # copied from propose()'s single-candidate 400.
+            max_tokens=400 * max(1, n),
+            temperature=0.4,
+        )
+        effort = bridge_reasoning_effort()
+        if effort:
+            create_kwargs["reasoning_effort"] = effort
+        call_start = time.monotonic()
+        response = client.chat.completions.create(**create_kwargs)
+        duration_ms = (time.monotonic() - call_start) * 1000
+        usage_obj = getattr(response, "usage", None)
+        usage = {
+            "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) or 0,
+            "completion_tokens": getattr(usage_obj, "completion_tokens", 0) or 0,
+            "total_tokens": getattr(usage_obj, "total_tokens", 0) or 0,
+        }
+        choice = response.choices[0]
+        finish_reason = getattr(choice, "finish_reason", "") or ""
+        model = str(getattr(response, "model", "") or create_kwargs["model"])
+        content = getattr(getattr(choice, "message", None), "content", "") or ""
+        try:
+            with call_context(current_cycle_id(), "proposer"):
+                record_llm_call(
+                    model=model, duration_ms=duration_ms, usage=usage,
+                    finish_reason=finish_reason, retries=0,
+                    system_prompt_chars=len(system_content),
+                )
+                record_llm_prompt(
+                    messages=create_kwargs["messages"], content=content,
+                    reasoning_content=None, finish_reason=finish_reason, model=model,
+                    prompt_tokens=usage["prompt_tokens"],
+                    completion_tokens=usage["completion_tokens"],
+                )
+        except Exception:
+            pass
+        reply = content
+    except Exception as exc:
+        _last_propose_failure = f"{type(exc).__name__}: {exc}"
+        return None
+    return _extract_json_array(reply)
+
+
+def _extract_json_array(text: str) -> list[dict[str, Any]] | None:
+    """Sibling to :func:`_extract_json_object`, same fence-then-bare-match
+    preference order, for :func:`propose_multi`'s array reply. Every
+    element that is not itself a JSON object is dropped from the parsed
+    list -- NOT the never-drop guarantee #1796 is about (that guarantee
+    covers a well-formed candidate never being excluded from RANKING; a
+    reply element that is not even an object has nothing for
+    ``demand_ranking`` to score in the first place, the same "not a
+    candidate" reasoning ADR-024 rule 5 applies to an unresolvable
+    reference)."""
+    if not text:
+        return None
+    stripped = text.strip()
+    fence_match = _JSON_ARRAY_FENCE_RE.search(stripped)
+    candidate = fence_match.group(1) if fence_match else None
+    if candidate is None:
+        arr_match = _JSON_ARRAY_RE.search(stripped)
+        candidate = arr_match.group(0) if arr_match else None
+    if candidate is None:
+        return None
+    try:
+        parsed = json.loads(candidate)
+    except Exception:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    return [item for item in parsed if isinstance(item, dict)]
+
+
 def _validate_serves(proposal: dict[str, Any]) -> tuple[bool, str]:
     """#751: goal-alignment field validation, same reject/retry path as the
     other schema checks in :func:`validate_sizing`. ``serves`` must be a
@@ -2919,6 +3059,7 @@ def write_request(
     *,
     cycle_id: str | None = None,
     lane: str | None = None,
+    rung_gained_claim: bool | None = None,
 ) -> str:
     """Write the request JSON in the ``subagent-request-v1`` shape the
     subagent bridge consumes (#707 C1) — same keys, ``request_status:
@@ -3042,6 +3183,13 @@ def write_request(
         "serves": serves,
         "source_artifact": "llm_proposer",
         **({"hypothesis_ref": hypothesis_ref} if hypothesis_ref else {}),
+        # #1796 (ADR-027 decision 5): a CLAIM made at proposal time by the
+        # ranking that selected this candidate ("connecting this raises the
+        # rung"), never the graph's own measurement -- absent entirely when
+        # the caller (the pre-#1796 maybe_propose path) makes no such
+        # claim, so the field's mere presence already distinguishes
+        # ranked-mode proposals from unranked ones without a second flag.
+        **({"rung_gained_claim": bool(rung_gained_claim)} if rung_gained_claim is not None else {}),
     }
     # #760: demand traceability — when serves is 'demand <id>', the proposed
     # row also carries the id, so proposal→demand-item is queryable.
@@ -3084,6 +3232,143 @@ def write_request(
     append_event(state_dir, proposed_event)
 
     return str(request_path)
+
+
+def ranked_proposal_enabled() -> bool:
+    """#1796 kill switch, off by default -- see the constant's own comment."""
+    return os.environ.get(_RANKED_PROPOSAL_ENABLED_ENV, "").strip().lower() in ("1", "true", "yes")
+
+
+def select_ranked_candidate(
+    candidates: list[dict[str, Any]],
+    *,
+    state_dir: Path,
+    now: datetime | None = None,
+) -> tuple[demand_ranking.ScoredCandidate | None, list[demand_ranking.ScoredCandidate]]:
+    """Score every candidate (never dropping one) and return
+    ``(the highest-scoring one, every scored candidate in ranked order)``.
+
+    Reads the published artifact graph (:func:`artifact_graph.read_latest_artifact_graph`
+    — the harness-owned sidecar, never recomputed here) for the value
+    term's rung; an unavailable graph degrades every candidate's value to
+    the conservative default rather than blocking the ranking itself (an
+    input must still produce an order even when one of its own inputs is
+    missing).
+
+    Pure glue between :func:`propose_multi`'s reply and
+    :mod:`nanobot.runtime.demand_ranking` — this function makes no LLM
+    call and writes nothing; the caller decides what to do with the
+    winner.
+    """
+    try:
+        graph = artifact_graph.read_latest_artifact_graph(state_dir)
+        if graph.status != "complete":
+            graph = None
+    except Exception:
+        graph = None
+
+    ranked = demand_ranking.rank_candidates(candidates, graph=graph, state_dir=Path(state_dir), now=now)
+    winner = ranked[0] if ranked else None
+    return winner, ranked
+
+
+def maybe_propose_ranked(state_dir: Path, selfevo_repo: Path | None) -> str | None:
+    """#1796 (ADR-027): the several-candidates-one-call entry point.
+
+    Delegates straight to :func:`maybe_propose` — zero behavior change —
+    unless :func:`ranked_proposal_enabled` is on. This is the SAME rollout
+    shape #760 and #1785 both used: a new mechanism ships behind its own
+    switch, off by default, before anything is asked to depend on it. When
+    on, this covers the FALLBACK (non-demand-mode) path only — demand-mode's
+    own rotation/assignment machinery (#902) is #maybe_propose's, unchanged,
+    and is not reproduced here; wiring ranking into that path is a
+    follow-on decision, not a gap in this one.
+
+    One chat completion (:func:`propose_multi`) produces every candidate
+    for the cycle (ADR-027 decision 7's cost discipline); each is scored
+    (:func:`select_ranked_candidate`) and every score is recorded on a
+    ``ranked_candidates`` ledger row BEFORE any candidate is tried, so the
+    full ordering survives even if every candidate is later rejected.
+    Candidates are then tried, highest-scored first, through the SAME
+    ``validate_sizing``/``_is_duplicate_proposal``/``write_request`` path
+    :func:`maybe_propose` uses — ranking decides TRY ORDER, never
+    admission (ADR-027 decision 6: an input, never a gate). A rejected
+    candidate costs no additional LLM call; only the one call that
+    produced all of them was ever spent.
+    """
+    if not ranked_proposal_enabled():
+        return maybe_propose(state_dir, selfevo_repo)
+
+    cycle_id = ""
+    context_token = None
+    try:
+        cycle_id = _mint_cycle_id()
+        context_token = set_call_context(cycle_id, "proposer")
+
+        if not should_propose(state_dir, selfevo_repo):
+            return None
+
+        context = build_context(state_dir, selfevo_repo)
+        candidates = propose_multi(context)
+        if not candidates:
+            _record_proposer_reject(
+                state_dir, "llm_unavailable" if _last_propose_failure else "empty_context",
+                detail=_last_propose_failure or "propose_multi returned no candidates",
+            )
+            return None
+
+        _winner, ranked = select_ranked_candidate(candidates, state_dir=state_dir)
+
+        append_event(state_dir, {
+            "phase": "ranked_candidates",
+            "cycle_id": cycle_id,
+            "count": len(ranked),
+            "scores": [demand_ranking.record_score(s) for s in ranked],
+        })
+
+        for scored in ranked:
+            proposal = scored.candidate
+            if not isinstance(proposal, dict):
+                continue
+            ok, reason = validate_sizing(proposal)
+            if not ok:
+                _record_proposer_reject(
+                    state_dir,
+                    "operator_owned_path" if reason == "operator_owned_path" else "sizing_rejected",
+                    task_title=str(proposal.get("task_title") or ""),
+                    target_path=str(proposal.get("target_path") or ""),
+                    detail=reason,
+                    demand_id=_candidate_identity(proposal),
+                )
+                continue
+            dup, dup_reason, dup_matched = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
+            if dup:
+                _record_proposer_reject(
+                    state_dir,
+                    _dedup_reject_reason(dup_matched),
+                    task_title=str(proposal.get("task_title") or ""),
+                    target_path=str(proposal.get("target_path") or ""),
+                    matched_against=dup_matched,
+                    detail=dup_reason if _dedup_reject_reason(dup_matched) == enhancement_gate.REASON else "",
+                    demand_id=_candidate_identity(proposal),
+                )
+                continue
+            request_path = write_request(
+                state_dir, proposal, selfevo_repo, cycle_id=cycle_id,
+                rung_gained_claim=scored.rung_gained_claim,
+            )
+            return _display_title(str(proposal.get("task_title") or ""))
+
+        return None
+    except Exception as exc:
+        try:
+            _record_proposer_reject(state_dir, "error", detail=f"{type(exc).__name__}: {exc}")
+        except Exception:
+            pass
+        return None
+    finally:
+        if context_token is not None:
+            reset_call_context(context_token)
 
 
 def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
