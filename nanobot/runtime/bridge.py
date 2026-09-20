@@ -4811,7 +4811,7 @@ _ALLOWED_SENSITIVE_BASENAMES = frozenset({'token_report.py', 'summarize_token_co
 _BLOCKED_EXACT_PATHS = frozenset({
     'goals.md', 'IDENTITY.md', 'SOUL.md', 'USER.md', 'OPERATING.md', 'agents_md_consolidate.py',
 })
-_ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/', 'skills/')
+_ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/', 'skills/', 'diary/')
 _ALLOWED_EXACT_PATHS = frozenset({'AGENTS.md'})
 _GATE_EXT_ALLOWLIST = frozenset(('.py', '.md', '.json', '.yaml', '.yml', '.toml', '.txt', '.sh', '.service', '.timer', '.conf', '.cron', '.html', '.css', '.ts', '.js', '.example'))
 _GATE_BASENAME_ALLOWLIST = frozenset(('Makefile', 'Dockerfile'))

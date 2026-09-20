@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from nanobot.agent.tools.base import Tool
+from nanobot.runtime.day_diary import DIARY_MARKER, is_diary_path
 
 
 def _resolve_path(
@@ -233,6 +234,16 @@ class WriteFileTool(_FsTool):
                 if self._on_prevent_write:
                     self._on_prevent_write(fp)
                 return f"Error: Write access to protected sidecar is blocked: {path}"
+            # ADR-028 rule 1: write_file replaces the whole file, dropping
+            # everything it does not rewrite -- for a diary that is the
+            # whole day. Refused unconditionally; edit_file against the
+            # marker is the only safe append route (see day_diary.py).
+            if self._workspace and is_diary_path(fp, self._workspace):
+                return (
+                    f"Error: write_file is not permitted under diary/ (ADR-028 rule 1). "
+                    f"Use edit_file to replace the marker ({DIARY_MARKER!r}) with your "
+                    "entry followed by the marker again."
+                )
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} bytes to {fp}"

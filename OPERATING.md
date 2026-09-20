@@ -9,7 +9,7 @@ Work only on the cycle branch the harness already created off `origin/main`. Imp
 ## Mutation surface
 
 <!-- rendered-from: mutation_policy -->
-Allowed targets: surfaces/, scripts/, memory/, lessons/, docs/, tests/, skills/, AGENTS.md
+Allowed targets: surfaces/, scripts/, memory/, lessons/, docs/, tests/, skills/, diary/, AGENTS.md
 Creating or improving skills for repeated patterns is valuable work.
 Do NOT modify: state/, ops/, goals.md, IDENTITY.md, SOUL.md, USER.md, OPERATING.md, secrets, or systemd units.
 
