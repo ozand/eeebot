@@ -8,6 +8,8 @@ from nanobot.runtime.artifact_graph import (
     EDGE_KINDS,
     SCHEMA_VERSION,
     ArtifactGraph,
+    Edge,
+    Node,
     build_artifact_graph,
     publish_artifact_graph,
     read_latest_artifact_graph,
@@ -165,6 +167,183 @@ def test_a_script_naming_itself_never_becomes_self_referential(tmp_path):
     graph = build_artifact_graph(repo)
     assert not graph.is_component("scripts/solo")
     assert not any(e.source == "scripts/solo.py" and e.target == "scripts/solo" for e in graph.edges)
+
+
+# ─── self-reference and manufactured-consumer edges never promote ───────────
+#
+# Measured live 2026-09-20: the validity ladder's rung 2 ("an artifact
+# nothing ran now has something that runs it") reached the host at 02:52Z;
+# proposals shaped "Default <script>.py to self-tests when invoked without
+# arguments" went 0 -> 5 within hours. The charter clause was patched
+# (PR #1814: "something OTHER THAN ITSELF that runs it"), which closes the
+# WORDING the proposer reads. It does not close the MECHANISM: nothing
+# stopped the same shape from reaching #1796's ranking through the computed
+# graph once entrypoint-kind detection (ADR-025) is built, under a
+# different form or a different wording. These tests pin the graph itself
+# against the four named forms, independent of prose.
+#
+# Two of the four (a script importing itself; a wrapper/skill minted next
+# to its target) are exercised end-to-end through build_artifact_graph,
+# proving the real resolver cannot produce a promoting self-reference from
+# source text. All four are ALSO exercised by constructing an ArtifactGraph
+# directly with hand-built Node/Edge objects -- this proves the STRUCTURAL
+# rule (is_component) itself, independent of whether today's text-based
+# resolver happens to have a code path that could produce the shape (it
+# does not, for the skill+script pair -- nothing currently makes a skill an
+# edge TARGET -- but the rule must hold if that ever changes).
+
+
+def _graph(nodes: list[Node], edges: list[Edge]) -> ArtifactGraph:
+    return ArtifactGraph(
+        status="complete",
+        generated_at="2026-09-20T00:00:00Z",
+        nodes={n.id: n for n in nodes},
+        edges=edges,
+    )
+
+
+def test_self_loop_edge_never_promotes():
+    """Evasion form 1: a script that imports/invokes itself."""
+    graph = _graph(
+        nodes=[Node(id="scripts/foo", type="script", path="scripts/foo.py")],
+        edges=[Edge(source="scripts/foo.py", target="scripts/foo", kind="used_by", evidence="import_or_exec_path")],
+    )
+    assert not graph.is_component("scripts/foo")
+
+
+def test_a_self_tested_script_is_not_promoted_by_its_own_embedded_test():
+    """Evasion form 2: a test living in the same file as the thing it
+    tests. tested_by never promotes regardless (ADR-025 decision 2), and a
+    self-sourced tested_by edge is doubly inert -- both rules apply."""
+    graph = _graph(
+        nodes=[Node(id="scripts/foo", type="script", path="scripts/foo.py")],
+        edges=[Edge(source="scripts/foo.py", target="scripts/foo", kind="tested_by", evidence="import_or_exec_path")],
+    )
+    assert not graph.is_component("scripts/foo")
+
+
+def test_a_wrapper_whose_only_consumer_is_its_target_never_promotes_it():
+    """Evasion form 3: a wrapper placed next to its target whose only
+    consumer is the target -- foo_wrapper "invokes" foo (foo gets a
+    used_by edge), but foo_wrapper's own only reference anywhere is foo
+    importing it back. Neither is a genuine external dependency."""
+    graph = _graph(
+        nodes=[
+            Node(id="scripts/foo", type="script", path="scripts/foo.py"),
+            Node(id="scripts/foo_wrapper", type="script", path="scripts/foo_wrapper.py"),
+        ],
+        edges=[
+            Edge(source="scripts/foo_wrapper.py", target="scripts/foo", kind="used_by", evidence="import_or_exec_path"),
+            Edge(source="scripts/foo.py", target="scripts/foo_wrapper", kind="used_by", evidence="import_or_exec_path"),
+        ],
+    )
+    assert not graph.is_component("scripts/foo")
+    assert not graph.is_component("scripts/foo_wrapper")
+
+
+def test_a_skill_whose_only_reader_is_the_script_it_documents_never_promotes_it():
+    """Evasion form 4: a skill whose only reader is the script it
+    documents -- the same mutual-pair shape as form 3, with a skill+script
+    pair instead of two scripts. Nothing in today's resolver makes a skill
+    an edge target, so this is a structural guarantee against a future
+    extension, exercised directly against the rule rather than through
+    build_artifact_graph."""
+    graph = _graph(
+        nodes=[
+            Node(id="scripts/foo", type="script", path="scripts/foo.py"),
+            Node(id="skills/foo-doc", type="skill", path="skills/foo-doc/SKILL.md"),
+        ],
+        edges=[
+            Edge(source="skills/foo-doc/SKILL.md", target="scripts/foo", kind="used_by", evidence="skill_reference"),
+            Edge(source="scripts/foo.py", target="skills/foo-doc", kind="used_by", evidence="import_or_exec_path"),
+        ],
+    )
+    assert not graph.is_component("scripts/foo")
+    assert not graph.is_component("skills/foo-doc")
+
+
+def test_a_mutual_pair_does_not_strand_a_side_with_genuine_outside_use():
+    """The safety valve: a real two-way dependency between two
+    independently-used modules must never be wrongly stranded. bar
+    genuinely uses foo (external, from elsewhere) AND foo happens to also
+    import bar back -- bar's promotion must survive the reciprocal edge to
+    foo, since bar has an anchor outside the pair."""
+    graph = _graph(
+        nodes=[
+            Node(id="scripts/foo", type="script", path="scripts/foo.py"),
+            Node(id="scripts/bar", type="script", path="scripts/bar.py"),
+            Node(id="scripts/consumer", type="script", path="scripts/consumer.py"),
+        ],
+        edges=[
+            # mutual pair between foo and bar
+            Edge(source="scripts/bar.py", target="scripts/foo", kind="used_by", evidence="import_or_exec_path"),
+            Edge(source="scripts/foo.py", target="scripts/bar", kind="used_by", evidence="import_or_exec_path"),
+            # a genuine, independent consumer of bar
+            Edge(source="scripts/consumer.py", target="scripts/bar", kind="used_by", evidence="import_or_exec_path"),
+        ],
+    )
+    assert graph.is_component("scripts/bar")  # promoted via consumer.py, not the pair
+    assert not graph.is_component("scripts/foo")  # foo's only edge is the manufactured pair
+
+
+def test_a_doc_or_systemd_source_can_never_form_a_mutual_pair():
+    """A source that is not itself a graph node (a doc, a systemd unit)
+    cannot reciprocate -- it always promotes, exactly as before this
+    hardening. This is the "no it does not apply where the source is
+    genuinely external" half of the rule."""
+    graph = _graph(
+        nodes=[Node(id="scripts/foo", type="script", path="scripts/foo.py")],
+        edges=[Edge(source="docs/howto.md", target="scripts/foo", kind="used_by", evidence="run_instruction")],
+    )
+    assert graph.is_component("scripts/foo")
+
+
+def test_a_self_invocation_no_arg_branch_produces_no_edge_at_all(tmp_path):
+    """The measured, real-world instance of evasion form 1/2: giving a
+    script a no-argument self-test branch (the shape the ladder's rung 2
+    was read to satisfy, PR #1814's own measurement). Nothing external
+    references the script differently, so no used_by edge is created by
+    ANY resolution path -- confirmed against the actual resolver, not just
+    the structural rule."""
+    repo = _minimal_repo(tmp_path)
+    _write(
+        repo / "scripts" / "check_thing.py",
+        "import sys\n"
+        "\n"
+        "def _run_self_tests():\n"
+        "    assert True\n"
+        "\n"
+        "def main():\n"
+        "    if len(sys.argv) == 1:\n"
+        "        _run_self_tests()\n"
+        "        return 0\n"
+        "    return 1\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+    )
+    _write(
+        repo / "tests" / "test_check_thing.py",
+        "SCRIPT = REPO_ROOT / 'scripts' / 'check_thing.py'\n",
+    )
+
+    graph = build_artifact_graph(repo)
+    assert not graph.is_component("scripts/check_thing")
+    assert not any(e.target == "scripts/check_thing" and e.kind == "used_by" for e in graph.edges)
+
+
+def test_a_wrapper_script_manufactured_via_real_text_still_does_not_promote(tmp_path):
+    """End-to-end through build_artifact_graph (not a hand-built graph):
+    a real wrapper script whose only reference anywhere is its target
+    importing it back, and vice versa -- the resolver must not promote
+    either from source text alone."""
+    repo = _minimal_repo(tmp_path)
+    _write(repo / "scripts" / "foo.py", "import foo_wrapper\n")
+    _write(repo / "scripts" / "foo_wrapper.py", "import foo\n\ndef run():\n    pass\n")
+
+    graph = build_artifact_graph(repo)
+    assert not graph.is_component("scripts/foo")
+    assert not graph.is_component("scripts/foo_wrapper")
 
 
 # ─── tested_by never promotes ────────────────────────────────────────────────
