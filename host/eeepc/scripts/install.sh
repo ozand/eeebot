@@ -283,6 +283,7 @@ enable_timers() {
     eeebot-reflector.timer
     eeebot-strategist.timer
     eeebot-systemd-drift-check.timer
+    eeebot-narrator.timer
   )
   for t in "${timers[@]}"; do
     run systemctl enable "$t"

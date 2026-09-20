@@ -1,0 +1,15 @@
+[Unit]
+Description=Narrate the previous day once per day (#1820)
+
+[Timer]
+# 03:30 host-local, after the nightly jobs the day's ledger depends on
+# (curator 00:00, action index 00:05, capabilities 01:00, drift 02:00) and
+# clear of them. The job narrates yesterday UTC, which is closed at this hour
+# in any timezone, so the exact minute only affects freshness, never whether
+# the day being narrated is finished.
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+Unit=eeebot-narrator.service
+
+[Install]
+WantedBy=timers.target
