@@ -1339,6 +1339,55 @@ class TestSelfDedup:
         assert observed[0]["matched_against"] == f"completed:{demand_id}"
         assert "#1801" in observed[0].get("detail", "")
 
+    def test_a_path_verified_completed_chain_match_rejects(self, tmp_path, monkeypatch):
+        """#1801's own restoration: unlike the case above, this candidate's
+        completion WAS checked by the fold against a path its summary
+        named — demand.completed_demand_ids_path_verified(state_dir)
+        contains it — so it is trusted as an instance-scoped, single-
+        artifact done-fact and rejects for real, the same way the
+        completed-chain check did before chain-log-only (#1807)."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "no priority section, so should_propose is True")
+
+        demand_id = "defect-real"
+        cycle_ledger.append_event(state_dir, {
+            "phase": "proposed", "cycle_id": "cycle-earlier",
+            "task_title": "Fix scripts/validate_skill_name.py exit status handling",
+            "demand_id": demand_id, "serves": f"demand {demand_id}",
+        })
+        _append_outcome(
+            state_dir, "cycle-earlier", "success",
+            files_changed=["scripts/validate_skill_name.py", "tests/test_validate_skill_name.py"],
+        )
+        demand._fold_completed(
+            state_dir,
+            summaries_by_id={demand_id: "validator scripts/validate_skill_name.py fails when run"},
+        )
+        assert demand_id in demand.completed_demand_ids_path_verified(state_dir)
+
+        calls = []
+
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            calls.append(rejection_reason)
+            return {
+                "task_title": "Write scripts/validate_skill_name.py to validate skill name format",
+                "rationale": "Same demand item, different wording.",
+                "target_path": "scripts/validate_skill_name.py",
+                "serves": f"demand {demand_id}",
+            }
+
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        result = llm_proposer.maybe_propose(state_dir, None)
+
+        assert result is None
+        assert len(calls) == 2  # the retry-once contract; both hit the verified match
+
+        rows = llm_proposer._load_ledger_rows(state_dir)
+        rejects = [r for r in rows if r.get("phase") == "proposer_reject"]
+        assert rejects[-1]["reason"] == "self_dedup"
+        assert rejects[-1]["matched_against"] == f"completed:{demand_id}"
+        assert not [r for r in rows if r.get("reason") == "self_dedup_observed"]
+
     def test_retagged_title_is_the_same_repeated_candidate(self, tmp_path, monkeypatch):
         """#1785 AC: a version-tag retag of an already-rejected title is the
         SAME candidate — (V1) -> (V2) must not mint a fresh identity that

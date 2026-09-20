@@ -2581,6 +2581,29 @@ def _is_duplicate_proposal(
         # authoritative chain, not text similarity, decides "already done":
         candidate_id = _candidate_identity(proposal)
         if candidate_id and candidate_id in demand.completed_demand_ids(state_dir):
+            # #1801: reject power returns ONLY for the subset the fold
+            # itself verified against a named path
+            # (:func:`demand.completed_demand_ids_path_verified` --
+            # `entries[id]["path_verified"] is True`, written when the id's
+            # summary named a path AND the retiring cycle was confirmed to
+            # touch it; see the #1764/#1801 comments on
+            # ``demand._fold_completed``). That is exactly "this id names
+            # ONE piece of work, and the completion was checked against it"
+            # -- an instance-scoped fact, not the class-scoped one below.
+            #
+            # Replayed against the 7 historical chain-fires audited when
+            # this was still an unconditional reject (1 real duplicate, 6
+            # not, 14% precision): none carry ``path_verified`` -- the field
+            # did not exist when any of them folded, and append-only means
+            # it never will retroactively. All 7 stay on the observe-only
+            # path below, by construction, not by re-auditing each one.
+            if candidate_id in demand.completed_demand_ids_path_verified(state_dir):
+                return True, (
+                    f"your proposal '{title}' duplicates work already "
+                    f"completed under demand {candidate_id}; propose "
+                    "something from a DIFFERENT area, preferring the "
+                    "numbered Current priority targets"
+                ), f"completed:{candidate_id}"
             # #1801: the chain OBSERVES, it does not terminate -- yet.
             #
             # #1785 replaced a matcher that rejected 339 times with ~271 of
@@ -2603,7 +2626,7 @@ def _is_duplicate_proposal(
             # Since #1785 removed the text matcher, this is now the ONLY and
             # therefore authoritative duplicate signal. A signal that is
             # wrong 6 times in 7 when it fires must not be the last word, so
-            # until #1801 narrows it to ids that name one piece of work it
+            # until an id's own completion is path_verified (above) it
             # records the would-be rejection and lets the proposal through.
             # The rows it leaves are also the replay corpus #1801 needs,
             # which no artifact currently holds.
@@ -2615,9 +2638,9 @@ def _is_duplicate_proposal(
                 matched_against=f"completed:{candidate_id}",
                 detail=(
                     "observed only (#1801): the completed-chain match is "
-                    "class-scoped and was measured at 1-in-7 precision; "
-                    "not rejecting until the id is known to name one piece "
-                    "of work"
+                    "class-scoped (not path_verified) and was measured at "
+                    "1-in-7 precision; not rejecting until the id is known "
+                    "to name one piece of work"
                 ),
                 demand_id=candidate_id,
             )
