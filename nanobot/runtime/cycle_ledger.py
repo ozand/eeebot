@@ -456,6 +456,47 @@ def successful_cycle_ids(state_dir: Path) -> set[str]:
     return ids
 
 
+def read_events_across_rotation(
+    state_dir: Path, *, phases: "frozenset[str] | set[str] | None" = None, max_archives: int = 8,
+) -> list[dict]:
+    """Rows across rotation, OLDEST FIRST: up to *max_archives* newest
+    ``cycles-YYYY-MM-DD.jsonl.gz`` archives, then the active file.
+
+    Unlike :func:`read_events` (same-day only, by design, for same-day
+    checks -- see its own docstring), this is for a caller that needs a
+    window spanning more than one day: a rolling-window report, a
+    multi-day trend. #1178/#1207's "rotation narrows every reader" class
+    is a reader that opens only the live file; the opposite failure
+    (unbounded memory from reading the ledger's entire history) is
+    avoided here by capping at *max_archives*, not by narrowing back to
+    the live file the way :func:`read_events` does on purpose.
+
+    *phases* restricts rows to those ``phase`` values (``None`` = every
+    row). Best-effort — never raises; a corrupt archive, an unreadable
+    line, or a missing directory yields fewer rows, never an exception.
+    """
+    ledger_dir = _ledger_dir(state_dir)
+    rows: list[dict] = []
+
+    def _collect(lines) -> None:
+        for line in lines:
+            with contextlib.suppress(Exception):
+                row = json.loads(line)
+                if isinstance(row, dict) and (phases is None or row.get("phase") in phases):
+                    rows.append(row)
+
+    with contextlib.suppress(Exception):
+        archives = sorted(ledger_dir.glob("cycles-*.jsonl.gz"))
+        for gz_path in archives[-max_archives:]:
+            with contextlib.suppress(Exception):
+                with gzip.open(gz_path, "rt", encoding="utf-8", errors="replace") as fh:
+                    _collect(fh)
+    with contextlib.suppress(Exception):
+        with open(ledger_dir / _LEDGER_FILENAME, encoding="utf-8") as fh:
+            _collect(fh)
+    return rows
+
+
 def record_explore_started(state_dir: Path, cycle_id: str, candidates_count: int, declared_measurement: str) -> None:
     append_event(state_dir, {
         'phase': 'explore_started',

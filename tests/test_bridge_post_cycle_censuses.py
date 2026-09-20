@@ -26,10 +26,12 @@ def test_both_census_writers_are_called_with_the_right_arguments(tmp_path: Path,
     import nanobot.runtime.diary_fitness as diary_fitness
     import nanobot.runtime.lesson_v2 as lesson_v2
     import nanobot.runtime.skill_fitness as skill_fitness
+    import nanobot.runtime.trajectory as trajectory
 
     skill_calls: list[tuple[Path, Path]] = []
     lesson_calls: list[Path] = []
     diary_calls: list[Path] = []
+    trajectory_calls: list[tuple[Path, Path]] = []
 
     def fake_skill_write(state_dir: Path, selfevo_repo: Path) -> dict:
         skill_calls.append((state_dir, selfevo_repo))
@@ -43,9 +45,14 @@ def test_both_census_writers_are_called_with_the_right_arguments(tmp_path: Path,
         diary_calls.append(state_dir)
         return {"ok": True, "written": True, "path": str(state_dir)}
 
+    def fake_trajectory_write(state_dir: Path, selfevo_repo: Path, **kwargs: object) -> dict:
+        trajectory_calls.append((state_dir, selfevo_repo))
+        return {"ok": True, "written": True, "path": str(state_dir)}
+
     monkeypatch.setattr(skill_fitness, "write_zero_read_census", fake_skill_write)
     monkeypatch.setattr(lesson_v2, "write_lesson_citation_census", fake_lesson_write)
     monkeypatch.setattr(diary_fitness, "write_diary_read_rate", fake_diary_write)
+    monkeypatch.setattr(trajectory, "write_trajectory_report", fake_trajectory_write)
 
     state_dir = tmp_path / "state"
     selfevo_repo = tmp_path / "repo"
@@ -54,6 +61,7 @@ def test_both_census_writers_are_called_with_the_right_arguments(tmp_path: Path,
     assert skill_calls == [(state_dir, selfevo_repo)]
     assert lesson_calls == [state_dir]
     assert diary_calls == [state_dir]
+    assert trajectory_calls == [(state_dir, selfevo_repo)]
 
 
 def test_a_broken_skill_writer_does_not_prevent_the_lesson_writer_from_running(
@@ -99,4 +107,14 @@ def test_a_broken_diary_writer_does_not_raise_into_the_cycle(tmp_path: Path, mon
         raise OSError("diary cycle-scan ledger unreadable")
 
     monkeypatch.setattr(diary_fitness, "write_diary_read_rate", broken_diary_write)
+    bridge._write_post_cycle_censuses(tmp_path / "state", tmp_path / "repo")  # must not raise
+
+
+def test_a_broken_trajectory_writer_does_not_raise_into_the_cycle(tmp_path: Path, monkeypatch) -> None:
+    import nanobot.runtime.trajectory as trajectory
+
+    def broken_trajectory_write(state_dir: Path, selfevo_repo: Path, **kwargs: object) -> dict:
+        raise OSError("ledger unreadable")
+
+    monkeypatch.setattr(trajectory, "write_trajectory_report", broken_trajectory_write)
     bridge._write_post_cycle_censuses(tmp_path / "state", tmp_path / "repo")  # must not raise

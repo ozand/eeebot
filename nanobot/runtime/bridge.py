@@ -618,6 +618,13 @@ def _write_post_cycle_censuses(state_dir: 'Path', selfevo_repo: 'Path') -> None:
     - ADR-028 rule 5 (#1812): diary read-rate census
       (``state/demand/diary_read_rate.json``) — same fail-open, every-cycle
       contract as the two above.
+    - ADR-011 rule 3 (#1825): trajectory report
+      (``state/demand/trajectory_report.json``) — task-shape concentration
+      and target in-degree concentration over a rolling window, same
+      fail-open, every-cycle contract. Report only: see
+      ``nanobot.runtime.trajectory``'s module docstring and
+      ``tests/test_trajectory_report_never_gates.py`` for the structural
+      test that keeps this call the ONLY caller.
 
     Extracted to one call site so both writers are exercised together by a
     single, direct unit test (``tests/test_bridge_post_cycle_censuses.py``)
@@ -639,6 +646,11 @@ def _write_post_cycle_censuses(state_dir: 'Path', selfevo_repo: 'Path') -> None:
     try:
         from nanobot.runtime.diary_fitness import write_diary_read_rate
         write_diary_read_rate(state_dir)
+    except Exception:
+        pass
+    try:
+        from nanobot.runtime.trajectory import write_trajectory_report
+        write_trajectory_report(state_dir, selfevo_repo)
     except Exception:
         pass
 

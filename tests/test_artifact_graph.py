@@ -298,6 +298,62 @@ def test_a_doc_or_systemd_source_can_never_form_a_mutual_pair():
     assert graph.is_component("scripts/foo")
 
 
+# ─── in_degree (#1825) -- must agree with is_component's sign at zero ────────
+
+
+def test_in_degree_zero_matches_a_leaf():
+    graph = _graph(nodes=[Node(id="scripts/foo", type="script", path="scripts/foo.py")], edges=[])
+    assert graph.in_degree("scripts/foo") == 0
+    assert not graph.is_component("scripts/foo")
+
+
+def test_in_degree_counts_every_genuine_used_by_edge():
+    graph = _graph(
+        nodes=[
+            Node(id="scripts/foo", type="script", path="scripts/foo.py"),
+            Node(id="scripts/a", type="script", path="scripts/a.py"),
+            Node(id="scripts/b", type="script", path="scripts/b.py"),
+        ],
+        edges=[
+            Edge(source="scripts/a.py", target="scripts/foo", kind="used_by", evidence="import_or_exec_path"),
+            Edge(source="scripts/b.py", target="scripts/foo", kind="used_by", evidence="import_or_exec_path"),
+            # tested_by must not count toward in-degree, only used_by does.
+            Edge(source="tests/test_foo.py", target="scripts/foo", kind="tested_by", evidence="import_or_exec_path"),
+        ],
+    )
+    assert graph.in_degree("scripts/foo") == 2
+
+
+def test_in_degree_excludes_a_self_loop():
+    """A self-loop must read as in-degree ZERO, not one -- a raw edge count
+    here would silently disagree with is_component's leaf verdict for the
+    same node, which is exactly the gamed-rung failure #1825's in-degree
+    number must not reintroduce."""
+    graph = _graph(
+        nodes=[Node(id="scripts/foo", type="script", path="scripts/foo.py")],
+        edges=[Edge(source="scripts/foo.py", target="scripts/foo", kind="used_by", evidence="import_or_exec_path")],
+    )
+    assert graph.in_degree("scripts/foo") == 0
+    assert not graph.is_component("scripts/foo")
+
+
+def test_in_degree_excludes_a_manufactured_mutual_pair_but_keeps_genuine_use():
+    graph = _graph(
+        nodes=[
+            Node(id="scripts/foo", type="script", path="scripts/foo.py"),
+            Node(id="scripts/bar", type="script", path="scripts/bar.py"),
+            Node(id="scripts/consumer", type="script", path="scripts/consumer.py"),
+        ],
+        edges=[
+            Edge(source="scripts/bar.py", target="scripts/foo", kind="used_by", evidence="import_or_exec_path"),
+            Edge(source="scripts/foo.py", target="scripts/bar", kind="used_by", evidence="import_or_exec_path"),
+            Edge(source="scripts/consumer.py", target="scripts/bar", kind="used_by", evidence="import_or_exec_path"),
+        ],
+    )
+    assert graph.in_degree("scripts/foo") == 0  # only the manufactured pair edge
+    assert graph.in_degree("scripts/bar") == 1  # the pair edge is excluded, consumer.py counts
+
+
 def test_a_self_invocation_no_arg_branch_produces_no_edge_at_all(tmp_path):
     """The measured, real-world instance of evasion form 1/2: giving a
     script a no-argument self-test branch (the shape the ladder's rung 2
