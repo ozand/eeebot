@@ -182,6 +182,11 @@ RULE_FINGERPRINTS: dict[str, re.Pattern[str]] = {
     "identity": re.compile(r"You are eeebot"),
     "budget": re.compile(r"tool iterations", re.IGNORECASE),
     "final_json": re.compile(r'"concrete_next_action"'),
+    # #1793 (ADR-026): the step position line and the mortality passage,
+    # both code-generated into the position block -- worded to avoid the
+    # "tool iterations" phrase already fingerprinted to "budget" above.
+    "step_position": re.compile(r"Step \d+ of \d+\."),
+    "mortality": re.compile(r"Nothing survives past a boundary"),
 }
 
 #: The only fingerprint the volatile user message is allowed to carry
