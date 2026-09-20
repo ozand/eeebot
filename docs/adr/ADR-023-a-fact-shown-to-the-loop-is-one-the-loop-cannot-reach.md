@@ -102,6 +102,7 @@ Five clauses follow from it:
 
 # References
 
+- `docs/VERIFICATION_CHAIN.md` (#1826) — this record's rule applied to the judges themselves: which verifier reads loop-writable input, which can block integration, and where the authoritative chain terminates. The rule here was written about figures shown to the loop; the same partition decides whether a verifier's verdict is independent, and the answer differs per verifier.
 - #1766 — the harness-owned state block in the executor prompt (first implementation).
 - #1769 / ADR-024 — the artifact dependency graph, the source of the one unsafe figure.
 - ADR-022 — context ontology; this record extends decision 2 from text to numbers.
