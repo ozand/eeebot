@@ -149,3 +149,15 @@ def test_day_boundary_hour_is_midnight_utc_matching_the_nightly_cluster():
     executor reads."""
     assert day_clock.DAY_BOUNDARY_HOUR_UTC == 0
     assert day_clock.DAY_HOURS == 24
+
+
+def test_day_clock_source_never_mentions_the_diary():
+    """ADR-028 rule 4: the diary never enters the prompt. day_clock.py is
+    the ONLY source day_clock's facts flow from (ledger events + the wall
+    clock) -- pinning that its source never references "diary" at all
+    guards against a future edit quietly wiring diary/ content into the
+    day-position facts this module feeds to ContextBuilder's position
+    block. #1810/#1812 build the diary itself; this module has no reason
+    to ever import or read it."""
+    src = Path(day_clock.__file__).read_text(encoding="utf-8")
+    assert "diary" not in src.lower()
