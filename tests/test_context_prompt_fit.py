@@ -507,6 +507,41 @@ def test_position_block_has_no_verdict_word(tmp_path):
         assert word not in text, f"verdict word {word!r} leaked into the position block"
 
 
+def test_position_block_never_reads_or_mentions_the_diary(tmp_path):
+    """ADR-028 rule 4: the diary never enters the prompt. The position
+    block reads only day_clock's wall-clock/ledger facts, never a
+    diary/YYYY-MM-DD.md file -- proven here two ways: (a) a diary file
+    dropped into the workspace, with content distinctive enough that its
+    leaking into the block would be unmistakable, does not change the
+    rendered position block at all; (b) the assembling source (context.py,
+    subagent.py) never references "diary", so a later edit cannot wire it
+    in quietly -- see test_day_clock.py's matching source pin for
+    day_clock.py itself."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    builder_without_diary = ContextBuilder(workspace)
+    without = builder_without_diary._load_position_block(iteration=1, max_iterations=80, cycle_id="cycle-x")
+
+    diary_dir = workspace / "diary"
+    diary_dir.mkdir()
+    (diary_dir / "2026-09-20.md").write_text(
+        "UNMISTAKABLE_DIARY_MARKER_9f3c: today I intend to refactor the gateway.",
+        encoding="utf-8",
+    )
+    builder_with_diary = ContextBuilder(workspace)
+    with_diary = builder_with_diary._load_position_block(iteration=1, max_iterations=80, cycle_id="cycle-x")
+
+    assert with_diary == without
+    assert "UNMISTAKABLE_DIARY_MARKER_9f3c" not in with_diary
+
+    for src_path in (
+        Path(context_module.__file__),
+        Path(context_module.__file__).resolve().parents[1] / "agent" / "subagent.py",
+    ):
+        text = src_path.read_text(encoding="utf-8")
+        assert "diary" not in text.lower(), f"{src_path} must not reference the diary (ADR-028 rule 4)"
+
+
 def test_position_block_step_line_avoids_the_budget_fingerprint():
     """ADR-022 rule 4: the step line must not restate the phrase already
     fingerprinted to OPERATING.md's own '## Iteration budget' section
