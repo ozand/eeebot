@@ -105,6 +105,25 @@ class ContextBuilder:
     #: (#1802 AC 4), which reports the actual event instead of pre-emptively
     #: rationing against it.
     _RELEASE_POOL_CHARS = 15_500
+    #: #1802: a FLOOR, not a ceiling -- the distinction is the whole point.
+    #:
+    #: Blocks draw from the pool in assembly order, and the order ends
+    #: IDENTITY -> SOUL -> goals -> USER -> OPERATING. So the LAST block
+    #: absorbs everyone else's growth, and the last block is the cycle
+    #: rules. USER.md, two positions ahead of it, is exactly the file the
+    #: operator appends directives to. Left alone, the rules are what gets
+    #: cut first, quietly, by whoever wrote above them.
+    #:
+    #: A ceiling forbids writing and does its damage BEFORE anything is
+    #: written -- that is the defect this issue removes, and re-adding one
+    #: here would reintroduce it in mirror image. A floor forbids nothing.
+    #: It only decides WHO absorbs the pressure: a reserved block keeps its
+    #: minimum, and the overflow lands on the blocks with slack instead.
+    #:
+    #: Reserved for OPERATING.md only, at its pre-pool size. Every other
+    #: file draws freely. If a second file ever needs a floor, that is a
+    #: decision to take then, with the measurement that motivates it.
+    _RELEASE_BLOCK_FLOORS: dict[str, int] = {"OPERATING.md": 5_000}
     #: Loop-owned, gate-bounded workspace files. Sourced from the read policy
     #: (not a literal) so this list and MUTATION_POLICY.read_paths cannot
     #: drift apart — see tests/test_mutation_policy.py.
@@ -346,10 +365,18 @@ Skills with available="false" need dependencies installed first - you can try in
         # 1,473 unused characters.
         pool_left = self._RELEASE_POOL_CHARS
         pool_usage: dict[str, int] = {}
+        #: Characters still owed to floors not yet loaded. Subtracted from
+        #: what an earlier block may take, so a reserved block cannot be
+        #: starved by whoever sits above it in the assembly order.
+        floors_ahead = dict(self._RELEASE_BLOCK_FLOORS)
         for root_kind, filename, cap, required in self.BOOTSTRAP_FILES:
             root = self.release_root if root_kind == "release" else self.workspace
             key = Path(filename).stem.lower()
-            effective_cap = min(cap, pool_left) if root_kind == "release" else cap
+            if root_kind == "release":
+                floors_ahead.pop(filename, None)  # this block's own floor is not withheld from it
+                effective_cap = min(cap, max(0, pool_left - sum(floors_ahead.values())))
+            else:
+                effective_cap = cap
             if root is None:
                 text, meta = f"[missing: {filename}]", {"missing": True, "truncated": False}
             else:

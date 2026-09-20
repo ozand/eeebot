@@ -122,18 +122,23 @@ def test_the_pool_still_bounds_the_total(tmp_path: Path):
     assert len(sections["identity"]) <= ContextBuilder._RELEASE_POOL_CHARS
 
 
-def test_an_early_runaway_starves_later_blocks_and_that_is_reported(tmp_path: Path):
-    """The one risk a per-block ceiling covered. Blocks draw in assembly
-    order, so a bloated IDENTITY.md leaves less for OPERATING.md. The
-    answer is the alarm below, not pre-emptive rationing: the condition is
-    reported rather than prevented by starving everyone equally."""
+def test_an_early_runaway_is_cut_itself_rather_than_starving_the_rules(tmp_path: Path):
+    """The risk a per-block ceiling used to cover, now covered by the floor.
+
+    Blocks draw in assembly order, so before the floor a bloated
+    IDENTITY.md left nothing for OPERATING.md -- the last block, carrying
+    the cycle rules. The floor reverses who pays: the runaway is the one
+    truncated, and it is reported, while the reserved block is served in
+    full."""
+    floor = ContextBuilder._RELEASE_BLOCK_FLOORS["OPERATING.md"]
     sizes = {name: 10 for name in RELEASE_FILES}
     sizes["IDENTITY.md"] = ContextBuilder._RELEASE_POOL_CHARS - 100
-    sizes["OPERATING.md"] = 5_000
+    sizes["OPERATING.md"] = floor
     _, sections, _, truncated = _blocks(tmp_path, sizes)
 
-    assert "OPERATING.md" in truncated
-    assert len(sections["operating"]) <= 100
+    assert "IDENTITY.md" in truncated, truncated
+    assert "OPERATING.md" not in truncated, truncated
+    assert len(sections["operating"]) >= floor
 
 
 # ---------------------------------------------------------------------------
@@ -191,3 +196,62 @@ def test_no_alarm_when_nothing_was_cut(tmp_path: Path):
         _loguru.remove(sink_id)
 
     assert not [r for r in records if "system prompt blocks cut" in r], records
+
+
+# ---------------------------------------------------------------------------
+# the floor: who absorbs the pressure
+# ---------------------------------------------------------------------------
+
+def test_the_cycle_rules_keep_their_floor_when_an_earlier_block_grows(tmp_path: Path):
+    """The mirror of the defect this issue removes.
+
+    Blocks draw in assembly order and the order ENDS with OPERATING.md, so
+    the last block absorbs everyone else's growth -- and the last block is
+    the cycle rules. USER.md sits two positions ahead of it and is exactly
+    the file the operator appends directives to.
+
+    A ceiling would forbid writing and do its damage before anything is
+    written, which is the defect being removed. A floor forbids nothing; it
+    only decides who absorbs the pressure.
+    """
+    floor = ContextBuilder._RELEASE_BLOCK_FLOORS["OPERATING.md"]
+    sizes = {name: 10 for name in RELEASE_FILES}
+    # USER.md tries to eat essentially the whole pool.
+    sizes["USER.md"] = ContextBuilder._RELEASE_POOL_CHARS - 100
+    sizes["OPERATING.md"] = floor
+    _, sections, _, truncated = _blocks(tmp_path, sizes)
+
+    assert "OPERATING.md" not in truncated, truncated
+    assert len(sections["operating"]) >= floor
+    # The pressure landed on the block with slack instead.
+    assert "USER.md" in truncated
+
+
+def test_the_floor_forbids_nothing_when_the_pool_has_room(tmp_path: Path):
+    """A floor is a reservation, not a cap: USER.md may still exceed its own
+    former 4,000 as long as OPERATING.md's reservation survives."""
+    sizes = {name: 10 for name in RELEASE_FILES}
+    sizes["USER.md"] = 6_000  # 2,000 past its old cap
+    sizes["OPERATING.md"] = 4_000
+    _, sections, _, truncated = _blocks(tmp_path, sizes)
+
+    assert not truncated, truncated
+    assert len(sections["user"]) >= 6_000
+
+
+def test_a_reserved_block_may_still_exceed_its_own_floor(tmp_path: Path):
+    """The floor is a minimum, never a maximum -- OPERATING.md past 5,000
+    is the case #1802 exists to allow, and the floor must not re-forbid it."""
+    sizes = {name: 10 for name in RELEASE_FILES}
+    sizes["OPERATING.md"] = 8_000
+    _, sections, _, truncated = _blocks(tmp_path, sizes)
+
+    assert not truncated, truncated
+    assert len(sections["operating"]) >= 8_000
+
+
+def test_only_the_cycle_rules_are_reserved():
+    """Stated as a decision, not a habit: one floor, for the block whose
+    loss is silent and worst. A second is a decision to take when a
+    measurement motivates it."""
+    assert set(ContextBuilder._RELEASE_BLOCK_FLOORS) == {"OPERATING.md"}
