@@ -23,6 +23,11 @@ from typing import Iterable
 _READ_PATHS = ("AGENTS.md",)
 _COMMIT_PATH_PREFIXES = (
     "surfaces/", "scripts/", "memory/", "lessons/", "docs/", "tests/", "skills/",
+    # ADR-028 rule 1 (#1810): the day diary. Append-only via edit_file
+    # against its marker -- write_file is refused there unconditionally by
+    # WriteFileTool itself (nanobot.runtime.day_diary.is_diary_path), a
+    # stronger rule than this prefix alone grants.
+    "diary/",
 )
 _COMMIT_EXACT_PATHS = frozenset({"AGENTS.md"})
 # Release-owned files (ADR-022 ontology). They ship read-only in the release

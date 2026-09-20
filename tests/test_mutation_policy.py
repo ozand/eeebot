@@ -44,7 +44,7 @@ def test_release_owned_files_are_blocked_in_every_mirror() -> None:
 def test_rendered_do_not_modify_names_control_plane_and_release_files() -> None:
     block = MUTATION_POLICY.render_bridge_surface_block()
     assert "Do NOT modify: state/, ops/, goals.md, IDENTITY.md, SOUL.md, USER.md, OPERATING.md, secrets, or systemd units." in block
-    assert "Allowed targets: surfaces/, scripts/, memory/, lessons/, docs/, tests/, skills/, AGENTS.md" in block
+    assert "Allowed targets: surfaces/, scripts/, memory/, lessons/, docs/, tests/, skills/, diary/, AGENTS.md" in block
 
 
 def test_agents_md_scope_bound() -> None:
@@ -331,7 +331,7 @@ def test_malformed_policy_fails_closed_with_diagnostic() -> None:
 
 def test_effective_commit_permission_set() -> None:
     assert MUTATION_POLICY.commit_surfaces == (
-        "surfaces/", "scripts/", "memory/", "lessons/", "docs/", "tests/", "skills/", "AGENTS.md",
+        "surfaces/", "scripts/", "memory/", "lessons/", "docs/", "tests/", "skills/", "diary/", "AGENTS.md",
     )
     assert MUTATION_POLICY.commit_exact_paths == frozenset({"AGENTS.md"})
 
