@@ -615,6 +615,9 @@ def _write_post_cycle_censuses(state_dir: 'Path', selfevo_repo: 'Path') -> None:
       fail-open contract; not gated on whether THIS cycle integrated, since
       the census reads the citation-scan ledger directly, not this cycle's
       own commit.
+    - ADR-028 rule 5 (#1812): diary read-rate census
+      (``state/demand/diary_read_rate.json``) — same fail-open, every-cycle
+      contract as the two above.
 
     Extracted to one call site so both writers are exercised together by a
     single, direct unit test (``tests/test_bridge_post_cycle_censuses.py``)
@@ -631,6 +634,11 @@ def _write_post_cycle_censuses(state_dir: 'Path', selfevo_repo: 'Path') -> None:
     try:
         from nanobot.runtime.lesson_v2 import write_lesson_citation_census
         write_lesson_citation_census(state_dir)
+    except Exception:
+        pass
+    try:
+        from nanobot.runtime.diary_fitness import write_diary_read_rate
+        write_diary_read_rate(state_dir)
     except Exception:
         pass
 
@@ -4120,6 +4128,28 @@ async def _main_impl_body():
                         print(f'skill-fitness: recorded {_sf_count} SKILL.md read(s) for cycle {_cycle_id}')
             except Exception:
                 pass  # skill-fitness write errors are non-blocking
+
+            # ADR-028 rule 5 (#1812): unlike skill-fitness credit above, this is
+            # NOT gated on `_integrated` -- the obligation is to read today's
+            # diary as the first action of the cycle, independent of whether
+            # the cycle's own code change is later accepted. Gating it would
+            # make a rejected cycle indistinguishable from one that skipped
+            # the diary outright. `collect_day_file_reads` (subagent.py) hands
+            # back the raw read list; the diary-specific interpretation and
+            # persistence happens here, bridge-side, deliberately -- ADR-028
+            # rule 4 keeps subagent.py's source free of this module's name.
+            try:
+                from nanobot.runtime.diary_fitness import record_cycle_diary_read
+                _diary_row = record_cycle_diary_read(
+                    STATE_DIR, cycle_id=_cycle_id, reads=mgr.collect_day_file_reads(),
+                )
+                if _diary_row:
+                    print(
+                        f"diary-fitness: cycle {_cycle_id} diary_read="
+                        f"{_diary_row.get('diary_read')} position={_diary_row.get('tool_call_position')}"
+                    )
+            except Exception:
+                pass  # diary-fitness write errors are non-blocking
             _write_post_cycle_censuses(STATE_DIR, _selfevo_repo)
 
             if _integrated and backlog_title and not _is_proposer_request(req):

@@ -78,6 +78,17 @@ class ReadFileTool(_FsTool):
     indistinguishable from a cycle that never asked: both leave
     ``skill_count: 0`` and nothing else.  Exceptions are swallowed on the same
     grounds as above.
+
+    *on_day_file_read* (ADR-028 rule 5 / #1812) is invoked exactly once after
+    a successful read whose resolved path falls under the day-file directory
+    (per :func:`nanobot.runtime.day_diary.is_diary_path`). It receives the
+    file's stem (e.g. ``"2026-09-20"``) as a single positional ``str`` -- the
+    caller decides what "today" means, this tool only reports what was read.
+    Named without the module's own word deliberately: ADR-028 rule 4 forbids
+    that word from appearing anywhere in the prompt-assembly sources
+    (``context.py``, ``subagent.py``), and this is the one callback whose
+    name those files would otherwise have to write out. Exceptions are
+    swallowed on the same grounds as the skill callbacks.
     """
 
     _MAX_CHARS = 128_000
@@ -90,10 +101,12 @@ class ReadFileTool(_FsTool):
         extra_allowed_dirs: list[Path] | None = None,
         on_skill_read: "Callable[[Path], None] | None" = None,
         on_skill_read_failed: "Callable[[str], None] | None" = None,
+        on_day_file_read: "Callable[[str], None] | None" = None,
     ):
         super().__init__(workspace, allowed_dir, extra_allowed_dirs)
         self._on_skill_read = on_skill_read
         self._on_skill_read_failed = on_skill_read_failed
+        self._on_day_file_read = on_day_file_read
 
     @staticmethod
     def _is_skill_request(path: str) -> bool:
@@ -190,6 +203,14 @@ class ReadFileTool(_FsTool):
             if self._on_skill_read is not None and fp.name == "SKILL.md":
                 try:
                     self._on_skill_read(fp.resolve())
+                except Exception:
+                    pass  # instrumentation bug must never break the read
+            # ADR-028 rule 5 (#1812): report a day-file read the same way --
+            # after a successful read only, resolved path only, workspace-scoped.
+            if self._on_day_file_read is not None and self._workspace is not None:
+                try:
+                    if is_diary_path(fp, self._workspace):
+                        self._on_day_file_read(fp.stem)
                 except Exception:
                     pass  # instrumentation bug must never break the read
             return result
