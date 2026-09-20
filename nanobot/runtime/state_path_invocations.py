@@ -56,6 +56,11 @@ WRITER_INVOKERS: dict[str, dict[str, str]] = {
         "kind": "direct",
         "invoker": "nanobot.runtime.bridge:_main_impl_body",
     },
+    "story": {
+        "writer": "scripts.journal_story:_write_story_artifact",
+        "kind": "systemd",
+        "unit": "eeebot-narrator.timer",
+    },
     "strategist": {
         "writer": "nanobot.runtime.strategist:_record_decision",
         "kind": "systemd",

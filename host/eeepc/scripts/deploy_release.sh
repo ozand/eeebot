@@ -495,6 +495,11 @@ sync_timer eeebot-action-index.timer optional
 sync_timer eeebot-reflector.timer optional
 sync_timer eeebot-strategist.timer optional
 sync_timer eeebot-systemd-drift-check.timer optional
+# #1820: the copy near the top of this script installs the unit FILE; only a
+# sync_timer call enables it. A unit sitting in /etc/systemd/system that was
+# never enabled is the same silence as no unit at all -- #1663's drop-in sat
+# inert for fourteen days while its author believed it was running.
+sync_timer eeebot-narrator.timer optional
 
 # Activate the long-running dashboard against the new current release. Unlike
 # the static oneshot bridge, it keeps the old Python process alive across a

@@ -1,0 +1,30 @@
+[Unit]
+Description=Narrate the previous day's ledger into state/story/<day>.json (#1820)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=eeepc-agent
+Group=eeepc-agent
+WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+EnvironmentFile=-/etc/eeepc-agent/preset.env
+EnvironmentFile=/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env
+# The narrator calls one model through the strategist's gateway pattern, so it
+# needs the same credentials file the curator learned to require (#986): without
+# it every run dies inside _default_narrator_llm and the artifact records a
+# gateway failure that looks like a model problem.
+EnvironmentFile=/etc/eeepc-agent/litellm.env
+EnvironmentFile=-/etc/eeepc-agent/instances/self-evolving-subagent-bridge-workspace.env
+Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=+/bin/mkdir -p /var/lib/eeepc-agent/self-evolving-agent/state/story
+ExecStartPre=+/bin/chown eeepc-agent:eeepc-agent /var/lib/eeepc-agent/self-evolving-agent/state/story
+# No --day: the job defaults to yesterday UTC, which is closed whatever hour
+# the timer fires in whatever timezone the host is set to.
+ExecStart=/opt/eeepc-agent/venv/bin/python scripts/journal_story.py --state-root /var/lib/eeepc-agent/self-evolving-agent/state
+TimeoutStartSec=420
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=false
+ProtectSystem=strict
+ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state

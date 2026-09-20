@@ -150,6 +150,8 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
     # standing failure mode (#924/#1219).
     "story": (
         "scripts.journal_story:_write_story_artifact",
+        # #1820: the run journal -- one row per invocation, whatever happened.
+        "scripts.journal_story:_append_run_row",
     ),
     "strategist": (
         "nanobot.runtime.strategist:_write_advisories",

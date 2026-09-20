@@ -12,18 +12,27 @@ client the strategist uses (:func:`nanobot.runtime.strategist._default_llm`
 pattern -- ``LITELLM_BASE_URL``/``LITELLM_API_KEY`` from the unit
 environment, bounded retries, a fixed timeout), and the write of the
 resulting artifact to ``state/story/<day>.json``. This is a job, not a
-service: it is meant to be run once per day by an operator or a future
-systemd unit (increment 3, not built here) -- no publishing, no video, no
-channel figure anywhere in this module (ADR-016 rule 1's call-graph
-constraint: the narrator has no reader for any channel figure, and no
-figure is a parameter here for it to have one).
+service -- no publishing, no video, no channel figure anywhere in this
+module (ADR-016 rule 1's call-graph constraint: the narrator has no reader
+for any channel figure, and no figure is a parameter here for it to have
+one).
+
+Increment 3 (#1820) is the part that makes the job actually happen: a
+``main`` entry point defaulting to yesterday UTC, a run journal written on
+every path so a day nobody narrated cannot be mistaken for a quiet one, and
+an ADR-026 stage record on every artifact. The schedule itself lives beside
+it as ``host/eeepc/systemd/eeebot-narrator.{service,timer}`` -- still no
+rendering and no publishing, so the stage this job reaches is always
+``none``, recorded rather than omitted.
 """
 from __future__ import annotations
 
+import argparse
 import gzip
 import json
 import os
 import re
+import sys
 import tempfile
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -34,6 +43,26 @@ SCHEMA_VERSION = "journal-story-v1"
 JOB_SCHEMA_VERSION = "journal-story-job-v1"
 PRODUCER = "scripts.journal_story"
 DEFAULT_MAX_BEATS = 8
+# ADR-026 decision 3: the day's deliverable is done in three stages, and only
+# the last counts toward the charter's top rung. The narrator produces none of
+# them -- a story artifact is text a renderer has not consumed yet -- so every
+# run this module makes records `reached: "none"`. That is the intended first
+# honest report ("the earliest days end at stage reached: none"), not a defect
+# to route around, and it is recorded rather than omitted so the gap is
+# countable. `published`/`observed` are "unknown", never False and never 0:
+# ADR-026 "an observation is never inferred" and "`unknown` is never rendered
+# as zero or as success". When a render pipeline exists it, not this module,
+# is what moves `rendered` to True.
+STAGES = ("rendered", "published", "observed")
+STAGE_NONE = "none"
+STAGE_UNKNOWN = "unknown"
+# One row per invocation, whatever happened. The artifact alone cannot answer
+# "did the job run?": a day with no beats writes an artifact that looks much
+# like a quiet day, and a day the timer never fired writes nothing at all --
+# the same absence a day with beats and a dead gateway would leave if the
+# write itself failed. The run journal is what makes those distinguishable
+# (#1820 AC 4 and AC 6).
+RUNS_SUBPATH = ("story", "runs.jsonl")
 # Narrator-specific override, falling back to the strategist role's own
 # resolved model (env vars, then its built-in default) -- #1622's own
 # instruction: "model from an env var with the strategist's default". No
@@ -486,8 +515,7 @@ def run_narrator_job(
             "narration": [], "citation_set": {}, "violations": [],
             "note": "no beats recorded for this day; no model call made",
         }
-        no_beats_result["artifact_path"] = str(_write_story_artifact(state_dir, day, no_beats_result))
-        return no_beats_result
+        return _finish(state_dir, day, no_beats_result)
     model = _resolve_narrator_model()
     prompt = build_story_prompt(beats, glossary=glossary)
     messages = [
@@ -512,5 +540,119 @@ def run_narrator_job(
             "model_output": None, "narration": [], "citation_set": {},
             "violations": [f"{exc.__class__.__name__}: {exc}"],
         }
-    result["artifact_path"] = str(_write_story_artifact(state_dir, day, result))
+    return _finish(state_dir, day, result)
+
+
+# ---------------------------------------------------------------------------
+# increment 3: the stage record, the run journal, and the daily entry point
+# ---------------------------------------------------------------------------
+
+def stage_record() -> dict[str, Any]:
+    """What stage the day's deliverable reached, recorded rather than omitted.
+
+    Always ``none`` from here. This module writes a story artifact; ADR-026's
+    `rendered` wants "a sequence exists as an artifact on the host, produced
+    by the loop's own pipeline", and no such pipeline exists. Saying so is the
+    point: a recorded `none` is countable, an absent field is not.
+    """
+    return {
+        "reached": STAGE_NONE,
+        "rendered": False,
+        "published": STAGE_UNKNOWN,
+        "observed": STAGE_UNKNOWN,
+        "note": (
+            "narration only; no render pipeline exists, and no publish or "
+            "observation channel exists to report on (ADR-026 decision 3)"
+        ),
+    }
+
+
+def _append_run_row(state_dir: str | Path, row: dict[str, Any]) -> None:
+    """Append one line to ``state/story/runs.jsonl``. Never raises: a journal
+    failure must not turn a completed run into a crashed one, and the crash
+    would itself be the silence this journal exists to remove."""
+    path = Path(state_dir).joinpath(*RUNS_SUBPATH)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except Exception as exc:  # pragma: no cover - reported, not hidden
+        print(f"narrator: run journal append failed: {exc!r}", file=sys.stderr)
+
+
+def _finish(state_dir: str | Path, day: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Stamp the stage, write the artifact, and journal the run -- on every
+    path, including the one where the artifact write itself fails. Without the
+    last case a failed write is indistinguishable from a timer that never
+    fired, which is exactly the confusion #1820 exists to end."""
+    result["stage"] = stage_record()
+    try:
+        result["artifact_path"] = str(_write_story_artifact(state_dir, day, result))
+    except Exception as exc:
+        result["status"] = "rejected"
+        result["artifact_path"] = None
+        result.setdefault("violations", [])
+        result["violations"] = list(result["violations"]) + [
+            f"artifact_write_failed: {exc.__class__.__name__}: {exc}"
+        ]
+    _append_run_row(
+        state_dir,
+        {
+            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "producer": PRODUCER,
+            "day": day,
+            "status": result.get("status"),
+            "beats": len(result.get("beats") or []),
+            "model": result.get("model"),
+            "journal_status": result.get("journal_status"),
+            "violations": list(result.get("violations") or []),
+            "artifact_path": result.get("artifact_path"),
+            "stage_reached": result["stage"]["reached"],
+        },
+    )
     return result
+
+
+def default_day(now: datetime | None = None) -> str:
+    """Yesterday, UTC. Closed at any local hour the timer could fire: "the day
+    before today UTC" is over by definition the moment today UTC begins, so
+    the unit never narrates an open day even if the host's timezone moves."""
+    moment = now or datetime.now(timezone.utc)
+    return (moment.astimezone(timezone.utc).date() - timedelta(days=1)).isoformat()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="journal_story",
+        description="Narrate one closed day into state/story/<day>.json (#1820).",
+    )
+    parser.add_argument(
+        "--state-root",
+        required=True,
+        help="state directory, e.g. /var/lib/eeepc-agent/self-evolving-agent/state",
+    )
+    parser.add_argument("--day", default=None, help="YYYY-MM-DD; defaults to yesterday UTC")
+    parser.add_argument("--max-beats", type=int, default=DEFAULT_MAX_BEATS)
+    args = parser.parse_args(argv)
+    day = args.day or default_day()
+    result = run_narrator_job(args.state_root, day, max_beats=args.max_beats)
+    print(
+        json.dumps(
+            {
+                "day": day,
+                "status": result.get("status"),
+                "beats": len(result.get("beats") or []),
+                "stage_reached": result["stage"]["reached"],
+                "artifact_path": result.get("artifact_path"),
+                "violations": result.get("violations") or [],
+            },
+            ensure_ascii=False,
+        )
+    )
+    # A rejected narration exits non-zero so systemd records a failed run:
+    # a quiet day and a broken gateway must not look the same to the host.
+    return 0 if result.get("status") == "ok" else 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

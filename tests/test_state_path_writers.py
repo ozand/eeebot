@@ -179,6 +179,7 @@ def test_writer_invocation_check_flags_disabled_strategist_timer_and_keeps_direc
         eeebot-reflector.timer                 enabled enabled
         eeebot-skill-evals.timer                enabled enabled
         eeebot-validator-harness.timer          enabled enabled
+        eeebot-narrator.timer                   enabled enabled
         eeepc-self-evolving-subagent-bridge.timer enabled enabled
     """
 
@@ -214,7 +215,7 @@ def test_writer_invocation_check_accepts_enabled_strategist_timer() -> None:
 def test_writer_invocation_check_covers_only_evidenced_entries() -> None:
     assert set(state_path_invocations.WRITER_INVOKERS) == {
         "action_index", "curator", "heldout", "hypotheses", "ledger",
-        "llm_calls", "reflector", "scorecard", "strategist", "subagents",
+        "llm_calls", "reflector", "scorecard", "story", "strategist", "subagents",
     }
     for segment, spec in state_path_invocations.WRITER_INVOKERS.items():
         assert spec["writer"] in state_paths.STATE_PATH_WRITERS[segment]
