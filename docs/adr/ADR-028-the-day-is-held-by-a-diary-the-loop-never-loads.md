@@ -142,12 +142,19 @@ live. Aliveness is not the criterion; owning the boundary and having a durable
 write path are. Both belong to the knowledge curator.
 
 The boundary is not a thing to choose — it already exists and already has an
-order. `eeebot-knowledge-curator.timer` is `OnCalendar=daily`, which is midnight,
-and it is the job that already consolidates lessons into the bounded knowledge
-base. `eeebot-action-index.timer` follows at `00:05:00`, described in its own
-unit as running *before prompt rotation*, and the cycle ledger rotates at the
-same moment. So the day already closes as a short sequence, and the fold slots
-into it rather than inventing a boundary of its own.
+order. `eeebot-knowledge-curator.timer` is `OnCalendar=daily`, which is local
+midnight, and it is the job that already consolidates lessons into the bounded
+knowledge base. `eeebot-action-index.timer` follows at `00:05:00`, described in
+its own unit as running *before prompt rotation*. So the day already closes as a
+short sequence, and the fold slots into it rather than inventing a boundary of
+its own.
+
+**Corrected again 2026-09-21 (ADR-029).** This rule previously added that the
+cycle ledger rotates "at the same moment" as the action index. It does not: the
+timers are local and the ledger's rotation key was UTC, so the two events were
+three hours apart and only looked simultaneous because both are written `00:05`.
+ADR-029 makes every day-keyed artifact and boundary job host-local, which is
+what makes the ordering below meaningful at all.
 
 The reflector is the wrong owner on both counts. It runs on
 `OnUnitActiveSec=30m`, so it has no notion that a day has ended — it wakes forty
@@ -166,9 +173,11 @@ watermark advances only after staging is durably written, so a failed fold is
 retried rather than lost.
 
 Ordering inside the boundary is part of the rule: if the fold reads any ledger
-fact about the day, it runs **before** rotation at `00:05`, not after. A reader
-that runs after rotation sees an empty file and reports a quiet day — this
-system has produced that exact false reading before.
+fact about the day, it runs **before** that day's rotation, not after — and
+under ADR-029 both are on the same local clock, so "before" is a fact rather
+than a coincidence of timezones. A reader that runs after rotation sees an empty
+file and reports a quiet day; this system has produced that exact false reading
+before.
 
 At the boundary the curator reduces the day file to one line in
 `diary/YYYY-MM.md`, and the month file is one line per day. A top-level index
