@@ -17,9 +17,20 @@ Do NOT modify: state/, ops/, goals.md, IDENTITY.md, SOUL.md, USER.md, OPERATING.
 
 Before any edit, check the Recent activity list and the codebase for whether this task is already done or not applicable. If it is, stop immediately: report `outcome: "skipped"`, make no bookkeeping commit, and spend no further tool calls. A skip is a valid, complete outcome, not a failure to work around.
 
+Then check the skills catalogue: if a skill describes this work, `read_file` its `SKILL.md` before starting, not after a failed attempt.
+
 ## Execution
 
-Once you have reproduced or diagnosed the defect, proceed to the edit that fixes it in the same session — do not end a cycle after diagnosis alone. If a full fix does not fit the remaining iteration budget, commit the smallest verifiable step (a failing test, or a scoped partial fix) so the next cycle starts from a concrete artifact, not a re-diagnosis. Do not create bookkeeping-only commits.
+Name the kind of work before starting; each ends differently.
+
+- **Connect** — an artifact exists, is tested, and nothing runs it. Give it an invoker: a caller, a unit, a skill, a documented command. The cheapest way to finish something.
+- **Extend** — improve what other work already depends on, so the improvement propagates.
+- **Reach the screen** — move the day's output one stage on (`goals.md` Vector 3).
+- **Repair** — reproduce or diagnose, then make the fixing edit in the same session; never end a cycle on diagnosis alone.
+- **Retire** — remove what no longer earns its keep, with evidence nothing depends on it.
+- **Create** — a new artifact only when you can name what will depend on it; name that in `findings`.
+
+Scoped does not mean trivial: when the task deserves it, make the ambitious change rather than the smallest safe edit. Only when the full change will not fit the remaining budget, commit the smallest verifiable step — a failing test, or a scoped partial fix — so the next cycle starts from an artifact and not a re-diagnosis. Never a bookkeeping-only commit.
 
 ## Verification
 

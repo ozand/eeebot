@@ -14,12 +14,28 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from nanobot.agent.context import ContextBuilder
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
 
 RELEASE_ROOT = Path(__file__).resolve().parents[1]
 OPERATING_MD = RELEASE_ROOT / "OPERATING.md"
 
-MAX_CHARS = 5_000
+#: #1802 replaced the five per-block caps (this file's own 5,000 among
+#: them) with one 15,500-char pool shared by the whole release ontology,
+#: plus a floor reserving OPERATING.md's old cap as a MINIMUM, never a
+#: ceiling -- #1803's rewrite is exactly the case that floor exists to
+#: allow (this file past its old 5,000 while the pool has room). A
+#: per-file ceiling test here would now fail on legitimate growth, so
+#: budget checks below are against the pool, not this file alone.
+OPERATING_FLOOR = ContextBuilder._RELEASE_BLOCK_FLOORS["OPERATING.md"]
+RELEASE_POOL_CHARS = ContextBuilder._RELEASE_POOL_CHARS
+RELEASE_FILE_NAMES = ContextBuilder._RELEASE_BLOCK_NAMES
+
+
+def _release_pool_used() -> int:
+    return sum(
+        len((RELEASE_ROOT / name).read_text(encoding="utf-8")) for name in RELEASE_FILE_NAMES
+    )
 
 # ADR-022's assembly order, section 5 (OPERATING.md): the ten headings this
 # file must carry, in this exact order.
@@ -63,7 +79,13 @@ def test_operating_md_exists_non_empty_and_within_budget():
     assert OPERATING_MD.is_file(), "OPERATING.md missing from the release root"
     text = _read()
     assert text.strip(), "OPERATING.md is empty"
-    assert len(text) <= MAX_CHARS, f"OPERATING.md is {len(text)} chars; budget {MAX_CHARS}"
+    assert len(text) >= OPERATING_FLOOR, (
+        f"OPERATING.md is {len(text)} chars, below its {OPERATING_FLOOR}-char floor (#1802)"
+    )
+    used = _release_pool_used()
+    assert used <= RELEASE_POOL_CHARS, (
+        f"release ontology totals {used} chars against the {RELEASE_POOL_CHARS}-char pool"
+    )
 
 
 def test_operating_md_has_the_ten_sections_in_order():
@@ -248,9 +270,15 @@ def test_iteration_budget_section_keeps_all_four_rules():
 def test_operating_md_has_headroom_for_the_soul_migration():
     """#1770 must move two rules out of SOUL.md into this file (+153 chars).
     Measured here so the migration cannot discover mid-PR that it does not
-    fit -- which is exactly what #1783 was filed about."""
-    slack = MAX_CHARS - len(_read())
+    fit -- which is exactly what #1783 was filed about.
+
+    #1802 superseded the per-block cap this test used to check against
+    (`Compress a section rather than raise the cap`): the five per-file
+    caps became one 15,500-char pool shared by the whole release ontology,
+    so headroom is now the pool's own slack across all five files, not
+    this file's individual distance from a ceiling that no longer exists."""
+    slack = RELEASE_POOL_CHARS - _release_pool_used()
     assert slack >= 153, (
-        f"only {slack} chars of headroom; #1770's migration needs 153. "
-        f"Compress a section rather than raise the cap (#1783)."
+        f"only {slack} chars of pool headroom across the release ontology; "
+        f"#1770's migration needs 153."
     )
