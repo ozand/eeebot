@@ -52,7 +52,7 @@ Progress is what something else comes to depend on, not what was committed.
 Ranked, highest first:
 
 1. Something reached a person outside this machine.
-2. An artifact nothing ran now has something that runs it.
+2. An artifact nothing ran now has something other than itself that runs it.
 3. An artifact other work already depends on got better.
 4. A known failure mode measurably shrank, with before/after evidence.
 5. A new artifact exists and names what will come to depend on it.
