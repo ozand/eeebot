@@ -251,6 +251,43 @@ def record_gate_decision(
     )
 
 
+#: ADR-028 rules 2-3 (#1811): the diary's opening-entry write is committed
+#: and pushed on main, before the cycle branch is cut -- there is no gate
+#: verdict for it to survive, by construction. "integrated" is the only
+#: success outcome; every other value is a fail-open no-op (the cycle still
+#: proceeds) and must still be journalled -- a silent no-op path is a
+#: defect, not an acceptable branch (#1811 AC).
+VALID_DIARY_OPEN_OUTCOMES = frozenset({
+    "integrated", "refused", "malformed", "push_failed", "commit_failed",
+})
+
+
+def record_diary_open_entry(
+    state_dir: Path,
+    cycle_id: str,
+    outcome: str,
+    commit_sha: str | None,
+    reason: str,
+) -> None:
+    """Log the outcome of writing this cycle's opening diary entry (#1811).
+
+    ``outcome`` is coerced to ``"commit_failed"`` if unrecognized -- an
+    unknown outcome must not silently read as a success.
+    """
+    if outcome not in VALID_DIARY_OPEN_OUTCOMES:
+        outcome = "commit_failed"
+    append_event(
+        state_dir,
+        {
+            "phase": "diary_open_entry",
+            "cycle_id": cycle_id or "",
+            "outcome": outcome,
+            "commit_sha": commit_sha or None,
+            "reason": reason or None,
+        },
+    )
+
+
 def record_cycle_outcome(
     state_dir: Path,
     cycle_id: str,
