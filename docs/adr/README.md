@@ -43,6 +43,7 @@ Conventions:
 | [ADR-025](ADR-025-an-artifact-is-finished-when-something-depends-on-it.md) | An artifact is finished when something depends on its working — readiness by artifact kind, and how it reaches task selection | accepted |
 | [ADR-026](ADR-026-the-day-is-a-cycle.md) | The day is a cycle — three clocks, a daily deliverable, and deep sleep as a named boundary | accepted |
 | [ADR-027](ADR-027-work-is-ranked-by-rung-gained-per-measured-cost.md) | Work is ranked by rung gained per measured cost, and estimates are audited against outcomes rather than re-scored | accepted |
+| [ADR-028](ADR-028-the-day-is-held-by-a-diary-the-loop-never-loads.md) | The day is held by a diary the loop appends to and never loads — second-tier continuity across the ~90 cycles of a day | accepted |
 
 ## Acceptance
 
