@@ -157,14 +157,21 @@ def test_pool_occupancy_is_recorded_per_file(tmp_path: Path):
     assert used + builder._release_pool_left == ContextBuilder._RELEASE_POOL_CHARS
 
 
-def test_a_truncated_block_raises_an_alarm(tmp_path: Path, caplog):
+def test_a_truncated_block_raises_an_alarm(tmp_path: Path):
     """AC 4: ``truncated`` non-empty is a condition someone is TOLD about.
-    The first block to truncate will be the one carrying the cycle rules."""
-    import logging
+    The first block to truncate will be the one carrying the cycle rules.
 
+    ``logger.enable`` is not decoration. ``nanobot/cli/commands.py`` calls
+    ``logger.disable("nanobot")`` for a chat session without ``--logs``, and
+    loguru's enable/disable state is process-global and sticky: once a CLI
+    test has run in the same process, every later warning from ``nanobot.*``
+    is dropped. This test passed alone and failed in the full suite for
+    exactly that reason. Re-enabling here asserts the alarm rather than the
+    test's position in the run order."""
     from loguru import logger as _loguru
 
     records: list[str] = []
+    _loguru.enable("nanobot")
     sink_id = _loguru.add(lambda m: records.append(str(m)), level="WARNING")
     try:
         sizes = {name: 10 for name in RELEASE_FILES}
@@ -182,10 +189,15 @@ def test_a_truncated_block_raises_an_alarm(tmp_path: Path, caplog):
 
 
 def test_no_alarm_when_nothing_was_cut(tmp_path: Path):
-    """An alarm that fires on the healthy path is one nobody reads."""
+    """An alarm that fires on the healthy path is one nobody reads.
+
+    Same ``logger.enable`` as above, and for a sharper reason: without it
+    this test passes because nothing can log at all, which is agreement by
+    silence rather than evidence."""
     from loguru import logger as _loguru
 
     records: list[str] = []
+    _loguru.enable("nanobot")
     sink_id = _loguru.add(lambda m: records.append(str(m)), level="WARNING")
     try:
         release = _write_release(tmp_path, {name: 50 for name in RELEASE_FILES})
