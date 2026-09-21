@@ -2,7 +2,7 @@
 """Judge daily loop movement vs appearance of work vs stalled (#1855).
 
 Evaluates the preceding 24-hour window from objective harness sidecars
-(state/ledger/cycles.jsonl) and writes state/day_verdict/latest.json
+via state_access and writes state/day_verdict/latest.json
 and state/day_verdict/history.jsonl.
 """
 
