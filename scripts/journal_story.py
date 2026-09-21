@@ -530,10 +530,16 @@ def run_narrator_job(
     day is still an honest one (ADR-016), and it costs nothing to say so.
 
     A rejected narration (:class:`StoryValidationError`) is written too --
-    ``status: "rejected"`` plus the violation -- never silently dropped.
-    There is no retry: at most the one model call this function makes,
-    ever, per invocation. Never raises; a failure at any stage before the
-    artifact is written is itself recorded as a rejected/erred artifact.
+    ``status: "rejected"`` plus the violation -- never silently dropped. This
+    is the content gate doing its job: a completed run with a negative
+    verdict, not a failure of the machine (#1842). Anything that keeps the
+    job from reaching a verdict at all -- a gateway error, a parse failure
+    before validation ran, an unwritable artifact -- is a distinct outcome,
+    ``status: "error"``, so the two questions ("was the narration
+    publishable" and "did the job run") stay answerable from the status
+    field alone. There is no retry: at most the one model call this function
+    makes, ever, per invocation. Never raises; a failure at any stage before
+    the artifact is written is itself recorded as a rejected/error artifact.
     """
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     journal = load_day_journal(state_dir, day)
@@ -572,9 +578,9 @@ def run_narrator_job(
             "model_output": raw,
             "narration": [], "citation_set": {}, "violations": [str(exc)],
         }
-    except Exception as exc:  # gateway/parse failure before validation ran at all
+    except Exception as exc:  # gateway/parse failure before validation ran at all -- the job did not run
         result = {
-            **base, "status": "rejected", "model": model, "prompt": prompt,
+            **base, "status": "error", "model": model, "prompt": prompt,
             "model_output": None, "narration": [], "citation_set": {},
             "violations": [f"{exc.__class__.__name__}: {exc}"],
         }
@@ -627,7 +633,7 @@ def _finish(state_dir: str | Path, day: str, result: dict[str, Any]) -> dict[str
     try:
         result["artifact_path"] = str(_write_story_artifact(state_dir, day, result))
     except Exception as exc:
-        result["status"] = "rejected"
+        result["status"] = "error"  # the job could not do its work -- not a content-gate verdict
         result["artifact_path"] = None
         result.setdefault("violations", [])
         result["violations"] = list(result["violations"]) + [
@@ -687,9 +693,13 @@ def main(argv: list[str] | None = None) -> int:
             ensure_ascii=False,
         )
     )
-    # A rejected narration exits non-zero so systemd records a failed run:
-    # a quiet day and a broken gateway must not look the same to the host.
-    return 0 if result.get("status") == "ok" else 1
+    # Exit code answers "did the job run", not "was the artifact publishable"
+    # (#1842). A validator rejection is a completed run with a negative
+    # verdict -- ordinary, expected, and not a reason for systemd to mark the
+    # unit failed. Only "error" -- the job could not do its work at all --
+    # exits non-zero, so a dead gateway does not read as more of the same
+    # once rejections are routine.
+    return 0 if result.get("status") in ("ok", "rejected") else 1
 
 
 if __name__ == "__main__":  # pragma: no cover
