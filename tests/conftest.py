@@ -11,8 +11,22 @@ in every individual test file.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+import pytest
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Make every test subprocess fail fast instead of prompting for Git input.
+
+    Git integration tests create their repositories under pytest's ``tmp_path``;
+    this inherited environment guard prevents an accidental remote or
+    credential lookup from hanging the suite.
+    """
+    os.environ["GIT_TERMINAL_PROMPT"] = "0"
+
 
 # Ensure the repository root and local tests directory are at the top of sys.path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
