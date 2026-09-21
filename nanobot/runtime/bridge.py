@@ -1898,6 +1898,80 @@ def dump_spawn_prompts(
         pass  # fail-open: never block a spawn
 
 
+#: #1843: paths a per-cycle BOOKKEEPING commit writes to, exclusively.
+#: A commit whose entire changed-file list falls under one of these
+#: prefixes carries no work-content — see
+#: `_recent_commit_is_bookkeeping_only`. `diary/` is the only member
+#: today (`_write_diary_open_entry`, ADR-028 rule 2, one commit every
+#: cycle); a future per-cycle bookkeeping commit under a different path
+#: is covered by adding its prefix here, not by a new special case.
+_BOOKKEEPING_ONLY_PREFIXES: tuple[str, ...] = ('diary/',)
+
+
+def _recent_commit_is_bookkeeping_only(paths: 'list[str]') -> bool:
+    """True iff *paths* (a commit's full changed-file list) is non-empty
+    and every path falls under :data:`_BOOKKEEPING_ONLY_PREFIXES`.
+
+    Path-based, not subject-line text (#1843): the diary's fixed subject
+    (``diary: cycle <id> opening entry (ADR-028)``) is reliable TODAY,
+    written by exactly one function, but a later wording change would
+    silently stop matching a subject-line filter while this one keeps
+    working unchanged — the actual diff is what makes a commit
+    bookkeeping, not what it says about itself. An EMPTY path list
+    (an empty commit, or a merge git shows no diff for) is never
+    bookkeeping by this check — no evidence either way, so it is kept
+    visible rather than guessed away; the pre-existing `merge:`
+    subject-line filter below already excludes merge commits on its own
+    terms.
+    """
+    if not paths:
+        return False
+    return all(
+        p.strip().replace('\\', '/').lstrip('/').startswith(_BOOKKEEPING_ONLY_PREFIXES)
+        for p in paths if p.strip()
+    )
+
+
+def _recent_commits_with_paths(repo_root: 'Path', since: str) -> 'list[tuple[str, str, list[str]]]':
+    """``(short_sha, subject, changed_paths)`` for every commit ``--since``
+    *since*, newest first — the same window `_recent_git_log`
+    (`nanobot.runtime.goal_text_utils`) reads, but with the changed-file
+    list attached so `_recent_commit_is_bookkeeping_only` can classify
+    each one (#1843). A standalone git call, not a change to
+    `_recent_git_log` itself: that function's plain `--oneline` output
+    is also read by the done-detection heuristics in
+    `goal_text_utils.py`, which have no use for path data and must not
+    pay for fetching it.
+
+    ``\\x00`` (never a legal character in a git subject or path) separates
+    commit records so a multi-line changed-file list can be split
+    unambiguously. Best-effort — never raises; a git failure yields ``[]``,
+    the same fail-open contract as `_recent_git_log`.
+    """
+    import subprocess as _sp
+
+    git_cmd = [
+        'git', '-c', f'safe.directory={repo_root}', '-C', str(repo_root),
+        'log', '--pretty=format:%x00%h %s', '--name-only', f'--since={since}',
+    ]
+    try:
+        raw = _sp.check_output(git_cmd, stderr=_sp.DEVNULL, timeout=10).decode(errors='replace')
+    except Exception:
+        return []
+    commits: 'list[tuple[str, str, list[str]]]' = []
+    for block in raw.split('\x00'):
+        if not block.strip():
+            continue
+        block_lines = block.splitlines()
+        header = block_lines[0]
+        sha, _, subject = header.partition(' ')
+        if not sha:
+            continue
+        paths = [ln for ln in block_lines[1:] if ln.strip()]
+        commits.append((sha, subject, paths))
+    return commits
+
+
 def _recent_activity_context(
     state_dir: 'Path | None',
     selfevo_repo_root: 'Path | None',
@@ -1910,8 +1984,8 @@ def _recent_activity_context(
     same thing. Two sources:
 
     1. Recently completed — the last ~8 commit subject lines from
-       `_recent_git_log` (the same #575 done-detection git-log text already
-       used elsewhere in this module).
+       `_recent_commits_with_paths` (the same #575 done-detection git-log
+       window `_recent_git_log` reads, plus per-commit changed-file paths).
     2. Recently rejected/no-commit — a FAILURE PROXY, not a ledger: scans the
        same `state/subagents/results/*.json` directory `_get_previous_attempts`
        reads, for the ~5 most recent entries with a `rollback.reason` set or
@@ -1927,21 +2001,28 @@ def _recent_activity_context(
         lines: list[str] = []
 
         if selfevo_repo_root is not None:
-            from nanobot.runtime.goal_text_utils import _recent_git_log
-            git_log = _recent_git_log(selfevo_repo_root, since="7 days ago")
+            commits = _recent_commits_with_paths(selfevo_repo_root, since="7 days ago")
             # #1727: 4 of 8 subjects on the recorded prompts were
             # `merge: integrate selfevo/cycle-...` — the bridge's own
             # integration commits, not "recent work" a subagent should read
-            # as novelty pressure. `git log --oneline` lines are
-            # `<sha> <subject>`; skip any whose subject starts with `merge:`.
+            # as novelty pressure. Skip any whose subject starts with `merge:`.
+            #
+            # #1843: a per-cycle BOOKKEEPING commit (today: the diary's
+            # opening entry, ADR-028 rule 2 — written every cycle, unlike a
+            # work commit written only on an accepted one) occupied half of
+            # this 8-slot window on a live prompt and grows with the
+            # rejection rate, shrinking the window exactly when the loop is
+            # struggling and needs it most. Skipped by path
+            # (`_recent_commit_is_bookkeeping_only`), not by this specific
+            # subject text, so any future per-cycle bookkeeping commit is
+            # covered by adding its path prefix, not a new special case.
             subjects: list[str] = []
-            for ln in git_log.splitlines():
-                if not ln.strip():
+            for sha, subject, paths in commits:
+                if subject.strip().lower().startswith('merge:'):
                     continue
-                _subject = ln.split(' ', 1)[1] if ' ' in ln else ''
-                if _subject.strip().lower().startswith('merge:'):
+                if _recent_commit_is_bookkeeping_only(paths):
                     continue
-                subjects.append(ln)
+                subjects.append(f'{sha} {subject}')
                 if len(subjects) >= 8:
                     break
             if subjects:
