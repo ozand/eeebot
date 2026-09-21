@@ -325,9 +325,11 @@ def test_compliant_model_is_ok_with_a_citation_map_resolving_real_rows(tmp_path)
 
 
 def test_writer_never_raises_on_a_gateway_failure(tmp_path):
+    """#1842: the job could not run at all, so this is ``error`` -- not
+    ``rejected``, which means the content gate fired on a completed run."""
     _write_ledger(tmp_path, [_ledger_row("2026-09-15T08:00:00Z", "cycle-a", "success")], [])
     result = run_narrator_job(tmp_path, "2026-09-15", llm=_raising_llm)  # must not raise
-    assert result["status"] == "rejected"
+    assert result["status"] == "error"
     assert "RuntimeError" in result["violations"][0]
     assert Path(result["artifact_path"]).is_file()
 

@@ -162,7 +162,8 @@ def test_a_day_nobody_narrated_leaves_nothing_at_all(tmp_path: Path):
 
 def test_a_gateway_failure_is_journalled_not_silent(tmp_path: Path):
     """AC 6. A run that reached the model and failed must not read as a quiet
-    day: same absence of narration, entirely different fact."""
+    day: same absence of narration, entirely different fact. #1842: this is
+    ``error`` (the job could not run), not ``rejected`` (the gate fired)."""
     _ledger(tmp_path, "2026-09-19", 3)
 
     def _dead(messages, model):
@@ -170,10 +171,10 @@ def test_a_gateway_failure_is_journalled_not_silent(tmp_path: Path):
 
     result = run_narrator_job(tmp_path, "2026-09-19", llm=_dead)
 
-    assert result["status"] == "rejected"
+    assert result["status"] == "error"
     rows = _runs(tmp_path)
     assert len(rows) == 1
-    assert rows[0]["status"] == "rejected"
+    assert rows[0]["status"] == "error"
     assert rows[0]["beats"] == 3
     assert any("gateway refused" in violation for violation in rows[0]["violations"])
 
@@ -272,13 +273,138 @@ def test_main_runs_the_job_and_reports_the_day(tmp_path: Path, capsys):
     assert (tmp_path / "story" / "2026-09-19.json").is_file()
 
 
-def test_main_exits_non_zero_when_the_narration_was_rejected(tmp_path: Path, monkeypatch, capsys):
-    """systemd must record a failed run. A quiet day exiting 0 and a dead
-    gateway exiting 0 would make ``systemctl status`` useless as evidence."""
+def test_main_exits_zero_for_an_ok_narration(tmp_path: Path, monkeypatch, capsys):
+    _ledger(tmp_path, "2026-09-19", 1)
+
+    def _compliant(messages, model):
+        beats = json.loads(messages[1]["content"])["beats"]
+        return json.dumps([
+            {"beat_id": b["beat_id"], "text": "task 1 worked", "sign": b["sign"], "terms": []}
+            for b in beats
+        ])
+
+    monkeypatch.setattr("scripts.journal_story._default_narrator_llm", _compliant)
+    monkeypatch.setattr("scripts.journal_story._resolve_narrator_model", lambda: "fake-model")
+    code = main(["--state-root", str(tmp_path), "--day", "2026-09-19"])
+    capsys.readouterr()
+    assert code == 0
+    assert _runs(tmp_path)[0]["status"] == "ok"
+
+
+def test_main_exits_non_zero_only_when_the_job_could_not_run(tmp_path: Path, monkeypatch, capsys):
+    """#1842: a dead gateway is a job failure (``status: "error"``) and must
+    exit non-zero -- ``systemctl status`` is the only evidence a genuine
+    outage leaves, and it must not read as routine once rejections are."""
     _ledger(tmp_path, "2026-09-19", 3)
     monkeypatch.setenv("LITELLM_BASE_URL", "")
     monkeypatch.setenv("LITELLM_API_KEY", "")
     code = main(["--state-root", str(tmp_path), "--day", "2026-09-19"])
     capsys.readouterr()
     assert code == 1
-    assert _runs(tmp_path)[0]["status"] == "rejected"
+    assert _runs(tmp_path)[0]["status"] == "error"
+
+
+def test_main_exits_zero_when_the_content_gate_rejects_a_completed_run(tmp_path: Path, monkeypatch, capsys):
+    """#1842's central claim: a validator rejection is an ordinary, expected
+    verdict -- the machine worked, the gate did its job -- so it must leave
+    the unit ``ActiveState=active`` / ``Result=success``, not ``failed``."""
+    _ledger(tmp_path, "2026-09-19", 3)
+
+    def _untraceable(messages, model):
+        return json.dumps([{"beat_id": "not-a-real-beat", "text": "x", "sign": "worked", "terms": []}])
+
+    monkeypatch.setattr("scripts.journal_story._default_narrator_llm", _untraceable)
+    monkeypatch.setattr("scripts.journal_story._resolve_narrator_model", lambda: "fake-model")
+    code = main(["--state-root", str(tmp_path), "--day", "2026-09-19"])
+    capsys.readouterr()
+    assert code == 0
+    rows = _runs(tmp_path)
+    assert rows[0]["status"] == "rejected"
+    assert rows[0]["violations"]
+
+
+# ---------------------------------------------------------------------------
+# replay of the recorded day (state/story/2026-09-20.json, eeepc host,
+# fetched via SSH 2026-09-21) -- the exact run the issue measured:
+# ExecMainStartTimestamp 03:30 MSK, ExecMainStatus=1, ActiveState=failed,
+# while the model answered in 14.8s, the artifact was written, runs.jsonl
+# got its row, and the validator rejected one beat's wording (#1840). This
+# reproduces that day's real cycle_ids and titles through the actual
+# load_day_journal -> select_beats -> run_narrator_job pipeline, not a
+# fabricated one (#1842's own acceptance: "prove by replaying the recorded
+# day").
+# ---------------------------------------------------------------------------
+
+_RECORDED_2026_09_20_ROWS = [
+    ("cycle-e953d1bce4fc", "success", ""),
+    ("cycle-802327dfcda5", "success", "Add select_test_runner to scripts/verify_and_proof.py to choose runner based on test target"),
+    ("cycle-5b82bdfb77d7", "success", "Add prune_zero_consumer_keys to scripts/format_existence_index_exclusions.py to filter zero-consumer keys"),
+    ("cycle-13dee0060d95", "success", "Add count_consecutive_matching_errors to scripts/check_repeat_failures.py to tally trailing matching error messages"),
+    ("cycle-c9aff50b1457", "partial", "Add extract_incident_id to scripts/search_subagent_archive.py to parse incident IDs from defect strings"),
+    ("cycle-067815bdbb03", "success", "Exclude index.md from lesson schema assertions in test_lessons_integrity.py"),
+    ("cycle-37717160a42e", "success", "Add failure search guidance in AGENTS.md to direct queries to subagent archive instead of ledger"),
+    ("cycle-b500a5fab8fe", "partial", "Add steering rule in AGENTS.md to emit strictly raw JSON without conversational preambles in final turns"),
+]
+
+
+def _write_2026_09_20_ledger(state_dir: Path) -> None:
+    ledger = state_dir / "ledger"
+    ledger.mkdir(parents=True, exist_ok=True)
+    rows = [
+        json.dumps({
+            "phase": "outcome", "cycle_id": cycle_id, "outcome": outcome,
+            "task_title": title, "ts": f"2026-09-20T{index:02d}:00:00Z",
+        })
+        for index, (cycle_id, outcome, title) in enumerate(_RECORDED_2026_09_20_ROWS, start=1)
+    ]
+    (ledger / "cycles.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def test_recorded_2026_09_20_replay_gate_rejection_leaves_unit_successful(tmp_path: Path, monkeypatch, capsys):
+    """Same real day, real cycle_ids and titles; the content gate fires on
+    one beat's wording exactly as it did on the host. The unit must not
+    report this as a failure -- the machine and the gate both worked."""
+    _write_2026_09_20_ledger(tmp_path)
+
+    def _narrator_with_one_contradiction(messages, model):
+        beats = {b["beat_id"]: b for b in json.loads(messages[1]["content"])["beats"]}
+        narration = []
+        for beat_id, beat in beats.items():
+            text = "A routine change landed as expected."
+            if beat["event"].startswith("Add select_test_runner"):
+                text = "Added select_test_runner, though the result feels broken."
+            narration.append({"beat_id": beat_id, "text": text, "sign": beat["sign"], "terms": []})
+        return json.dumps(narration)
+
+    monkeypatch.setattr("scripts.journal_story._default_narrator_llm", _narrator_with_one_contradiction)
+    monkeypatch.setattr("scripts.journal_story._resolve_narrator_model", lambda: "an/gemini-3.8-flash-high")
+
+    code = main(["--state-root", str(tmp_path), "--day", "2026-09-20"])
+    capsys.readouterr()
+
+    assert code == 0
+    rows = _runs(tmp_path)
+    assert rows[0]["status"] == "rejected"
+    assert rows[0]["beats"] == 8
+    assert any("negative wording contradicts worked beat" in violation for violation in rows[0]["violations"])
+
+
+def test_recorded_2026_09_20_replay_gateway_outage_leaves_unit_failed(tmp_path: Path, monkeypatch, capsys):
+    """The same real day and beats, but the model call never returns -- the
+    machine itself is broken this time, and only this case may exit non-zero."""
+    _write_2026_09_20_ledger(tmp_path)
+
+    def _dead_gateway(messages, model):
+        raise RuntimeError("litellm credentials not configured; check the unit EnvironmentFile chain")
+
+    monkeypatch.setattr("scripts.journal_story._default_narrator_llm", _dead_gateway)
+    monkeypatch.setattr("scripts.journal_story._resolve_narrator_model", lambda: "an/gemini-3.8-flash-high")
+
+    code = main(["--state-root", str(tmp_path), "--day", "2026-09-20"])
+    capsys.readouterr()
+
+    assert code == 1
+    rows = _runs(tmp_path)
+    assert rows[0]["status"] == "error"
+    assert rows[0]["beats"] == 8
+    assert any("litellm credentials" in violation for violation in rows[0]["violations"])
