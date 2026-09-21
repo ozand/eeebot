@@ -1,0 +1,12 @@
+[Unit]
+Description=Judge daily loop movement once per day (#1855)
+
+[Timer]
+# 03:00 host-local (MSK). Runs before the narrator (03:30) and well after the
+# nightly curator run (00:00) so the evaluation has the complete closed day.
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+Unit=eeebot-daily-verdict.service
+
+[Install]
+WantedBy=timers.target
