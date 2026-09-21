@@ -37,6 +37,7 @@ def _extract_fn(name: str, extra_setup: str = '') -> object:
                     '_BLOCKED_EXACT_PATHS',
                     '_ALLOWED_PATH_PREFIXES',
                     '_ALLOWED_EXACT_PATHS',
+                    '_FORBIDDEN_DIRS',
                     '_GATE_EXT_ALLOWLIST',
                     '_GATE_BASENAME_ALLOWLIST',
                 )

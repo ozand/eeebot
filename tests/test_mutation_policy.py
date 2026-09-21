@@ -336,6 +336,42 @@ def test_effective_commit_permission_set() -> None:
     assert MUTATION_POLICY.commit_exact_paths == frozenset({"AGENTS.md"})
 
 
+def test_forbidden_path_is_rejected_even_when_nested_in_a_commit_prefix() -> None:
+    policy = MutationPolicy(
+        read_paths=("AGENTS.md",),
+        commit_path_prefixes=("scripts/",),
+        commit_exact_paths=frozenset(),
+        forbidden_dirs=("scripts/private/",),
+    )
+    policy.validate()
+    assert policy.forbidden_path_violations(["scripts/private/data.json"]) == [
+        "forbidden directory blocked from mutation: scripts/private/ (scripts/private/data.json)"
+    ]
+
+
+def test_gate_rejects_forbidden_path_before_allowlist_can_permit_it(monkeypatch) -> None:
+    from nanobot.runtime import gate
+
+    policy = MutationPolicy(
+        read_paths=("AGENTS.md",),
+        commit_path_prefixes=("scripts/",),
+        commit_exact_paths=frozenset(),
+        forbidden_dirs=("scripts/private/",),
+    )
+    monkeypatch.setattr(gate, "MUTATION_POLICY", policy)
+    monkeypatch.setattr(gate, "_ALLOWED_PATH_PREFIXES", policy.commit_path_prefixes)
+    monkeypatch.setattr(gate, "_ALLOWED_EXACT_PATHS", policy.commit_exact_paths)
+    monkeypatch.setattr(gate, "_FORBIDDEN_DIRS", policy.forbidden_dirs)
+
+    assert gate._validate_mutation_surfaces(
+        ["scripts/private/data.json"],
+        allowed_exact_paths=policy.commit_exact_paths,
+        allowed_path_prefixes=policy.commit_path_prefixes,
+    ) == [
+        "forbidden directory blocked from mutation: scripts/private/ (scripts/private/data.json)"
+    ]
+
+
 def test_policy_rejects_release_file_or_forbidden_dir_on_commit_surface() -> None:
     with pytest.raises(MutationPolicyError, match="release-owned goals.md"):
         MutationPolicy(
