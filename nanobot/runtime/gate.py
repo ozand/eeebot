@@ -110,6 +110,7 @@ def _is_blocked_filename(
 # projections for callers/tests that historically imported gate constants.
 _ALLOWED_PATH_PREFIXES = MUTATION_POLICY.commit_path_prefixes
 _ALLOWED_EXACT_PATHS = MUTATION_POLICY.commit_exact_paths
+_FORBIDDEN_DIRS = MUTATION_POLICY.forbidden_dirs
 
 # #863: the gate can only exercise/see-through these file types. Prefix
 # rules bound WHERE the instance may write; this bounds WHAT KIND of file
@@ -156,14 +157,29 @@ def _validate_mutation_surfaces(
         return [diagnostic]
     # Keep explicit arguments for compatibility, but reject any attempt to
     # invoke the gate with a policy different from the authoritative object.
-    if blocked_exact_paths != _BLOCKED_EXACT_PATHS or allowed_exact_paths != MUTATION_POLICY.commit_exact_paths or allowed_path_prefixes != MUTATION_POLICY.commit_path_prefixes:
+    if (
+        blocked_exact_paths != _BLOCKED_EXACT_PATHS
+        or allowed_exact_paths != MUTATION_POLICY.commit_exact_paths
+        or allowed_path_prefixes != MUTATION_POLICY.commit_path_prefixes
+        or _FORBIDDEN_DIRS != MUTATION_POLICY.forbidden_dirs
+    ):
         return ["mutation policy mismatch: gate arguments disagree with authoritative policy"]
     violations: list[str] = []
     for f in changed_files:
-        if MUTATION_POLICY.is_forbidden_path(f):
-            violations.extend(MUTATION_POLICY.forbidden_path_violations([f]))
-            continue
-        lower = f.lower()
+        # Preserve the established surface diagnostic for paths that are not
+        # commit candidates at all. A forbidden-directory denial is an
+        # additional guard for an otherwise permitted surface, not a
+        # replacement for the more fundamental outside-surface reason.
+        allow_exact = f in allowed_exact_paths
+        allow_prefix = any(f.startswith(prefix) for prefix in allowed_path_prefixes)
+        if allow_exact or allow_prefix:
+            normalized = f.replace(chr(92), '/')
+            for directory in _FORBIDDEN_DIRS:
+                if normalized.startswith(directory):
+                    violations.append(
+                        f'forbidden directory blocked from mutation: {directory} ({f})'
+                    )
+                    break
         # #944: explicitly blocked paths (immutable files that must never be
         # mutated, independent of prefix rules).
         fname = f.rsplit('/', 1)[-1] if '/' in f else f
@@ -173,17 +189,15 @@ def _validate_mutation_surfaces(
         # Allowed exact paths (AGENTS.md, ADR-022) bypass the prefix check;
         # the AGENTS.md scope bound is applied on content by
         # _agents_md_scope_violations in the bridge classifier.
-        if f in allowed_exact_paths:
+        if allow_exact:
             continue
         # Blocked filename patterns
         if is_blocked_filename(f):
             violations.append(f'blocked filename pattern in: {f}')
-        else:
-            # Must be in an allowed path prefix
-            if not any(f.startswith(prefix) for prefix in allowed_path_prefixes):
-                violations.append(
-                    f'file outside allowed paths {allowed_path_prefixes}: {f}'
-                )
+        elif not allow_prefix:
+            violations.append(
+                f'file outside allowed paths {allowed_path_prefixes}: {f}'
+            )
     return violations
 
 
@@ -781,17 +795,27 @@ def _classify_mutation_surface(
     diagnostic = policy_mismatch_diagnostic()
     if diagnostic:
         return [], [diagnostic], 'script'
-    if allowed_exact_paths != MUTATION_POLICY.commit_exact_paths or allowed_path_prefixes != MUTATION_POLICY.commit_path_prefixes:
+    if (
+        allowed_exact_paths != MUTATION_POLICY.commit_exact_paths
+        or allowed_path_prefixes != MUTATION_POLICY.commit_path_prefixes
+        or _FORBIDDEN_DIRS != MUTATION_POLICY.forbidden_dirs
+    ):
         return [], ['mutation policy mismatch: gate arguments disagree with authoritative policy'], 'script'
     slice_paths = runtime_slice_paths()
     blocked: 'list[str]' = []
     violations: 'list[str]' = []
     tier = 'script'
     for f in changed_files:
-        lower = f.lower()
-        if MUTATION_POLICY.is_forbidden_path(f):
-            violations.extend(MUTATION_POLICY.forbidden_path_violations([f]))
-            continue
+        allow_exact = f in allowed_exact_paths
+        allow_prefix = any(f.startswith(prefix) for prefix in allowed_path_prefixes)
+        if allow_exact or allow_prefix:
+            normalized = f.replace(chr(92), '/')
+            for directory in _FORBIDDEN_DIRS:
+                if normalized.startswith(directory):
+                    violations.append(
+                        f'forbidden directory blocked from mutation: {directory} ({f})'
+                    )
+                    break
         # #944: explicitly blocked exact paths (immutable files).
         fname = f.rsplit('/', 1)[-1] if '/' in f else f
         if fname in blocked_exact_paths or f in blocked_exact_paths:

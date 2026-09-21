@@ -5067,6 +5067,7 @@ _BLOCKED_EXACT_PATHS = frozenset({
 })
 _ALLOWED_PATH_PREFIXES = ('surfaces/', 'scripts/', 'memory/', 'lessons/', 'docs/', 'tests/', 'skills/', 'diary/')
 _ALLOWED_EXACT_PATHS = frozenset({'AGENTS.md'})
+_FORBIDDEN_DIRS = ('state/', 'ops/')
 _GATE_EXT_ALLOWLIST = frozenset(('.py', '.md', '.json', '.yaml', '.yml', '.toml', '.txt', '.sh', '.service', '.timer', '.conf', '.cron', '.html', '.css', '.ts', '.js', '.example'))
 _GATE_BASENAME_ALLOWLIST = frozenset(('Makefile', 'Dockerfile'))
 _RUNTIME_SLICE_ENV = 'SELFEVO_RUNTIME_SLICE'
@@ -5108,22 +5109,33 @@ def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
     diagnostic = _policy.policy_mismatch_diagnostic(policy)
     if diagnostic:
         return [diagnostic]
-    if _ALLOWED_PATH_PREFIXES != policy.commit_path_prefixes or _ALLOWED_EXACT_PATHS != policy.commit_exact_paths:
+    if (
+        _ALLOWED_PATH_PREFIXES != policy.commit_path_prefixes
+        or _ALLOWED_EXACT_PATHS != policy.commit_exact_paths
+        or _FORBIDDEN_DIRS != policy.forbidden_dirs
+    ):
         return ['mutation policy mismatch: bridge compatibility mirrors disagree with authoritative policy']
     violations: list[str] = []
     for f in changed_files:
-        if policy.is_forbidden_path(f):
-            violations.extend(policy.forbidden_path_violations([f]))
-            continue
+        allow_exact = f in policy.commit_exact_paths
+        allow_prefix = any(f.startswith(prefix) for prefix in policy.commit_path_prefixes)
+        if allow_exact or allow_prefix:
+            normalized = f.replace(chr(92), '/')
+            for directory in _FORBIDDEN_DIRS:
+                if normalized.startswith(directory):
+                    violations.append(
+                        f'forbidden directory blocked from mutation: {directory} ({f})'
+                    )
+                    break
         fname = f.rsplit('/', 1)[-1] if '/' in f else f
         if fname in _BLOCKED_EXACT_PATHS or f in _BLOCKED_EXACT_PATHS:
             violations.append(f'immutable file blocked from mutation: {f}')
             continue
-        if f in _ALLOWED_EXACT_PATHS:
+        if allow_exact:
             continue
         if _is_blocked_filename(f):
             violations.append(f'blocked filename pattern in: {f}')
-        elif not any(f.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
+        elif not allow_prefix:
             violations.append(f'file outside allowed paths {_ALLOWED_PATH_PREFIXES}: {f}')
     return violations
 
