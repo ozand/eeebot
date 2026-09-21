@@ -512,6 +512,7 @@ sync_timer eeebot-systemd-drift-check.timer optional
 # sync_timer call enables it. A unit sitting in /etc/systemd/system that was
 # never enabled is the same silence as no unit at all -- #1663's drop-in sat
 # inert for fourteen days while its author believed it was running.
+sync_timer eeebot-daily-verdict.timer optional
 sync_timer eeebot-narrator.timer optional
 
 # Activate the long-running dashboard against the new current release. Unlike

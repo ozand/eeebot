@@ -1,0 +1,33 @@
+[Unit]
+Description=Judge daily loop movement vs appearance of work vs stalled (#1855)
+Documentation=https://github.com/ozand/eeebot/issues/1855
+After=network.target
+
+[Service]
+Type=oneshot
+User=eeepc-agent
+Group=eeepc-agent
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/eeepc-agent/litellm.env
+EnvironmentFile=-/etc/eeepc-agent/preset.env
+WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+ExecStart=/opt/eeepc-agent/venv/bin/python -m scripts.judge_daily_movement --state-dir /var/lib/eeepc-agent/self-evolving-agent/state
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=180
+
+# Hardening
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state /var/log/eeepc-agent
+PrivateTmp=true
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

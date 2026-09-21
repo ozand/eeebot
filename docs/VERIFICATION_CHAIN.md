@@ -47,6 +47,7 @@ Two consequences worth stating before the table, because both are easy to miss:
 | `skill_evals` | `nanobot/runtime/skill_eval_harness.py` | `eeebot-skill-evals.timer` | held-out evaluation of skills | `skills/` | **yes** | no |
 | `promotion_verifier` | `host/eeepc/systemd/eeepc-promotion-verifier.service` | `eeepc-promotion-verifier.timer` | ownership and mode of the promoted tree on the host | the host filesystem | no | no — it verifies the host, not a cycle |
 | `systemd_drift_check` | `host/eeepc/systemd/eeebot-systemd-drift-check.service` | `eeebot-systemd-drift-check.timer` | that the units on the host match the units in the release | the host filesystem and the release tree | no | no |
+| `daily_verdict` | `host/eeepc/systemd/eeebot-daily-verdict.service` | `eeebot-daily-verdict.timer` | judges daily loop movement vs appearance vs stalled | the cycle ledger under `state/` | no | no |
 | `local_ci` | `host/eeepc/systemd/eeebot-local-ci.service` | `eeebot-local-ci.timer` | the suite, on the host, on a schedule | `tests/` | **yes** | no |
 
 Units deliberately **not** verifiers, listed so their absence above is a

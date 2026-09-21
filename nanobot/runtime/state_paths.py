@@ -148,6 +148,11 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
     "state": (
         "nanobot.runtime.reflector:_append_journal",
     ),
+    # #1855: daily movement verdict (movement vs appearance vs stalled)
+    # evaluated at 03:00 local time before the narrator runs at 03:30.
+    "day_verdict": (
+        "scripts.judge_daily_movement:_write_verdict",
+    ),
     # #1622 increment 2: one artifact per UTC day, written by the narrator
     # job (no systemd unit yet -- increment 3, operator-invoked today).
     # No reader exists yet either (the channel/publishing side is future

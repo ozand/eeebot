@@ -47,6 +47,7 @@ VERIFIER_INPUTS: dict[str, str | None] = {
     "skill_evals": "skills/",
     "promotion_verifier": None,
     "systemd_drift_check": None,
+    "daily_verdict": None,
     "local_ci": "tests/",
 }
 
