@@ -75,9 +75,36 @@ def test_parse_history_returns_list():
 
 
 def test_parse_history_extracts_dates():
+    """#1828: compare against RECENT_DATE -- the same constant SAMPLE_HISTORY
+    was built from at import time -- never a freshly recomputed
+    date.today(). A full-suite run that crosses midnight between module
+    import and this assertion must not turn a correct result into a
+    failure (see test_parse_history_dates_are_stable_across_a_midnight_crossing
+    below for the regression proof)."""
     entries = _parse_history_entries(SAMPLE_HISTORY)
-    today = datetime.date.today()
-    recent = [e for e in entries if e["date"] == today]
+    recent = [e for e in entries if e["date"].isoformat() == RECENT_DATE]
+    assert len(recent) == 2
+
+
+def test_parse_history_dates_are_stable_across_a_midnight_crossing(monkeypatch):
+    """#1828 regression proof: advance the wall clock a full day past
+    RECENT_DATE (the exact midnight-crossing shape the issue describes --
+    a fixture stamped yesterday compared against today's clock) and assert
+    the outcome is unchanged. If a future edit reintroduces
+    ``datetime.date.today()`` into this assertion, this test catches it:
+    the recomputed "today" would no longer match any parsed entry and the
+    count would drop to 0."""
+    tomorrow = datetime.date.fromisoformat(RECENT_DATE) + datetime.timedelta(days=1)
+
+    class _AdvancedDate(datetime.date):
+        @classmethod
+        def today(cls):
+            return tomorrow
+
+    monkeypatch.setattr(datetime, "date", _AdvancedDate)
+
+    entries = _parse_history_entries(SAMPLE_HISTORY)
+    recent = [e for e in entries if e["date"].isoformat() == RECENT_DATE]
     assert len(recent) == 2
 
 
