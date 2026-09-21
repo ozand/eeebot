@@ -168,6 +168,23 @@ Its properties are each load-bearing:
 Its output is written where the agent itself will read it: the day diary
 (ADR-028), not a harness-side backlog.
 
+**The session is also where "look before you build" lives.** Always put the
+obligations to consult what already exists — skills, memory, the earlier
+record — in this session's fixed prompt, and state them unconditionally.
+
+Never leave them as a conditional in the execution turn. `OPERATING.md`
+currently says *"if a skill describes this work, `read_file` its `SKILL.md`"*,
+which lets a cycle rule on applicability without opening anything; the catalogue
+costs 4,048 resident characters and is read in 1 cycle of 24, while the diary's
+unconditional *"read today's diary as the first action of the cycle"* is read in
+84%. A conditional that the reader evaluates before looking is not an
+instruction to look.
+
+Discovery is a **stage**, not a judgement about whether this particular task
+needs one. The session's prompt never varies, so the obligation cannot be
+reasoned away, and its 20 ticks are separate from the execution box, so looking
+costs the work nothing (#1857).
+
 The analysis half and the planning half are the same two letters ADR-030 names:
 the insight of the increment that just ended, and the hypothesis of the one
 about to start. **HADI closes inside the agent's own recurring session**, with
