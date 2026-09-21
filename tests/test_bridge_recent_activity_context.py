@@ -6,10 +6,66 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
-from nanobot.runtime.bridge import _recent_activity_context, build_task
+from nanobot.runtime.bridge import (
+    _recent_activity_context,
+    _recent_commit_is_bookkeeping_only,
+    _recent_commits_with_paths,
+    build_task,
+)
 from tests.test_goal_backlog_routing import _make_git_repo_with_commit
+
+
+# ---------------------------------------------------------------------------
+# #1843: a diary bookkeeping commit (written every cycle) must not occupy a
+# slot in the "Recently completed" window meant for WORK (written only on an
+# accepted cycle) -- helpers build a repo with both kinds, interleaved.
+# ---------------------------------------------------------------------------
+
+
+def _init_bare_repo(tmp_path: Path, name: str = "repo") -> Path:
+    repo = tmp_path / name
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    return repo
+
+
+def _commit_work(repo: Path, i: int, prefix: str = "feat") -> None:
+    (repo / "scripts").mkdir(exist_ok=True)
+    (repo / "scripts" / f"work_{i}.py").write_text(f"# work {i}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", f"{prefix}: implement work item {i}"], cwd=repo, check=True)
+
+
+def _commit_diary(repo: Path, cycle_id: str) -> None:
+    """Mirrors ADR-028 rule 1/2's real shape: one file per day, appended to,
+    one commit per cycle, fixed subject -- but the fixture asserts on PATH,
+    not this exact subject text (see _recent_commit_is_bookkeeping_only)."""
+    diary_dir = repo / "diary"
+    diary_dir.mkdir(exist_ok=True)
+    path = diary_dir / "2026-09-21.md"
+    existing = path.read_text(encoding="utf-8") if path.is_file() else "# Diary\n"
+    path.write_text(existing + f"entry for {cycle_id}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", f"diary: cycle {cycle_id} opening entry (ADR-028)"],
+        cwd=repo, check=True,
+    )
+
+
+def _commit_mixed(repo: Path, i: int) -> None:
+    """A commit touching BOTH diary/ and a work path -- must NOT be treated
+    as bookkeeping-only (it carries real content too)."""
+    (repo / "scripts").mkdir(exist_ok=True)
+    (repo / "diary").mkdir(exist_ok=True)
+    (repo / "scripts" / f"mixed_{i}.py").write_text(f"# mixed {i}\n", encoding="utf-8")
+    (repo / "diary" / "2026-09-21.md").write_text(f"mixed entry {i}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", f"feat: mixed commit {i}"], cwd=repo, check=True)
 
 
 def test_recent_activity_includes_recent_commits(tmp_path: Path):
@@ -88,6 +144,85 @@ def test_1727_recent_activity_skips_merge_commits_keeps_eight(tmp_path: Path):
     assert "merge:" not in ctx
     feature_lines = [ln for ln in ctx.splitlines() if ln.startswith("- ") and "implement feature" in ln]
     assert len(feature_lines) == 6
+
+
+# ---------------------------------------------------------------------------
+# #1843 -- diary bookkeeping commits must not occupy a slot in the window
+# ---------------------------------------------------------------------------
+
+
+def test_recent_commit_is_bookkeeping_only_classifies_by_path():
+    assert _recent_commit_is_bookkeeping_only(["diary/2026-09-21.md"]) is True
+    assert _recent_commit_is_bookkeeping_only(["diary/2026-09-21.md", "diary/notes.md"]) is True
+    assert _recent_commit_is_bookkeeping_only(["scripts/foo.py"]) is False
+    # A commit touching diary/ AND something else carries real content too --
+    # never pure bookkeeping just because part of its diff is under diary/.
+    assert _recent_commit_is_bookkeeping_only(["diary/2026-09-21.md", "scripts/foo.py"]) is False
+    # No evidence either way -- kept visible, never guessed away.
+    assert _recent_commit_is_bookkeeping_only([]) is False
+
+
+def test_recent_commits_with_paths_parses_sha_subject_and_changed_files(tmp_path: Path):
+    repo = _init_bare_repo(tmp_path)
+    _commit_work(repo, 0)
+    _commit_diary(repo, "cycle-abc")
+
+    commits = _recent_commits_with_paths(repo, since="7 days ago")
+    assert len(commits) == 2
+    # Newest first.
+    sha, subject, paths = commits[0]
+    assert subject == "diary: cycle cycle-abc opening entry (ADR-028)"
+    assert paths == ["diary/2026-09-21.md"]
+    assert len(sha) >= 7  # abbreviated sha, not empty/truncated to nothing
+
+    _sha2, subject2, paths2 = commits[1]
+    assert subject2 == "feat: implement work item 0"
+    assert paths2 == ["scripts/work_0.py"]
+
+
+def test_recent_activity_excludes_diary_bookkeeping_commits(tmp_path: Path):
+    """The exact live shape #1843 measured: diary commits interleaved with
+    work commits must contribute zero lines to the rendered window, and
+    must never be mistaken for the CURRENT cycle's own opening commit
+    telling itself not to repeat."""
+    repo = _init_bare_repo(tmp_path)
+    for i in range(3):
+        _commit_diary(repo, f"cycle-{i}a")
+        _commit_work(repo, i)
+        _commit_diary(repo, f"cycle-{i}b")
+
+    ctx = _recent_activity_context(state_dir=None, selfevo_repo_root=repo)
+
+    assert "diary:" not in ctx
+    work_lines = [ln for ln in ctx.splitlines() if ln.startswith("- ") and "implement work item" in ln]
+    assert len(work_lines) == 3
+
+
+def test_recent_activity_window_of_n_work_commits_stays_n_for_any_diary_count(tmp_path: Path):
+    """AC: the window of N work commits stays N regardless of how many
+    diary commits are interleaved -- not merely "diary lines don't
+    appear" but "real work lines are never pushed out by diary volume"."""
+    for diary_per_work in (1, 5, 20):
+        repo = _init_bare_repo(tmp_path, name=f"repo-{diary_per_work}")
+        work_count = 3
+        for i in range(work_count):
+            for j in range(diary_per_work):
+                _commit_diary(repo, f"cycle-{i}-{j}")
+            _commit_work(repo, i)
+
+        ctx = _recent_activity_context(state_dir=None, selfevo_repo_root=repo)
+        work_lines = [ln for ln in ctx.splitlines() if ln.startswith("- ") and "implement work item" in ln]
+        assert len(work_lines) == work_count, (
+            f"diary_per_work={diary_per_work}: expected {work_count} work lines, got {len(work_lines)}"
+        )
+
+
+def test_recent_activity_keeps_a_commit_that_touches_diary_and_work_together(tmp_path: Path):
+    repo = _init_bare_repo(tmp_path)
+    _commit_mixed(repo, 0)
+
+    ctx = _recent_activity_context(state_dir=None, selfevo_repo_root=repo)
+    assert "mixed commit 0" in ctx
 
 
 def test_recent_activity_fail_open(tmp_path: Path):
