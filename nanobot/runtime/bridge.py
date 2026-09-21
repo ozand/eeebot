@@ -5112,6 +5112,9 @@ def _validate_mutation_surfaces(changed_files: 'list[str]') -> 'list[str]':
         return ['mutation policy mismatch: bridge compatibility mirrors disagree with authoritative policy']
     violations: list[str] = []
     for f in changed_files:
+        if policy.is_forbidden_path(f):
+            violations.extend(policy.forbidden_path_violations([f]))
+            continue
         fname = f.rsplit('/', 1)[-1] if '/' in f else f
         if fname in _BLOCKED_EXACT_PATHS or f in _BLOCKED_EXACT_PATHS:
             violations.append(f'immutable file blocked from mutation: {f}')

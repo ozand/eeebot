@@ -160,6 +160,9 @@ def _validate_mutation_surfaces(
         return ["mutation policy mismatch: gate arguments disagree with authoritative policy"]
     violations: list[str] = []
     for f in changed_files:
+        if MUTATION_POLICY.is_forbidden_path(f):
+            violations.extend(MUTATION_POLICY.forbidden_path_violations([f]))
+            continue
         lower = f.lower()
         # #944: explicitly blocked paths (immutable files that must never be
         # mutated, independent of prefix rules).
@@ -786,6 +789,9 @@ def _classify_mutation_surface(
     tier = 'script'
     for f in changed_files:
         lower = f.lower()
+        if MUTATION_POLICY.is_forbidden_path(f):
+            violations.extend(MUTATION_POLICY.forbidden_path_violations([f]))
+            continue
         # #944: explicitly blocked exact paths (immutable files).
         fname = f.rsplit('/', 1)[-1] if '/' in f else f
         if fname in blocked_exact_paths or f in blocked_exact_paths:

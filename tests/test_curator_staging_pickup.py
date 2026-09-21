@@ -58,6 +58,31 @@ class TestPickupStagedPromotions:
         n = _pickup_staged_promotions(repo, state)
         assert n == 0
 
+    def test_pickup_staged_state_is_outside_loop_commit_path_and_still_commits(self, tmp_path):
+        """Curator staging stays outside the executor path and pickup remains allowed."""
+        from nanobot.runtime.bridge import _pickup_staged_promotions
+        from nanobot.runtime.mutation_policy import MUTATION_POLICY
+
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+        (repo / "memory").mkdir(parents=True)
+        (repo / "memory" / "index.md").write_text("# Index\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "memory/index.md"], capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-m", "add index"], capture_output=True)
+        state = tmp_path / "state"
+        _write_manifest(state, [{
+            "path": "memory/facts/staged.md",
+            "action": "create",
+            "payload_file": "memory__facts__staged.md",
+            "index_line": "- [Staged](memory/facts/staged.md)",
+            "index_rel": "memory/index.md",
+        }])
+        staged_path = "state/curator/staged/manifest.json"
+        assert MUTATION_POLICY.is_forbidden_path(staged_path)
+        assert not any(staged_path.startswith(prefix) for prefix in MUTATION_POLICY.commit_path_prefixes)
+        assert _pickup_staged_promotions(repo, state) == 1
+        assert (repo / "memory/facts/staged.md").exists()
+
     def test_pickup_commits_staged_facts_on_main(self, tmp_path):
         """#1001: pickup copies staged fact into repo and creates a commit on main."""
         from nanobot.runtime.bridge import _pickup_staged_promotions

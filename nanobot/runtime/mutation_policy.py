@@ -119,6 +119,30 @@ class MutationPolicy:
         ):
             raise MutationPolicyError("append_only_no_shrink_files must be a tuple of strings")
 
+    def is_forbidden_path(self, path: str) -> bool:
+        """Return whether *path* is beneath a declared forbidden directory."""
+        normalized = path.replace("\\", "/")
+        return any(normalized.startswith(directory) for directory in self.forbidden_dirs)
+
+    def forbidden_path_violations(self, paths: Iterable[str]) -> list[str]:
+        """Return violations for paths beneath any forbidden directory.
+
+        This check is intentionally independent of the commit allow-list: a
+        forbidden directory must remain forbidden even if a future commit
+        surface is nested beneath it.
+        """
+        self.validate()
+        violations: list[str] = []
+        for path in paths:
+            normalized = path.replace("\\", "/")
+            for directory in self.forbidden_dirs:
+                if normalized.startswith(directory):
+                    violations.append(
+                        f"forbidden directory blocked from mutation: {directory} ({path})"
+                    )
+                    break
+        return violations
+
     @property
     def commit_surfaces(self) -> tuple[str, ...]:
         self.validate()
