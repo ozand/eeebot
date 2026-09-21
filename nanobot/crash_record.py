@@ -66,6 +66,18 @@ RUN_RETENTION_DAYS = 90
 # that counter exists to detect the LOOP crash-looping (#1197's own 9h20m
 # incident), not the supplier's uptime.
 SUPPLIER_PAUSED_EXIT_CODE = 5
+# Issue #1835: Signals that represent external shutdown / interruption rather
+# than an autonomous loop failure. When systemd stops or restarts the bridge unit
+# (e.g. during deploy_release.sh flip), it issues SIGTERM optionally followed
+# by SIGKILL. In systemd / Python, these present as signal names or status 143/130.
+INTERRUPTED_EXIT_STATUSES = frozenset({
+    "TERM",
+    "SIGTERM",
+    "INT",
+    "SIGINT",
+    143,  # 128 + 15 (SIGTERM)
+    130,  # 128 + 2 (SIGINT)
+})
 _armed = False
 _run_metadata: dict[str, Any] = {}
 
@@ -283,8 +295,8 @@ def record_exit(
     ``outcome`` is ``"success"`` or ``"failure"``. Raises on a write failure
     after printing what could not be written — never a silent fallback.
     """
-    if outcome not in ("success", "failure"):
-        raise ValueError(f"outcome must be success|failure, got {outcome!r}")
+    if outcome not in ("success", "failure", "interrupted"):
+        raise ValueError(f"outcome must be success|failure|interrupted, got {outcome!r}")
     root = Path(root)
     records_path, streak_path = root / RECORDS_REL, root / STREAK_REL
     stamp = _now_iso(now)
@@ -312,7 +324,12 @@ def record_exit(
         streak.setdefault("schema_version", STREAK_SCHEMA)
         streak["total_records"] = int(streak.get("total_records") or 0) + 1
         if not merged:
-            if outcome == "failure":
+            if outcome == "interrupted":
+                streak["last_interrupted_ts"] = stamp
+                streak["last_exit_status"] = exit_status
+                streak["last_error"] = error
+                streak["last_where"] = where
+            elif outcome == "failure":
                 streak["consecutive_failures"] = int(streak.get("consecutive_failures") or 0) + 1
                 streak["total_failures"] = int(streak.get("total_failures") or 0) + 1
                 if streak["consecutive_failures"] == 1:
@@ -395,7 +412,12 @@ def main(argv: list[str] | None = None) -> int:
     if status == SUPPLIER_PAUSED_EXIT_CODE:
         print(json.dumps({"outcome": "skipped_supplier_paused", "consecutive_failures": None}))
         return 0
-    outcome = "success" if args.service_result == "success" else "failure"
+    # Issue #1835: SIGTERM / SIGINT from deploy restart or operator shutdown
+    # is an external interruption, not an autonomous loop failure.
+    if status in INTERRUPTED_EXIT_STATUSES or str(args.exit_status) in INTERRUPTED_EXIT_STATUSES:
+        outcome = "interrupted"
+    else:
+        outcome = "success" if args.service_result == "success" else "failure"
     try:
         streak = record_exit(root, outcome=outcome, exit_status=status, source=args.source,
                              service_result=args.service_result, exit_code=args.exit_code, error=args.error)

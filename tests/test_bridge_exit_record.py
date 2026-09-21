@@ -330,3 +330,42 @@ def test_systemd_exit_recording_with_run_marker(tmp_path):
     assert len(runs_data) == 1
     assert runs_data[0]["source"] == "systemd"
     assert runs_data[0]["classification"] == "completion"
+
+
+def test_record_exit_interrupted_sets_outcome_and_preserves_consecutive_failures(tmp_path):
+    """Issue #1835: SIGTERM / SIGINT exit status records outcome='interrupted' and does not increment consecutive_failures."""
+    from nanobot import crash_record
+
+    streak = crash_record.record_exit(
+        tmp_path,
+        outcome="interrupted",
+        source="systemd",
+        exit_code="exited",
+        exit_status="TERM",
+        service_result="success",
+        now=NOW,
+    )
+    assert streak.get("consecutive_failures") in (0, None)
+    assert streak["last_exit_status"] == "TERM"
+    assert streak["last_outcome"] == "interrupted"
+    assert streak.get("total_failures", 0) == 0
+    assert "last_interrupted_ts" in streak
+    assert "last_failure_ts" not in streak
+
+
+def test_main_cli_maps_sigterm_to_interrupted(tmp_path, monkeypatch):
+    """Issue #1835: ExecStopPost CLI converts exit-status TERM / 143 to outcome='interrupted'."""
+    from nanobot import crash_record
+
+    monkeypatch.setenv("STATE_DIR", str(tmp_path))
+    argv = [
+        "--source", "systemd",
+        "--exit-code", "exited",
+        "--exit-status", "TERM",
+        "--service-result", "success",
+    ]
+    rc = crash_record.main(argv)
+    assert rc == 0
+    streak = json.loads((tmp_path / "bridge" / "exit_streak.json").read_text())
+    assert streak["last_outcome"] == "interrupted"
+    assert streak.get("consecutive_failures") in (0, None)

@@ -197,6 +197,16 @@ def test_gate_other_streak_failure_still_rolls_back(repo, mock_bin):
     assert "rolling back" in combined and "exit recorder shows a failure" in combined, combined
 
 
+def test_gate_interrupted_streak_failure_waits_instead_of_rolling_back(repo, mock_bin):
+    """Issue #1835: an interrupted exit (SIGTERM from deploy restart) in streak waits, not rolls back."""
+    streak = ('{"schema_version": "bridge-exit-streak-v1", "consecutive_failures": 1, '
+              '"last_failure_ts": "2099-01-01T00:00:00Z", "last_exit_status": "TERM", "last_outcome": "interrupted"}')
+    set_ssh_mock(mock_bin, _streak_mock(streak))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert res.returncode == 0, combined
+
+
 def test_transport_then_clean_run_is_clean_exit(repo, mock_bin):
     """The streak after a transient: consecutive_failures back to 0 with a post-flip success."""
     streak = ('{"schema_version": "bridge-exit-streak-v1", "consecutive_failures": 0, '
