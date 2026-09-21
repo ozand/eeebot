@@ -152,9 +152,22 @@ list — and without it there is no complex component and no product. This axis 
 what makes investment rational: *optimise the work you repeat, and the work you
 could not afford becomes affordable.*
 
-Never let the ladder become an excuse. A stage is claimed by naming what the next
-stage will be and what currently makes it unreachable; a component whose complex
-component is never named is a leaf with a story attached.
+Never let the ladder become an excuse. A stage is claimed by naming **the stage
+and the one above it** — nothing more. A component whose complex component is
+never named is a leaf with a story attached, and `goals.md` already ranks a leaf
+last.
+
+Two fields, not prose. An earlier draft also asked what currently makes the next
+stage unreachable; that is dropped. It invites narration, costs iterations, and
+adds nothing the first requirement does not already carry: naming the complex
+component that will use this component is the claim a later reader can check.
+
+The stage does **not** enter the ranking, and this is deliberate rather than
+provisional-by-accident. Scoring a stage creates an immediate incentive to call
+things components, and the cheapest probe comes first (ADR-030 rule 1): the
+precedent is #1814, where eighteen characters of charter moved the output shape
+in one night while no suppressor ever has. Ship the ladder as knowledge, count
+the stages chosen, and let the counter say whether ranking is needed at all.
 
 ### 5. Autonomy in belief, never in judgement
 
@@ -177,10 +190,16 @@ worker's; *did it work* is not.
 - **The planning session is worthless until the diary carries content.** It reads
   the written record by construction (ADR-031 rule 5). Ship #1844 first. This is
   an ordering, not a preference.
-- **`goals.md` gains an axis and must stay under its cap.** The charter is
-  immutable to the loop and lives in a pooled character budget; the ladder
-  competes with what is already there. Adding it is an edit to be made within
-  the budget, not beside it.
+- **`goals.md` gains an axis, and the release pool is raised to hold it.** The
+  charter is immutable to the loop and draws on a pooled budget shared with
+  IDENTITY, SOUL, USER and OPERATING: 13,455 characters used of 15,500. The
+  ladder plus the diary and planning instructions this record implies exceed
+  the 2,045 spare, and the pool has already been paid for in deleted content
+  that was not redundant. The pool goes to 20,000 — not further, because the
+  binding constraint is attention rather than space: the skills catalogue costs
+  4,048 resident characters and is read in 1 cycle of 24 (#1805), while the
+  diary's named obligation costs about a hundred and is read in 84%. The raise
+  ships with per-block read measurement, so the next one is decided on data.
 - **Autonomy is falsifiable.** If the share of cycles raising a rung does not
   rise, or the monoculture returns, the change is withdrawn. ADR-030 rule 1:
   withdrawal on a measurement is the experiment working.
