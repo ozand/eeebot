@@ -46,6 +46,8 @@ Conventions:
 | [ADR-028](ADR-028-the-day-is-held-by-a-diary-the-loop-never-loads.md) | The day is held by a diary the loop appends to and never loads — second-tier continuity across the ~90 cycles of a day | accepted |
 | [ADR-029](ADR-029-one-clock-the-day-is-host-local.md) | One clock — the day is host-local, everywhere | accepted |
 | [ADR-030](ADR-030-a-cycle-is-a-hadi-loop.md) | A cycle is a HADI loop, and an unknown is a measurement to schedule | accepted |
+| [ADR-031](ADR-031-the-cycle-is-a-box-and-the-increment-is-sized-to-it.md) | The cycle is a box of 80 ticks, the increment is sized to fill it, and a planning session opens it | accepted |
+| [ADR-032](ADR-032-the-agent-chooses-its-own-work.md) | The agent chooses its own work; the outer contour holds the goal and judges the day | accepted |
 
 ## Acceptance
 
