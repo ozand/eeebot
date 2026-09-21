@@ -3493,3 +3493,44 @@ class TestRefutedHypothesisGuard:
         dup, feedback, matched = llm_proposer._is_duplicate_proposal(state_dir, None, proposal)
         assert dup is True
         assert matched.startswith("refuted-hypothesis:")
+
+
+class TestProposalDorDod:
+    def test_proposal_sanitizes_valid_dor_and_dod(self):
+        proposal = {
+            "title": "Fix memory leak",
+            "target_path": "scripts/clean_mem.py",
+            "rationale": "leaks tokens",
+            "serves": "Vector 1 (PRIMARY)",
+            "dor": {
+                "metric": "tokens_per_integration",
+                "description": "baseline token consumption measured",
+                "target": "tokens_per_integration",
+            },
+            "dod": {
+                "metric": "tokens_per_integration",
+                "description": "tokens per integration reduced by 2%",
+                "target": "tokens_per_integration",
+            },
+        }
+        res = llm_proposer._sanitized_expected_outcome(proposal)
+        assert res is not None
+        assert "dor" in res and res["dor"]["metric"] == "tokens_per_integration"
+        assert "dod" in res and res["dod"]["metric"] == "tokens_per_integration"
+
+    def test_proposal_rejects_self_referential_dor_or_dod(self):
+        proposal = {
+            "title": "Fix memory leak",
+            "target_path": "scripts/clean_mem.py",
+            "rationale": "leaks tokens",
+            "serves": "Vector 1 (PRIMARY)",
+            "dor": {
+                "metric": "compile_clean_ratio",
+                "description": "compile passes",
+                "target": "tests/test_clean_mem.py",  # loop-writable test -> rejected
+            },
+        }
+        res = llm_proposer._sanitized_expected_outcome(proposal)
+        # Loop-writable criteria dropped
+        assert res is None or "dor" not in res
+

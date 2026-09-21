@@ -247,3 +247,28 @@ def test_a_dirty_workspace_after_the_session_is_hard_reset(tmp_path: Path, monke
     assert "y" in pushed
     assert _git(repo, "rev-parse", "HEAD") != pre_sha  # the plan commit landed after the reset
     assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_planning_session_includes_dor_and_dod_in_plan_block(tmp_path: Path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    result_obj = {
+        "insight": "benchmark test demonstrates bottleneck",
+        "plan": "optimize benchmark pipeline",
+        "iterations_planned": 12,
+        "dor": "baseline tokens_per_integration established",
+        "dod": "tokens_per_integration improves by 1%",
+        "hypotheses": ["pipelining cuts tokens"],
+        "futility_advisories": [],
+    }
+    monkeypatch.setattr(bridge, "SubagentManager", _make_fake_mgr_factory(state, result_obj))
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+    assert outcome["ran"] is True
+
+    _git(repo, "fetch", "origin", "main")
+    pushed = subprocess.run(
+        ["git", "-C", str(repo), "show", f"origin/main:{diary_relpath()}"], capture_output=True, text=True,
+    ).stdout
+    assert "DoR: baseline tokens_per_integration established" in pushed
+    assert "DoD: tokens_per_integration improves by 1%" in pushed

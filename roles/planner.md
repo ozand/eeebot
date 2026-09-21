@@ -44,6 +44,8 @@ wrapping):
   "insight": "<one line: what the record shows about what just happened>",
   "plan": "<one paragraph: the concrete next increment and why>",
   "iterations_planned": <integer, your forecast of how many tool iterations the next cycle's execution will take>,
+  "dor": "<optional, Definition of Ready: pre-conditions or baseline state before starting>",
+  "dod": "<optional, Definition of Done: structurally falsifiable criterion or benchmark metric verified externally>",
   "hypotheses": ["<optional, 0-3 short falsifiable claims worth testing>"],
   "futility_advisories": ["<optional, 0-2 directions the record shows are not worth pursuing again>"]
 }
