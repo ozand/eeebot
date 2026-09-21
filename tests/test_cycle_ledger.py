@@ -311,6 +311,47 @@ class TestTypedHelpers:
         assert len(outcome_rows) == 1
         assert [r["phase"] for r in rows] == ["started", "dedup", "gate", "outcome"]
 
+    def test_record_cycle_outcome_records_box_iteration_metrics(self, tmp_path):
+        """#1850: record actual iteration consumption, limit active in cycle,
+        fraction, and forecast placeholder."""
+        # Case 1: cycle completed early within a limit of 80
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c1", "success", None, ["a.py"], "selfevo/cycle-1",
+            iterations_used=12,
+            iterations_limit=80,
+            iterations_predicted=15,
+        )
+        # Case 2: cycle hit the cap under a different limit (e.g. 40)
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c2", "failed", "max_iterations_reached", [], "selfevo/cycle-2",
+            iterations_used=40,
+            iterations_limit=40,
+            iterations_predicted=None,
+        )
+        # Case 3: legacy / omitted values do not corrupt pre-1850 shape
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c3", "success", None, [], "selfevo/cycle-3",
+        )
+
+        rows = _read_ledger(tmp_path)
+        r1 = next(r for r in rows if r["cycle_id"] == "c1")
+        assert r1["iterations_used"] == 12
+        assert r1["iterations_limit"] == 80
+        assert r1["iteration_fraction"] == 0.15
+        assert r1["iterations_predicted"] == 15
+
+        r2 = next(r for r in rows if r["cycle_id"] == "c2")
+        assert r2["iterations_used"] == 40
+        assert r2["iterations_limit"] == 40
+        assert r2["iteration_fraction"] == 1.0
+        assert "iterations_predicted" not in r2
+
+        r3 = next(r for r in rows if r["cycle_id"] == "c3")
+        assert "iterations_used" not in r3
+        assert "iterations_limit" not in r3
+        assert "iteration_fraction" not in r3
+        assert "iterations_predicted" not in r3
+
 
 def test_run_window_is_state_access_owned_and_reports_retained_rows(tmp_path):
     from nanobot import crash_record

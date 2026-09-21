@@ -348,6 +348,9 @@ def record_cycle_outcome(
     main_sha_before: str | None = None,
     real_result: dict | None = None,
     llm_error_classification: dict | None = None,
+    iterations_used: int | None = None,
+    iterations_limit: int | None = None,
+    iterations_predicted: int | None = None,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
 
@@ -463,6 +466,15 @@ def record_cycle_outcome(
             "class": str(llm_error_classification.get("class") or ""),
             "raw_error": str(llm_error_classification.get("raw_error") or "")[:400],
         }
+    if iterations_used is not None and isinstance(iterations_used, int):
+        # #1850: record the cycle's actual iteration consumption against the limit
+        # active in this cycle, plus the fraction consumed and forecast placeholder.
+        row["iterations_used"] = iterations_used
+        if iterations_limit is not None and isinstance(iterations_limit, int) and iterations_limit > 0:
+            row["iterations_limit"] = iterations_limit
+            row["iteration_fraction"] = round(iterations_used / iterations_limit, 4)
+        if iterations_predicted is not None and isinstance(iterations_predicted, int):
+            row["iterations_predicted"] = iterations_predicted
     if files_changed is not None:
         try:
             from nanobot.runtime.demand import classify_change_tier
