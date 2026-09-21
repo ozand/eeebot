@@ -5262,6 +5262,19 @@ async def _main_impl_body():
             change_shape = classify_subject(change_subject)
         except Exception:
             change_shape = "unclassified"
+    # #1850: capture iterations consumed by the executor subagent against the
+    # cycle's active limit.
+    _iterations_used: int | None = None
+    if _subagent_task_id:
+        try:
+            _telem_file = STATE_DIR / 'subagents' / f'{_subagent_task_id}.json'
+            if _telem_file.is_file():
+                _telem = json.loads(_telem_file.read_text(encoding='utf-8'))
+                _iters_list = (_telem.get('context_usage') or {}).get('iterations')
+                if isinstance(_iters_list, list):
+                    _iterations_used = len(_iters_list)
+        except Exception:
+            _iterations_used = None
     record_cycle_outcome(
         STATE_DIR, _cycle_id, _cycle_outcome, _rollback_reason, files_changed, cycle_branch,
         lesson_candidate=_lesson_candidate,
@@ -5272,6 +5285,10 @@ async def _main_impl_body():
         lane=req.get('lane') or None,
         prompt_fit_rung=_res.get('prompt_fit_rung'),
         change_shape=change_shape,
+        iterations_used=_iterations_used,
+        iterations_limit=resolved_iterations,
+        # iterations_predicted remains None until forecast is implemented
+        iterations_predicted=None,
         # #1709 increment 2: only a push_pending row needs the base it
         # merged against — _finish_pending_pushes reads this back to tell
         # "origin/main unchanged" (safe to redo) from "moved" (superseded).
