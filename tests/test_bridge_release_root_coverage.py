@@ -63,17 +63,23 @@ def test_build_task_renders_doc_budget_notice():
 
 
 class _ReleaseRootManager:
+    #: #1852: the bridge now also spawns a SECOND, EARLIER SubagentManager
+    #: for the planning session, via this same (monkeypatched) class -- kept
+    #: out of `instances` (by `telemetry_component`) so `instances[0]` stays
+    #: the executor's manager, as every test here already assumes.
     instances: list["_ReleaseRootManager"] = []
 
-    def __init__(self, *, workspace, system_context="", release_root=None, **_kwargs):
+    def __init__(self, *, workspace, system_context="", release_root=None, telemetry_component: str = "", **_kwargs):
         self.workspace = workspace
         self.system_context = system_context
         # #1725: the bridge now passes release_root instead of a
         # pre-built charter+identity system_context string.
         self.release_root = release_root
+        self._telemetry_component = telemetry_component
         self._running_tasks: dict = {}
         self._skill_reads_this_cycle: list[dict] = []
-        self.__class__.instances.append(self)
+        if telemetry_component != "planner":
+            self.__class__.instances.append(self)
 
     def _build_subagent_prompt(self) -> str:
         agents = (self.workspace / "AGENTS.md").read_text(encoding="utf-8")
@@ -87,6 +93,8 @@ class _ReleaseRootManager:
         return f"{agents}\n\n---\n\n{release_text}\n\n---\n\n{self.system_context}"
 
     async def spawn(self, **_kwargs):
+        if self._telemetry_component == "planner":
+            return "fake planner spawned (noop)"
         (self.workspace / "scripts").mkdir(exist_ok=True)
         (self.workspace / "scripts" / "feature.py").write_text("def feature():\n    return 42\n", encoding="utf-8")
         from tests.test_cycle_ledger import _run
