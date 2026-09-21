@@ -458,3 +458,28 @@ def test_atomic_write_normalises_the_sidecar_mode(tmp_path, monkeypatch):
     assert [m for _p, m in chmodded] == [0o644], (
         f"a rewrite must normalise too, saw {chmodded}"
     )
+
+
+def test_orphaned_active_hypothesis_transitions_to_stale(tmp_path):
+    """Issue #1847: An active hypothesis orphaned by input pruning transitions to stale."""
+    state = _state(tmp_path)
+    _durable(state, [_entry("hyp-0005", "Will be dropped")])
+    _backlog(state, [])
+    hb.reconcile(state, now=NOW)
+    row_active = _lifecycle(state)["entries"]["hyp-0005"]
+    assert row_active["status"] == "active"
+    assert "stale_at" not in row_active
+
+    # Drop from durable inputs
+    _durable(state, [])
+    hb.reconcile(state, now=NOW + timedelta(hours=1))
+    row_orphaned = _lifecycle(state)["entries"]["hyp-0005"]
+    assert row_orphaned["orphaned"] is True
+    assert row_orphaned["status"] == "stale"
+    assert row_orphaned["stale_at"] == "2026-09-06T01:00:00Z"
+
+    # Re-evaluating while still orphaned keeps status stale without changing stale_at
+    hb.reconcile(state, now=NOW + timedelta(hours=2))
+    row_rechecked = _lifecycle(state)["entries"]["hyp-0005"]
+    assert row_rechecked["status"] == "stale"
+    assert row_rechecked["stale_at"] == "2026-09-06T01:00:00Z"
