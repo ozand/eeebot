@@ -884,16 +884,20 @@ while :; do
     STREAK_FAIL_TS=$(echo "$STREAK_RAW" | grep -o '"last_failure_ts": "[^"]*"' | cut -d'"' -f4 || true)
     STREAK_OK_TS=$(echo "$STREAK_RAW" | grep -o '"last_success_ts": "[^"]*"' | cut -d'"' -f4 || true)
     STREAK_N=$(echo "$STREAK_RAW" | grep -o '"consecutive_failures": [0-9]*' | grep -o '[0-9]*$' || true)
-    STREAK_EXIT=$(echo "$STREAK_RAW" | grep -o '"last_exit_status": [0-9]*' | grep -o '[0-9]*$' || true)
-    # #1303: a failure row is only a live verdict while consecutive_failures is
+    STREAK_EXIT=$(echo "$STREAK_RAW" | grep -o '"last_exit_status": [^,}]*' | head -1 | sed -e 's/.*: //' -e 's/[" ]//g' || true)
+    STREAK_OUTCOME=$(echo "$STREAK_RAW" | grep -o '"last_outcome": "[^"]*"' | cut -d'"' -f4 || true)
+    # #1303/#1835: a failure row is only a live verdict while consecutive_failures is
     # non-zero; the recorder resets it on the next clean run, and a transport
     # failure followed by a clean cycle is the expected post-flip sequence now.
+    # An interrupted exit (SIGTERM during deploy restart) is never a loop failure.
     # A real crash in the window is still caught by the journal grep above.
     if [ -n "$STREAK_FAIL_TS" ] && [[ "$STREAK_FAIL_TS" > "$FLIP_TS" ]] && [ "${STREAK_N:-0}" != "0" ]; then
       # #1303: the recorder is meant to advance on a transport failure (#1280)
       # — that is the streak being honest, not the release being broken. Only
       # a failure recorded with any OTHER exit status rolls back.
-      if [ "$STREAK_EXIT" = "$BRIDGE_EXIT_EXECUTOR_LLM_ERROR" ]; then
+      if [ "$STREAK_OUTCOME" = "interrupted" ] || [ "$STREAK_EXIT" = "TERM" ] || [ "$STREAK_EXIT" = "SIGTERM" ] || [ "$STREAK_EXIT" = "143" ]; then
+        log "Health gate: exit recorder shows an interrupted exit after the flip (last_exit_status=$STREAK_EXIT, outcome=$STREAK_OUTCOME); waiting for next run."
+      elif [ "$STREAK_EXIT" = "$BRIDGE_EXIT_EXECUTOR_LLM_ERROR" ]; then
         if [ -z "${TRANSPORT_STREAK_LOGGED:-}" ]; then
           log "Health gate: exit recorder shows a transport failure after the flip (last_exit_status=$STREAK_EXIT = EXIT_EXECUTOR_LLM_ERROR, consecutive_failures=${STREAK_N:-?}); the streak advanced as #1280 intends, not a release failure (#1303); waiting for a clean run."
           TRANSPORT_STREAK_LOGGED=1
