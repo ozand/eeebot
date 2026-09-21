@@ -680,8 +680,13 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
             entry.setdefault("title", cand["title"])
             # #1346: this key was in the inputs for this pass
             entry["last_evaluated"] = now_iso
-            if entry.get("orphaned"):
+            reappeared = bool(entry.get("orphaned"))
+            if reappeared:
                 entry["reappeared_at"] = now_iso
+                if entry.get("status") == "stale":
+                    entry["status"] = "active"
+                    entry["cycles_untouched"] = 0
+                    entry.pop("stale_at", None)
             entry.pop("orphaned", None)
             entry.pop("orphaned_at", None)
             if cand.get("claim"):
@@ -712,7 +717,7 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
                 if key in touched_keys:
                     entry["cycles_untouched"] = 0
                     entry["last_touched"] = now_iso
-                else:
+                elif not reappeared:
                     entry["cycles_untouched"] = int(entry.get("cycles_untouched") or 0) + 1
 
                 first_seen = _parse_ts(entry.get("first_seen")) or now
@@ -747,6 +752,10 @@ def reconcile(state_dir: Path, *, now: datetime | None = None) -> None:
                             or entry.get("answered_at") or entry.get("first_seen") or None
                         )
                     orphaned_now += 1
+                if entry.get("status") == "active":
+                    entry["status"] = "stale"
+                    if not entry.get("stale_at"):
+                        entry["stale_at"] = now_iso
         lifecycle["entries"] = entries
         lifecycle["updated_at"] = now_iso
         lifecycle["last_pass"] = {
