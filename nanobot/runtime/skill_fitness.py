@@ -233,6 +233,7 @@ def record_cycle_skill_scan(
     cycle_id: str,
     skills_read: list[str],
     skills_attempted_not_found: list[str] | None = None,
+    tool_call_position: "int | None" = None,
 ) -> None:
     """One row per cycle naming which skills were read -- possibly none.
 
@@ -257,6 +258,12 @@ def record_cycle_skill_scan(
     absent means the release predates the instrumentation, and the
     distinction this field exists to draw cannot be drawn for that row.
 
+    *tool_call_position* (#1857): the earliest tool-call position among
+    this cycle's own skill reads -- ``None`` when nothing was read this
+    cycle, never coerced to a number. Same field ADR-028 rule 5 (#1812)
+    already carries for the diary, so "how early was the obligation met"
+    is comparable across both channels without a second convention.
+
     Bounded append, same discipline as ``_write_sidecar_atomic`` above.
     Fail-open: any error is swallowed, never raised into the caller -- a
     lost row must not break a cycle, matching every other writer in this
@@ -273,6 +280,7 @@ def record_cycle_skill_scan(
             "skills_attempted_not_found": sorted(
                 {str(s).strip() for s in (skills_attempted_not_found or ()) if str(s).strip()}
             ),
+            "tool_call_position": int(tool_call_position) if isinstance(tool_call_position, int) else None,
         }
         rows = _read_cycle_scans(state_dir)
         rows.append(row)
@@ -284,6 +292,95 @@ def record_cycle_skill_scan(
         tmp_path.replace(path)
     except Exception:
         pass
+
+
+# ── #1857: rolling skill-read rate, same shape as diary_fitness ─────────────
+READ_RATE_SCHEMA = "skill-read-rate-v1"
+READ_RATE_REL = "demand/skill_read_rate.json"  # same demand/ home as the zero-read census
+_READ_RATE_WINDOW_DAYS = 30
+
+
+def _parse_scan_ts(value: Any) -> "datetime | None":
+    """Timezone-aware ISO-8601 timestamp, or None (naive, malformed, non-string)."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def skill_read_rate(
+    state_dir: Path, *, now: "datetime | None" = None, window_days: int = _READ_RATE_WINDOW_DAYS
+) -> dict[str, Any]:
+    """Rolling-window rate: what fraction of recorded cycles read at least
+    one skill, over the last *window_days* -- the skill-side sibling of
+    ``diary_fitness.diary_read_rate``, read from the SAME
+    ``skill_fitness/cycle_scans.jsonl`` :func:`record_cycle_skill_scan`
+    already writes (#1857 precondition 3: no parallel counter).
+
+    ``ok: False`` with no rate published means "no data" (the source is
+    missing or invalid) -- never rendered as a rate of 0, which would
+    misreport "never measured" as "measured and nobody reads skills"
+    (#1342-class distinction, same fail-open contract as every sibling
+    census in this system).
+    """
+    try:
+        now_dt = now or datetime.now(timezone.utc)
+        cutoff_dt = now_dt - timedelta(days=window_days)
+        path = Path(state_dir) / CYCLE_SCAN_REL
+        if not path.is_file():
+            return {
+                "ok": False, "reason": "scans_unavailable",
+                "window_days": window_days, "cycles_in_window": 0,
+                "reads_in_window": 0, "rate": None,
+            }
+        rows = _read_cycle_scans(state_dir)
+        in_window = []
+        for row in rows:
+            ts = _parse_scan_ts(row.get("ts"))
+            if ts is None or ts > now_dt or ts < cutoff_dt:
+                continue
+            in_window.append(row)
+        reads_in_window = sum(1 for r in in_window if int(r.get("skill_count") or 0) > 0)
+        cycles_in_window = len(in_window)
+        return {
+            "ok": True,
+            "window_days": window_days,
+            "cycles_in_window": cycles_in_window,
+            "reads_in_window": reads_in_window,
+            "rate": (reads_in_window / cycles_in_window) if cycles_in_window else None,
+        }
+    except Exception:
+        return {
+            "ok": False, "reason": "census_error",
+            "window_days": window_days, "cycles_in_window": 0,
+            "reads_in_window": 0, "rate": None,
+        }
+
+
+def write_skill_read_rate(state_dir: Path, *, now: "datetime | None" = None) -> dict[str, Any]:
+    """Write the rolling-window skill-read rate to ``demand/skill_read_rate.json``.
+
+    Report-only, harness-side, written every cycle regardless of that
+    cycle's own outcome -- same contract as ``write_zero_read_census``.
+    """
+    result = skill_read_rate(state_dir, now=now)
+    payload = {
+        "schema": READ_RATE_SCHEMA,
+        "written_at": (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z"),
+        **result,
+    }
+    path = Path(state_dir) / READ_RATE_REL
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        return {"ok": False, "written": False, "path": str(path)}
+    return {"ok": result["ok"], "written": True, "path": str(path)}
 
 
 def confirmed_reads_for_cycle(state_dir: Path, cycle_id: str) -> list[dict[str, Any]]:

@@ -335,8 +335,12 @@ class SubagentManager:
                     except ValueError:
                         return
                     if len(rel.parts) == 2 and rel.parts[1] == "SKILL.md":
+                        # #1857: `iteration` (this method's own loop counter,
+                        # read at call time) is the tool-call position the
+                        # obligation needs to be checkable against -- same
+                        # pattern as `_on_day_file_read` below.
                         self._skill_reads_this_cycle.append(
-                            {"skill": rel.parts[0], "path": f"skills/{rel.as_posix()}"}
+                            {"skill": rel.parts[0], "path": f"skills/{rel.as_posix()}", "position": iteration}
                         )
 
                 def _on_skill_read_failed(requested: str) -> None:  # noqa: E301
@@ -1003,6 +1007,13 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         self._skill_read_failures_this_cycle.clear()
         try:
             from nanobot.runtime.skill_fitness import record_cycle_skill_scan
+            # #1857: the earliest tool-call position among this cycle's own
+            # skill reads -- same "how early was the obligation met" signal
+            # ADR-028 rule 5 (#1812) already records for the day file.
+            positions = [
+                int(r["position"]) for r in self._skill_reads_this_cycle
+                if isinstance(r.get("position"), int)
+            ]
             record_cycle_skill_scan(
                 self._skill_fitness_state_dir,
                 cycle_id=self._skill_fitness_cycle_id,
@@ -1010,6 +1021,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
                     str(r.get("skill") or "") for r in self._skill_reads_this_cycle if r.get("skill")
                 ],
                 skills_attempted_not_found=attempted,
+                tool_call_position=min(positions) if positions else None,
             )
         except Exception:
             pass

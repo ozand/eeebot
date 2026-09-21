@@ -126,7 +126,9 @@ def test_strict_drops_only_declared_sections_largest_first_and_records_them(tmp_
     assert "## Working knowledge" in prompt and "## Standard test runner" in prompt, "critical sections survive regardless of position"
     assert "## Big optional appendix" not in prompt, "the largest declared-droppable section goes first"
     assert "## Small optional note" in prompt, "a droppable section is not dropped when the prompt already fits"
-    assert "# Memory" in prompt and "<skills>" in prompt
+    # #1857: the loop profile no longer renders the skills catalogue --
+    # discovery moved to the planning session's fixed prompt.
+    assert "# Memory" in prompt and "<skills>" not in prompt
     fit = builder.last_fit
     assert fit["strict"] is True and fit["cap"] == 6_000 and fit["chars"] == len(prompt)
     assert fit["dropped"] == [{"section": "## Big optional appendix", "chars": pytest.approx(len(_section("Big optional appendix", 60, droppable=True))), "how": "declared-droppable"}]
@@ -350,54 +352,22 @@ def test_subagent_prompt_is_strict_and_exposes_the_fit(tmp_path, monkeypatch):
     assert mgr.last_prompt_fit["dropped"] == []
 
 
-def test_catalogue_bound_keeps_complete_entries_and_records_named_omissions(tmp_path, monkeypatch):
-    builder = _builder(tmp_path, "", catalogue_lines=4, memory_lines=2)
-    section = "# Skills\n\n" + "\n".join(
-        f'  <skill available="true" source="workspace">\n'
-        f'    <name>skill-{i}</name>\n'
-        f'    <description>description-{i}</description>\n'
-        f'    <location>skills/skill-{i}/SKILL.md</location>\n'
-        "  </skill>"
-        for i in range(4)
-    )
-    matches = list(context_module.re.finditer(r"<skill\b[^>]*>.*?</skill>", section, context_module.re.DOTALL))
-    marker = builder.SKILLS_CATALOGUE_TRUNCATION_MARKER.format(
-        count=3, chars=sum(len(match.group(0)) for match in matches[1:]),
-    )
-    budget = len(section[:matches[0].start()]) + len(matches[0].group(0)) + len(marker)
-    bounded, evidence = builder._bound_skills_catalogue(section, budget)
-    assert evidence["status"] == "bounded"
-    assert evidence["load"]["status"] == "complete"
-    assert evidence["start"]["budget"] == budget
-    assert evidence["total_count"] == 4
-    assert evidence["retained_count"] == 1
-    assert evidence["omitted_count"] == 3
-    assert evidence["omitted_chars"] == sum(len(match.group(0)) for match in matches[1:])
-    assert evidence["omitted_names"] == ["skill-1", "skill-2", "skill-3"]
-    assert evidence["sweep"]["status"] == "bounded"
-    assert "skills catalogue truncated" in bounded
-    assert bounded.count("<skill ") == 1
-    assert bounded.count("</skill>") == 1
-
-
-def test_catalogue_budget_uses_live_fixed_floor(tmp_path, monkeypatch):
+def test_loop_profile_never_calls_build_skills_summary(tmp_path, monkeypatch):
+    """#1857: the resident catalogue's call site is gone from the loop
+    profile, not merely starved to zero by its budget computation -- proven
+    by a summary that would be nonempty if called, and isn't."""
     builder = _loop_builder(tmp_path, "", catalogue_lines=1, memory_lines=1)
-    builder.skills.build_skills_summary = lambda excluded_names=None, compact=False: (
-        '<skill available="true"><name>catalogue</name></skill>'
-    )
-    monkeypatch.setattr(ContextBuilder, "MAX_SYSTEM_PROMPT_CHARS", 3_000)
+    calls: list[int] = []
+
+    def _tripwire(excluded_names=None, compact=False):
+        calls.append(1)
+        return '<skill available="true"><name>catalogue</name></skill>'
+
+    builder.skills.build_skills_summary = _tripwire
     builder.build_system_prompt(loop_profile=True)
-    first_fit = dict(builder.last_fit)
-    first_budget = first_fit["skills_catalogue"]["budget"]
-    # #1725: the floor is every fixed section EXCEPT skills_catalogue itself
-    # — the six ontology blocks plus memory and runtime, all non-empty for
-    # this builder's stub content.
-    expected_floor = sum(first_fit["sections"][name] for name in LOOP_FIXED_SECTION_NAMES + ("agents",))
-    expected_floor += len(LOOP_FIXED_SECTION_NAMES + ("agents",)) * len(builder.SECTION_SEPARATOR)
-    assert first_budget == 3_000 - expected_floor
-    builder.memory.get_memory_context = lambda *, loop=False, max_chars=4000: "M" * 2000
-    builder.build_system_prompt(loop_profile=True)
-    assert builder.last_fit["skills_catalogue"]["budget"] < first_budget
+    assert calls == []
+    assert builder.last_fit["sections"]["skills_catalogue"] == 0
+    assert "skills_catalogue" not in builder.last_fit
 
 
 def test_fair_budgets_are_keyed_on_length_not_position():

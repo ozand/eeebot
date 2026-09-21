@@ -217,19 +217,41 @@ def test_tools_section_is_pinned_to_the_registry():
     assert mentioned == set(EXECUTOR_TOOL_NAMES)
 
 
-def test_search_memory_and_the_skills_catalogue_each_state_a_trigger():
-    """#1767's finding: the catalogue lists what exists and nothing states
-    when to go and get it. A name without a condition is the failure mode,
-    not the fix, so both get an explicit trigger sentence."""
+def test_search_memory_states_a_trigger():
+    """#1767's finding, still true for search_memory: the memory block is an
+    index and nothing states when to escalate past it. Only search_memory
+    keeps a trigger sentence -- Skills does not, per #1857 below."""
     section = _section(_read(), "Tools")
 
     search_line = next(ln for ln in section.splitlines() if "`search_memory`" in ln)
     assert "index" in search_line.lower(), search_line
     assert "when" in search_line.lower(), search_line
 
+
+def test_skills_bullet_carries_no_conditional_trigger():
+    """#1857 AC 1: OPERATING.md contains no conditional clause governing
+    whether to consult skills. #1767's old "when a task matches" trigger is
+    gone -- the unconditional obligation to look now lives in the planning
+    session's fixed prompt (roles/planner.md), not here. This bullet is
+    purely mechanical: how to read a skill, never whether."""
+    section = _section(_read(), "Tools")
+
     skills_line = next(ln for ln in section.splitlines() if "**Skills**" in ln)
     assert "SKILL.md" in skills_line, skills_line
-    assert "before starting" in skills_line, skills_line
+    lowered = skills_line.lower()
+    for qualifier in ("if ", "when", "matches", "before starting"):
+        assert qualifier not in lowered, (
+            f"Skills bullet carries a conditional/judgement qualifier {qualifier!r}: {skills_line!r}"
+        )
+
+
+def test_skip_check_section_carries_no_skills_conditional():
+    """#1857 AC 1: the old 'Then check the skills catalogue: if a skill
+    describes this work...' sentence is gone from the skip-check paragraph
+    entirely -- moved to the planning session, not reworded in place."""
+    section = _section(_read(), "Before editing: skip check")
+    assert "skill" not in section.lower()
+    assert "catalogue" not in section.lower()
 
 
 def test_exec_bounds_survive_the_rewrite():

@@ -18,7 +18,17 @@ def _bridge_src() -> str:
 
 
 def _find_loop_excluded_skills_literal() -> list[str]:
-    """Extract the _LOOP_EXCLUDED_SKILLS list literal from bridge.py."""
+    """The names bridge.py's ``_LOOP_EXCLUDED_SKILLS`` resolves to.
+
+    #1857: the source of truth moved to
+    ``nanobot.runtime.skills_index.LOOP_EXCLUDED_SKILLS`` -- the generated
+    ``skills/index.md`` and the executor's own prompt exclusion must agree,
+    so bridge.py now assigns ``_LOOP_EXCLUDED_SKILLS = list(...)`` from that
+    import rather than carrying its own second literal. Still a source-level
+    check (not a runtime import of bridge.py, which this file's other tests
+    deliberately avoid): confirms bridge.py assigns from the shared name,
+    then reads the actual values from skills_index directly.
+    """
     tree = ast.parse(_bridge_src(), filename=str(BRIDGE_PATH))
     for node in ast.walk(tree):
         if (
@@ -26,9 +36,12 @@ def _find_loop_excluded_skills_literal() -> list[str]:
             and len(node.targets) == 1
             and isinstance(node.targets[0], ast.Name)
             and node.targets[0].id == "_LOOP_EXCLUDED_SKILLS"
-            and isinstance(node.value, ast.List)
         ):
-            return [elt.value for elt in node.value.elts if isinstance(elt, ast.Constant)]
+            if isinstance(node.value, ast.List):
+                return [elt.value for elt in node.value.elts if isinstance(elt, ast.Constant)]
+            if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == "list":
+                from nanobot.runtime.skills_index import LOOP_EXCLUDED_SKILLS
+                return list(LOOP_EXCLUDED_SKILLS)
     raise AssertionError("_LOOP_EXCLUDED_SKILLS not found in bridge.py")
 
 

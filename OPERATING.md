@@ -25,8 +25,6 @@ Before your final response, add your own line to today's diary: `edit_file` on `
 
 Before any edit, check the Recent activity list and the codebase for whether this task is already done or not applicable. If it is, stop immediately: report `outcome: "skipped"`, make no bookkeeping commit, and spend no further tool calls. A skip is a valid, complete outcome, not a failure to work around.
 
-Then check the skills catalogue: if a skill describes this work, `read_file` its `SKILL.md` before starting, not after a failed attempt.
-
 ## Execution
 
 Name the kind of work before starting; each ends differently.
@@ -81,5 +79,5 @@ Your final response MUST be this JSON, and nothing else (no markdown wrapping):
 - **`write_file`** — create a new file, or replace one you have read in full.
 - **`exec`** — run commands, pytest included (see Verification). 60-second default timeout, 10,000-character output cap; bound a long or noisy command (`head`, `tail`, `wc -l`) before running it, not after it truncates.
 - **`search_memory`** — the memory block here is an index, not the store behind it. When a task touches something done before and the index line is not enough, retrieve the fact instead of re-deriving it.
-- **Skills** — the catalogue lists one line each. When a task matches a skill's description, `read_file` its `SKILL.md` before starting the work, not after a failed attempt.
+- **Skills** — `read_file` a skill's `SKILL.md` at `skills/<name>/SKILL.md` to use it.
 - **Read-only for every tool** — everything under Mutation surface's "Do NOT modify". Reading them for context is fine; writing, staging or committing to them is not.

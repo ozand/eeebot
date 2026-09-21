@@ -215,12 +215,6 @@ class ContextBuilder:
     #: section is critical and is never dropped in the strict (loop) profile.
     DROPPABLE_MARKER = "<!-- prompt-fit: droppable -->"
     MAX_MEDIA_BYTES = 2 * 1024 * 1024
-    # The loop derives this section budget from the other sections at build
-    # time. The marker is part of the bounded section, so omission cannot read
-    # like a catalogue that was never loaded (#1563).
-    SKILLS_CATALOGUE_TRUNCATION_MARKER = (
-        "[skills catalogue truncated: omitted {count} skill(s) / {chars} chars]"
-    )
 
     def __init__(self, workspace: Path, release_root: "Path | None" = None, state_dir: "Path | None" = None):
         self.workspace = workspace
@@ -605,25 +599,27 @@ Skills with available="false" need dependencies installed first - you can try in
         cycle_id: str = "",
     ) -> str:
         """#1725 (ADR-022): the loop profile's own assembly — six ontology
-        blocks, skills catalogue, memory, code-generated runtime facts, the
-        #1766 scorecard block, then the #1793 position block LAST. No
-        ``active_skills`` section (dropped, #1725 item 3): the loop's only
-        always-skill, ``memory``, is already excluded from it, so the
-        section was always empty under
-        this profile."""
+        blocks, skills catalogue (#1857: retired, always empty -- kept as a
+        named, empty section rather than removed from the list), memory,
+        code-generated runtime facts, the #1766 scorecard block, then the
+        #1793 position block LAST. No ``active_skills`` section (dropped,
+        #1725 item 3): the loop's only always-skill, ``memory``, is already
+        excluded from it, so the section was always empty under this
+        profile."""
         sections, missing, truncated = self._load_ontology_blocks()
 
-        # #1732: the loop profile renders the catalogue one line per skill.
-        skills_summary = self.skills.build_skills_summary(
-            excluded_names=excluded_skill_names, compact=True,
-        )
-        self._skills_catalogue_usage = dict(getattr(self.skills, "last_catalogue_usage", {}))
-        skills_section = (f"""# Skills
-
-The following skills extend your capabilities. To use a skill, read the skill's SKILL.md file using the read_file tool.
-Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
-
-{skills_summary}""" if skills_summary else "")
+        # #1857: the resident catalogue is retired -- 1 cycle of 24 ever
+        # read it (#1805), at ~4,048 chars every cycle paid whether or not
+        # it looked. Discovery is now the planning session's stage
+        # (ADR-031 rule 5): `skills/index.md` (harness-generated,
+        # nanobot.runtime.skills_index) plus an unconditional instruction
+        # in roles/planner.md, reachable via `read_file`, never resident.
+        # The section name stays in the ordered list below (empty
+        # content), so section order/coverage is unchanged for every
+        # reader of that shape; only its characters and its own budget
+        # computation are gone.
+        skills_section = ""
+        self._skills_catalogue_usage = {}
 
         # #1725: MemoryStore already caps+labels its own loop-mode output
         # (resident/remainder split, ``last_index_fit`` telemetry) — pass
@@ -648,22 +644,6 @@ Skills with available="false" need dependencies installed first - you can try in
         )
 
         self._skills_catalogue_observation = None
-        if skills_section:
-            # Derive the catalogue budget from every other fixed section
-            # (#1725: six ontology blocks + memory + runtime; #1766 adds the
-            # scorecard block; #1793 adds the position block) built above.
-            # Memory/runtime/scorecard/position are included at their
-            # (already-capped) actual size: the floor is not a frozen
-            # measurement from one day (#1563).
-            fixed_sections = [content for _, content in sections] + [
-                memory_section, runtime_section, scorecard_section, position_section,
-            ]
-            nonempty_fixed = [content for content in fixed_sections if content]
-            fixed_floor = sum(len(content) for content in nonempty_fixed) + len(nonempty_fixed) * len(self.SECTION_SEPARATOR)
-            catalogue_budget = max(0, self._cap() - fixed_floor)
-            skills_section, self._skills_catalogue_observation = self._bound_skills_catalogue(
-                skills_section, catalogue_budget,
-            )
         sections.append(("skills_catalogue", skills_section))
         sections.append(("memory", memory_section))
         sections.append(("runtime", runtime_section))
@@ -685,137 +665,6 @@ Skills with available="false" need dependencies installed first - you can try in
         separator per gap between non-empty sections == ``chars`` — can be
         pinned against the real value)."""
         return cls.SECTION_SEPARATOR.join(content for _, content in sections if content)
-
-    def _bound_skills_catalogue(
-        self, section: str, budget: int,
-    ) -> tuple[str, dict[str, Any]]:
-        """Bound the loop catalogue without splitting a skill entry.
-
-        The complete rendered section is loaded first, then a deterministic
-        prefix of complete entries is retained. Every omission is named in
-        the returned fit evidence and in the prompt marker; the global
-        prompt-fit ladder remains the final safety net.
-
-        #1732: the loop profile now renders the catalogue as one ``- NAME:
-        DESC`` line per skill (``format: "lines"``) instead of an XML
-        ``<skill>...</skill>`` block (``format: "xml"``) — this function
-        branches on which one it was handed, entry-extraction and
-        name-extraction differ, the rest of the bounding algorithm (full-fits
-        short-circuit, greedy whole-entry prefix, truncation marker, observed
-        fit evidence) is shared.
-        """
-        is_xml = "<skill" in section
-        if is_xml:
-            entry_pattern = re.compile(r"<skill\b[^>]*>.*?</skill>", re.DOTALL)
-        else:
-            # One skill per line: "- NAME: DESC ..."; the two-line header
-            # (layout rule + blank line) precedes the first entry and is
-            # never itself a candidate for truncation.
-            entry_pattern = re.compile(r"^- .*$", re.MULTILINE)
-        matches = list(entry_pattern.finditer(section))
-        source_chars = len(section)
-        fmt = "xml" if is_xml else "lines"
-        if not matches:
-            observation = {
-                "status": "empty" if not section else "unavailable",
-                "source_chars": source_chars,
-                "retained_chars": source_chars,
-                "budget": budget,
-                "total_count": 0,
-                "retained_count": 0,
-                "omitted_count": 0,
-                "omitted_chars": 0,
-                "omitted_names": [],
-                "truncated": False,
-                "format": fmt,
-                "load": {"status": "empty" if not section else "unavailable", "source_chars": source_chars, "total_count": 0},
-                "start": {"budget": budget, "source_chars": source_chars, "total_count": 0},
-                "sweep": {"status": "not_run", "retained_count": 0, "omitted_count": 0},
-            }
-            return section, observation
-
-        prefix = section[:matches[0].start()]
-        suffix = section[matches[-1].end():]
-        blocks = [match.group(0) for match in matches]
-        names = []
-        if is_xml:
-            for block in blocks:
-                name_match = re.search(r"<name>(.*?)</name>", block, re.DOTALL)
-                names.append(re.sub(r"<[^>]+>", "", name_match.group(1)).strip() if name_match else "")
-        else:
-            for block in blocks:
-                # "- NAME: DESC ..." -> "NAME". A line with no ':' (should
-                # not happen from the renderer) yields the whole entry text
-                # rather than raising.
-                entry_text = block[2:] if block.startswith("- ") else block
-                names.append(entry_text.split(":", 1)[0].strip())
-        block_chars = [len(block) for block in blocks]
-
-        full_candidate = section
-        if len(full_candidate) <= budget:
-            return full_candidate, {
-                "status": "full",
-                "source_chars": source_chars,
-                "retained_chars": len(full_candidate),
-                "budget": budget,
-                "total_count": len(blocks),
-                "retained_count": len(blocks),
-                "omitted_count": 0,
-                "omitted_chars": 0,
-                "omitted_names": [],
-                "truncated": False,
-                "format": fmt,
-                "load": {"status": "complete", "source_chars": source_chars, "total_count": len(blocks)},
-                "start": {"budget": budget, "source_chars": source_chars, "total_count": len(blocks)},
-                "sweep": {"status": "not_needed", "retained_count": len(blocks), "omitted_count": 0},
-            }
-
-        retained_count = 0
-        for index, block in enumerate(blocks):
-            omitted_names = names[index + 1:]
-            omitted_chars = sum(block_chars[index + 1:])
-            marker = self.SKILLS_CATALOGUE_TRUNCATION_MARKER.format(
-                count=len(omitted_names), chars=omitted_chars,
-            )
-            marker_text = marker if is_xml else f"\n{marker}"
-            candidate = section[:matches[index].end()] + marker_text + suffix
-            if len(candidate) > budget:
-                break
-            retained_count = index + 1
-
-        omitted_names = names[retained_count:]
-        omitted_chars = sum(block_chars[retained_count:])
-        marker = self.SKILLS_CATALOGUE_TRUNCATION_MARKER.format(
-            count=len(omitted_names), chars=omitted_chars,
-        )
-        marker_text = marker if is_xml else f"\n{marker}"
-        candidate = (
-            section[:matches[retained_count - 1].end()] + marker_text + suffix
-            if retained_count else prefix + marker_text + suffix
-        )
-        if len(candidate) > budget:
-            # The derived floor should leave room for the marker. If a future
-            # floor consumes that room, keep the marker visible rather than
-            # pretending the catalogue was complete; the global ladder then
-            # reports the remaining failure honestly.
-            candidate = prefix + marker_text + suffix
-        observation = {
-            "status": "bounded",
-            "source_chars": source_chars,
-            "retained_chars": len(candidate),
-            "budget": budget,
-            "total_count": len(blocks),
-            "retained_count": retained_count,
-            "omitted_count": len(omitted_names),
-            "omitted_chars": omitted_chars,
-            "omitted_names": omitted_names,
-            "truncated": True,
-            "format": fmt,
-            "load": {"status": "complete", "source_chars": source_chars, "total_count": len(blocks)},
-            "start": {"budget": budget, "source_chars": source_chars, "total_count": len(blocks)},
-            "sweep": {"status": "bounded", "retained_count": retained_count, "omitted_count": len(omitted_names)},
-        }
-        return candidate, observation
 
     @staticmethod
     def _section_sizes(names: list[str], sections: list[tuple[str, str]]) -> dict[str, int]:
