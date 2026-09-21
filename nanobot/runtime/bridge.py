@@ -2935,6 +2935,38 @@ def _write_diary_plan_block(repo_root: 'Path', state_dir: 'Path', cycle_id: str,
         return {'outcome': 'commit_failed', 'commit_sha': None, 'reason': f'unexpected error: {exc}'}
 
 
+def _should_regenerate_skills_index(repo_root: 'Path', files_changed: 'list[str]') -> bool:
+    """#1857 follow-up: whether an integrated cycle should attempt a
+    ``skills/index.md`` regeneration -- either this cycle's OWN diff
+    touched ``skills/``, OR the index does not exist yet at all.
+
+    The ``files_changed``-only gate #1857 shipped with left a bootstrap
+    gap: the resident catalogue leaves every prompt the moment this
+    release deploys, but ``skills/index.md`` is born only on the FIRST
+    later cycle whose own diff happens to touch ``skills/``.
+    Skill-touching cycles are rare (two renames in the loop's whole
+    history), so that gap could run for days with discovery pointed at a
+    file that does not exist -- a strict regression from the resident
+    catalogue it replaced. Checking for absence here closes it without
+    weakening the no-bookkeeping-commit property: the caller's own
+    :func:`_regenerate_skills_index_if_needed` still no-ops (no commit)
+    once the file exists and its content already matches.
+
+    Extracted to its own function -- like :func:`_write_post_cycle_censuses`
+    -- so this gating decision is directly unit-testable (a missing index
+    with an unrelated diff must return True; an existing, current index
+    with the same diff must return False) rather than only reachable
+    through a full, untestable cycle run.
+    """
+    try:
+        from nanobot.runtime.skills_index import INDEX_RELPATH
+        if not (Path(repo_root) / INDEX_RELPATH).is_file():
+            return True
+    except Exception:
+        pass
+    return any(f.startswith('skills/') for f in files_changed)
+
+
 def _regenerate_skills_index_if_needed(repo_root: 'Path', files_changed: 'list[str]') -> dict:
     """#1857: after a cycle that touched ``skills/`` integrates, regenerate
     ``skills/index.md`` from the now-current skills directory and commit it
@@ -2945,10 +2977,15 @@ def _regenerate_skills_index_if_needed(repo_root: 'Path', files_changed: 'list[s
 
     Called AFTER integration (unlike the diary's write, which precedes the
     cycle branch): this reads the skills directory post-merge, on main, so
-    the regenerated index reflects exactly what just landed. Never called
-    unless *files_changed* (this cycle's own diff) touched ``skills/`` --
-    a cycle that changed nothing under it produces no bookkeeping-only
-    commit.
+    the regenerated index reflects exactly what just landed. The caller
+    gates this on *files_changed* (this cycle's own diff) touching
+    ``skills/``, OR the index not existing yet at all (bootstrap gap --
+    skills-touching cycles are rare, and the resident catalogue leaves the
+    prompt the moment this ships, so the file-changed gate alone left a
+    days-long window with neither channel present). Either way, a cycle
+    whose regeneration produces no actual content change still makes no
+    bookkeeping-only commit -- :func:`write_skills_index_if_changed`'s own
+    no-op contract.
 
     Returns ``{"outcome": str, "commit_sha": str | None}``. ``outcome`` is
     one of ``"unchanged"`` (nothing to write), ``"integrated"``,
@@ -4739,10 +4776,7 @@ async def _main_impl_body():
                 pass  # diary-fitness write errors are non-blocking
             _write_post_cycle_censuses(STATE_DIR, _selfevo_repo)
 
-            # #1857: only when this cycle's OWN diff touched skills/, and only
-            # once it actually integrated -- a rejected skill change must not
-            # regenerate an index describing content that never reached main.
-            if _integrated and any(f.startswith('skills/') for f in files_changed):
+            if _integrated and _should_regenerate_skills_index(_selfevo_repo, files_changed):
                 try:
                     _skills_index_result = _regenerate_skills_index_if_needed(_selfevo_repo, files_changed)
                     if _skills_index_result['outcome'] != 'unchanged':

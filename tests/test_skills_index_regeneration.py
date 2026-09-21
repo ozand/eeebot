@@ -7,7 +7,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from nanobot.runtime.bridge import _regenerate_skills_index_if_needed
+from nanobot.runtime.bridge import _regenerate_skills_index_if_needed, _should_regenerate_skills_index
 from nanobot.runtime.skills_index import INDEX_RELPATH
 
 
@@ -97,3 +97,73 @@ def test_push_failure_rolls_back_and_leaves_tree_clean(tmp_path: Path):
     assert _git(repo, "rev-parse", "HEAD") == pre_sha
     assert _git(repo, "status", "--porcelain") == ""
     assert not (repo / INDEX_RELPATH).exists()
+
+
+# ---------------------------------------------------------------------------
+# #1857 follow-up: the bootstrap gap. The resident catalogue leaves every
+# prompt the moment this ships; skills/index.md is born only on the FIRST
+# later cycle whose own diff touches skills/ -- rare (two renames in the
+# loop's whole history). _should_regenerate_skills_index also fires when the
+# index is simply missing, independent of files_changed, so that window
+# cannot run for days with neither channel present.
+# ---------------------------------------------------------------------------
+
+
+def test_should_regenerate_when_index_missing_even_with_an_unrelated_diff(tmp_path: Path):
+    """A cycle that touched nothing under skills/ still triggers
+    regeneration when the index does not exist at all -- the bootstrap
+    case this property exists for."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert not (repo / INDEX_RELPATH).exists()
+
+    assert _should_regenerate_skills_index(repo, ["docs/README.md"]) is True
+
+
+def test_should_not_regenerate_when_index_exists_and_diff_is_unrelated(tmp_path: Path):
+    """An existing index and an unrelated diff must not trigger a
+    bookkeeping-only regeneration attempt -- the property #1857 shipped
+    with (no commit when nothing changed) must survive this fix."""
+    repo = tmp_path / "repo"
+    target = repo / INDEX_RELPATH
+    target.parent.mkdir(parents=True)
+    target.write_text("# Skills index\n\n(no skills yet)\n", encoding="utf-8")
+
+    assert _should_regenerate_skills_index(repo, ["docs/README.md"]) is False
+
+
+def test_should_regenerate_when_diff_touches_skills_even_with_an_existing_index(tmp_path: Path):
+    repo = tmp_path / "repo"
+    target = repo / INDEX_RELPATH
+    target.parent.mkdir(parents=True)
+    target.write_text("# Skills index\n\n(no skills yet)\n", encoding="utf-8")
+
+    assert _should_regenerate_skills_index(repo, ["skills/alpha/SKILL.md"]) is True
+
+
+def test_end_to_end_bootstrap_creates_the_index_for_a_cycle_that_did_not_touch_skills(tmp_path: Path):
+    """The full gate-plus-write path: a cycle whose own diff never touched
+    skills/, on a repo with no index.md at all yet, still ends with the
+    index created and pushed."""
+    repo = _init_repo_with_origin(tmp_path)
+    _add_skill(repo, "alpha")  # a skill exists on disk, just not from THIS cycle's diff
+    _git(repo, "add", "skills/alpha/SKILL.md")
+    _git(repo, "commit", "-m", "add alpha skill (an earlier cycle)")
+    _git(repo, "push", "origin", "main")
+    assert not (repo / INDEX_RELPATH).exists()
+
+    files_changed = ["docs/README.md"]  # this cycle's own diff -- unrelated to skills/
+    assert _should_regenerate_skills_index(repo, files_changed) is True
+    result = _regenerate_skills_index_if_needed(repo, files_changed)
+
+    assert result["outcome"] == "integrated"
+    assert (repo / INDEX_RELPATH).is_file()
+    assert "- alpha: does things" in (repo / INDEX_RELPATH).read_text(encoding="utf-8")
+
+    # And a second such cycle, with the index now current, makes no
+    # bookkeeping-only commit.
+    before_sha = _git(repo, "rev-parse", "HEAD")
+    assert _should_regenerate_skills_index(repo, files_changed) is False
+    second = _regenerate_skills_index_if_needed(repo, files_changed)
+    assert second["outcome"] == "unchanged"
+    assert _git(repo, "rev-parse", "HEAD") == before_sha

@@ -599,8 +599,10 @@ Skills with available="false" need dependencies installed first - you can try in
         cycle_id: str = "",
     ) -> str:
         """#1725 (ADR-022): the loop profile's own assembly — six ontology
-        blocks, skills catalogue (#1857: retired, always empty -- kept as a
-        named, empty section rather than removed from the list), memory,
+        blocks, skills catalogue (#1857: retired, always empty -- the name
+        stays in ``last_fit["sections"]``'s telemetry dict at 0, but the
+        assembled PROMPT the model reads carries no skills-catalogue text
+        at all, empty content is dropped by :meth:`_join_sections`), memory,
         code-generated runtime facts, the #1766 scorecard block, then the
         #1793 position block LAST. No ``active_skills`` section (dropped,
         #1725 item 3): the loop's only always-skill, ``memory``, is already
@@ -614,10 +616,14 @@ Skills with available="false" need dependencies installed first - you can try in
         # (ADR-031 rule 5): `skills/index.md` (harness-generated,
         # nanobot.runtime.skills_index) plus an unconditional instruction
         # in roles/planner.md, reachable via `read_file`, never resident.
-        # The section name stays in the ordered list below (empty
-        # content), so section order/coverage is unchanged for every
-        # reader of that shape; only its characters and its own budget
-        # computation are gone.
+        # The section name stays in `sections` below and therefore in
+        # `last_fit["sections"]`'s telemetry dict (0, not absent -- #1379's
+        # "legitimately empty" vs "dropped" distinction), so a ledger row
+        # or dashboard already reading that shape sees no new/missing key.
+        # This is NOT a claim about the assembled prompt text itself:
+        # `_join_sections` skips empty content, so a cycle's actual prompt
+        # carries no skills-catalogue text or heading at all -- proven by
+        # `test_loop_profile_never_calls_build_skills_summary`.
         skills_section = ""
         self._skills_catalogue_usage = {}
 
