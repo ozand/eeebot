@@ -32,6 +32,7 @@ SAMPLE_HISTORY = f"""\
 - {RECENT_DATE}: [cycle-new002] fix: smoke_test stall detection (files: scripts/smoke_test_loop.py)
 - {OLD_DATE}: [cycle-old001] feat: add cycle_logger.py (files: scripts/cycle_logger.py)
 - {OLD_DATE}: [cycle-old002] chore: mark Priority 5 Done in MEMORY.md
+- no date on this line at all
 """
 
 SAMPLE_MEMORY_SMALL = """\
@@ -70,30 +71,53 @@ def _make_repo(tmp: Path, history: str = "", memory: str = "", archive: str = ""
 
 def test_parse_history_returns_list():
     entries = _parse_history_entries(SAMPLE_HISTORY)
-    assert len(entries) == 4
+    assert len(entries) == 5
     assert all("date" in e and "text" in e for e in entries)
 
 
 def test_parse_history_extracts_dates():
-    """#1828: compare against RECENT_DATE -- the same constant SAMPLE_HISTORY
-    was built from at import time -- never a freshly recomputed
-    date.today(). A full-suite run that crosses midnight between module
-    import and this assertion must not turn a correct result into a
-    failure (see test_parse_history_dates_are_stable_across_a_midnight_crossing
-    below for the regression proof)."""
+    """#1828: identify the two explicitly-recent-dated lines by their own
+    text (``- {RECENT_DATE}: ...``), never by re-deriving today's date at
+    assertion time -- and, since #1838 added an undated line to
+    SAMPLE_HISTORY, never by bare ``date`` equality either: the undated
+    line's clock fallback (scripts/memory_archiver.py:157/159) also stamps
+    it with RECENT_DATE on any same-day run, which would otherwise inflate
+    this count to 3 for a reason unrelated to what this test checks. That
+    fallback behaviour has its own test,
+    test_undated_line_is_stamped_with_todays_date_not_dropped_or_rejected."""
     entries = _parse_history_entries(SAMPLE_HISTORY)
-    recent = [e for e in entries if e["date"].isoformat() == RECENT_DATE]
+    recent = [e for e in entries if e["text"].startswith(f"- {RECENT_DATE}:")]
     assert len(recent) == 2
 
 
+def test_undated_line_is_stamped_with_todays_date_not_dropped_or_rejected():
+    """scripts/memory_archiver.py:157/159: a HISTORY.md line whose date
+    cannot be parsed is neither dropped nor rejected -- it is silently
+    stamped with ``datetime.date.today()``, a day taken from the clock at
+    PARSE time rather than from the line's own content. Stated here as a
+    decision worth documenting, not one to inherit silently -- and it sits
+    inside the very module ADR-029's %Y-%m-%d-from-the-clock census (#1831)
+    was run on."""
+    entries = _parse_history_entries(SAMPLE_HISTORY)
+    undated = [e for e in entries if e["text"] == "- no date on this line at all"]
+    assert len(undated) == 1
+    assert undated[0]["date"] == datetime.date.today()
+
+
 def test_parse_history_dates_are_stable_across_a_midnight_crossing(monkeypatch):
-    """#1828 regression proof: advance the wall clock a full day past
-    RECENT_DATE (the exact midnight-crossing shape the issue describes --
-    a fixture stamped yesterday compared against today's clock) and assert
-    the outcome is unchanged. If a future edit reintroduces
-    ``datetime.date.today()`` into this assertion, this test catches it:
-    the recomputed "today" would no longer match any parsed entry and the
-    count would drop to 0."""
+    """#1828 regression proof, made load-bearing by #1838's undated line:
+    without the monkeypatch below, the undated SAMPLE_HISTORY line's
+    fallback (scripts/memory_archiver.py:157/159) stamps it with the REAL
+    ``today`` -- which, in a normal same-day test run, equals RECENT_DATE,
+    inflating "recent" to 3 entries. Advancing the clock a full day past
+    RECENT_DATE (the exact midnight-crossing shape #1828 describes) stamps
+    the undated line with tomorrow instead, so it does NOT match
+    RECENT_DATE and the count correctly stays at 2. Delete the
+    ``monkeypatch.setattr`` line below and this test fails (3 != 2),
+    proving the patch changes the result rather than being decorative --
+    the property #1838 found this test was NOT actually proving, since
+    every original SAMPLE_HISTORY line carried a parseable date and the
+    :157/:159 fallback was never reached."""
     tomorrow = datetime.date.fromisoformat(RECENT_DATE) + datetime.timedelta(days=1)
 
     class _AdvancedDate(datetime.date):
