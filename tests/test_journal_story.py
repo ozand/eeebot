@@ -74,6 +74,64 @@ def test_corrupt_archive_is_reported_not_skipped_silently(tmp_path):
     assert load_day_journal(tmp_path / "nowhere", "2026-09-15")["notes"] == ["ledger_dir_missing"]
 
 
+def test_a_cross_midnight_cycles_title_reaches_its_outcome_beat_1841(tmp_path):
+    """Reproduces the real 2026-09-20 production case (cycle-e953d1bce4fc,
+    fetched from state/ledger on eeepc): its `proposed` row lands
+    2026-09-19T23:10:20Z, its `outcome` row (no task_title of its own)
+    lands 2026-09-20T00:05:07Z. Before #1841, load_day_journan's own day
+    filter dropped the `proposed` row before select_beats ever saw it, so
+    the recorded state/story/2026-09-20.json artifact's beat-001 fell back
+    to the bare "outcome event" title.
+    """
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    proposed = json.dumps({
+        "phase": "proposed", "cycle_id": "cycle-e953d1bce4fc",
+        "task_title": "Add collect_incident_errors to scripts/search_subagent_archive.py "
+                      "to gather error-status result records",
+        "ts": "2026-09-19T23:10:20.391471Z",
+    })
+    with gzip.open(ledger / "cycles-2026-09-19.jsonl.gz", "wt", encoding="utf-8") as handle:
+        handle.write(proposed + "\n")
+    outcome = json.dumps({
+        "phase": "outcome", "cycle_id": "cycle-e953d1bce4fc", "outcome": "success",
+        "ts": "2026-09-20T00:05:07.210007Z",
+    })
+    with gzip.open(ledger / "cycles-2026-09-20.jsonl.gz", "wt", encoding="utf-8") as handle:
+        handle.write(outcome + "\n")
+    (ledger / "cycles.jsonl").write_text("", encoding="utf-8")
+
+    journal = load_day_journal(tmp_path, "2026-09-20")
+    beats = select_beats(journal["rows"], day="2026-09-20")
+    assert len(beats) == 1
+    assert beats[0]["event"] == (
+        "Add collect_incident_errors to scripts/search_subagent_archive.py "
+        "to gather error-status result records"
+    )
+    assert beats[0]["event"] != "outcome event"  # the pre-fix fallback
+
+
+def test_a_neighbouring_days_own_event_still_does_not_enter_the_beats_1841(tmp_path):
+    """The day filter for BEATS (events) must stay strict -- only the
+    `proposed`-row title exemption changed. An outcome row genuinely
+    stamped the day before must not surface as one of today's beats, even
+    though the file window reads yesterday's archive too."""
+    ledger = tmp_path / "ledger"
+    ledger.mkdir()
+    yesterday_outcome = json.dumps({
+        "phase": "outcome", "cycle_id": "cycle-yesterday", "outcome": "success",
+        "task_title": "Yesterday's own change", "ts": "2026-09-19T23:50:00Z",
+    })
+    with gzip.open(ledger / "cycles-2026-09-19.jsonl.gz", "wt", encoding="utf-8") as handle:
+        handle.write(yesterday_outcome + "\n")
+    (ledger / "cycles.jsonl").write_text("", encoding="utf-8")
+
+    journal = load_day_journal(tmp_path, "2026-09-20")
+    assert not any(row.get("cycle_id") == "cycle-yesterday" for row in journal["rows"])
+    beats = select_beats(journal["rows"], day="2026-09-20")
+    assert beats == []
+
+
 def _row(line: int, *, cycle: str = "cycle-a", outcome: str = "success", title: str = "Ship change"):
     return {
         "phase": "outcome", "cycle_id": cycle, "outcome": outcome,

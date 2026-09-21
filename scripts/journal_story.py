@@ -167,6 +167,11 @@ def load_day_journal(state_dir: str | Path, day: str) -> dict[str, Any]:
     dropped: ``status`` is ``incomplete`` whenever any row of the day may be
     missing, so a thin day (``complete``, few rows) and a partly unreadable
     day never look alike (ADR-015 rule 5). No model is involved.
+
+    A ``proposed`` row is returned regardless of its own day, since it only
+    ever supplies a title (#1841) -- a cycle straddling midnight can have its
+    ``proposed`` row dated yesterday and its ``outcome`` row dated today.
+    Every other row is still bound to ``day`` exactly.
     """
     requested = date.fromisoformat(day)
     ledger_dir = Path(state_dir) / "ledger"
@@ -197,7 +202,19 @@ def load_day_journal(state_dir: str | Path, day: str) -> dict[str, Any]:
                         unreadable.append({"file": path.name, "line": line_no, "reason": "not_an_object"})
                         continue
                     stamp = _parse_ts(row.get("ts"))
-                    if stamp is None or stamp.astimezone(timezone.utc).date() != requested:
+                    # #1841: a ``proposed`` row only ever supplies a title
+                    # (keyed by cycle_id, in select_beats) -- it is never
+                    # itself an event. A cycle whose ``proposed`` row falls
+                    # the day before its ``outcome`` row still needs that
+                    # title to reach select_beats, so title rows are exempt
+                    # from the day match; the file window above (day-1/0/+1)
+                    # already bounds how far a title can drift. Event rows
+                    # (every other phase) keep the strict day match: a
+                    # neighbouring day's events must never enter this day's
+                    # beats.
+                    if row.get("phase") != "proposed" and (
+                        stamp is None or stamp.astimezone(timezone.utc).date() != requested
+                    ):
                         continue
                     rows.append({**row, "_source_file": path.name, "_source_line": line_no})
         except PermissionError:
