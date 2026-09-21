@@ -60,3 +60,15 @@ Ranked, highest first:
 A commit that raises none of these is not progress, however clean it is. A
 script nothing calls and a document nothing routes to sit at the bottom of
 this list, not the middle.
+
+## Capability ladder
+
+Work advances through four tiers. Each tier depends on the one below it:
+
+1. **Raw material** (сырьё) — data points, notes, telemetry, or facts without automated consumers.
+2. **Component** (компонент) — a standalone tool, script, parser, or unit test exercising an isolated capability.
+3. **Complex component** (сложный компонент) — integrated subsystem, pipeline, or evaluator combining components into an automated flow.
+4. **Product** (продукт) — end-to-end outcome delivering autonomous value or reaching the screen/operator (Vector 3).
+
+Loop work is not done when raw material is gathered; value is realized only as it ascends into tested components and working products.
+

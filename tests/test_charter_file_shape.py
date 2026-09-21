@@ -100,8 +100,9 @@ def test_mutation_surface_is_not_stated_in_the_charter(charter: str) -> None:
 
 
 def test_vectors_and_validity_rules_survive(charter: str) -> None:
-    for literal in ("Vector 1", "Vector 2", "Validity rules"):
+    for literal in ("Vector 1", "Vector 2", "Validity rules", "Capability ladder"):
         assert literal in charter, f"goals.md lost its '{literal}' section"
+
 
 
 def test_bridge_block_carries_exactly_one_top_level_heading() -> None:
