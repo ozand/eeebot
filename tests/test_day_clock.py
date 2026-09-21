@@ -15,6 +15,21 @@ from pathlib import Path
 from nanobot.runtime import day_clock
 
 
+_UNIT_DIR = Path(__file__).parents[1] / "host" / "eeepc" / "systemd"
+
+
+def _timer_clock_hour(timer_name: str) -> int:
+    """Read the local-hour schedule declared by a repository timer."""
+    text = (_UNIT_DIR / timer_name).read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if line.startswith("OnCalendar="):
+            value = line.split("=", 1)[1].strip()
+            if value == "daily":
+                return 0
+            return int(value.rsplit(" ", 1)[1].split(":", 1)[0])
+    raise AssertionError(f"{timer_name} has no OnCalendar schedule")
+
+
 def _write_ledger(state_dir: Path, events: list[dict]) -> None:
     ledger_dir = state_dir / "ledger"
     ledger_dir.mkdir(parents=True, exist_ok=True)
@@ -23,18 +38,21 @@ def _write_ledger(state_dir: Path, events: list[dict]) -> None:
             f.write(json.dumps(ev) + "\n")
 
 
-def test_day_start_is_utc_midnight_on_or_before_now():
-    now = datetime(2026, 9, 20, 14, 37, 12, tzinfo=timezone.utc)
-    assert day_clock.day_start(now) == datetime(2026, 9, 20, 0, 0, 0, tzinfo=timezone.utc)
+def test_day_start_is_local_midnight_on_or_before_now():
+    local = datetime.now().astimezone().tzinfo
+    now = datetime(2026, 9, 20, 14, 37, 12, tzinfo=local)
+    assert day_clock.day_start(now) == datetime(2026, 9, 20, 0, 0, 0, tzinfo=local)
 
 
 def test_day_start_at_exact_boundary_stays_on_that_day():
-    now = datetime(2026, 9, 20, 0, 0, 0, tzinfo=timezone.utc)
+    local = datetime.now().astimezone().tzinfo
+    now = datetime(2026, 9, 20, 0, 0, 0, tzinfo=local)
     assert day_clock.day_start(now) == now
 
 
 def test_day_position_reports_elapsed_and_remaining_summing_to_24h():
-    now = datetime(2026, 9, 20, 6, 0, 0, tzinfo=timezone.utc)
+    local = datetime.now().astimezone().tzinfo
+    now = datetime(2026, 9, 20, 6, 0, 0, tzinfo=local)
     pos = day_clock.day_position(now)
     assert pos["hours_elapsed"] == 6.0
     assert pos["hours_to_deep_sleep"] == 18.0
@@ -142,12 +160,12 @@ def test_no_verdict_word_in_any_rendered_action_or_mortality_text(tmp_path):
         assert word not in lowered, f"verdict word {word!r} leaked into day_actions output"
 
 
-def test_day_boundary_hour_is_midnight_utc_matching_the_nightly_cluster():
-    """Pin (ADR-026 decision 4): the day boundary a future deep-sleep job
-    must import rather than re-derive is UTC midnight -- drifting this
-    constant would silently move every 'hours to deep sleep' figure the
-    executor reads."""
-    assert day_clock.DAY_BOUNDARY_HOUR_UTC == 0
+def test_day_boundary_hour_matches_the_declared_nightly_timer_schedule():
+    """The live boundary follows the repository's local-time timer schedule."""
+    curator_hour = _timer_clock_hour("eeebot-knowledge-curator.timer")
+    action_hour = _timer_clock_hour("eeebot-action-index.timer")
+    assert curator_hour == action_hour
+    assert day_clock.DAY_BOUNDARY_HOUR_LOCAL == curator_hour
     assert day_clock.DAY_HOURS == 24
 
 
