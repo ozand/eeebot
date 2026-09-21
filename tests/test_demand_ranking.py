@@ -93,8 +93,9 @@ def test_urgency_is_flat_for_every_tier_except_moves_deliverable():
 
 
 def test_urgency_rises_toward_deep_sleep_only_for_moves_deliverable():
+    # Day starts at 03:30 local (00:30 UTC). 04:00 local (01:00 UTC) is early, 23:00 local (20:00 UTC) is late.
     early = dr.compute_urgency("moves_deliverable", now=datetime(2026, 9, 20, 1, 0, tzinfo=timezone.utc))
-    late = dr.compute_urgency("moves_deliverable", now=datetime(2026, 9, 20, 23, 0, tzinfo=timezone.utc))
+    late = dr.compute_urgency("moves_deliverable", now=datetime(2026, 9, 20, 20, 0, tzinfo=timezone.utc))
     assert late.score > early.score
 
 
@@ -257,3 +258,29 @@ def test_record_score_size_estimated_flag_survives_into_the_record(tmp_path):
     scored = dr.score_candidate({"target_path": "docs/x.md"}, graph=_graph(), state_dir=tmp_path)
     row = dr.record_score(scored)
     assert row["size_estimated"] is True  # no ledger history in a fresh tmp_path
+
+
+# ─── increment_fit: non-monotonic size scaling (#1851, ADR-031) ─────────────
+
+
+def test_increment_fit_favors_box_capacity_over_both_extremes(tmp_path):
+    """Tasks of the same shape/tier: ~190 lines (box capacity) beats both
+    trivial (5 lines) and oversized (2000 lines)."""
+    trivial = {"target_path": "scripts/leaf.py", "estimated_lines": 5}
+    optimal = {"target_path": "scripts/leaf.py", "estimated_lines": 190}
+    oversized = {"target_path": "scripts/leaf.py", "estimated_lines": 2500}
+
+    s_triv = dr.score_candidate(trivial, graph=_graph(), state_dir=tmp_path)
+    s_opt = dr.score_candidate(optimal, graph=_graph(), state_dir=tmp_path)
+    s_over = dr.score_candidate(oversized, graph=_graph(), state_dir=tmp_path)
+
+    assert s_opt.increment_fit > s_triv.increment_fit
+    assert s_opt.increment_fit > s_over.increment_fit
+    assert s_opt.total > s_triv.total
+    assert s_opt.total > s_over.total
+
+
+def test_increment_fit_defaults_to_neutral_when_lines_absent(tmp_path):
+    no_lines = {"target_path": "scripts/leaf.py"}
+    s = dr.score_candidate(no_lines, graph=_graph(), state_dir=tmp_path)
+    assert s.increment_fit == 1.0

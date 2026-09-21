@@ -42,6 +42,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import math
 from pathlib import Path
 from typing import Any
 
@@ -275,6 +276,30 @@ def compute_size(candidate: dict[str, Any], state_dir: Path, *, now: datetime | 
     return SizeEstimate(shape=shape, cost=max(cost, 0.001), estimated=True)
 
 
+#: ADR-031 target median increment size in lines (~190 lines on host history).
+_BOX_TARGET_LINES = 190.0
+
+
+def compute_increment_fit(candidate: dict[str, Any]) -> float:
+    """Non-monotonic multiplier for increment size in numerator (#1851, ADR-031)."""
+    if not isinstance(candidate, dict):
+        return 1.0
+    raw = candidate.get("estimated_lines")
+    if raw is None:
+        raw = candidate.get("lines")
+    if raw is None:
+        return 1.0
+    try:
+        lines = float(raw)
+    except (TypeError, ValueError):
+        return 1.0
+    if lines <= 0:
+        return 0.1
+    ratio = lines / _BOX_TARGET_LINES
+    fit = math.exp(-0.5 * (math.log(ratio) / 1.2) ** 2)
+    return round(max(0.1, min(1.0, fit)), 4)
+
+
 @dataclass(frozen=True)
 class ScoredCandidate:
     candidate: dict[str, Any]
@@ -282,10 +307,8 @@ class ScoredCandidate:
     value_score: int
     urgency: Urgency
     size: SizeEstimate
+    increment_fit: float
     total: float
-    #: The rung-gained CLAIM this candidate makes at proposal time (True
-    #: only for connects_leaf/extends_component tiers) -- distinct from
-    #: whatever the graph measures weeks later. See :func:`record_score`.
     rung_gained_claim: bool
 
 
@@ -303,17 +326,15 @@ def score_candidate(
     value_tier, value_score = classify_value(candidate, graph)
     urgency = compute_urgency(value_tier, now=now, state_dir=state_dir)
     size = compute_size(candidate, state_dir, now=now)
-    # Value gained per unit of measured cost -- WSJF's own shape (ADR-027
-    # decision 1: "Value = rung gained + known failure mode reduced",
-    # divided by the measured-cost denominator, decision 3), plus the
-    # flat/rising urgency term.
-    total = (value_score / size.cost) + urgency.score
+    fit = compute_increment_fit(candidate)
+    total = ((value_score * fit) / size.cost) + urgency.score
     return ScoredCandidate(
         candidate=candidate,
         value_tier=value_tier,
         value_score=value_score,
         urgency=urgency,
         size=size,
+        increment_fit=fit,
         total=round(total, 6),
         rung_gained_claim=value_tier in ("connects_leaf", "extends_component"),
     )
@@ -367,5 +388,6 @@ def record_score(scored: ScoredCandidate) -> dict[str, Any]:
         "size_shape": scored.size.shape,
         "size_cost": scored.size.cost,
         "size_estimated": scored.size.estimated,
+        "increment_fit": scored.increment_fit,
         "total": scored.total,
     }
