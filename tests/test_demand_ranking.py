@@ -93,8 +93,9 @@ def test_urgency_is_flat_for_every_tier_except_moves_deliverable():
 
 
 def test_urgency_rises_toward_deep_sleep_only_for_moves_deliverable():
-    early = dr.compute_urgency("moves_deliverable", now=datetime(2026, 9, 20, 1, 0, tzinfo=timezone.utc))
-    late = dr.compute_urgency("moves_deliverable", now=datetime(2026, 9, 20, 23, 0, tzinfo=timezone.utc))
+    local = datetime.now().astimezone().tzinfo
+    early = dr.compute_urgency("moves_deliverable", now=datetime(2026, 9, 20, 1, 0, tzinfo=local))
+    late = dr.compute_urgency("moves_deliverable", now=datetime(2026, 9, 20, 23, 0, tzinfo=local))
     assert late.score > early.score
 
 
