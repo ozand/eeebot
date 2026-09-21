@@ -605,6 +605,41 @@ def _changed_files_and_violations(repo_root: 'Path', base_sha: str) -> 'tuple[li
     return files_changed, blocked, mutation, tier
 
 
+def _record_diary_fitness_marker(
+    state_dir: 'Path', cycle_id: str, *, reads: list[dict] | None = None, wrote: bool = False,
+) -> dict:
+    """Record one diary-fitness row and make failures observable.
+
+    Pre-spawn terminal paths have no executor manager/read list, but they are
+    still completed cycles. They use an empty read list here; executor paths
+    pass their collected reads. The writer remains non-blocking, while a
+    missing row leaves a cycle-ledger error and a visible diagnostic instead
+    of being mistaken for ``diary_read=False``.
+    """
+    try:
+        from nanobot.runtime.diary_fitness import record_cycle_diary_read
+
+        row = record_cycle_diary_read(
+            state_dir, cycle_id=cycle_id, reads=reads or [], wrote=wrote,
+        )
+        if row:
+            return row
+        reason = "writer returned no row"
+    except Exception as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+    message = f"diary-fitness: cycle {cycle_id} marker failed: {reason}"
+    print(message)
+    append_event(
+        state_dir,
+        {
+            "phase": "diary_fitness_error",
+            "cycle_id": cycle_id,
+            "reason": reason,
+        },
+    )
+    return {}
+
+
 def _write_post_cycle_censuses(state_dir: 'Path', selfevo_repo: 'Path') -> None:
     """Report-only, harness-side censuses written every cycle. Never a gate
     input, never written by the loop.
@@ -3435,6 +3470,7 @@ async def _main_impl_body():
                 )
                 # #721: no cycle branch exists yet on this path — tag at current HEAD.
                 _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'failed')
+                _record_diary_fitness_marker(STATE_DIR, _cycle_id)
                 return 0
 
         # #1001: pick up any curator-staged fact promotions at the safe cycle-start
@@ -3553,6 +3589,7 @@ async def _main_impl_body():
                 real_result=_real_result_ledger_inputs('already_done'),
             )
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-already-done')
+            _record_diary_fitness_marker(STATE_DIR, _cycle_id)
             # #733: bulk-skip — bookkeeping done for this duplicate; move on to
             # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
             _skips += 1
@@ -3636,6 +3673,7 @@ async def _main_impl_body():
             )
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-recent-failure')
+            _record_diary_fitness_marker(STATE_DIR, _cycle_id)
             # #733: bulk-skip — bookkeeping done for this duplicate; move on to
             # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
             _skips += 1
@@ -3707,6 +3745,7 @@ async def _main_impl_body():
             )
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-existence-duplicate')
+            _record_diary_fitness_marker(STATE_DIR, _cycle_id)
             # #733: bulk-skip — bookkeeping done for this duplicate; move on to
             # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
             _skips += 1
@@ -4772,8 +4811,13 @@ async def _main_impl_body():
                         f"{_diary_row.get('diary_read')} position={_diary_row.get('tool_call_position')} "
                         f"diary_written={_diary_row.get('diary_written')}"
                     )
-            except Exception:
-                pass  # diary-fitness write errors are non-blocking
+            except Exception as _diary_exc:
+                print(f"diary-fitness: cycle {_cycle_id} collection failed: {_diary_exc}")
+                _diary_row = {}
+            if not _diary_row:
+                _record_diary_fitness_marker(
+                    STATE_DIR, _cycle_id, reads=[], wrote=_wrote_diary,
+                )
             _write_post_cycle_censuses(STATE_DIR, _selfevo_repo)
 
             if _integrated and _should_regenerate_skills_index(_selfevo_repo, files_changed):

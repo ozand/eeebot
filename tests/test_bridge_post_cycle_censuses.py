@@ -22,6 +22,36 @@ from pathlib import Path
 from nanobot.runtime import bridge
 
 
+def test_diary_marker_failure_leaves_a_cycle_ledger_error(tmp_path: Path, monkeypatch) -> None:
+    import json
+    import nanobot.runtime.diary_fitness as diary_fitness
+
+    monkeypatch.setattr(diary_fitness, "record_cycle_diary_read", lambda *args, **kwargs: {})
+    row = bridge._record_diary_fitness_marker(tmp_path / "state", "cycle-broken")
+
+    assert row == {}
+    ledger = tmp_path / "state" / "ledger" / "cycles.jsonl"
+    events = [json.loads(line) for line in ledger.read_text().splitlines()]
+    assert events[-1]["phase"] == "diary_fitness_error"
+    assert events[-1]["cycle_id"] == "cycle-broken"
+    assert "writer returned no row" in events[-1]["reason"]
+
+
+def test_diary_marker_records_pre_spawn_cycle_without_reads(tmp_path: Path, monkeypatch) -> None:
+    import json
+    import nanobot.runtime.diary_fitness as diary_fitness
+
+    monkeypatch.setattr(
+        diary_fitness,
+        "record_cycle_diary_read",
+        lambda state_dir, **kwargs: {"cycle_id": kwargs["cycle_id"], "diary_read": False},
+    )
+    row = bridge._record_diary_fitness_marker(tmp_path / "state", "cycle-skipped")
+
+    assert row == {"cycle_id": "cycle-skipped", "diary_read": False}
+    assert not (tmp_path / "state" / "ledger" / "cycles.jsonl").exists()
+
+
 def test_both_census_writers_are_called_with_the_right_arguments(tmp_path: Path, monkeypatch) -> None:
     import nanobot.runtime.diary_fitness as diary_fitness
     import nanobot.runtime.lesson_v2 as lesson_v2
