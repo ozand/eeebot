@@ -45,6 +45,7 @@ Conventions:
 | [ADR-027](ADR-027-work-is-ranked-by-rung-gained-per-measured-cost.md) | Work is ranked by rung gained per measured cost, and estimates are audited against outcomes rather than re-scored | accepted |
 | [ADR-028](ADR-028-the-day-is-held-by-a-diary-the-loop-never-loads.md) | The day is held by a diary the loop appends to and never loads — second-tier continuity across the ~90 cycles of a day | accepted |
 | [ADR-029](ADR-029-one-clock-the-day-is-host-local.md) | One clock — the day is host-local, everywhere | accepted |
+| [ADR-030](ADR-030-a-cycle-is-a-hadi-loop.md) | A cycle is a HADI loop, and an unknown is a measurement to schedule | accepted |
 
 ## Acceptance
 
