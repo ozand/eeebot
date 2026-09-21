@@ -127,6 +127,24 @@ def shape_concentration(
     current = rows[-window:]
     prior = rows[-2 * window:-window] if len(rows) > window else []
 
+    # PR #1834 review: a 'proposed' row does not itself carry the cycle's
+    # base sha (it is written before the cycle even starts) -- only the
+    # LATER 'outcome' row does, as `main_sha_before`. Without it,
+    # classify_task_shape cannot tell "extend existing" from "new leaf"
+    # (both exist by the time anyone looks), which is exactly the defect
+    # measured live: 3 of 13 scripts/*.py targets in a real sample were
+    # created by the very cycle that targeted them, and all three were
+    # called extend_existing_script. Joined here, once, by cycle_id --
+    # never re-derived per row.
+    base_sha_by_cycle: dict[str, str] = {}
+    if repo is not None:
+        needed = {str(r.get("cycle_id")) for r in current + prior if r.get("cycle_id")}
+        for outcome_row in read_events_across_rotation(state_dir, phases={"outcome"}):
+            cid = str(outcome_row.get("cycle_id") or "")
+            sha = outcome_row.get("main_sha_before")
+            if cid in needed and sha:
+                base_sha_by_cycle[cid] = str(sha)
+
     def _shapes(batch: list[dict]) -> dict[str, int]:
         counts: dict[str, int] = {shape: 0 for shape in TASK_SHAPES}
         for row in batch:
@@ -134,6 +152,7 @@ def shape_concentration(
                 task_title=str(row.get("task_title") or ""),
                 target_path=str(row.get("target_path") or ""),
                 repo=repo,
+                base_sha=base_sha_by_cycle.get(str(row.get("cycle_id") or "")),
             )
             counts[shape] = counts.get(shape, 0) + 1
         return counts

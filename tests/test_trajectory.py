@@ -87,6 +87,56 @@ def test_shape_concentration_omits_trend_when_the_prior_window_is_thin(tmp_path:
     assert result["trend"] is None
 
 
+def test_shape_concentration_uses_the_outcome_join_to_tell_new_leaf_from_extend(tmp_path: Path):
+    """End-to-end proof of the PR #1834 review fix: shape_concentration
+    itself (not just classify_task_shape in isolation) must distinguish
+    a script the cycle created from one it extended, by joining each
+    'proposed' row to its own 'outcome' row's main_sha_before -- a
+    'proposed' row carries no base sha of its own."""
+    import subprocess
+
+    def _git(repo: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, text=True, capture_output=True,
+        ).stdout.strip()
+
+    state = tmp_path / "state"
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "scripts" / "existing.py").write_text("pass\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+    (repo / "scripts" / "new_leaf.py").write_text("pass\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "cycle")
+
+    # _MIN_ROWS_FOR_A_FINDING padding: a few filler proposals with no
+    # matching outcome row, so they fall to the "other" bucket without
+    # affecting the two rows under test.
+    for i in range(3):
+        _proposed(state, f"filler-{i}", "investigate something", "")
+
+    _proposed(state, "extend-cycle", "add a function", "scripts/existing.py")
+    cycle_ledger.record_cycle_outcome(
+        state, "extend-cycle", "success", None, ["scripts/existing.py"], "branch/extend-cycle",
+        main_sha_before=base_sha,
+    )
+    _proposed(state, "new-leaf-cycle", "add a script", "scripts/new_leaf.py")
+    cycle_ledger.record_cycle_outcome(
+        state, "new-leaf-cycle", "success", None, ["scripts/new_leaf.py"], "branch/new-leaf-cycle",
+        main_sha_before=base_sha,
+    )
+
+    result = trajectory.shape_concentration(state, repo=repo, window=5)
+    assert result["ok"] is True
+    assert result["counts"]["extend_existing_script"] == 1
+    assert result["counts"]["new_leaf_script"] == 1
+
+
 def test_shape_concentration_window_and_row_count_are_always_reported():
     """AC: 'the report states its own window and row count, so a thin
     window cannot read as a confident finding' -- true on both the
