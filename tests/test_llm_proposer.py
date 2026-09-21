@@ -3505,12 +3505,12 @@ class TestProposalDorDod:
             "dor": {
                 "metric": "tokens_per_integration",
                 "description": "baseline token consumption measured",
-                "target": "tests/test_clean_mem.py",
+                "target": "tokens_per_integration",
             },
             "dod": {
                 "metric": "tokens_per_integration",
                 "description": "tokens per integration reduced by 2%",
-                "target": "tests/test_clean_mem.py",
+                "target": "tokens_per_integration",
             },
         }
         res = llm_proposer._sanitized_expected_outcome(proposal)
@@ -3527,9 +3527,10 @@ class TestProposalDorDod:
             "dor": {
                 "metric": "compile_clean_ratio",
                 "description": "compile passes",
-                "target": "scripts/clean_mem.py",  # self-referential
+                "target": "tests/test_clean_mem.py",  # loop-writable test -> rejected
             },
         }
         res = llm_proposer._sanitized_expected_outcome(proposal)
-        # Self-referential criteria dropped
+        # Loop-writable criteria dropped
         assert res is None or "dor" not in res
+
