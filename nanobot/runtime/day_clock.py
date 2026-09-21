@@ -3,7 +3,7 @@ boundary, plus the harness-computed facts that make the step/cycle/day
 clocks visible to the executor (#1793).
 
 Single source, per ADR-026 decision 4 and #1793 item 4: the day boundary
-used here (:data:`DAY_BOUNDARY_HOUR_UTC`, :func:`day_start`) is the same
+used here (:data:`DAY_BOUNDARY_HOUR_LOCAL`, :func:`day_start`) is the same
 definition a future deep-sleep job (not built by this issue -- see the
 Non-goals in #1793) must import rather than re-derive, so the block's
 "hours to deep sleep" and the job's own trigger can never drift apart the
@@ -30,12 +30,12 @@ from typing import Any
 
 from nanobot.runtime.state_access import evidence_status, ledger_window
 
-#: UTC hour the day boundary falls on. Matches the existing nightly cluster
-#: (ADR-026 context: knowledge curator 00:00, action index 00:05, host
-#: capabilities 01:00, systemd drift check 02:00) -- deep sleep, when
-#: built, is described by ADR-026 as the first of these jobs to run, not a
-#: separate arrangement, so its boundary is this same hour.
-DAY_BOUNDARY_HOUR_UTC = 0
+#: The nightly cluster is scheduled in the host's local clock: the curator's
+#: ``OnCalendar=daily`` fires at local midnight, followed by action index at
+#: 00:05 and the later narrator at 03:30. Keep this live boundary on that
+#: local clock. This is deliberately separate from #1831's stored-day-key
+#: migration; no persisted key is read or rewritten here.
+DAY_BOUNDARY_HOUR_LOCAL = 0
 
 #: Length of a day in this ontology (ADR-026 decision 1's "day" clock).
 DAY_HOURS = 24
@@ -64,15 +64,15 @@ VERDICT_WORDS = (
 
 
 def day_start(now: "datetime | None" = None) -> datetime:
-    """UTC midnight on or before *now* -- the start of the current day."""
-    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    return now.replace(hour=DAY_BOUNDARY_HOUR_UTC, minute=0, second=0, microsecond=0)
+    """Host-local midnight on or before *now* -- the live day boundary."""
+    now = (now or datetime.now().astimezone()).astimezone()
+    return now.replace(hour=DAY_BOUNDARY_HOUR_LOCAL, minute=0, second=0, microsecond=0)
 
 
 def day_position(now: "datetime | None" = None) -> dict[str, Any]:
     """Hours elapsed since the day started and hours remaining to deep
     sleep -- the day half of ADR-026 decision 1's three clocks."""
-    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    now = (now or datetime.now().astimezone()).astimezone()
     start = day_start(now)
     elapsed_hours = (now - start).total_seconds() / 3600.0
     remaining_hours = max(0.0, DAY_HOURS - elapsed_hours)
@@ -99,7 +99,7 @@ def day_actions(state_dir: "Path | str", now: "datetime | None" = None) -> dict[
     is reported as unavailable, never folded into a zero count (the same
     discipline #1773's ``integration_class_counts`` applies).
     """
-    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    now = (now or datetime.now().astimezone()).astimezone()
     start = day_start(now)
     since_ts = start.isoformat().replace("+00:00", "Z")
     try:
