@@ -302,6 +302,19 @@ def _contains_any(text: str, words: frozenset[str]) -> bool:
     return any(re.search(rf"\b{re.escape(word)}\b", lowered) for word in words)
 
 
+def _words(text: str) -> frozenset[str]:
+    """Casefolded word tokens in *text* (#1840).
+
+    Used to subtract a beat's own vocabulary from a forbidden-word list
+    before matching the narration against it. A word the beat's own event
+    text already carries is an echo of the source, not an invented tone —
+    beat-007's event text ("Add failure search guidance...") names
+    ``failure`` as the SUBJECT of the change; forbidding the narration from
+    using that same word made faithful retelling impossible (#1840).
+    """
+    return frozenset(re.findall(r"\w+", text.casefold()))
+
+
 def validate_narration(
     narration: Any,
     beats: list[dict[str, Any]],
@@ -327,11 +340,19 @@ def validate_narration(
         claimed = _text(item.get("sign"))
         if claimed != expected:
             raise StoryValidationError(f"sign drift for {beat_id}: expected {expected}, got {claimed or 'missing'}")
-        if expected == "failed" and _contains_any(text, _POSITIVE_WORDS):
+        # #1840: a word the beat's own event text already carries is an
+        # echo of the source, never an invented tone -- subtract the
+        # beat's own vocabulary from each forbidden set before matching.
+        # beat-007's event text ("Add failure search guidance...") makes
+        # "failure" the SUBJECT of the change; a faithful retelling that
+        # reuses the word must not be treated the same as a narration that
+        # invents a negative/positive/confident word absent from its beat.
+        beat_words = _words(str(beat_map[beat_id].get("event") or ""))
+        if expected == "failed" and _contains_any(text, _POSITIVE_WORDS - beat_words):
             raise StoryValidationError(f"positive wording contradicts failed beat {beat_id}")
-        if expected == "worked" and _contains_any(text, _NEGATIVE_WORDS):
+        if expected == "worked" and _contains_any(text, _NEGATIVE_WORDS - beat_words):
             raise StoryValidationError(f"negative wording contradicts worked beat {beat_id}")
-        if expected == "unknown" and _contains_any(text, _CONFIDENT_UNKNOWN_WORDS):
+        if expected == "unknown" and _contains_any(text, _CONFIDENT_UNKNOWN_WORDS - beat_words):
             raise StoryValidationError(f"confident wording contradicts unknown beat {beat_id}")
         terms = item.get("terms", [])
         if not isinstance(terms, list) or any(str(term) not in allowed_terms for term in terms):

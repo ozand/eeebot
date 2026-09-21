@@ -132,6 +132,53 @@ def test_failed_beat_rejects_positive_prose_and_unknown_is_explicit():
         validate_narration([{"beat_id": "beat-001", "text": "I finally fixed it.", "sign": "unknown", "terms": []}], unknown)
 
 
+def test_beats_own_vocabulary_is_echoed_not_invented():
+    """#1840: a word the beat's own event text already carries is the
+    SUBJECT of the change, not an invented tone. A faithful narration that
+    reuses that word must pass; a narration that invents a DIFFERENT
+    forbidden word absent from the beat must still be rejected -- proven
+    for all three word lists, both directions."""
+    # _NEGATIVE_WORDS on a "worked" beat: the real 2026-09-20 beat-007
+    # shape (see test_narrator_job_2026_09_20_replay_reaches_ok below for
+    # the full-day replay against the recorded artifact).
+    worked = select_beats([_row(1, outcome="success", title="Add failure search guidance in AGENTS.md")])
+    validate_narration(
+        [{"beat_id": "beat-001", "text": "Updated AGENTS.md to point failure searches toward the subagent archive.", "sign": "worked", "terms": []}],
+        worked,
+    )
+    with pytest.raises(StoryValidationError, match="negative wording"):
+        validate_narration(
+            [{"beat_id": "beat-001", "text": "The AGENTS.md update was broken on arrival.", "sign": "worked", "terms": []}],
+            worked,
+        )
+
+    # _POSITIVE_WORDS on a "failed" beat: "success" is the subject of the
+    # investigated metric, not a claim that the investigation succeeded.
+    failed = select_beats([_row(1, outcome="failed", title="Investigate the success metric regression")])
+    validate_narration(
+        [{"beat_id": "beat-001", "text": "Investigated the success metric regression; the fix did not land.", "sign": "failed", "terms": []}],
+        failed,
+    )
+    with pytest.raises(StoryValidationError, match="positive wording"):
+        validate_narration(
+            [{"beat_id": "beat-001", "text": "The regression investigation improved matters.", "sign": "failed", "terms": []}],
+            failed,
+        )
+
+    # _CONFIDENT_UNKNOWN_WORDS on an "unknown" beat: "fixed" names the
+    # threshold under investigation, not a confident verdict on it.
+    unknown = select_beats([_row(1, outcome="partial", title="Investigate the fixed threshold behaviour")])
+    validate_narration(
+        [{"beat_id": "beat-001", "text": "Investigated the fixed threshold behaviour; the outcome is unclear.", "sign": "unknown", "terms": []}],
+        unknown,
+    )
+    with pytest.raises(StoryValidationError, match="confident wording"):
+        validate_narration(
+            [{"beat_id": "beat-001", "text": "The threshold behaviour is definitely settled now.", "sign": "unknown", "terms": []}],
+            unknown,
+        )
+
+
 def test_invented_beat_and_undefined_term_are_rejected():
     beats = select_beats([_row(1)])
     with pytest.raises(StoryValidationError, match="no selected beat"):
@@ -232,6 +279,61 @@ def test_writer_never_raises_on_malformed_model_output(tmp_path):
     result = run_narrator_job(tmp_path, "2026-09-15", llm=lambda messages, model: "not json at all")
     assert result["status"] == "rejected"
     assert Path(result["artifact_path"]).is_file()
+
+
+# The real recorded day (2026-09-20) that first exposed the #1840 defect --
+# beats and model_output copied verbatim from state/story/2026-09-20.json
+# on the eeepc host (artifact generated_at 2026-09-21T00:30:01.202762Z,
+# status: rejected, violations: ["negative wording contradicts worked
+# beat beat-007"]). A replay of a recorded day, not a manufactured event
+# -- no second model call, per #1840's own acceptance criteria.
+_RECORDED_2026_09_20_BEATS = [
+    {"beat_id": "beat-001", "event": "outcome event", "sign": "worked", "cost": None,
+     "source": {"file": "cycles-2026-09-20.jsonl.gz", "line": 3, "cycle_id": "cycle-e953d1bce4fc", "phase": "outcome"}},
+    {"beat_id": "beat-002", "event": "Add select_test_runner to scripts/verify_and_proof.py to choose runner based on test target", "sign": "worked", "cost": None,
+     "source": {"file": "cycles-2026-09-20.jsonl.gz", "line": 24, "cycle_id": "cycle-802327dfcda5", "phase": "outcome"}},
+    {"beat_id": "beat-003", "event": "Add prune_zero_consumer_keys to scripts/format_existence_index_exclusions.py to filter zero-consumer keys", "sign": "worked", "cost": None,
+     "source": {"file": "cycles-2026-09-20.jsonl.gz", "line": 39, "cycle_id": "cycle-5b82bdfb77d7", "phase": "outcome"}},
+    {"beat_id": "beat-004", "event": "Add count_consecutive_matching_errors to scripts/check_repeat_failures.py to tally trailing matching error messages", "sign": "worked", "cost": None,
+     "source": {"file": "cycles-2026-09-20.jsonl.gz", "line": 54, "cycle_id": "cycle-13dee0060d95", "phase": "outcome"}},
+    {"beat_id": "beat-005", "event": "Add extract_incident_id to scripts/search_subagent_archive.py to parse incident IDs from defect strings", "sign": "unknown", "cost": None,
+     "source": {"file": "cycles-2026-09-20.jsonl.gz", "line": 67, "cycle_id": "cycle-c9aff50b1457", "phase": "outcome"}},
+    {"beat_id": "beat-006", "event": "Exclude index.md from lesson schema assertions in test_lessons_integrity.py", "sign": "worked", "cost": None,
+     "source": {"file": "cycles-2026-09-20.jsonl.gz", "line": 95, "cycle_id": "cycle-067815bdbb03", "phase": "outcome"}},
+    {"beat_id": "beat-007", "event": "Add failure search guidance in AGENTS.md to direct queries to subagent archive instead of ledger", "sign": "worked", "cost": None,
+     "source": {"file": "cycles-2026-09-20.jsonl.gz", "line": 111, "cycle_id": "cycle-37717160a42e", "phase": "outcome"}},
+    {"beat_id": "beat-008", "event": "Add steering rule in AGENTS.md to emit strictly raw JSON without conversational preambles in final turns", "sign": "unknown", "cost": None,
+     "source": {"file": "cycles-2026-09-20.jsonl.gz", "line": 131, "cycle_id": "cycle-b500a5fab8fe", "phase": "outcome"}},
+]
+
+_RECORDED_2026_09_20_MODEL_OUTPUT = json.dumps([
+    {"beat_id": "beat-001", "text": "A routine outcome check completed cleanly.", "sign": "worked", "terms": []},
+    {"beat_id": "beat-002", "text": "Added select_test_runner to verify_and_proof so it can pick the right runner for each test target.", "sign": "worked", "terms": []},
+    {"beat_id": "beat-003", "text": "Added prune_zero_consumer_keys to filter out keys with no consumers from exclusion lists.", "sign": "worked", "terms": []},
+    {"beat_id": "beat-004", "text": "Added count_consecutive_matching_errors to check_repeat_failures to tally repeated trailing errors.", "sign": "worked", "terms": []},
+    {"beat_id": "beat-005", "text": "Worked on extract_incident_id to pull IDs from defect strings, but the final result is unknown.", "sign": "unknown", "terms": []},
+    {"beat_id": "beat-006", "text": "Excluded index.md from schema integrity checks across lesson files.", "sign": "worked", "terms": []},
+    {"beat_id": "beat-007", "text": "Updated AGENTS.md to point failure searches toward the subagent archive rather than the ledger.", "sign": "worked", "terms": []},
+    {"beat_id": "beat-008", "text": "Added steering rules in AGENTS.md to keep final turns strictly raw JSON, though the outcome is unknown.", "sign": "unknown", "terms": []},
+])
+
+
+def test_recorded_2026_09_20_day_now_validates_ok_no_second_model_call():
+    """#1840 AC: re-running the narrator for 2026-09-20 reaches an ok
+    result. This is a replay of the recorded day -- the beats and the
+    model's own output are copied verbatim from state/story/2026-09-20.json
+    on the eeepc host, fetched via SSH from the live artifact; no model is
+    called here. Before #1840, this raised StoryValidationError on
+    beat-007 ("negative wording contradicts worked beat beat-007") --
+    beat-007's own event text names "failure" as the subject of the
+    change, and the model's faithful retelling echoed that exact word."""
+    validated = validate_narration(
+        json.loads(_RECORDED_2026_09_20_MODEL_OUTPUT), _RECORDED_2026_09_20_BEATS,
+    )
+    assert len(validated) == 8
+    beat_007 = next(item for item in validated if item["beat_id"] == "beat-007")
+    assert beat_007["sign"] == "worked"
+    assert "failure" in beat_007["text"].lower()
 
 
 def test_no_beats_day_writes_ok_artifact_with_no_model_call(tmp_path):
