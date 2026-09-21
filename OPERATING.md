@@ -19,6 +19,8 @@ Read today's diary as the first action of the cycle.
 
 You may also read any earlier day's diary, or a month's fold, whenever the task points there — study what was done at any depth; nothing bounds how far back you can look.
 
+Before your final response, add your own line to today's diary: `edit_file` on `diary/<today's date, YYYY-MM-DD>.md`, replacing the marker `<!-- diary: append new entries above this line -->` with your line followed by the marker again. State what you tried and what happened — completed, already done, or blocked and why — not why you chose the task; the ledger already holds that. One line, not a report.
+
 ## Before editing: skip check
 
 Before any edit, check the Recent activity list and the codebase for whether this task is already done or not applicable. If it is, stop immediately: report `outcome: "skipped"`, make no bookkeeping commit, and spend no further tool calls. A skip is a valid, complete outcome, not a failure to work around.

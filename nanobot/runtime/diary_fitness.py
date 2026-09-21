@@ -121,6 +121,7 @@ def record_cycle_diary_read(
     *,
     cycle_id: str,
     reads: "list[dict[str, Any]] | None" = None,
+    wrote: bool = False,
 ) -> dict[str, Any]:
     """Append one unconditional marker row for this cycle.
 
@@ -136,10 +137,21 @@ def record_cycle_diary_read(
     cycle the obligation was met -- or ``None`` when it was not met at
     all this cycle.
 
+    *wrote* (#1844) is whether TODAY's diary path appears among this
+    cycle's own changed files -- the caller (the bridge, from the cycle's
+    ``files_changed`` diff) decides this, the same way it decides
+    ``diary_read`` from the raw read list; this module only records what
+    it is told. Deliberately NOT gated on whether the cycle integrated:
+    ``files_changed`` reflects the cycle's own commits regardless of the
+    later verdict, and gating this on integration would make a rejected
+    cycle's diary write indistinguishable from one that never attempted
+    it -- the same reasoning the bridge already applies to ``diary_read``
+    (see its call site's comment).
+
     A row is written every time this is called, whether or not anything
-    was read -- the same unconditional-marker discipline as
-    ``skill_fitness.record_cycle_skill_scan``, so a cycle that read
-    nothing is distinguishable from a cycle where this was never called
+    was read or written -- the same unconditional-marker discipline as
+    ``skill_fitness.record_cycle_skill_scan``, so a cycle that touched
+    neither is distinguishable from a cycle where this was never called
     (instrumentation off, an older release, a crash).
 
     Returns the row written (empty dict on any error). Fail-open: an
@@ -159,6 +171,7 @@ def record_cycle_diary_read(
             "diary_read": bool(today_positions),
             "tool_call_position": min(today_positions) if today_positions else None,
             "days_read": sorted({str(r.get("day")) for r in (reads or []) if isinstance(r, dict) and r.get("day")}),
+            "diary_written": bool(wrote),
         }
         path = Path(state_dir) / CYCLE_SCAN_REL
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -220,21 +233,74 @@ def diary_read_rate(
         }
 
 
+def diary_write_rate(
+    state_dir: Path, *, now: "datetime | None" = None, window_days: int = _WINDOW_DAYS
+) -> dict[str, Any]:
+    """Rolling-window write rate: what fraction of recorded cycles added
+    content to today's diary, over the last *window_days*.
+
+    #1844: the write-side sibling of :func:`diary_read_rate` -- same
+    rows, same window, same fail-open ``ok: False``-means-no-data
+    contract (never a published rate of 0 standing in for "never
+    measured").
+    """
+    try:
+        now_dt = now or datetime.now(timezone.utc)
+        cutoff_dt = now_dt - timedelta(days=window_days)
+        rows = _read_cycle_scans(state_dir)
+        if rows is None:
+            return {
+                "ok": False, "reason": "writes_unavailable",
+                "window_days": window_days, "cycles_in_window": 0,
+                "writes_in_window": 0, "write_rate": None,
+            }
+        in_window = []
+        for row in rows:
+            ts = _parse_ts(row.get("ts"))
+            if ts is None or ts > now_dt or ts < cutoff_dt:
+                continue
+            in_window.append(row)
+        writes_in_window = sum(1 for r in in_window if r.get("diary_written") is True)
+        cycles_in_window = len(in_window)
+        return {
+            "ok": True,
+            "window_days": window_days,
+            "cycles_in_window": cycles_in_window,
+            "writes_in_window": writes_in_window,
+            "write_rate": (writes_in_window / cycles_in_window) if cycles_in_window else None,
+        }
+    except Exception:
+        return {
+            "ok": False, "reason": "census_error",
+            "window_days": window_days, "cycles_in_window": 0,
+            "writes_in_window": 0, "write_rate": None,
+        }
+
+
 def write_diary_read_rate(
     state_dir: Path, *, now: "datetime | None" = None
 ) -> dict[str, Any]:
-    """Write the rolling-window read rate to ``demand/diary_read_rate.json``.
+    """Write the rolling-window read AND write rate to
+    ``demand/diary_read_rate.json``.
 
     Report-only, harness-side, written every cycle regardless of that
     cycle's own outcome -- the census reads the cycle-scan ledger
     directly, not the current cycle's own commit (same contract as
     ``skill_fitness.write_zero_read_census``).
+
+    #1844: carries the write-rate fields (``writes_in_window``,
+    ``write_rate``) alongside the read-rate fields in the same payload,
+    rather than a second file -- one more unread artifact family is
+    exactly the failure mode this system has already produced enough of.
     """
     result = diary_read_rate(state_dir, now=now)
+    write_result = diary_write_rate(state_dir, now=now)
     payload = {
         "schema": CENSUS_SCHEMA,
         "written_at": (now or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z"),
         **result,
+        "writes_in_window": write_result.get("writes_in_window", 0),
+        "write_rate": write_result.get("write_rate"),
     }
     path = Path(state_dir) / CENSUS_REL
     try:
