@@ -172,6 +172,7 @@ class SubagentManager:
         web_tools_enabled: bool = False,
         denied_paths: "set[Path] | None" = None,
         release_root: "Path | None" = None,
+        role_system_prompt: "str | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -202,6 +203,15 @@ class SubagentManager:
         #: caller — those blocks render ``[missing: <name>]``, same as a
         #: genuinely absent file.
         self.release_root = release_root
+        #: #1852 (ADR-031 rule 5): a caller that already holds a complete,
+        #: fixed system prompt (a role file assembled by
+        #: ``nanobot.runtime.role_prompt.build_role_system_prompt``) passes
+        #: it here to bypass the ContextBuilder/ADR-022 ontology path
+        #: entirely -- OPERATING.md's cycle contract (commit, verify, gate)
+        #: does not apply to a session that only reads and plans. ``None``
+        #: (every caller before this) leaves :meth:`_build_subagent_prompt`
+        #: unchanged.
+        self._role_system_prompt = role_system_prompt.strip() if role_system_prompt else None
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
         from nanobot.runtime.state import resolve_runtime_state_location
@@ -906,6 +916,19 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         builtin skills (weather, tmux, clawhub) from the loop summary without
         changing normal ContextBuilder defaults for interactive sessions.
         """
+        # #1852 (ADR-031 rule 5): a role-prompt caller supplies its whole,
+        # fixed system prompt and skips the ContextBuilder ontology path
+        # (OPERATING.md's cycle contract) entirely -- see ``__init__``.
+        # ``getattr`` (not ``self._role_system_prompt``): several tests
+        # construct a SubagentManager via ``__new__`` and set only the
+        # attributes their scenario needs, predating this one -- absent
+        # means "no override" exactly like the real ``__init__`` default.
+        if getattr(self, '_role_system_prompt', None) is not None:
+            prompt = self._role_system_prompt
+            if self.system_context:
+                prompt += "\n\n---\n\n" + self.system_context
+            return prompt
+
         from nanobot.agent.context import ContextBuilder
 
         # #1766 (ADR-023): the scorecard block reads state/scorecard/latest.json

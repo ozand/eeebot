@@ -25,6 +25,7 @@ from nanobot.runtime import bridge
 def test_both_census_writers_are_called_with_the_right_arguments(tmp_path: Path, monkeypatch) -> None:
     import nanobot.runtime.diary_fitness as diary_fitness
     import nanobot.runtime.lesson_v2 as lesson_v2
+    import nanobot.runtime.planning_fitness as planning_fitness
     import nanobot.runtime.skill_fitness as skill_fitness
     import nanobot.runtime.trajectory as trajectory
 
@@ -32,6 +33,7 @@ def test_both_census_writers_are_called_with_the_right_arguments(tmp_path: Path,
     lesson_calls: list[Path] = []
     diary_calls: list[Path] = []
     trajectory_calls: list[tuple[Path, Path]] = []
+    planning_calls: list[Path] = []
 
     def fake_skill_write(state_dir: Path, selfevo_repo: Path) -> dict:
         skill_calls.append((state_dir, selfevo_repo))
@@ -49,10 +51,15 @@ def test_both_census_writers_are_called_with_the_right_arguments(tmp_path: Path,
         trajectory_calls.append((state_dir, selfevo_repo))
         return {"ok": True, "written": True, "path": str(state_dir)}
 
+    def fake_planning_write(state_dir: Path, **kwargs: object) -> dict:
+        planning_calls.append(state_dir)
+        return {"ok": True, "written": True, "path": str(state_dir)}
+
     monkeypatch.setattr(skill_fitness, "write_zero_read_census", fake_skill_write)
     monkeypatch.setattr(lesson_v2, "write_lesson_citation_census", fake_lesson_write)
     monkeypatch.setattr(diary_fitness, "write_diary_read_rate", fake_diary_write)
     monkeypatch.setattr(trajectory, "write_trajectory_report", fake_trajectory_write)
+    monkeypatch.setattr(planning_fitness, "write_planning_overhead_rate", fake_planning_write)
 
     state_dir = tmp_path / "state"
     selfevo_repo = tmp_path / "repo"
@@ -62,6 +69,7 @@ def test_both_census_writers_are_called_with_the_right_arguments(tmp_path: Path,
     assert lesson_calls == [state_dir]
     assert diary_calls == [state_dir]
     assert trajectory_calls == [(state_dir, selfevo_repo)]
+    assert planning_calls == [state_dir]
 
 
 def test_a_broken_skill_writer_does_not_prevent_the_lesson_writer_from_running(
@@ -117,4 +125,14 @@ def test_a_broken_trajectory_writer_does_not_raise_into_the_cycle(tmp_path: Path
         raise OSError("ledger unreadable")
 
     monkeypatch.setattr(trajectory, "write_trajectory_report", broken_trajectory_write)
+    bridge._write_post_cycle_censuses(tmp_path / "state", tmp_path / "repo")  # must not raise
+
+
+def test_a_broken_planning_overhead_writer_does_not_raise_into_the_cycle(tmp_path: Path, monkeypatch) -> None:
+    import nanobot.runtime.planning_fitness as planning_fitness
+
+    def broken_planning_write(state_dir: Path, **kwargs: object) -> dict:
+        raise OSError("planning cycle-scan ledger unreadable")
+
+    monkeypatch.setattr(planning_fitness, "write_planning_overhead_rate", broken_planning_write)
     bridge._write_post_cycle_censuses(tmp_path / "state", tmp_path / "repo")  # must not raise

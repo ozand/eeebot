@@ -56,6 +56,11 @@ ROLE_FLAGS: dict[str, tuple[bool, bool]] = {
     "strategist": (False, False),
     "reflector": (False, False),
     "skill-eval": (False, False),
+    # #1852 (ADR-031 rule 5): the planning session reads the charter so its
+    # plan is grounded in the three vectors, not just the archive digest
+    # `strategist` worked from -- but carries no soul block, same as the
+    # other bounded-input roles above.
+    "planner": (True, False),
 }
 ROLE_NAMES: tuple[str, ...] = tuple(ROLE_FLAGS)
 

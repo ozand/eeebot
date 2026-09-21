@@ -288,6 +288,48 @@ def record_diary_open_entry(
     )
 
 
+#: #1852 (ADR-031 rule 5): the planning session's own outcome, journalled
+#: unconditionally -- a failed session must fail open (the cycle proceeds
+#: on the ranked queue as before) and say so here, not silently. "integrated"
+#: is the only success outcome, mirroring diary-open-entry's shape above.
+VALID_PLANNING_OUTCOMES = frozenset({
+    "integrated", "refused", "malformed", "spawn_failed", "commit_failed", "timed_out",
+})
+
+
+def record_planning_session(
+    state_dir: Path,
+    cycle_id: str,
+    outcome: str,
+    *,
+    iterations_used: int | None,
+    iterations_planned: int | None,
+    reason: str = "",
+) -> None:
+    """Log one planning-session run (#1852): whether its plan reached the
+    diary, how many of its 20 ticks it used, and its own forecast for the
+    cycle it is planning for.
+
+    ``iterations_planned`` is left ``None`` (never coerced to 0) when the
+    session did not produce one -- a missing forecast must stay
+    distinguishable from a forecast of zero (#1850-class distinction).
+    ``outcome`` is coerced to ``"malformed"`` if unrecognized.
+    """
+    if outcome not in VALID_PLANNING_OUTCOMES:
+        outcome = "malformed"
+    append_event(
+        state_dir,
+        {
+            "phase": "planning_session",
+            "cycle_id": cycle_id or "",
+            "outcome": outcome,
+            "iterations_used": int(iterations_used) if isinstance(iterations_used, int) else None,
+            "iterations_planned": int(iterations_planned) if isinstance(iterations_planned, int) else None,
+            "reason": reason or None,
+        },
+    )
+
+
 def record_cycle_outcome(
     state_dir: Path,
     cycle_id: str,

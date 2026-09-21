@@ -133,6 +133,12 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.runtime.skill_fitness:record_skill_reads",
         "nanobot.runtime.skill_fitness:record_cycle_skill_scan",
     ),
+    # #1852: same blind-spot note as skill_fitness above -- wrapped in
+    # Path(state_dir) / CYCLE_SCAN_REL, not the bare form this registry's
+    # scan greps for.
+    "planning_fitness": (
+        "nanobot.runtime.planning_fitness:record_cycle_overhead",
+    ),
     "bridge": (
         "nanobot.crash_record:record_exit",
         "nanobot.crash_record:_start_run_marker",

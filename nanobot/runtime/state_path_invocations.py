@@ -31,11 +31,13 @@ WRITER_INVOKERS: dict[str, dict[str, str]] = {
         "kind": "systemd",
         "unit": "eeebot-skill-evals.timer",
     },
-    "hypotheses": {
-        "writer": "nanobot.runtime.hypothesis_backlog:append_hypotheses",
-        "kind": "systemd",
-        "unit": "eeebot-strategist.timer",
-    },
+    # #1852 (ADR-032 rule 2): eeebot-strategist.timer, this segment's only
+    # scheduled invoker, is retired -- the planning session that replaces it
+    # writes the day diary, never this backlog (see "strategist" entry
+    # below). The writer function itself is not deleted (nanobot.runtime.
+    # strategist.py's single-shot path stays reachable by hand, e.g.
+    # --dry-run), so it is intentionally left out of this table rather than
+    # pointing at a unit that no longer exists on the host.
     "ledger": {
         "writer": "nanobot.runtime.cycle_ledger:append_event",
         "kind": "direct",
@@ -61,10 +63,14 @@ WRITER_INVOKERS: dict[str, dict[str, str]] = {
         "kind": "systemd",
         "unit": "eeebot-narrator.timer",
     },
-    "strategist": {
-        "writer": "nanobot.runtime.strategist:_record_decision",
-        "kind": "systemd",
-        "unit": "eeebot-strategist.timer",
+    # #1852: strategist's "decisions.jsonl" writer (nanobot.runtime.
+    # strategist:_record_decision) is retired the same way "hypotheses"
+    # above is -- no scheduled unit reaches it any more. This segment is
+    # its replacement: the planning session's own overhead-ratio sidecar.
+    "planning_fitness": {
+        "writer": "nanobot.runtime.planning_fitness:record_cycle_overhead",
+        "kind": "direct",
+        "invoker": "nanobot.runtime.bridge:_main_impl_body",
     },
     "subagents": {
         "writer": "nanobot.runtime.bridge:_write_bridge_completed_result",
