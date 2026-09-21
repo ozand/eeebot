@@ -2136,24 +2136,39 @@ def _sanitized_expected_outcome(proposal: dict[str, Any]) -> dict[str, Any] | No
     """
     raw = proposal.get("expected_outcome")
     if not isinstance(raw, dict):
-        return None
+        raw = {}
     claim = str(raw.get("claim") or "").strip()
-    if not claim:
-        return None
-    result: dict[str, Any] = {"claim": claim[:_MAX_CLAIM_CHARS]}
-    check = raw.get("check")
-    if isinstance(check, dict):
-        kind = str(check.get("kind") or "").strip()
-        if kind in _VALID_CHECK_KINDS:
-            try:
-                sanitized_check = json.loads(json.dumps(check, ensure_ascii=False)[:_MAX_CLAIM_CHARS * 2])
-            except Exception:
-                sanitized_check = {"kind": kind}
-            if isinstance(sanitized_check, dict) and sanitized_check.get("kind") == kind:
-                result["check"] = sanitized_check
-            else:
-                result["check"] = {"kind": kind}
-    return result
+    result: dict[str, Any] = {}
+    if claim:
+        result["claim"] = claim[:_MAX_CLAIM_CHARS]
+        check = raw.get("check")
+        if isinstance(check, dict):
+            kind = str(check.get("kind") or "").strip()
+            if kind in _VALID_CHECK_KINDS:
+                try:
+                    sanitized_check = json.loads(json.dumps(check, ensure_ascii=False)[:_MAX_CLAIM_CHARS * 2])
+                except Exception:
+                    sanitized_check = {"kind": kind}
+                if isinstance(sanitized_check, dict) and sanitized_check.get("kind") == kind:
+                    result["check"] = sanitized_check
+                else:
+                    result["check"] = {"kind": kind}
+
+    # #1859: optional dor and dod criteria tied to external falsifiability
+    from nanobot.runtime.task_criteria import sanitize_criteria
+    target_path = str(proposal.get("target_path") or "")
+    dor_raw = proposal.get("dor") if "dor" in proposal else raw.get("dor")
+    if dor_raw is not None:
+        dor_obj = sanitize_criteria(dor_raw, target_path=target_path)
+        if dor_obj:
+            result["dor"] = dor_obj
+    dod_raw = proposal.get("dod") if "dod" in proposal else raw.get("dod")
+    if dod_raw is not None:
+        dod_obj = sanitize_criteria(dod_raw, target_path=target_path)
+        if dod_obj:
+            result["dod"] = dod_obj
+
+    return result if result else None
 
 
 def _demand_id_from_serves(serves: Any) -> str:

@@ -3157,6 +3157,12 @@ async def _run_planning_session(
         return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
 
     plan_lines = [f"Insight: {(parsed.get('insight') or '').strip() or '(none stated)'}", f"Plan: {parsed['plan'].strip()}"]
+    dor = parsed.get("dor")
+    if isinstance(dor, str) and dor.strip():
+        plan_lines.append(f"DoR: {dor.strip()}")
+    dod = parsed.get("dod")
+    if isinstance(dod, str) and dod.strip():
+        plan_lines.append(f"DoD: {dod.strip()}")
     for h in (parsed.get('hypotheses') or [])[:3]:
         if isinstance(h, str) and h.strip():
             plan_lines.append(f'Hypothesis: {h.strip()}')
