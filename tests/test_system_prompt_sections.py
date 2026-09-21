@@ -87,17 +87,14 @@ def _expected_loop_section_texts(builder: ContextBuilder) -> dict[str, str]:
     """Mirrors ``ContextBuilder._build_loop_system_prompt``'s section
     assembly exactly (#1725), so a test can compare the builder's own
     ``last_fit["sections"]`` sizes against the actual text it must have
-    produced -- independent of the prompt string itself. No catalogue
-    bounding here (tests using this helper keep the catalogue tiny enough
-    to never need it) -- the raw skills_summary is the expected text."""
+    produced -- independent of the prompt string itself.
+
+    #1857: ``skills_catalogue`` is always empty in the loop profile now --
+    the resident catalogue's call site is gone (discovery moved to the
+    planning session's fixed prompt), so this helper no longer renders it
+    at all rather than mirroring a call that no longer happens."""
     ontology_sections, _missing, _truncated = builder._load_ontology_blocks()
-    skills_summary = builder.skills.build_skills_summary(excluded_names=None)
-    skills_catalogue = (f"""# Skills
-
-The following skills extend your capabilities. To use a skill, read the skill's SKILL.md file using the read_file tool.
-Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
-
-{skills_summary}""" if skills_summary else "")
+    skills_catalogue = ""
     memory = builder.memory.get_memory_context(loop=True, max_chars=builder._MEMORY_BLOCK_CAP)
     memory_section = f"# Memory\n\n{memory}" if memory else ""
     runtime_section = builder._get_identity(loop_profile=True)

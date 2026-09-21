@@ -5,17 +5,16 @@ from pathlib import Path
 from nanobot.agent.context import ContextBuilder
 
 
-def test_loop_profile_skips_stale_memory_always_skill_but_keeps_catalogue(tmp_path: Path):
+def test_loop_profile_skips_stale_memory_always_skill_and_the_catalogue_too(tmp_path: Path):
+    """#1857: the resident catalogue is gone from the loop profile entirely
+    -- 'memory' (a builtin, not excluded from the old catalogue, only from
+    get_always_skills) no longer appears via that route either."""
     prompt = ContextBuilder(tmp_path).build_system_prompt(loop_profile=True)
 
     assert "Always loaded into your context" not in prompt
     assert "You don't need to manage this" not in prompt
-    # #1732: the loop profile renders the catalogue as one line per skill;
-    # memory is a builtin that is not excluded from the loop catalogue
-    # (only removed from get_always_skills above), so it still appears,
-    # named with its real path since it is not under the workspace rule.
-    assert "- memory: " in prompt
-    assert "(nanobot/skills/memory/SKILL.md)" in prompt
+    assert "- memory: " not in prompt
+    assert "(nanobot/skills/memory/SKILL.md)" not in prompt
     assert "<name>memory</name>" not in prompt
 
 

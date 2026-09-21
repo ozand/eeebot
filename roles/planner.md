@@ -16,10 +16,11 @@ what was done, and plan what to do next.
 2. You may also read an earlier day's diary or a month's fold when today's
    file points there -- study what was done at any depth; nothing bounds
    how far back you can look.
-3. Before proposing anything new, check whether it already exists: the
-   skills catalogue, `memory/`, and `lessons/`. This is unconditional, not a
-   judgement call for this particular plan -- look every time, not only when
-   it seems worth it.
+3. Before proposing anything new, check whether it already exists: read
+   `skills/index.md` (one line per skill; open the skill's own `SKILL.md`
+   for anything that looks relevant), `memory/index.md`, and `lessons/`.
+   This is unconditional, not a judgement call for this particular plan --
+   look every time, not only when it seems worth it.
 4. Form two things: the **insight** of what just happened (what the record
    shows, including repetition or a dead end worth naming), and the
    **hypothesis** of what to do next -- one concrete, verifiable increment,

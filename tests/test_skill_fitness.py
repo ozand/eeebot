@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from nanobot.runtime import runtime_deny, scorecard, skill_fitness
@@ -140,6 +141,9 @@ def test_cycle_skill_scan_records_zero_reads(tmp_path: Path):
         # #1767: always written, empty included -- the same reason the row
         # itself is unconditional.
         "skills_attempted_not_found": [],
+        # #1857: always written, None when nothing was read this cycle --
+        # never coerced to a position that never happened.
+        "tool_call_position": None,
     }]
 
 
@@ -208,3 +212,73 @@ def test_cycle_skill_scan_never_raises_on_bad_attempted_values(tmp_path: Path):
     )
     rows = [json.loads(l) for l in (state / skill_fitness.CYCLE_SCAN_REL).read_text(encoding="utf-8").splitlines()]
     assert rows[0]["skills_attempted_not_found"] == ["ok"]
+
+
+# ---------------------------------------------------------------------------
+# #1857: tool_call_position + the rolling skill-read rate
+# ---------------------------------------------------------------------------
+
+
+def test_cycle_skill_scan_records_the_tool_call_position(tmp_path: Path):
+    state = tmp_path / "state"
+    skill_fitness.record_cycle_skill_scan(
+        state, cycle_id="cycle-pos", skills_read=["review"], tool_call_position=1,
+    )
+    rows = [json.loads(l) for l in (state / skill_fitness.CYCLE_SCAN_REL).read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["tool_call_position"] == 1
+
+
+def test_cycle_skill_scan_position_defaults_to_none_not_zero(tmp_path: Path):
+    state = tmp_path / "state"
+    skill_fitness.record_cycle_skill_scan(state, cycle_id="cycle-noread", skills_read=[])
+    rows = [json.loads(l) for l in (state / skill_fitness.CYCLE_SCAN_REL).read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["tool_call_position"] is None
+
+
+def test_skill_read_rate_reports_no_data_when_scans_absent(tmp_path: Path):
+    result = skill_fitness.skill_read_rate(tmp_path / "state")
+    assert result["ok"] is False
+    assert result["reason"] == "scans_unavailable"
+    assert result["rate"] is None
+
+
+def test_skill_read_rate_computes_fraction_over_the_window(tmp_path: Path):
+    state = tmp_path / "state"
+    for i, read in enumerate([True, True, False]):
+        skill_fitness.record_cycle_skill_scan(
+            state, cycle_id=f"cycle-{i}",
+            skills_read=["review"] if read else [],
+            tool_call_position=1 if read else None,
+        )
+    result = skill_fitness.skill_read_rate(state, now=datetime.now(timezone.utc))
+    assert result["ok"] is True
+    assert result["cycles_in_window"] == 3
+    assert result["reads_in_window"] == 2
+    assert result["rate"] == 2 / 3
+
+
+def test_skill_read_rate_excludes_rows_outside_the_window(tmp_path: Path):
+    state = tmp_path / "state"
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat().replace("+00:00", "Z")
+    sidecar_dir = state / "skill_fitness"
+    sidecar_dir.mkdir(parents=True)
+    (sidecar_dir / "cycle_scans.jsonl").write_text(
+        '{"cycle_id": "old", "ts": "%s", "skill_count": 1, "skills_read": ["review"], '
+        '"skills_attempted_not_found": [], "tool_call_position": 1}\n' % old_ts,
+        encoding="utf-8",
+    )
+    skill_fitness.record_cycle_skill_scan(state, cycle_id="fresh", skills_read=[])
+    result = skill_fitness.skill_read_rate(state)
+    assert result["cycles_in_window"] == 1
+    assert result["reads_in_window"] == 0
+
+
+def test_write_skill_read_rate_persists_the_census(tmp_path: Path):
+    state = tmp_path / "state"
+    skill_fitness.record_cycle_skill_scan(state, cycle_id="cycle-1", skills_read=["review"], tool_call_position=2)
+    result = skill_fitness.write_skill_read_rate(state)
+    assert result["ok"] is True
+    assert result["written"] is True
+    payload = json.loads((state / skill_fitness.READ_RATE_REL).read_text(encoding="utf-8"))
+    assert payload["schema"] == skill_fitness.READ_RATE_SCHEMA
+    assert payload["reads_in_window"] == 1

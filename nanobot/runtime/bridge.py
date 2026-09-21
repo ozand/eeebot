@@ -631,6 +631,11 @@ def _write_post_cycle_censuses(state_dir: 'Path', selfevo_repo: 'Path') -> None:
       sidecar :func:`_run_planning_session` and the overhead-recording call
       right after the single-candidate ``_evaluate_candidate`` already
       wrote, never this cycle's own state directly.
+    - #1857: skill-read-rate census (``state/demand/skill_read_rate.json``)
+      — same fail-open, every-cycle contract as ADR-028 rule 5's diary
+      read-rate census, reading the SAME ``skill_fitness/cycle_scans.jsonl``
+      :meth:`SubagentManager.collect_skill_reads` already writes (#939 Part
+      C / #1666), not a second, parallel counter.
 
     Extracted to one call site so both writers are exercised together by a
     single, direct unit test (``tests/test_bridge_post_cycle_censuses.py``)
@@ -662,6 +667,11 @@ def _write_post_cycle_censuses(state_dir: 'Path', selfevo_repo: 'Path') -> None:
     try:
         from nanobot.runtime.planning_fitness import write_planning_overhead_rate
         write_planning_overhead_rate(state_dir)
+    except Exception:
+        pass
+    try:
+        from nanobot.runtime.skill_fitness import write_skill_read_rate
+        write_skill_read_rate(state_dir)
     except Exception:
         pass
 
@@ -2925,6 +2935,58 @@ def _write_diary_plan_block(repo_root: 'Path', state_dir: 'Path', cycle_id: str,
         return {'outcome': 'commit_failed', 'commit_sha': None, 'reason': f'unexpected error: {exc}'}
 
 
+def _regenerate_skills_index_if_needed(repo_root: 'Path', files_changed: 'list[str]') -> dict:
+    """#1857: after a cycle that touched ``skills/`` integrates, regenerate
+    ``skills/index.md`` from the now-current skills directory and commit it
+    directly to main -- the harness-owned, never-hand-maintained path
+    AC 3's "replace the catalogue with the obligation plus the index"
+    depends on. See ``nanobot.runtime.skills_index``'s module docstring for
+    why the loop itself never writes this file.
+
+    Called AFTER integration (unlike the diary's write, which precedes the
+    cycle branch): this reads the skills directory post-merge, on main, so
+    the regenerated index reflects exactly what just landed. Never called
+    unless *files_changed* (this cycle's own diff) touched ``skills/`` --
+    a cycle that changed nothing under it produces no bookkeeping-only
+    commit.
+
+    Returns ``{"outcome": str, "commit_sha": str | None}``. ``outcome`` is
+    one of ``"unchanged"`` (nothing to write), ``"integrated"``,
+    ``"commit_failed"``, ``"push_failed"``. Never raises.
+    """
+    import subprocess as _sp_skills
+
+    from nanobot.runtime.skills_index import INDEX_RELPATH, write_skills_index_if_changed
+
+    try:
+        if not write_skills_index_if_changed(repo_root):
+            return {'outcome': 'unchanged', 'commit_sha': None}
+        git = _git_cmd(repo_root)
+        pre_sha = _sp_skills.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+        add_r = _sp_skills.run(git + ['add', '--', INDEX_RELPATH], capture_output=True, text=True)
+        if add_r.returncode != 0:
+            return {'outcome': 'commit_failed', 'commit_sha': None, 'reason': f'git add failed: {add_r.stderr[:200]}'}
+        commit_r = _sp_skills.run(
+            git + ['commit', '-m', 'chore: regenerate skills/index.md (#1857)'],
+            capture_output=True, text=True,
+        )
+        if commit_r.returncode != 0:
+            _sp_skills.run(git + ['reset', 'HEAD', '--', INDEX_RELPATH], capture_output=True, text=True)
+            _sp_skills.run(git + ['checkout', '--', INDEX_RELPATH], capture_output=True, text=True)
+            return {'outcome': 'commit_failed', 'commit_sha': None, 'reason': f'git commit failed: {commit_r.stderr[:200]}'}
+        push_r = _sp_skills.run(git + ['push', 'origin', 'main'], capture_output=True, text=True)
+        if push_r.returncode != 0:
+            if pre_sha:
+                _sp_skills.run(git + ['reset', '--hard', pre_sha], capture_output=True, text=True)
+            push_error = ((push_r.stderr or push_r.stdout).strip().splitlines()[-1:] or [f'exit {push_r.returncode}'])[0][:200]
+            return {'outcome': 'push_failed', 'commit_sha': None, 'reason': f'push to origin/main failed: {push_error}'}
+        new_sha = _sp_skills.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+        print(f'bridge: skills/index.md regenerated, pushed to origin/main {new_sha[:12]} (#1857)')
+        return {'outcome': 'integrated', 'commit_sha': new_sha}
+    except Exception as exc:
+        return {'outcome': 'commit_failed', 'commit_sha': None, 'reason': f'unexpected error: {exc}'}
+
+
 async def _run_planning_session(
     *, provider, bus, config, model: str, state_dir: 'Path', selfevo_repo: 'Path',
     denied_paths: set, cycle_id: str,
@@ -3749,7 +3811,12 @@ async def _main_impl_body():
         # closed here (bridge-side, not instance-controlled) — instance code cannot
         # widen or override it.
         # #958 Part B: add cron, summarize, github (never used by the loop).
-        _LOOP_EXCLUDED_SKILLS = ["weather", "tmux", "clawhub", "cron", "summarize", "github"]
+        # #1857: the single home for this list is skills_index.LOOP_EXCLUDED_SKILLS
+        # -- the generated skills/index.md must agree with what the executor's
+        # own prompt excludes, or the index would list a skill the loop's
+        # prompt tells it does not exist.
+        from nanobot.runtime.skills_index import LOOP_EXCLUDED_SKILLS as _LOOP_EXCLUDED_SKILLS_TUPLE
+        _LOOP_EXCLUDED_SKILLS = list(_LOOP_EXCLUDED_SKILLS_TUPLE)
         _denied_sidecar_paths = {
             (STATE_DIR / rel).resolve() for rel in _FITNESS_SIDECARS
         }
@@ -4671,6 +4738,17 @@ async def _main_impl_body():
             except Exception:
                 pass  # diary-fitness write errors are non-blocking
             _write_post_cycle_censuses(STATE_DIR, _selfevo_repo)
+
+            # #1857: only when this cycle's OWN diff touched skills/, and only
+            # once it actually integrated -- a rejected skill change must not
+            # regenerate an index describing content that never reached main.
+            if _integrated and any(f.startswith('skills/') for f in files_changed):
+                try:
+                    _skills_index_result = _regenerate_skills_index_if_needed(_selfevo_repo, files_changed)
+                    if _skills_index_result['outcome'] != 'unchanged':
+                        print(f"skills-index: {_skills_index_result['outcome']} ({_skills_index_result.get('reason', '')[:120]})")
+                except Exception:
+                    pass  # skills-index regeneration errors are non-blocking
 
             if _integrated and backlog_title and not _is_proposer_request(req):
                 marked = _try_mark_backlog_done(
