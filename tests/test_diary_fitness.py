@@ -127,6 +127,60 @@ def test_write_diary_read_rate_persists_the_census(tmp_path: Path):
     assert payload["reads_in_window"] == 1
 
 
+# ---------------------------------------------------------------------------
+# #1844 -- diary_written, the write-side sibling of diary_read.
+# ---------------------------------------------------------------------------
+
+
+def test_record_cycle_diary_read_records_diary_written_true(tmp_path: Path):
+    row = diary_fitness.record_cycle_diary_read(
+        tmp_path / "state", cycle_id="c1", reads=[], wrote=True,
+    )
+    assert row["diary_written"] is True
+
+
+def test_record_cycle_diary_read_defaults_diary_written_false(tmp_path: Path):
+    """A cycle that never passes ``wrote`` -- an older release, or a cycle
+    that touched nothing -- must not be silently counted as a write."""
+    row = diary_fitness.record_cycle_diary_read(tmp_path / "state", cycle_id="c1", reads=[])
+    assert row["diary_written"] is False
+
+
+def test_diary_write_rate_reports_no_data_when_sidecar_absent(tmp_path: Path):
+    result = diary_fitness.diary_write_rate(tmp_path / "state")
+    assert result["ok"] is False
+    assert result["reason"] == "writes_unavailable"
+    assert result["write_rate"] is None
+
+
+def test_diary_write_rate_computes_fraction_over_the_window(tmp_path: Path):
+    state = tmp_path / "state"
+    for i, wrote in enumerate([True, True, False]):
+        diary_fitness.record_cycle_diary_read(state, cycle_id=f"c{i}", reads=[], wrote=wrote)
+    result = diary_fitness.diary_write_rate(state, now=datetime.now(timezone.utc))
+    assert result["ok"] is True
+    assert result["cycles_in_window"] == 3
+    assert result["writes_in_window"] == 2
+    assert result["write_rate"] == 2 / 3
+
+
+def test_write_diary_read_rate_persists_the_write_rate_alongside_the_read_rate(tmp_path: Path):
+    """#1844 AC: the write rate is measured from the first day, published
+    in the same census file rather than a second, likely-unread one."""
+    state = tmp_path / "state"
+    diary_fitness.record_cycle_diary_read(
+        state, cycle_id="c1", reads=[{"day": diary_fitness._today(), "position": 1}], wrote=True,
+    )
+    result = diary_fitness.write_diary_read_rate(state)
+    assert result["ok"] is True
+
+    import json
+    payload = json.loads((state / diary_fitness.CENSUS_REL).read_text(encoding="utf-8"))
+    assert payload["reads_in_window"] == 1
+    assert payload["writes_in_window"] == 1
+    assert payload["write_rate"] == 1.0
+
+
 def test_record_cycle_diary_read_fails_open_on_bad_state_dir(tmp_path: Path):
     """A write error must never raise into the caller -- same fail-open
     contract as every other writer in this module."""

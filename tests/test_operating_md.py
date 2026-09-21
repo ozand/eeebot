@@ -286,9 +286,11 @@ def _day_diary_clauses() -> list[str]:
     return [p.strip() for p in section.split("\n\n") if p.strip()]
 
 
-def test_day_diary_section_carries_exactly_two_clauses():
+def test_day_diary_section_carries_exactly_three_clauses():
+    """#1844 adds the write clause alongside the original two (read
+    obligation, read permission) -- see the tests below for each."""
     clauses = _day_diary_clauses()
-    assert len(clauses) == 2, clauses
+    assert len(clauses) == 3, clauses
 
 
 def test_day_diary_obligation_clause_is_unconditional():
@@ -308,12 +310,41 @@ def test_day_diary_permission_clause_names_the_horizons():
     of them -- and it is worded separately from the obligation clause."""
     clauses = _day_diary_clauses()
     obligation = next(c for c in clauses if "first action" in c)
-    permission = next(c for c in clauses if c is not obligation)
+    permission = next(c for c in clauses if "may" in c.lower() and "earlier day" in c.lower())
+    assert permission is not obligation
     lowered = permission.lower()
     assert "may" in lowered
     assert "earlier day" in lowered
     assert "month" in lowered
     assert permission != obligation
+
+
+# ---------------------------------------------------------------------------
+# #1844 -- the write clause: the marker-append mechanism and the shape of
+# one entry, alongside the existing read obligation.
+# ---------------------------------------------------------------------------
+
+
+def _day_diary_write_clause() -> str:
+    return next(c for c in _day_diary_clauses() if "edit_file" in c)
+
+
+def test_day_diary_write_clause_names_the_marker_mechanism():
+    clause = _day_diary_write_clause().lower()
+    assert "edit_file" in clause
+    assert "<!-- diary: append new entries above this line -->" in _day_diary_write_clause()
+
+
+def test_day_diary_write_clause_states_the_entry_shape():
+    """AC: 'what I tried and what happened' -- not a restatement of why the
+    task was chosen, which the ledger/demand record already holds."""
+    clause = _day_diary_write_clause().lower()
+    assert "what you tried and what happened" in clause
+    assert "ledger already holds" in clause
+
+
+def test_day_diary_write_clause_runs_before_the_final_response():
+    assert "final response" in _day_diary_write_clause().lower()
 
 
 def test_operating_md_has_headroom_for_the_soul_migration():

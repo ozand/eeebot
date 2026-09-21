@@ -4352,15 +4352,25 @@ async def _main_impl_body():
             # back the raw read list; the diary-specific interpretation and
             # persistence happens here, bridge-side, deliberately -- ADR-028
             # rule 4 keeps subagent.py's source free of this module's name.
+            #
+            # #1844: `diary_written` is decided the same way and for the same
+            # reason -- from `files_changed` (this cycle's OWN commit diff,
+            # already computed above regardless of the later gate verdict),
+            # not gated on `_integrated`, so a rejected cycle's write attempt
+            # stays distinguishable from one that never wrote at all.
             try:
+                from nanobot.runtime import day_diary
                 from nanobot.runtime.diary_fitness import record_cycle_diary_read
+                _wrote_diary = day_diary.diary_relpath() in files_changed
                 _diary_row = record_cycle_diary_read(
                     STATE_DIR, cycle_id=_cycle_id, reads=mgr.collect_day_file_reads(),
+                    wrote=_wrote_diary,
                 )
                 if _diary_row:
                     print(
                         f"diary-fitness: cycle {_cycle_id} diary_read="
-                        f"{_diary_row.get('diary_read')} position={_diary_row.get('tool_call_position')}"
+                        f"{_diary_row.get('diary_read')} position={_diary_row.get('tool_call_position')} "
+                        f"diary_written={_diary_row.get('diary_written')}"
                     )
             except Exception:
                 pass  # diary-fitness write errors are non-blocking
