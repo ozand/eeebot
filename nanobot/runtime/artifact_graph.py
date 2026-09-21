@@ -177,19 +177,30 @@ class ArtifactGraph:
         independently-used modules is never wrongly stranded — only a
         pair with no anchor outside itself is.
         """
+        return any(True for _ in self._genuine_used_by_edges(node_id))
+
+    def _genuine_used_by_edges(self, node_id: str) -> "list[Edge]":
+        """``used_by`` edges targeting *node_id* that are not a self-loop or
+        a manufactured mutual pair -- the exact exclusion :meth:`is_component`
+        applies, factored out so :meth:`in_degree` (#1825) counts the same
+        genuine edges :meth:`is_component` checks the sign of, rather than
+        risking the two disagreeing about whether a gamed self-reference
+        counts."""
         node_by_path = self._node_id_by_path()
+        genuine: list[Edge] = []
         for e in self.edges:
             if e.kind != "used_by" or e.target != node_id:
                 continue
             source_node_id = node_by_path.get(e.source)
             if source_node_id is None:
-                return True  # not a graph node -- cannot self-reference
+                genuine.append(e)  # not a graph node -- cannot self-reference
+                continue
             if source_node_id == node_id:
                 continue  # self-loop
             if self._has_used_by_edge(node_id, source_node_id):
                 continue  # mutual pair: target's own edge reaches back to source
-            return True
-        return False
+            genuine.append(e)
+        return genuine
 
     def _has_used_by_edge(self, source_node_id: str, target: str) -> bool:
         """True iff some ``used_by`` edge whose source resolves to
@@ -205,6 +216,18 @@ class ArtifactGraph:
 
     def rung(self, node_id: str) -> str:
         return "component" if self.is_component(node_id) else "leaf"
+
+    def in_degree(self, node_id: str) -> int:
+        """Count of GENUINE ``used_by`` edges targeting *node_id* (#1825) --
+        the concentration number :meth:`is_component` only checks the sign
+        of. Excludes the same self-loop/manufactured-mutual-pair shapes
+        :meth:`is_component` excludes, so ``in_degree(x) == 0`` and
+        ``is_component(x) is False`` always agree. Distinct edges, not
+        distinct source files: two ``used_by`` edges from the SAME source
+        to the same target both count (an import plus a separate
+        subprocess call, say) -- this module's edge list is never
+        deduplicated by source (see :func:`build_artifact_graph`)."""
+        return len(self._genuine_used_by_edges(node_id))
 
     def leaves(self) -> list[str]:
         """Every node id with no ``used_by`` edge, in node-discovery order."""
