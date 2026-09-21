@@ -611,6 +611,29 @@ def stage_record() -> dict[str, Any]:
     }
 
 
+def _read_consecutive_rejected_streak(state_dir: str | Path) -> int:
+    """Read existing runs.jsonl to count the trailing streak of rejected runs."""
+    path = Path(state_dir).joinpath(*RUNS_SUBPATH)
+    if not path.is_file():
+        return 0
+    streak = 0
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            lines = [line.strip() for line in handle if line.strip()]
+        for line in reversed(lines):
+            try:
+                row = json.loads(line)
+            except Exception:
+                break
+            if row.get("status") == "rejected":
+                streak += 1
+            else:
+                break
+    except Exception:
+        return 0
+    return streak
+
+
 def _append_run_row(state_dir: str | Path, row: dict[str, Any]) -> None:
     """Append one line to ``state/story/runs.jsonl``. Never raises: a journal
     failure must not turn a completed run into a crashed one, and the crash
@@ -639,19 +662,25 @@ def _finish(state_dir: str | Path, day: str, result: dict[str, Any]) -> dict[str
         result["violations"] = list(result["violations"]) + [
             f"artifact_write_failed: {exc.__class__.__name__}: {exc}"
         ]
+    prior_streak = _read_consecutive_rejected_streak(state_dir)
+    status = result.get("status")
+    consecutive_rejected = (prior_streak + 1) if status == "rejected" else 0
+    result["consecutive_rejected"] = consecutive_rejected
+
     _append_run_row(
         state_dir,
         {
             "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "producer": PRODUCER,
             "day": day,
-            "status": result.get("status"),
+            "status": status,
             "beats": len(result.get("beats") or []),
             "model": result.get("model"),
             "journal_status": result.get("journal_status"),
             "violations": list(result.get("violations") or []),
             "artifact_path": result.get("artifact_path"),
             "stage_reached": result["stage"]["reached"],
+            "consecutive_rejected": consecutive_rejected,
         },
     )
     return result
@@ -689,6 +718,7 @@ def main(argv: list[str] | None = None) -> int:
                 "stage_reached": result["stage"]["reached"],
                 "artifact_path": result.get("artifact_path"),
                 "violations": result.get("violations") or [],
+                "consecutive_rejected": result.get("consecutive_rejected", 0),
             },
             ensure_ascii=False,
         )

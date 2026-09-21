@@ -24,7 +24,7 @@ def _ledger_row(ts: str, cycle: str, outcome: str = "success") -> str:
 
 def _write_ledger(state_dir, archive_lines: list[str], live_lines: list[str], *, archive_day: str = "2026-09-15"):
     ledger = state_dir / "ledger"
-    ledger.mkdir(parents=True)
+    ledger.mkdir(parents=True, exist_ok=True)
     with gzip.open(ledger / f"cycles-{archive_day}.jsonl.gz", "wt", encoding="utf-8") as handle:
         handle.write("\n".join(archive_lines) + "\n")
     (ledger / "cycles.jsonl").write_text("\n".join(live_lines) + "\n", encoding="utf-8")
@@ -415,3 +415,47 @@ def test_artifact_path_is_state_story_day_json(tmp_path):
     _write_ledger(tmp_path, [_ledger_row("2026-09-15T08:00:00Z", "cycle-a", "success")], [])
     result = run_narrator_job(tmp_path, "2026-09-15", llm=_compliant_llm)
     assert result["artifact_path"] == str(tmp_path / "story" / "2026-09-15.json")
+
+
+def test_consecutive_rejected_streak_tracked_in_runs_jsonl(tmp_path):
+    """#1861 AC: consecutive rejections are tracked as an observable streak in
+    runs.jsonl, and reset to 0 on the first non-rejected run."""
+    _write_ledger(tmp_path, [_ledger_row("2026-09-15T08:00:00Z", "cycle-a", "failed")], [])
+
+    # 1. First run rejected
+    r1 = run_narrator_job(tmp_path, "2026-09-15", llm=_sign_flipping_llm)
+    assert r1["status"] == "rejected"
+    assert r1["consecutive_rejected"] == 1
+
+    runs_file = tmp_path / "story" / "runs.jsonl"
+    lines = [json.loads(line) for line in runs_file.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 1
+    assert lines[0]["consecutive_rejected"] == 1
+
+    # 2. Second run also rejected -> streak increments to 2
+    r2 = run_narrator_job(tmp_path, "2026-09-15", llm=_sign_flipping_llm)
+    assert r2["status"] == "rejected"
+    assert r2["consecutive_rejected"] == 2
+
+    lines = [json.loads(line) for line in runs_file.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 2
+    assert lines[1]["consecutive_rejected"] == 2
+
+    # 3. Third run succeeds (ok) -> streak resets to 0
+    _write_ledger(
+        tmp_path,
+        [
+            _ledger_row("2026-09-15T08:00:00Z", "cycle-a", "success"),
+            _ledger_row("2026-09-15T09:00:00Z", "cycle-b", "success"),
+            _ledger_row("2026-09-15T10:00:00Z", "cycle-c", "success"),
+        ],
+        [],
+    )
+    r3 = run_narrator_job(tmp_path, "2026-09-15", llm=_compliant_llm)
+    assert r3["status"] == "ok"
+    assert r3["consecutive_rejected"] == 0
+
+    lines = [json.loads(line) for line in runs_file.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 3
+    assert lines[2]["consecutive_rejected"] == 0
+
