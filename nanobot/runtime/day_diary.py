@@ -39,6 +39,19 @@ DIARY_DIR = "diary"
 #: second occurrence implausible, not merely unlikely.
 DIARY_MARKER = "<!-- diary: append new entries above this line -->"
 
+#: #1852 (ADR-031 rule 5): the planning session's output lives in its own
+#: bounded region, replaced (not appended) on each run, positioned right
+#: after the intro paragraph and BEFORE the growing entries list -- so the
+#: current plan is at a fixed, known spot near the top of the file rather
+#: than requiring a scan of however many entries the day has accumulated
+#: (#1844 acceptance: "readable ... without reading the whole file").
+#: Written directly by the bridge (:func:`set_plan_block`), never through
+#: the loop's own ``edit_file`` -- the planning session's final response is
+#: read text, not a file it produces; see ``roles/planner.md``.
+PLAN_BEGIN = "<!-- diary: plan begin -->"
+PLAN_END = "<!-- diary: plan end -->"
+_NO_PLAN_YET = "(no plan recorded yet)"
+
 
 def _today() -> date:
     """ADR-029 (#1831) migration point -- the ONE clock call this whole
@@ -99,6 +112,7 @@ def new_day_file(day: "date | None" = None) -> str:
         "Entries below record intent: what a cycle is attempting and why, "
         "written at the start of its turn. This is not a report of what "
         "was done -- the ledger already holds that.\n\n"
+        f"{PLAN_BEGIN}\n{_NO_PLAN_YET}\n{PLAN_END}\n\n"
         f"{DIARY_MARKER}\n"
     )
 
@@ -125,3 +139,25 @@ def append_entry(content: str, entry: str) -> str:
             f"expected exactly one diary marker, found {count}"
         )
     return content.replace(DIARY_MARKER, entry.rstrip("\n") + "\n" + DIARY_MARKER)
+
+
+def set_plan_block(content: str, plan_text: str) -> str:
+    """Replace everything between :data:`PLAN_BEGIN` and :data:`PLAN_END`
+    with ``plan_text`` -- REPLACE, not append: only the latest planning
+    session's output is worth a reader's attention, and the position stays
+    fixed so a reader never has to find it among a growing entries list.
+
+    Raises :class:`ValueError` when either marker is missing, either occurs
+    more than once, or ``PLAN_END`` does not follow ``PLAN_BEGIN`` -- the
+    file is malformed and replacing a region in it would be a guess.
+    """
+    if content.count(PLAN_BEGIN) != 1 or content.count(PLAN_END) != 1:
+        raise ValueError(
+            f"expected exactly one plan-block marker pair, found "
+            f"{content.count(PLAN_BEGIN)} begin / {content.count(PLAN_END)} end"
+        )
+    start = content.index(PLAN_BEGIN) + len(PLAN_BEGIN)
+    end = content.index(PLAN_END)
+    if end < start:
+        raise ValueError("plan-block end marker precedes its begin marker")
+    return content[:start] + "\n" + plan_text.strip() + "\n" + content[end:]

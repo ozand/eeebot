@@ -270,6 +270,9 @@ init_state() {
 # ---------------------------------------------------------------------------
 enable_timers() {
   log "enabling systemd timers"
+  # #1852 (ADR-032 rule 2): eeebot-strategist.timer's daily OnCalendar cadence
+  # is retired -- the planning session now runs between cycles, from inside
+  # eeepc-self-evolving-subagent-bridge.service itself (bridge._run_planning_session).
   local timers=(
     eeepc-self-evolving-subagent-bridge.timer
     eeepc-promotion-verifier.timer
@@ -281,7 +284,6 @@ enable_timers() {
     eeebot-local-ci.timer
     eeebot-action-index.timer
     eeebot-reflector.timer
-    eeebot-strategist.timer
     eeebot-systemd-drift-check.timer
     eeebot-narrator.timer
   )

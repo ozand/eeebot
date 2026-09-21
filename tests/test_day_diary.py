@@ -76,6 +76,17 @@ def test_new_day_file_has_a_header_and_exactly_one_marker():
     assert content.count(day_diary.DIARY_MARKER) == 1
 
 
+def test_new_day_file_has_exactly_one_plan_block_with_a_placeholder():
+    """#1852: a fresh day file carries an empty, fixed-position plan block
+    the first planning session of the day can find and replace."""
+    content = day_diary.new_day_file(date(2026, 9, 20))
+    assert content.count(day_diary.PLAN_BEGIN) == 1
+    assert content.count(day_diary.PLAN_END) == 1
+    assert content.index(day_diary.PLAN_BEGIN) < content.index(day_diary.PLAN_END)
+    # positioned before the entries marker, not mixed into the entries list
+    assert content.index(day_diary.PLAN_END) < content.index(day_diary.DIARY_MARKER)
+
+
 def test_format_doc_states_intent_not_report():
     """AC (format doc): an entry records intent, not a report; the ledger
     holds what happened. Stated in the file itself, the one place every
@@ -125,6 +136,57 @@ def test_append_entry_refuses_a_file_with_the_marker_twice():
     doubled = f"# Diary\n\n{day_diary.DIARY_MARKER}\n\nstray text\n\n{day_diary.DIARY_MARKER}\n"
     with pytest.raises(ValueError):
         day_diary.append_entry(doubled, "an entry")
+
+
+# ---------------------------------------------------------------------------
+# #1852: the plan block -- replaced, not appended, at a fixed position
+# ---------------------------------------------------------------------------
+
+
+def test_set_plan_block_replaces_the_placeholder():
+    content = day_diary.new_day_file(date(2026, 9, 20))
+    content = day_diary.set_plan_block(content, "read the record, do X next")
+    assert content.count(day_diary.PLAN_BEGIN) == 1
+    assert content.count(day_diary.PLAN_END) == 1
+    assert "read the record, do X next" in content
+    assert "(no plan recorded yet)" not in content
+
+
+def test_set_plan_block_replaces_a_prior_plan_rather_than_appending():
+    """Only the latest plan survives -- REPLACE, not append (#1852: 'the
+    diary carries the current plan', not a growing history of plans)."""
+    content = day_diary.new_day_file(date(2026, 9, 20))
+    content = day_diary.set_plan_block(content, "first plan")
+    content = day_diary.set_plan_block(content, "second plan")
+    assert content.count("second plan") == 1
+    assert "first plan" not in content
+    assert content.count(day_diary.PLAN_BEGIN) == 1
+    assert content.count(day_diary.PLAN_END) == 1
+
+
+def test_set_plan_block_preserves_entries_appended_around_it():
+    content = day_diary.new_day_file(date(2026, 9, 20))
+    content = day_diary.append_entry(content, "Implement and commit: task one")
+    content = day_diary.set_plan_block(content, "do task two next")
+    content = day_diary.append_entry(content, "Implement and commit: task two")
+    assert "task one" in content
+    assert "do task two next" in content
+    assert content.count("Implement and commit: task two") == 1
+    assert content.count(day_diary.DIARY_MARKER) == 1
+
+
+def test_set_plan_block_refuses_a_file_with_no_markers():
+    with pytest.raises(ValueError):
+        day_diary.set_plan_block("# Diary\n\nno plan markers here.\n", "a plan")
+
+
+def test_set_plan_block_refuses_a_file_with_the_begin_marker_twice():
+    doubled = (
+        f"# Diary\n\n{day_diary.PLAN_BEGIN}\nold\n{day_diary.PLAN_END}\n\n"
+        f"{day_diary.PLAN_BEGIN}\nstray\n{day_diary.PLAN_END}\n"
+    )
+    with pytest.raises(ValueError):
+        day_diary.set_plan_block(doubled, "a plan")
 
 
 # ---------------------------------------------------------------------------

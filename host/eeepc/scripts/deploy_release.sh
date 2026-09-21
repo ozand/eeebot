@@ -315,6 +315,20 @@ if [ -e /etc/systemd/system/eeepc-network-fallback.timer ] || [ -e /etc/systemd/
   die "ghost unit files still present on disk"
 fi
 
+# #1852 (ADR-032 rule 2): eeebot-strategist.timer's daily OnCalendar cadence
+# is retired -- deleting the unit files from host/eeepc/systemd/ (this PR)
+# stops them being COPIED on future deploys, but does not by itself disable
+# or remove what a prior deploy already installed at /etc/systemd/system/
+# (the same "drop-ins are not deployed" class #1663/#1701 already named).
+# Purge explicitly, same shape as the eeepc-network-fallback ghost-unit
+# purge above, without the strict post-purge assertions that incident's
+# specific history warranted.
+if [ "$VERIFY_ONLY" -eq 0 ]; then
+  sudo systemctl disable --now eeebot-strategist.timer eeebot-strategist.service >/dev/null 2>&1 || true
+  sudo rm -f /etc/systemd/system/eeebot-strategist.timer /etc/systemd/system/eeebot-strategist.service
+  sudo systemctl daemon-reload
+fi
+
 # #1718: a timer unit file that did not exist on the host before this
 # deploy's copy is NEW -- its `systemctl is-enabled` reading "disabled" is
 # "never enabled", not an operator's deliberate `systemctl disable`, and
@@ -493,7 +507,6 @@ sync_timer eeebot-local-ci.timer optional
 sync_timer eeebot-knowledge-curator.timer optional
 sync_timer eeebot-action-index.timer optional
 sync_timer eeebot-reflector.timer optional
-sync_timer eeebot-strategist.timer optional
 sync_timer eeebot-systemd-drift-check.timer optional
 # #1820: the copy near the top of this script installs the unit FILE; only a
 # sync_timer call enables it. A unit sitting in /etc/systemd/system that was

@@ -35,6 +35,12 @@ from nanobot.runtime.role_prompt import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "role_literals_pre_1729.json"
 PRE_MIGRATION_LITERALS: dict[str, str] = json.loads(FIXTURE.read_text(encoding="utf-8"))
+#: The fixture is a frozen snapshot of the eight roles that existed as
+#: Python literals at #1729's own commit -- it does not grow when a later
+#: role (e.g. "planner", #1852) is born directly as a file with no prior
+#: literal to have parity with. Parity is checked against this frozen set,
+#: never against the live, growing ``ROLE_NAMES``.
+PRE_1729_ROLE_NAMES: tuple[str, ...] = tuple(PRE_MIGRATION_LITERALS)
 
 
 def _normalise(text: str) -> str:
@@ -57,8 +63,11 @@ def _release_root(tmp_path: Path, **files: str) -> Path:
 # ─── the eight files exist and say what the literals said ──────────────────
 
 class TestLiteralParity:
-    def test_fixture_covers_every_role(self):
-        assert set(PRE_MIGRATION_LITERALS) == set(ROLE_NAMES)
+    def test_fixture_covers_every_pre_1729_role(self):
+        """Every role ROLE_NAMES carried at #1729's own commit has a
+        literal in the fixture -- a role born later (planner, #1852) is
+        not expected to (see PRE_1729_ROLE_NAMES)."""
+        assert set(PRE_MIGRATION_LITERALS) <= set(ROLE_NAMES)
 
     @pytest.mark.parametrize("role", ROLE_NAMES)
     def test_role_file_exists_with_front_matter_and_heading(self, role):
@@ -69,7 +78,7 @@ class TestLiteralParity:
         assert f"role: {role}\n" in raw
         assert re.search(rf"^# Role: {re.escape(role)}$", raw, flags=re.M)
 
-    @pytest.mark.parametrize("role", ROLE_NAMES)
+    @pytest.mark.parametrize("role", PRE_1729_ROLE_NAMES)
     def test_loaded_role_text_equals_the_pre_migration_literal(self, role):
         text, meta = load_role_text(role, release_root=REPO_ROOT)
         assert meta["missing"] is False and meta["truncated"] is False

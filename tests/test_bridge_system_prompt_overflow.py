@@ -32,7 +32,15 @@ OVERFLOW = SystemPromptOverflowError(
 
 
 class _OverflowingManager(_FakeSubagentManager):
-    """The strict builder refuses; spawn must never be reached."""
+    """The strict builder refuses; the EXECUTOR's spawn must never be
+    reached.
+
+    #1852: the bridge also spawns a planning session, via a fully separate
+    prompt path (``role_system_prompt``, never ``_build_subagent_prompt``'s
+    ContextBuilder route this fake simulates overflowing) -- its `spawn()`
+    call is real in this fake too, so `spawned` (an executor-only signal)
+    must not flip for it.
+    """
 
     spawned = False
 
@@ -41,7 +49,8 @@ class _OverflowingManager(_FakeSubagentManager):
         raise OVERFLOW
 
     async def spawn(self, **kwargs):
-        type(self).spawned = True
+        if self._telemetry_component != "planner":
+            type(self).spawned = True
         return await super().spawn(**kwargs)
 
 

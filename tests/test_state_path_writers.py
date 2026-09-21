@@ -170,12 +170,15 @@ def test_hot_directories_are_declared_by_real_writers_not_orphans(segment: str) 
     assert all(resolve_writer(ref) is None for ref in writers)
 
 
-def test_writer_invocation_check_flags_disabled_strategist_timer_and_keeps_direct_ledger() -> None:
+def test_writer_invocation_check_flags_disabled_curator_timer_and_keeps_direct_ledger() -> None:
+    """#1852: eeebot-strategist.timer is retired, so this drift check --
+    otherwise unrelated to the strategist -- exercises the same
+    disabled-timer-fails-loudly behavior against a still-scheduled entry
+    (curator) instead."""
     output = """
-        eeebot-strategist.timer                disabled enabled
+        eeebot-knowledge-curator.timer         disabled enabled
         eeebot-self-evolving-subagent-bridge.timer enabled enabled
         eeebot-action-index.timer              enabled enabled
-        eeebot-knowledge-curator.timer         enabled enabled
         eeebot-reflector.timer                 enabled enabled
         eeebot-skill-evals.timer                enabled enabled
         eeebot-validator-harness.timer          enabled enabled
@@ -189,33 +192,32 @@ def test_writer_invocation_check_flags_disabled_strategist_timer_and_keeps_direc
 
     report = state_path_invocations.check_writer_invocations(runner)
 
-    assert report["results"]["hypotheses"]["status"] == "disabled"
+    assert report["results"]["curator"]["status"] == "disabled"
     assert report["results"]["ledger"]["status"] == "per_cycle"
     assert report["results"]["action_index"]["status"] == "scheduled"
-    assert report["results"]["curator"]["status"] == "scheduled"
     assert report["results"]["reflector"]["status"] == "scheduled"
-    assert report["failures"] == ["hypotheses", "strategist"]
+    assert report["failures"] == ["curator"]
 
 
-def test_writer_invocation_check_accepts_enabled_strategist_timer() -> None:
-    output = "eeebot-strategist.timer enabled enabled\n"
+def test_writer_invocation_check_accepts_enabled_curator_timer() -> None:
+    output = "eeebot-knowledge-curator.timer enabled enabled\n"
 
     def runner(command: list[str]):
         return subprocess.CompletedProcess(command, 0, output, "")
 
     report = state_path_invocations.check_writer_invocations(
         runner,
-        {"hypotheses": state_path_invocations.WRITER_INVOKERS["hypotheses"]},
+        {"curator": state_path_invocations.WRITER_INVOKERS["curator"]},
     )
 
     assert report["ok"] is True
-    assert report["results"]["hypotheses"]["status"] == "scheduled"
+    assert report["results"]["curator"]["status"] == "scheduled"
 
 
 def test_writer_invocation_check_covers_only_evidenced_entries() -> None:
     assert set(state_path_invocations.WRITER_INVOKERS) == {
-        "action_index", "curator", "heldout", "hypotheses", "ledger",
-        "llm_calls", "reflector", "scorecard", "story", "strategist", "subagents",
+        "action_index", "curator", "heldout", "ledger",
+        "llm_calls", "reflector", "scorecard", "story", "planning_fitness", "subagents",
     }
     for segment, spec in state_path_invocations.WRITER_INVOKERS.items():
         assert spec["writer"] in state_paths.STATE_PATH_WRITERS[segment]
@@ -228,8 +230,8 @@ def test_writer_invocation_check_distinguishes_absent_timer() -> None:
 
     report = state_path_invocations.check_writer_invocations(
         runner,
-        {"hypotheses": state_path_invocations.WRITER_INVOKERS["hypotheses"]},
+        {"curator": state_path_invocations.WRITER_INVOKERS["curator"]},
     )
 
     assert report["ok"] is False
-    assert report["results"]["hypotheses"]["status"] == "absent"
+    assert report["results"]["curator"]["status"] == "absent"

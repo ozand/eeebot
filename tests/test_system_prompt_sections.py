@@ -334,6 +334,11 @@ class _HealthySectionsManager(_FakeSubagentManager):
 
 
 class _OverflowSectionsManager(_FakeSubagentManager):
+    """#1852: `spawned` is an executor-only signal -- the planning
+    session's own real `spawn()` call on this fake must not flip it; see
+    ``test_bridge_system_prompt_overflow.py``'s sibling for the full note.
+    """
+
     spawned = False
 
     def _build_subagent_prompt(self) -> str:
@@ -341,7 +346,8 @@ class _OverflowSectionsManager(_FakeSubagentManager):
         raise OVERFLOW
 
     async def spawn(self, **kwargs):
-        type(self).spawned = True
+        if self._telemetry_component != "planner":
+            type(self).spawned = True
         return await super().spawn(**kwargs)
 
 

@@ -599,9 +599,20 @@ def test_resolve_max_tool_iterations_feeds_build_task_and_subagentmanager_from_o
     # the main spawn path's single resolve_max_tool_iterations() call, or
     # (the repair path, a separate spawn) an inline call to the SAME
     # resolver function -- either way there is no THIRD, independently
-    # derived iteration number anywhere in this file.
+    # derived EXECUTION budget anywhere in this file.
+    #
+    # #1852 (ADR-031 rule 5): the planning session's SubagentManager is a
+    # SEPARATE, deliberate 20-tick budget -- "bounded at 20, separate from
+    # the 80" is the decision, not a drift risk of the same kind this pin
+    # guards against. Recognised explicitly, by its own literal, rather than
+    # widening what counts as "traces to the resolver".
+    PLANNING_SESSION_ITERATIONS = "20"
+
     def _traces_to_resolver(name: str) -> bool:
         return name == resolved_name or name == "resolve_max_tool_iterations"
+
+    def _traces_to_resolver_or_planning_budget(name: str) -> bool:
+        return _traces_to_resolver(name) or name == PLANNING_SESSION_ITERATIONS
 
     build_task_max_iter = _kwarg_after_call("build_task")
     subagent_mgr_max_iter = _kwarg_after_call("SubagentManager")
@@ -610,6 +621,14 @@ def test_resolve_max_tool_iterations_feeds_build_task_and_subagentmanager_from_o
     assert all(_traces_to_resolver(name) for name in build_task_max_iter), (
         f"build_task max_iterations must trace to resolve_max_tool_iterations, found {build_task_max_iter}"
     )
-    assert all(_traces_to_resolver(name) for name in subagent_mgr_max_iter), (
-        f"SubagentManager max_iterations must trace to resolve_max_tool_iterations, found {subagent_mgr_max_iter}"
+    assert all(_traces_to_resolver_or_planning_budget(name) for name in subagent_mgr_max_iter), (
+        f"SubagentManager max_iterations must trace to resolve_max_tool_iterations or the "
+        f"planning session's own {PLANNING_SESSION_ITERATIONS}-tick budget, found {subagent_mgr_max_iter}"
+    )
+    # And the inverse: exactly one SubagentManager call site is allowed to
+    # carry the literal planning budget -- a second one would mean a THIRD,
+    # unexplained hardcoded iteration count slipped in beside it.
+    assert subagent_mgr_max_iter.count(PLANNING_SESSION_ITERATIONS) <= 1, (
+        f"more than one SubagentManager call site carries the literal "
+        f"{PLANNING_SESSION_ITERATIONS}, found {subagent_mgr_max_iter}"
     )

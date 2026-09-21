@@ -66,11 +66,15 @@ class TestBulkSkipDrainsInOneRun:
             lambda title, *_a, **_k: title if title.startswith("dup") else None,
         )
 
+        # #1852: the bridge also spawns a planning session (component
+        # "planner") once per run -- counted separately here so the
+        # executor-only "exactly one spawn" invariant below still holds.
         spawn_calls = []
         real_spawn = _FakeSubagentManager.spawn
 
         async def _counting_spawn(self, **kwargs):
-            spawn_calls.append(1)
+            if self._telemetry_component != "planner":
+                spawn_calls.append(1)
             return await real_spawn(self, **kwargs)
 
         monkeypatch.setattr(_FakeSubagentManager, "spawn", _counting_spawn)
@@ -254,11 +258,15 @@ class TestMarkerWedgeDoesNotCapRunAtOneSkip:
             lambda title, *_a, **_k: title if title.startswith("dup") else None,
         )
 
+        # #1852: the bridge also spawns a planning session (component
+        # "planner") once per run -- counted separately here so the
+        # executor-only "exactly one spawn" invariant below still holds.
         spawn_calls = []
         real_spawn = _FakeSubagentManager.spawn
 
         async def _counting_spawn(self, **kwargs):
-            spawn_calls.append(1)
+            if self._telemetry_component != "planner":
+                spawn_calls.append(1)
             return await real_spawn(self, **kwargs)
 
         monkeypatch.setattr(_FakeSubagentManager, "spawn", _counting_spawn)

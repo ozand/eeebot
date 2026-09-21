@@ -351,6 +351,42 @@ def test_run_window_pruned_store_is_unavailable_not_empty(tmp_path):
     assert "beyond_retention" in window.notes
 
 
+# ─── planning session (#1852) ──────────────────────────────────────────────────
+
+
+class TestRecordPlanningSession:
+    def test_records_success_with_both_iteration_counts(self, tmp_path):
+        cycle_ledger.record_planning_session(
+            tmp_path, "c1", "integrated", iterations_used=7, iterations_planned=25,
+        )
+        rows = _read_ledger(tmp_path)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["phase"] == "planning_session"
+        assert row["outcome"] == "integrated"
+        assert row["iterations_used"] == 7
+        assert row["iterations_planned"] == 25
+
+    def test_missing_forecast_stays_none_not_zero(self, tmp_path):
+        """#1850-class distinction: a session that never produced a forecast
+        must not be recorded as having forecast zero."""
+        cycle_ledger.record_planning_session(
+            tmp_path, "c1", "spawn_failed", iterations_used=None, iterations_planned=None,
+            reason="subagent spawn error",
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert row["iterations_planned"] is None
+        assert row["iterations_used"] is None
+        assert row["reason"] == "subagent spawn error"
+
+    def test_unrecognized_outcome_coerces_to_malformed(self, tmp_path):
+        cycle_ledger.record_planning_session(
+            tmp_path, "c1", "made_up_outcome", iterations_used=1, iterations_planned=None,
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert row["outcome"] == "malformed"
+
+
 # ─── rotation ──────────────────────────────────────────────────────────────────
 
 
@@ -485,13 +521,23 @@ class _FakeSubagentManager:
     """Stand-in for nanobot.agent.subagent.SubagentManager: simulates a
     subagent that commits one real change directly to the (already
     cycle-branched) workspace repo, without spawning a real LLM turn.
+
+    #1852: the bridge now also spawns a SECOND, EARLIER SubagentManager for
+    the planning session, via the same (monkeypatched) class -- telling the
+    two apart by ``telemetry_component`` and making the planner's spawn a
+    true no-op (no file, no commit) is what keeps every existing "exactly
+    one spawn"/"instances[0] is the executor" test in this suite correct
+    without each of them needing to know the planner exists at all.
     """
 
-    def __init__(self, *, workspace, **_kwargs):
+    def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
         self.workspace = workspace
+        self._telemetry_component = telemetry_component
         self._running_tasks: dict = {}
 
     async def spawn(self, **_kwargs):
+        if self._telemetry_component == "planner":
+            return "fake planner spawned (noop)"
         (self.workspace / "scripts").mkdir(exist_ok=True)
         (self.workspace / "scripts" / "feature.py").write_text("def feature():\n    return 42\n")
         _run(self.workspace, "add", "scripts/feature.py")

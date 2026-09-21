@@ -625,6 +625,12 @@ def _write_post_cycle_censuses(state_dir: 'Path', selfevo_repo: 'Path') -> None:
       ``nanobot.runtime.trajectory``'s module docstring and
       ``tests/test_trajectory_report_never_gates.py`` for the structural
       test that keeps this call the ONLY caller.
+    - ADR-031 rule 7 (#1852): planning-overhead census
+      (``state/demand/planning_overhead.json``) — the ratio of planning
+      ticks to total ticks, same fail-open, every-cycle contract; reads the
+      sidecar :func:`_run_planning_session` and the overhead-recording call
+      right after the single-candidate ``_evaluate_candidate`` already
+      wrote, never this cycle's own state directly.
 
     Extracted to one call site so both writers are exercised together by a
     single, direct unit test (``tests/test_bridge_post_cycle_censuses.py``)
@@ -651,6 +657,11 @@ def _write_post_cycle_censuses(state_dir: 'Path', selfevo_repo: 'Path') -> None:
     try:
         from nanobot.runtime.trajectory import write_trajectory_report
         write_trajectory_report(state_dir, selfevo_repo)
+    except Exception:
+        pass
+    try:
+        from nanobot.runtime.planning_fitness import write_planning_overhead_rate
+        write_planning_overhead_rate(state_dir)
     except Exception:
         pass
 
@@ -2840,6 +2851,271 @@ def _write_diary_open_entry(repo_root: 'Path', state_dir: 'Path', cycle_id: str,
         return {'outcome': 'commit_failed', 'commit_sha': None}
 
 
+def _write_diary_plan_block(repo_root: 'Path', state_dir: 'Path', cycle_id: str, plan_text: str) -> dict:
+    """#1852 (ADR-031 rule 5): write the planning session's plan into today's
+    diary, replacing whatever plan block is already there, and integrate it
+    on its own verdict -- the same carve-out :func:`_write_diary_open_entry`
+    already established for ADR-028 rule 3, applied to the plan block
+    instead of the entries list.
+
+    Mirrors :func:`_write_diary_open_entry`'s subprocess shape exactly
+    (commit on main, push immediately, roll back on push failure); the two
+    write different regions of the same file and never race each other --
+    this function's caller runs them sequentially within one bridge
+    invocation, never concurrently.
+
+    Returns ``{"outcome": str, "commit_sha": str | None}``; ``outcome`` is
+    one of ``cycle_ledger.VALID_PLANNING_OUTCOMES``. Never raises.
+    """
+    import subprocess as _sp_plan
+
+    from nanobot.runtime import day_diary
+
+    relpath = day_diary.diary_relpath()
+    if _is_blocked_filename(relpath):
+        return {'outcome': 'refused', 'commit_sha': None, 'reason': f'blocked filename pattern: {relpath}'}
+
+    target = repo_root / relpath
+    try:
+        existing = target.read_text(encoding='utf-8') if target.is_file() else None
+        base_content = existing if existing is not None else day_diary.new_day_file()
+        new_content = day_diary.set_plan_block(base_content, plan_text)
+    except ValueError as exc:
+        return {'outcome': 'malformed', 'commit_sha': None, 'reason': str(exc)}
+    except Exception as exc:
+        return {'outcome': 'malformed', 'commit_sha': None, 'reason': f'unexpected error reading diary: {exc}'}
+
+    git = _git_cmd(repo_root)
+    try:
+        pre_sha = _sp_plan.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(new_content, encoding='utf-8')
+        add_r = _sp_plan.run(git + ['add', '--', relpath], capture_output=True, text=True)
+        if add_r.returncode != 0:
+            if existing is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.write_text(existing, encoding='utf-8')
+            return {'outcome': 'commit_failed', 'commit_sha': None, 'reason': f'git add failed: {add_r.stderr[:200]}'}
+        commit_msg = f'diary: cycle {cycle_id} plan (ADR-031)'
+        commit_r = _sp_plan.run(git + ['commit', '-m', commit_msg], capture_output=True, text=True)
+        if commit_r.returncode != 0:
+            _sp_plan.run(git + ['reset', 'HEAD', '--', relpath], capture_output=True, text=True)
+            if existing is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.write_text(existing, encoding='utf-8')
+            return {'outcome': 'commit_failed', 'commit_sha': None, 'reason': f'git commit failed: {commit_r.stderr[:200]}'}
+        remote_r = _sp_plan.run(git + ['remote', 'get-url', 'origin'], capture_output=True, text=True)
+        if remote_r.returncode != 0:
+            push_error = 'no origin remote configured'
+        else:
+            push_r = _sp_plan.run(git + ['push', 'origin', 'main'], capture_output=True, text=True)
+            push_error = '' if push_r.returncode == 0 else (
+                (push_r.stderr or push_r.stdout).strip().splitlines()[-1:] or [f'exit {push_r.returncode}']
+            )[0][:200]
+        if push_error:
+            if pre_sha:
+                _sp_plan.run(git + ['reset', '--hard', pre_sha], capture_output=True, text=True)
+            return {'outcome': 'push_failed', 'commit_sha': None, 'reason': f'push to origin/main failed: {push_error}'}
+        new_sha = _sp_plan.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+        print(f'bridge: diary plan block: pushed to origin/main {new_sha[:12]} (#1852)')
+        return {'outcome': 'integrated', 'commit_sha': new_sha, 'reason': ''}
+    except Exception as exc:
+        return {'outcome': 'commit_failed', 'commit_sha': None, 'reason': f'unexpected error: {exc}'}
+
+
+async def _run_planning_session(
+    *, provider, bus, config, model: str, state_dir: 'Path', selfevo_repo: 'Path',
+    denied_paths: set, cycle_id: str,
+) -> dict:
+    """#1852 (ADR-031 rule 5, ADR-032 rule 2): the planning session. Between
+    cycles, on the executor's own model, in a clean context, bounded at 20
+    tool iterations, separate from the cycle's own 80: read what was done,
+    plan what to do next.
+
+    Reuses :class:`SubagentManager` exactly as the executor cycle does --
+    same tool set, same workspace -- but with ``roles/planner.md`` as its
+    whole system prompt (``role_system_prompt``, bypassing the
+    ADR-022/OPERATING.md ontology entirely: this session's task never
+    varies and is not the executor's cycle contract) and its own
+    ``telemetry_component="planner"`` so its LLM calls are distinguishable
+    from the executor's.
+
+    Safety: the workspace is ``selfevo_repo`` sitting on ``main``, not a
+    disposable cycle branch -- there is no gate downstream of this session.
+    ``roles/planner.md`` instructs the model not to edit files or run git,
+    and this function additionally verifies the checkout is still clean and
+    at the SHA it started from after the session ends, hard-resetting it
+    otherwise; a plan reaches the diary only through this function's own
+    :func:`_write_diary_plan_block` call on the session's FINAL RESPONSE
+    TEXT, never through anything the session's own tool calls touched.
+
+    Fail-open throughout: any failure here is recorded via
+    ``cycle_ledger.record_planning_session`` and returned as
+    ``{"ran": False, ...}`` -- the caller proceeds with the cycle exactly as
+    it would have before this function existed (ADR-031 rule 5 AC: "a failed
+    planning session degrades to the ranked queue").
+    """
+    import asyncio as _asyncio
+    import subprocess as _sp_run
+
+    from nanobot.runtime import day_diary, role_prompt
+    from nanobot.runtime.cycle_ledger import record_planning_session
+
+    def _fail(outcome: str, reason: str, *, tampered_files: "list[str] | None" = None) -> dict:
+        record_planning_session(
+            state_dir, cycle_id, outcome,
+            iterations_used=None, iterations_planned=None, reason=reason[:500],
+        )
+        print(f'planning-session: {outcome} ({reason[:200]})')
+        return {
+            'ran': False, 'iterations_used': None, 'iterations_planned': None,
+            'tampered_files': tampered_files or [],
+        }
+
+    git = _git_cmd(selfevo_repo)
+    pre_sha = _sp_run.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+
+    try:
+        role_text, _role_meta = role_prompt.build_role_system_prompt('planner', release_root=RELEASE_ROOT)
+    except Exception as exc:
+        return _fail('spawn_failed', f'role prompt assembly failed: {exc}')
+
+    # #789/#1456's spawn-boundary tamper detection covers the EXECUTOR's own
+    # spawn window; this session gets its own bracket around ITS spawn, for
+    # the same reason -- its tools reach the same FITNESS_SIDECARS paths
+    # (exec is not fenced by `denied_paths`, only edit_file/write_file are),
+    # and its window would otherwise close before the executor's own
+    # `_integrity_pre` hash is even taken, making a tamper here invisible to
+    # that later comparison (both sides of it would already reflect it).
+    _integrity_pre = _fitness_sidecar_hashes(state_dir)
+
+    try:
+        planner_manager = SubagentManager(
+            provider=provider,
+            workspace=selfevo_repo,
+            bus=bus,
+            model=model,
+            web_search_config=config.tools.web.search,
+            web_proxy=config.tools.web.proxy,
+            web_tools_enabled=False,
+            exec_config=config.tools.exec,
+            subagent_config=config.tools.subagent,
+            restrict_to_workspace=False,
+            denied_paths=denied_paths,
+            max_running=1,
+            max_iterations=20,
+            role_system_prompt=role_text,
+            telemetry_component='planner',
+        )
+        await planner_manager.spawn(
+            task='Plan the next cycle.',
+            label='selfevo-planner',
+            origin_channel='system',
+            origin_chat_id='self-evolving-agent',
+        )
+        planner_task_id = next(iter(planner_manager._running_tasks), None)
+        _timed_out = False
+        if planner_manager._running_tasks:
+            try:
+                await _asyncio.wait_for(
+                    _asyncio.gather(*list(planner_manager._running_tasks.values()), return_exceptions=True),
+                    timeout=600.0,
+                )
+            except _asyncio.TimeoutError:
+                _timed_out = True
+                for task_obj in list(planner_manager._running_tasks.values()):
+                    task_obj.cancel()
+                await _asyncio.gather(*list(planner_manager._running_tasks.values()), return_exceptions=True)
+    except Exception as exc:
+        return _fail('spawn_failed', f'planner subagent spawn error: {exc}')
+
+    _prevented = list(getattr(planner_manager, 'prevented_access_attempts', []))
+    if _prevented:
+        print(f'integrity: in-flight fitness sidecar access prevented during planning spawn: {", ".join(_prevented)} (#1456)')
+        append_event(
+            state_dir, {'phase': 'integrity', 'reason': 'sidecar_write_prevented', 'cycle_id': cycle_id, 'files': _prevented, 'component': 'planner'},
+        )
+    _integrity_post = _fitness_sidecar_hashes(state_dir)
+    _integrity_changed = [rel for rel in _FITNESS_SIDECARS if _integrity_pre.get(rel) != _integrity_post.get(rel)]
+    if _integrity_changed:
+        print(f'integrity: fitness sidecar(s) written during planning spawn window: {", ".join(_integrity_changed)} (#789/#1852)')
+        append_event(
+            state_dir, {'phase': 'integrity', 'reason': 'sidecar_write_during_spawn', 'cycle_id': cycle_id, 'files': _integrity_changed, 'component': 'planner'},
+        )
+        return _fail(
+            'spawn_failed', f'fitness sidecar tampered during planning spawn window: {", ".join(_integrity_changed)}',
+            tampered_files=_integrity_changed,
+        )
+
+    # Safety net: whatever the session's own tools touched, it must not
+    # survive -- only this function's own write, below, may change main.
+    try:
+        status = _sp_run.run(git + ['status', '--porcelain'], capture_output=True, text=True).stdout.strip()
+        head_now = _sp_run.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+        if status or (pre_sha and head_now != pre_sha):
+            _sp_run.run(git + ['reset', '--hard', pre_sha], capture_output=True, text=True)
+            _sp_run.run(git + ['clean', '-fd'], capture_output=True, text=True)
+            print('planning-session: checkout was not clean after the session; hard-reset to pre-session HEAD')
+    except Exception:
+        pass
+
+    if _timed_out:
+        return _fail('timed_out', 'planner subagent exceeded its 600s wall-clock allowance')
+    if not planner_task_id:
+        return _fail('spawn_failed', 'no subagent task_id produced')
+
+    try:
+        telem_path = state_dir / 'subagents' / f'{planner_task_id}.json'
+        telem = json.loads(telem_path.read_text(encoding='utf-8')) if telem_path.is_file() else {}
+    except Exception as exc:
+        return _fail('spawn_failed', f'unreadable planner telemetry: {exc}')
+
+    iterations_used = len((telem.get('context_usage') or {}).get('iterations') or [])
+    raw_result = str(telem.get('result') or '').strip()
+    try:
+        # roles/planner.md: "no markdown wrapping" -- same strict contract
+        # strategist.py's own final-response parse enforces; a fenced
+        # response is malformed, not silently unwrapped.
+        if raw_result.startswith('```'):
+            raise ValueError('final response must not be fenced')
+        parsed = json.loads(raw_result)
+        if not isinstance(parsed, dict) or not isinstance(parsed.get('plan'), str) or not parsed['plan'].strip():
+            raise ValueError('missing non-empty "plan" field')
+        iterations_planned = parsed.get('iterations_planned')
+        iterations_planned = int(iterations_planned) if isinstance(iterations_planned, (int, float)) else None
+    except Exception as exc:
+        record_planning_session(
+            state_dir, cycle_id, 'malformed',
+            iterations_used=iterations_used, iterations_planned=None,
+            reason=f'unparseable final response: {exc}',
+        )
+        print(f'planning-session: malformed final response ({exc})')
+        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
+
+    plan_lines = [f"Insight: {(parsed.get('insight') or '').strip() or '(none stated)'}", f"Plan: {parsed['plan'].strip()}"]
+    for h in (parsed.get('hypotheses') or [])[:3]:
+        if isinstance(h, str) and h.strip():
+            plan_lines.append(f'Hypothesis: {h.strip()}')
+    for f in (parsed.get('futility_advisories') or [])[:2]:
+        if isinstance(f, str) and f.strip():
+            plan_lines.append(f'Futility: {f.strip()}')
+    plan_text = '\n'.join(plan_lines)
+
+    write_result = _write_diary_plan_block(selfevo_repo, state_dir, cycle_id, plan_text)
+    record_planning_session(
+        state_dir, cycle_id, write_result['outcome'],
+        iterations_used=iterations_used, iterations_planned=iterations_planned,
+        reason=write_result.get('reason', ''),
+    )
+    return {
+        'ran': True, 'iterations_used': iterations_used,
+        'iterations_planned': iterations_planned if write_result['outcome'] == 'integrated' else None,
+        'tampered_files': [],
+    }
+
+
 async def _main_impl_body():
     _clear_result_entries_cache()
     set_config_path(CONFIG_PATH)
@@ -3994,6 +4270,26 @@ async def _main_impl_body():
                 # observability warning. The changed paths are names only;
                 # payloads never enter the durable reason.
                 _rollback_reason = 'fitness_sidecar_tamper'
+            # #1852: a tamper this same bridge invocation's planning session
+            # already detected and journalled (in ITS OWN spawn window,
+            # which closes before this window's `_integrity_pre` above is
+            # even taken, so a mismatch there is invisible to THIS
+            # comparison -- both sides already reflect it) must still fail
+            # this cycle. The planning session already wrote its own
+            # `phase: integrity` row; nothing is re-journalled here.
+            elif _planning_result.get('tampered_files'):
+                print(
+                    f'integrity: refusing integration -- fitness sidecar(s) tampered during this '
+                    f'cycle\'s planning spawn window: {", ".join(_planning_result["tampered_files"])} (#789/#1852)'
+                )
+                _rollback_reason = 'fitness_sidecar_tamper'
+                # Below, the gate-decision chain blocks integration on
+                # `elif _integrity_changed:` truthiness specifically (not on
+                # `_rollback_reason`) -- populate it with the SAME files the
+                # planning session already journalled its own `phase:
+                # integrity` row for, so key_learnings names them too,
+                # without a second ledger row (see comment above).
+                _integrity_changed = list(_planning_result['tampered_files'])
 
             # ── #846: out-of-band origin/main push detection ─────────────────────
             # Positive-only, fail-open (see _detect_out_of_band_main). The loop is
@@ -4517,6 +4813,28 @@ async def _main_impl_body():
         }
 
 
+    # #1852 (ADR-031 rule 5, ADR-032 rule 2): the planning session runs once
+    # per bridge invocation, between cycles -- after this cycle's own
+    # opening diary anchor and demand selection (both already settled by
+    # this point) and before the executor spawns below, so its plan is
+    # written to the SAME diary the executor is about to read as its own
+    # first action. Fail-open: any outcome here (including "did not run")
+    # leaves the rest of this cycle completely unaffected -- this PR does
+    # not yet change how a cycle's task is chosen (ADR-032 rule 1, #1857/
+    # #1859's scope), only that the session runs and its plan reaches the
+    # diary.
+    _planning_selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
+    _planning_denied_paths = {(STATE_DIR / rel).resolve() for rel in _FITNESS_SIDECARS}
+    try:
+        _planning_result = await _run_planning_session(
+            provider=provider, bus=bus, config=config, model=bridge_model,
+            state_dir=STATE_DIR, selfevo_repo=_planning_selfevo_repo,
+            denied_paths=_planning_denied_paths, cycle_id=_cycle_id,
+        )
+    except Exception as _planning_exc:
+        print(f'planning-session: unexpected error ({_planning_exc})')
+        _planning_result = {'ran': False, 'iterations_used': None, 'iterations_planned': None, 'tampered_files': []}
+
     _explore_n, _explore_metric = _parse_explore_mode(req)
     if _explore_n > 1:
         if not _explore_metric:
@@ -4538,6 +4856,28 @@ async def _main_impl_body():
 
     if _explore_n <= 1:
         _res = await _evaluate_candidate(_cycle_id, True)
+        # ADR-031 rule 7 (#1852): the overhead ratio, from day one. Explore
+        # mode (multiple candidates evaluated for one cycle) is deliberately
+        # left out here -- one planning session's ticks would otherwise be
+        # divided across several executor runs with no principled split, and
+        # explore mode is not this record's subject. The single-candidate
+        # path is the overwhelming majority of cycles.
+        try:
+            from nanobot.runtime.planning_fitness import record_cycle_overhead
+            _exec_task_id = _res.get('subagent_task_id')
+            _exec_iterations = None
+            if _exec_task_id:
+                _exec_telem_path = STATE_DIR / 'subagents' / f'{_exec_task_id}.json'
+                if _exec_telem_path.is_file():
+                    _exec_telem = json.loads(_exec_telem_path.read_text(encoding='utf-8'))
+                    _exec_iterations = len((_exec_telem.get('context_usage') or {}).get('iterations') or [])
+            record_cycle_overhead(
+                STATE_DIR, cycle_id=_cycle_id, planning_ran=_planning_result['ran'],
+                planning_iterations=_planning_result['iterations_used'],
+                execution_iterations=_exec_iterations,
+            )
+        except Exception:
+            pass  # planning-overhead write errors are non-blocking
     else:
         candidates_results = []
         for cand_idx in range(_explore_n):
