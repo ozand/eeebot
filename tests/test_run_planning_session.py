@@ -72,6 +72,8 @@ def _make_fake_mgr_factory(
     background task would produce, iterations included."""
 
     class _FakeSubagentManager:
+        last_task: str | None = None
+
         def __init__(self, **kwargs):
             if raise_on_init:
                 raise RuntimeError("provider unavailable")
@@ -85,6 +87,7 @@ def _make_fake_mgr_factory(
             )
 
         async def spawn(self, *, task, label, origin_channel, origin_chat_id):
+            type(self).last_task = task
             task_id = "plannerfake1"
             if dirty_repo:
                 (self.workspace / "stray.txt").write_text("oops\n", encoding="utf-8")
@@ -123,6 +126,8 @@ def _stub_role_prompt(monkeypatch):
         role_prompt_mod, "build_role_system_prompt",
         lambda role, **kwargs: ("fixed planner prompt", {"role": role}),
     )
+    release = Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
 
 
 async def _run(**overrides):
@@ -200,27 +205,81 @@ def test_a_fitness_sidecar_write_during_planning_spawn_is_detected_and_refused(t
     assert rows[0]["outcome"] == "spawn_failed"
 
 
-def test_missing_task_writing_read_refuses_and_resets_dirty_workspace(tmp_path: Path, monkeypatch):
-    """#1865: the planner must actually read its release-owned contract,
-    not merely receive an unconditional instruction pointing to it."""
+def test_harness_prereads_task_contract_before_planner_spawn(tmp_path: Path, monkeypatch):
+    """#1891: the immutable carrier reaches the planner before any model turn,
+    independently of whether the model chooses a read_file tool call."""
     repo = _init_repo_with_origin(tmp_path)
     state = tmp_path / "state"
-    result_obj = {"insight": "x", "plan": "y", "iterations_planned": 10}
-    monkeypatch.setattr(
-        bridge, "SubagentManager",
-        _make_fake_mgr_factory(state, result_obj, dirty_repo=True, task_writing_read=False),
+    release = tmp_path / "release"
+    skill = release / "nanobot" / "skills" / "task-writing" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# mandatory contract\nexternal criterion\n", encoding="utf-8")
+    manager_factory = _make_fake_mgr_factory(
+        state, {"insight": "x", "plan": "y", "iterations_planned": 10},
+        task_writing_read=False,
     )
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["ran"] is True
+    assert "# mandatory contract" in (manager_factory.last_task or "")
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["task_writing_read"] is True
+    assert row["task_writing_source"] == "harness_release_preread"
+    assert row["task_writing_path"].replace("\\", "/").endswith("nanobot/skills/task-writing/SKILL.md")
+    assert row["task_writing_bytes"] > 0
+    assert len(row["task_writing_sha256"]) == 64
+
+
+def test_timeout_is_distinct_from_missing_read(tmp_path: Path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    release = tmp_path / "release"
+    skill = release / "nanobot" / "skills" / "task-writing" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# contract\n", encoding="utf-8")
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
+    manager_factory = _make_fake_mgr_factory(state, {"plan": "x"})
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+
+    async def _timeout(awaitable, *, timeout):
+        awaitable.cancel()
+        try:
+            await awaitable
+        except asyncio.CancelledError:
+            pass
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(asyncio, "wait_for", _timeout)
+
+    result = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+    assert result["ran"] is False
+    assert not (repo / diary_relpath()).exists()
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["outcome"] == "timed_out"
+    assert row["task_writing_read"] is True
+    assert row["task_writing_source"] == "harness_release_preread"
+
+
+def test_missing_task_writing_preread_refuses_before_spawn(tmp_path: Path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    release = tmp_path / "release"
+    release.mkdir()
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
+    manager_factory = _make_fake_mgr_factory(state, {"plan": "must not run"})
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
 
     outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
 
     assert outcome["ran"] is False
-    assert not (repo / diary_relpath()).exists()
-    assert not (repo / "stray.txt").exists()
-    assert _git(repo, "status", "--porcelain") == ""
+    assert manager_factory.last_task is None
     [row] = _ledger_rows(state, "planning_session")
     assert row["outcome"] == "refused"
-    assert "mandatory task-writing skill was not read" in row["reason"]
     assert row["task_writing_read"] is False
+    assert "pre-read failed" in row["reason"]
 
 
 def test_malformed_final_response_degrades_without_touching_the_diary(tmp_path: Path, monkeypatch):

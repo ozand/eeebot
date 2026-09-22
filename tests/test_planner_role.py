@@ -30,16 +30,10 @@ def test_planner_names_the_derivable_memory_path():
 
 
 def test_planner_discovery_clause_is_unconditional():
-    """AC 2/scope: unconditional, stated as such in the text -- not left to
-    the session's own judgement about whether this particular plan needs
-    it (the #1805/#1857 failure mode this record exists to remove)."""
+    """AC 2/scope: the three discovery sources are required every run."""
     text = _body()
-    lowered = text.lower()
-    assert "unconditional" in lowered
-    # the discovery sentence itself must not carry a relevance qualifier
-    discovery_line = next(
-        line for line in text.splitlines() if "skills/index.md" in line
-    )
+    discovery_line = next(line for line in text.splitlines() if "skills/index.md" in line)
+    assert "every run" in text.lower()
     for qualifier in ("if ", "when it seems", "only when", "if it seems"):
         assert qualifier not in discovery_line.lower(), discovery_line
 
@@ -53,15 +47,12 @@ def test_planner_discovery_precedes_the_final_response_contract():
     assert discovery_pos < final_response_pos
 
 
-def test_planner_task_writing_instruction_is_unconditional_and_precedes_choice():
-    """#1865: planning always reads the release-owned task contract before
-    emitting an increment; its full text stays outside the resident role."""
+def test_planner_applies_harness_loaded_task_contract_before_discovery():
+    """#1891: model compliance with a read pointer is not the trust boundary;
+    the harness loads the contract before the first model turn."""
     text = _body()
-    line = next(line for line in text.splitlines() if "task_writing_skill_path" in line)
-    assert "unconditional" in text.lower()
-    for qualifier in ("if ", "when it seems", "only when", "if it seems"):
-        assert qualifier not in line.lower(), line
-    assert text.index("task_writing_skill_path") < text.index("## Final response")
+    assert "harness has already" in text.lower()
+    assert text.index("task-writing contract") < text.index("diary/<today>.md")
     assert "Structural Falsifiability" not in text
 
 
@@ -71,15 +62,6 @@ def test_planner_role_fits_its_declared_budget_without_truncation():
     assert len(text) <= meta["budget"]
 
 
-def test_planner_resolves_task_writing_to_its_explicit_release_root(tmp_path: Path):
-    root = tmp_path / "release"
-    (root / "roles").mkdir(parents=True)
-    for name in ("IDENTITY.md", "goals.md"):
-        (root / name).write_text("x\n", encoding="utf-8")
-    (root / "roles" / "planner.md").write_text(_body(), encoding="utf-8")
-
-    text, _meta = load_role_text("planner", release_root=root)
-
-    expected = str(root / "nanobot" / "skills" / "task-writing" / "SKILL.md")
-    assert expected in text
+def test_planner_role_contains_no_task_writing_path_placeholder():
+    text, _meta = load_role_text("planner", release_root=REPO_ROOT)
     assert "{task_writing_skill_path}" not in text
