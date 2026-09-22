@@ -65,6 +65,12 @@ def test_planner_task_writing_instruction_is_unconditional_and_precedes_choice()
     assert "Structural Falsifiability" not in text
 
 
+def test_planner_role_fits_its_declared_budget_without_truncation():
+    text, meta = load_role_text("planner", release_root=REPO_ROOT)
+    assert meta["truncated"] is False
+    assert len(text) <= meta["budget"]
+
+
 def test_planner_resolves_task_writing_to_its_explicit_release_root(tmp_path: Path):
     root = tmp_path / "release"
     (root / "roles").mkdir(parents=True)

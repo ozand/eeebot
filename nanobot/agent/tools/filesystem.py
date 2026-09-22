@@ -210,7 +210,7 @@ class ReadFileTool(_FsTool):
             # #1865: an abbreviated read cannot satisfy the planner's
             # mandatory contract read. The normal callback above still
             # observes any successful skill read for fitness accounting.
-            if self._on_complete_skill_read is not None and fp.name == "SKILL.md" and end == total:
+            if self._on_complete_skill_read is not None and fp.name == "SKILL.md" and offset == 1 and end == total:
                 try:
                     self._on_complete_skill_read(fp.resolve())
                 except Exception:

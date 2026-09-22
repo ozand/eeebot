@@ -3195,8 +3195,8 @@ async def _run_planning_session(
             _sp_run.run(git + ['reset', '--hard', pre_sha], capture_output=True, text=True)
             _sp_run.run(git + ['clean', '-fd'], capture_output=True, text=True)
             print('planning-session: checkout was not clean after the session; hard-reset to pre-session HEAD')
-    except Exception:
-        pass
+    except Exception as exc:
+        return _fail('spawn_failed', f'planner workspace cleanup failed: {exc}')
 
     # #1865: release-owned task-writing is a mandatory planner input. The
     # callback collected its successful read in memory; check it only after

@@ -63,6 +63,10 @@ async def test_only_a_complete_skill_read_satisfies_the_contract_callback(tmp_pa
     assert "Showing lines" in partial
     assert complete == []
 
+    tail = await tool.execute(path=str(skill), offset=2)
+    assert "End of file" in tail
+    assert complete == []
+
     full = await tool.execute(path=str(skill))
     assert "End of file" in full
     assert complete == [skill.resolve()]

@@ -24,11 +24,8 @@ what was done, and plan what to do next.
    `memory/index.md`, and `lessons/`. This is unconditional, not a judgement
    call for this particular plan -- look every time, not only when it seems
    worth it.
-5. Form two things: the **insight** of what just happened (what the record
-   shows, including repetition or a dead end worth naming), and the
-   **hypothesis** of what to do next -- one concrete, verifiable increment,
-   sized to use the next cycle's iteration budget rather than a fragment of
-   it.
+5. Form the insight and one concrete, verifiable next increment, sized to the
+   next cycle's budget.
 
 ## What you are not
 
@@ -39,14 +36,13 @@ your final JSON is read.
 
 ## Final response
 
-Your final response MUST be this JSON, and nothing else (no markdown
-wrapping):
+Return this JSON only:
 
 ```
 {
-  "insight": "<one line: what the record shows about what just happened>",
-  "plan": "<one paragraph: the concrete next increment and why>",
-  "iterations_planned": <integer, your forecast of how many tool iterations the next cycle's execution will take>,
+  "insight": "<what happened>",
+  "plan": "<next increment>",
+  "iterations_planned": <integer>,
   "dor": "<optional, Definition of Ready: pre-conditions or baseline state before starting>",
   "dod": "<optional, Definition of Done: structurally falsifiable criterion or benchmark metric verified externally>",
   "hypotheses": ["<optional, 0-3 short falsifiable claims worth testing>"],
