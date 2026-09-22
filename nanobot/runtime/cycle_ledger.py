@@ -305,6 +305,7 @@ def record_planning_session(
     iterations_used: int | None,
     iterations_planned: int | None,
     reason: str = "",
+    task_writing_read: bool | None = None,
 ) -> None:
     """Log one planning-session run (#1852): whether its plan reached the
     diary, how many of its 20 ticks it used, and its own forecast for the
@@ -326,6 +327,7 @@ def record_planning_session(
             "iterations_used": int(iterations_used) if isinstance(iterations_used, int) else None,
             "iterations_planned": int(iterations_planned) if isinstance(iterations_planned, int) else None,
             "reason": reason or None,
+            **({"task_writing_read": task_writing_read} if isinstance(task_writing_read, bool) else {}),
         },
     )
 

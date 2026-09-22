@@ -65,6 +65,7 @@ def _fake_config() -> SimpleNamespace:
 def _make_fake_mgr_factory(
     state_dir: Path, result_obj: object, *, dirty_repo: bool = False, raise_on_init: bool = False,
     tamper_sidecar_rel: "str | None" = None,
+    task_writing_read: bool = True,
 ):
     """A factory returning a fake SubagentManager class bound to one test's
     expectations -- writes the telemetry file real SubagentManager.spawn's
@@ -79,6 +80,9 @@ def _make_fake_mgr_factory(
             self.max_iterations = kwargs.get("max_iterations")
             self._telemetry_component = kwargs.get("telemetry_component", "")
             self._running_tasks: dict[str, asyncio.Task] = {}
+            self._planner_release_skill_reads = (
+                ["nanobot/skills/task-writing/SKILL.md"] if task_writing_read else []
+            )
 
         async def spawn(self, *, task, label, origin_channel, origin_chat_id):
             task_id = "plannerfake1"
@@ -160,6 +164,7 @@ def test_happy_path_writes_the_diary_and_journals_success(tmp_path: Path, monkey
     assert rows[0]["outcome"] == "integrated"
     assert rows[0]["iterations_used"] == 3
     assert rows[0]["iterations_planned"] == 35
+    assert rows[0]["task_writing_read"] is True
 
 
 def test_a_fitness_sidecar_write_during_planning_spawn_is_detected_and_refused(tmp_path: Path, monkeypatch):
@@ -193,6 +198,27 @@ def test_a_fitness_sidecar_write_during_planning_spawn_is_detected_and_refused(t
 
     rows = _ledger_rows(state, "planning_session")
     assert rows[0]["outcome"] == "spawn_failed"
+
+
+def test_missing_task_writing_read_refuses_before_diary_write(tmp_path: Path, monkeypatch):
+    """#1865: the planner must actually read its release-owned contract,
+    not merely receive an unconditional instruction pointing to it."""
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    result_obj = {"insight": "x", "plan": "y", "iterations_planned": 10}
+    monkeypatch.setattr(
+        bridge, "SubagentManager",
+        _make_fake_mgr_factory(state, result_obj, task_writing_read=False),
+    )
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["ran"] is False
+    assert not (repo / diary_relpath()).exists()
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["outcome"] == "refused"
+    assert "mandatory task-writing skill was not read" in row["reason"]
+    assert row["task_writing_read"] is False
 
 
 def test_malformed_final_response_degrades_without_touching_the_diary(tmp_path: Path, monkeypatch):

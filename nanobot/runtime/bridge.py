@@ -3101,6 +3101,7 @@ async def _run_planning_session(
         record_planning_session(
             state_dir, cycle_id, outcome,
             iterations_used=None, iterations_planned=None, reason=reason[:500],
+            task_writing_read=False if "task-writing" in reason else None,
         )
         print(f'planning-session: {outcome} ({reason[:200]})')
         return {
@@ -3140,6 +3141,7 @@ async def _run_planning_session(
             denied_paths=denied_paths,
             max_running=1,
             max_iterations=20,
+            release_root=RELEASE_ROOT,
             role_system_prompt=role_text,
             telemetry_component='planner',
         )
@@ -3183,6 +3185,15 @@ async def _run_planning_session(
             tampered_files=_integrity_changed,
         )
 
+    # #1865: release-owned task-writing is a mandatory planner input. The
+    # callback collected its successful read in memory; check it only after
+    # the sidecar integrity bracket closes so observation itself cannot look
+    # like a sidecar write during spawn.
+    _task_writing_path = "nanobot/skills/task-writing/SKILL.md"
+    _task_writing_read = _task_writing_path in getattr(planner_manager, '_planner_release_skill_reads', [])
+    if not _task_writing_read:
+        return _fail('refused', f'mandatory task-writing skill was not read: {_task_writing_path}')
+
     # Safety net: whatever the session's own tools touched, it must not
     # survive -- only this function's own write, below, may change main.
     try:
@@ -3224,6 +3235,7 @@ async def _run_planning_session(
             state_dir, cycle_id, 'malformed',
             iterations_used=iterations_used, iterations_planned=None,
             reason=f'unparseable final response: {exc}',
+            task_writing_read=_task_writing_read,
         )
         print(f'planning-session: malformed final response ({exc})')
         return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
@@ -3248,6 +3260,7 @@ async def _run_planning_session(
         state_dir, cycle_id, write_result['outcome'],
         iterations_used=iterations_used, iterations_planned=iterations_planned,
         reason=write_result.get('reason', ''),
+        task_writing_read=True,
     )
     return {
         'ran': True, 'iterations_used': iterations_used,

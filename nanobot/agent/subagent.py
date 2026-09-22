@@ -226,6 +226,9 @@ class SubagentManager:
         # Collected in memory during the spawn window; written by the bridge
         # after the subagent finishes (harness-side, protected by sidecar guard).
         self._skill_reads_this_cycle: list[dict] = []
+        # Planner-only evidence is held in memory until the integrity bracket
+        # closes; writing the fitness sidecar during planner spawn is a tamper.
+        self._planner_release_skill_reads: list[str] = []
         #: #1767 -- names the executor asked for and did not get this cycle.
         self._skill_read_failures_this_cycle: list[str] = []
         #: ADR-028 rule 5 (#1812) -- every day-file read this cycle, any
@@ -327,9 +330,10 @@ class SubagentManager:
             # that string is the whole evidence, since a failed lookup
             # resolves to nothing.
             _on_skill_read_failed = None
-            if self._skill_fitness_state_dir is not None:
+            if self._skill_fitness_state_dir is not None or self._role_system_prompt is not None:
                 workspace_skills = (self.workspace / "skills").resolve()
-                release_skills = BUILTIN_SKILLS_DIR.resolve()
+                release_base = self.release_root or BUILTIN_SKILLS_DIR.parent.parent
+                release_skills = (Path(release_base) / "nanobot" / "skills").resolve()
 
                 def _on_skill_read(skill_path: Path) -> None:  # noqa: E301
                     try:
@@ -342,6 +346,8 @@ class SubagentManager:
                         except ValueError:
                             return
                     if len(rel.parts) == 2 and rel.parts[1] == "SKILL.md":
+                        if path == "nanobot/skills/task-writing/SKILL.md":
+                            self._planner_release_skill_reads.append(path)
                         # #1857: `iteration` (this method's own loop counter,
                         # read at call time) is the tool-call position the
                         # obligation needs to be checkable against -- same
