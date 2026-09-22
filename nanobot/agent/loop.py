@@ -126,6 +126,7 @@ class AgentLoop:
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
         allowed_dir = self.workspace if self.restrict_to_workspace else None
+        # ADR-033: package skills include release-owned operator instructions.
         extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
         self.tools.register(ReadFileTool(workspace=self.workspace, allowed_dir=allowed_dir, extra_allowed_dirs=extra_read))
         for cls in (WriteFileTool, EditFileTool, ListDirTool):

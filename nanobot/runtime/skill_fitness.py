@@ -174,9 +174,15 @@ def record_skill_reads(
         for item in reads:
             skill_name = str(item.get("skill") or "").strip()
             skill_path = str(item.get("path") or "").strip().replace("\\", "/")
-            if not skill_name or skill_path != f"skills/{skill_name}/SKILL.md":
+            workspace_path = f"skills/{skill_name}/SKILL.md"
+            release_path = f"nanobot/skills/{skill_name}/SKILL.md"
+            if not skill_name or skill_path not in {workspace_path, release_path}:
                 continue
-            skill_commit = _git_sha(repo, skill_path) if repo else ""
+            # Instance provenance is available in the self-evolution repo;
+            # release skills are intentionally outside it. Their reads remain
+            # observable, but cannot earn provenance-based fitness credit
+            # without a separately verified release commit source.
+            skill_commit = _git_sha(repo, skill_path) if repo and skill_path == workspace_path else ""
             # Birth-use guard: if the last-edit commit of this SKILL.md is an
             # ancestor of the cycle's current HEAD (i.e. was committed in THIS
             # cycle, after cycle_base_sha), the authoring-cycle rule fires.
