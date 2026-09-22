@@ -134,12 +134,21 @@ def _substitute(text: str, substitutions: dict[str, str] | None) -> str:
     return text
 
 
-def default_substitutions() -> dict[str, str]:
+def default_substitutions(release_root: "str | Path | None" = None) -> dict[str, str]:
     """The values role files may reference. Today: the authoritative commit
     surfaces, so the proposer prompts keep agreeing with ``mutation_policy``."""
     from nanobot.runtime.mutation_policy import MUTATION_POLICY
 
-    return {"commit_surfaces": MUTATION_POLICY.render_commit_surfaces()}
+    root = resolve_release_root(release_root)
+    task_writing_path = (
+        str(root / "nanobot" / "skills" / "task-writing" / "SKILL.md")
+        if root is not None
+        else "nanobot/skills/task-writing/SKILL.md"
+    )
+    return {
+        "commit_surfaces": MUTATION_POLICY.render_commit_surfaces(),
+        "task_writing_skill_path": task_writing_path,
+    }
 
 
 def load_role_text(
@@ -165,7 +174,7 @@ def load_role_text(
     raw = path.read_text(encoding="utf-8")
     front, body = _parse_front_matter(raw)
     body = _ROLE_HEADING_RE.sub("", body, count=1).strip()
-    body = _substitute(body, substitutions if substitutions is not None else default_substitutions())
+    body = _substitute(body, substitutions if substitutions is not None else default_substitutions(release_root))
     budget = role_budget(front)
     if len(body) <= budget:
         return body, {"missing": False, "truncated": False, "chars": len(body), "budget": budget}

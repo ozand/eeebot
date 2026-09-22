@@ -3101,6 +3101,7 @@ async def _run_planning_session(
         record_planning_session(
             state_dir, cycle_id, outcome,
             iterations_used=None, iterations_planned=None, reason=reason[:500],
+            task_writing_read=False if "task-writing" in reason else None,
         )
         print(f'planning-session: {outcome} ({reason[:200]})')
         return {
@@ -3140,6 +3141,7 @@ async def _run_planning_session(
             denied_paths=denied_paths,
             max_running=1,
             max_iterations=20,
+            release_root=RELEASE_ROOT,
             role_system_prompt=role_text,
             telemetry_component='planner',
         )
@@ -3184,7 +3186,8 @@ async def _run_planning_session(
         )
 
     # Safety net: whatever the session's own tools touched, it must not
-    # survive -- only this function's own write, below, may change main.
+    # survive -- even a later refusal must leave main clean. This happens
+    # before #1865's missing-read return as well as normal result handling.
     try:
         status = _sp_run.run(git + ['status', '--porcelain'], capture_output=True, text=True).stdout.strip()
         head_now = _sp_run.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
@@ -3192,8 +3195,17 @@ async def _run_planning_session(
             _sp_run.run(git + ['reset', '--hard', pre_sha], capture_output=True, text=True)
             _sp_run.run(git + ['clean', '-fd'], capture_output=True, text=True)
             print('planning-session: checkout was not clean after the session; hard-reset to pre-session HEAD')
-    except Exception:
-        pass
+    except Exception as exc:
+        return _fail('spawn_failed', f'planner workspace cleanup failed: {exc}')
+
+    # #1865: release-owned task-writing is a mandatory planner input. The
+    # callback collected its successful read in memory; check it only after
+    # the sidecar integrity bracket closes so observation itself cannot look
+    # like a sidecar write during spawn.
+    _task_writing_path = "nanobot/skills/task-writing/SKILL.md"
+    _task_writing_read = _task_writing_path in getattr(planner_manager, '_planner_release_skill_reads', [])
+    if not _task_writing_read:
+        return _fail('refused', f'mandatory task-writing skill was not read: {_task_writing_path}')
 
     if _timed_out:
         return _fail('timed_out', 'planner subagent exceeded its 600s wall-clock allowance')
@@ -3224,6 +3236,7 @@ async def _run_planning_session(
             state_dir, cycle_id, 'malformed',
             iterations_used=iterations_used, iterations_planned=None,
             reason=f'unparseable final response: {exc}',
+            task_writing_read=_task_writing_read,
         )
         print(f'planning-session: malformed final response ({exc})')
         return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
@@ -3248,6 +3261,7 @@ async def _run_planning_session(
         state_dir, cycle_id, write_result['outcome'],
         iterations_used=iterations_used, iterations_planned=iterations_planned,
         reason=write_result.get('reason', ''),
+        task_writing_read=True,
     )
     return {
         'ran': True, 'iterations_used': iterations_used,

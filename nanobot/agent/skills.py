@@ -23,7 +23,7 @@ _RELEASE_SOURCE = "release"
 # ADR-033 / #1863: these are package-shipped operator instructions, distinct
 # from generic builtin capabilities and never overrideable by the instance.
 _RELEASE_OWNED_SKILL_NAMES = frozenset({
-    "eeebot-agent-work-review", "memory-lookup", "run-tests",
+    "eeebot-agent-work-review", "memory-lookup", "run-tests", "task-writing",
 })
 # #1585: classify only the declared 30-day confirmed-read window. This is a
 # safety ordering signal, not a relevance rank; unavailable input never becomes
