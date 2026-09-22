@@ -325,6 +325,7 @@ class SubagentManager:
             extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
             # #939 Part C: wire SKILL.md read instrumentation callback.
             _on_skill_read = None
+            _on_complete_skill_read = None
             # #1767: the failure mirror. A SKILL.md read the executor asked
             # for and did not get is recorded as the requested spelling --
             # that string is the whole evidence, since a failed lookup
@@ -335,19 +336,23 @@ class SubagentManager:
                 release_base = self.release_root or BUILTIN_SKILLS_DIR.parent.parent
                 release_skills = (Path(release_base) / "nanobot" / "skills").resolve()
 
-                def _on_skill_read(skill_path: Path) -> None:  # noqa: E301
+                def _skill_relpath(skill_path: Path) -> tuple[Path, str] | None:
                     try:
                         rel = skill_path.relative_to(workspace_skills)
-                        path = f"skills/{rel.as_posix()}"
+                        return rel, f"skills/{rel.as_posix()}"
                     except ValueError:
                         try:
                             rel = skill_path.relative_to(release_skills)
-                            path = f"nanobot/skills/{rel.as_posix()}"
+                            return rel, f"nanobot/skills/{rel.as_posix()}"
                         except ValueError:
-                            return
+                            return None
+
+                def _on_skill_read(skill_path: Path) -> None:  # noqa: E301
+                    resolved = _skill_relpath(skill_path)
+                    if resolved is None:
+                        return
+                    rel, path = resolved
                     if len(rel.parts) == 2 and rel.parts[1] == "SKILL.md":
-                        if path == "nanobot/skills/task-writing/SKILL.md":
-                            self._planner_release_skill_reads.append(path)
                         # #1857: `iteration` (this method's own loop counter,
                         # read at call time) is the tool-call position the
                         # obligation needs to be checkable against -- same
@@ -355,6 +360,14 @@ class SubagentManager:
                         self._skill_reads_this_cycle.append(
                             {"skill": rel.parts[0], "path": path, "position": iteration}
                         )
+
+                def _on_complete_skill_read(skill_path: Path) -> None:  # noqa: E301
+                    resolved = _skill_relpath(skill_path)
+                    if resolved is None:
+                        return
+                    rel, path = resolved
+                    if len(rel.parts) == 2 and path == "nanobot/skills/task-writing/SKILL.md":
+                        self._planner_release_skill_reads.append(path)
 
                 def _on_skill_read_failed(requested: str) -> None:  # noqa: E301
                     self._skill_read_failures_this_cycle.append(
@@ -381,6 +394,7 @@ class SubagentManager:
                 allowed_dir=allowed_dir,
                 extra_allowed_dirs=extra_read,
                 on_skill_read=_on_skill_read,
+                on_complete_skill_read=_on_complete_skill_read,
                 on_skill_read_failed=_on_skill_read_failed,
                 on_day_file_read=_on_day_file_read,
             ))

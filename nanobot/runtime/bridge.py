@@ -3185,17 +3185,9 @@ async def _run_planning_session(
             tampered_files=_integrity_changed,
         )
 
-    # #1865: release-owned task-writing is a mandatory planner input. The
-    # callback collected its successful read in memory; check it only after
-    # the sidecar integrity bracket closes so observation itself cannot look
-    # like a sidecar write during spawn.
-    _task_writing_path = "nanobot/skills/task-writing/SKILL.md"
-    _task_writing_read = _task_writing_path in getattr(planner_manager, '_planner_release_skill_reads', [])
-    if not _task_writing_read:
-        return _fail('refused', f'mandatory task-writing skill was not read: {_task_writing_path}')
-
     # Safety net: whatever the session's own tools touched, it must not
-    # survive -- only this function's own write, below, may change main.
+    # survive -- even a later refusal must leave main clean. This happens
+    # before #1865's missing-read return as well as normal result handling.
     try:
         status = _sp_run.run(git + ['status', '--porcelain'], capture_output=True, text=True).stdout.strip()
         head_now = _sp_run.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
@@ -3205,6 +3197,15 @@ async def _run_planning_session(
             print('planning-session: checkout was not clean after the session; hard-reset to pre-session HEAD')
     except Exception:
         pass
+
+    # #1865: release-owned task-writing is a mandatory planner input. The
+    # callback collected its successful read in memory; check it only after
+    # the sidecar integrity bracket closes so observation itself cannot look
+    # like a sidecar write during spawn.
+    _task_writing_path = "nanobot/skills/task-writing/SKILL.md"
+    _task_writing_read = _task_writing_path in getattr(planner_manager, '_planner_release_skill_reads', [])
+    if not _task_writing_read:
+        return _fail('refused', f'mandatory task-writing skill was not read: {_task_writing_path}')
 
     if _timed_out:
         return _fail('timed_out', 'planner subagent exceeded its 600s wall-clock allowance')

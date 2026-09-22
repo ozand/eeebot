@@ -200,7 +200,7 @@ def test_a_fitness_sidecar_write_during_planning_spawn_is_detected_and_refused(t
     assert rows[0]["outcome"] == "spawn_failed"
 
 
-def test_missing_task_writing_read_refuses_before_diary_write(tmp_path: Path, monkeypatch):
+def test_missing_task_writing_read_refuses_and_resets_dirty_workspace(tmp_path: Path, monkeypatch):
     """#1865: the planner must actually read its release-owned contract,
     not merely receive an unconditional instruction pointing to it."""
     repo = _init_repo_with_origin(tmp_path)
@@ -208,13 +208,15 @@ def test_missing_task_writing_read_refuses_before_diary_write(tmp_path: Path, mo
     result_obj = {"insight": "x", "plan": "y", "iterations_planned": 10}
     monkeypatch.setattr(
         bridge, "SubagentManager",
-        _make_fake_mgr_factory(state, result_obj, task_writing_read=False),
+        _make_fake_mgr_factory(state, result_obj, dirty_repo=True, task_writing_read=False),
     )
 
     outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
 
     assert outcome["ran"] is False
     assert not (repo / diary_relpath()).exists()
+    assert not (repo / "stray.txt").exists()
+    assert _git(repo, "status", "--porcelain") == ""
     [row] = _ledger_rows(state, "planning_session")
     assert row["outcome"] == "refused"
     assert "mandatory task-writing skill was not read" in row["reason"]

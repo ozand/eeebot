@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from nanobot.agent import skills
+from nanobot.agent.tools.filesystem import ReadFileTool
 from nanobot.runtime import gate
 from nanobot.runtime.role_prompt import build_role_system_prompt
 
@@ -42,3 +45,24 @@ def test_task_writing_contract_names_external_dor_dod_requirements():
         "no allowlisted metric",
     ):
         assert required in text
+
+
+@pytest.mark.asyncio
+async def test_only_a_complete_skill_read_satisfies_the_contract_callback(tmp_path: Path):
+    skill = tmp_path / "release" / "nanobot" / "skills" / "task-writing" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("line one\nline two\n", encoding="utf-8")
+    complete: list[Path] = []
+    tool = ReadFileTool(
+        workspace=tmp_path,
+        allowed_dir=tmp_path,
+        on_complete_skill_read=complete.append,
+    )
+
+    partial = await tool.execute(path=str(skill), limit=1)
+    assert "Showing lines" in partial
+    assert complete == []
+
+    full = await tool.execute(path=str(skill))
+    assert "End of file" in full
+    assert complete == [skill.resolve()]

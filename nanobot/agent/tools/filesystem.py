@@ -100,11 +100,13 @@ class ReadFileTool(_FsTool):
         allowed_dir: Path | None = None,
         extra_allowed_dirs: list[Path] | None = None,
         on_skill_read: "Callable[[Path], None] | None" = None,
+        on_complete_skill_read: "Callable[[Path], None] | None" = None,
         on_skill_read_failed: "Callable[[str], None] | None" = None,
         on_day_file_read: "Callable[[str], None] | None" = None,
     ):
         super().__init__(workspace, allowed_dir, extra_allowed_dirs)
         self._on_skill_read = on_skill_read
+        self._on_complete_skill_read = on_complete_skill_read
         self._on_skill_read_failed = on_skill_read_failed
         self._on_day_file_read = on_day_file_read
 
@@ -203,6 +205,14 @@ class ReadFileTool(_FsTool):
             if self._on_skill_read is not None and fp.name == "SKILL.md":
                 try:
                     self._on_skill_read(fp.resolve())
+                except Exception:
+                    pass  # instrumentation bug must never break the read
+            # #1865: an abbreviated read cannot satisfy the planner's
+            # mandatory contract read. The normal callback above still
+            # observes any successful skill read for fitness accounting.
+            if self._on_complete_skill_read is not None and fp.name == "SKILL.md" and end == total:
+                try:
+                    self._on_complete_skill_read(fp.resolve())
                 except Exception:
                     pass  # instrumentation bug must never break the read
             # ADR-028 rule 5 (#1812): report a day-file read the same way --
