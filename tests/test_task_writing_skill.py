@@ -29,7 +29,8 @@ def test_contract_is_not_resident_in_the_planner_prompt():
 
     assert "must not be able to satisfy its own criterion" in skill
     assert "must not be able to satisfy its own criterion" not in prompt
-    assert str(SKILL) in prompt
+    assert str(SKILL) not in prompt
+    assert "harness has already" in prompt.lower()
 
 
 def test_task_writing_contract_names_external_dor_dod_requirements():

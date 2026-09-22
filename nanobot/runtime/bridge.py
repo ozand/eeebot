@@ -3097,11 +3097,20 @@ async def _run_planning_session(
     from nanobot.runtime import day_diary, role_prompt
     from nanobot.runtime.cycle_ledger import record_planning_session
 
+    _task_writing_read = False
+    _task_writing_source = ""
+    _task_writing_bytes_count: "int | None" = None
+    _task_writing_sha256 = ""
+
     def _fail(outcome: str, reason: str, *, tampered_files: "list[str] | None" = None) -> dict:
         record_planning_session(
             state_dir, cycle_id, outcome,
             iterations_used=None, iterations_planned=None, reason=reason[:500],
-            task_writing_read=False if "task-writing" in reason else None,
+            task_writing_read=_task_writing_read,
+            task_writing_source=_task_writing_source or None,
+            task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+            task_writing_bytes=_task_writing_bytes_count,
+            task_writing_sha256=_task_writing_sha256 or None,
         )
         print(f'planning-session: {outcome} ({reason[:200]})')
         return {
@@ -3116,6 +3125,35 @@ async def _run_planning_session(
         role_text, _role_meta = role_prompt.build_role_system_prompt('planner', release_root=RELEASE_ROOT)
     except Exception as exc:
         return _fail('spawn_failed', f'role prompt assembly failed: {exc}')
+
+    # #1891: guarantee semantic access before any model turn. The immutable
+    # release skill is read by the harness with a strict bound, then supplied
+    # only in this planning session's volatile task message (never an executor
+    # or resident ontology block). Model tool compliance is observability, not
+    # authority -- production showed it can ignore a pointer until timeout.
+    _task_writing_file = RELEASE_ROOT / 'nanobot' / 'skills' / 'task-writing' / 'SKILL.md'
+    try:
+        with _task_writing_file.open('rb') as _task_writing_stream:
+            _task_writing_bytes = _task_writing_stream.read(16_385)
+        if not _task_writing_bytes or len(_task_writing_bytes) > 16_384:
+            raise ValueError(f'invalid size {len(_task_writing_bytes)} bytes')
+        _task_writing_contract = _task_writing_bytes.decode('utf-8')
+        import hashlib as _hashlib_task_contract
+        _task_writing_read = True
+        _task_writing_source = 'harness_release_preread'
+        _task_writing_bytes_count = len(_task_writing_bytes)
+        _task_writing_sha256 = _hashlib_task_contract.sha256(_task_writing_bytes).hexdigest()
+    except Exception as exc:
+        return _fail('refused', f'task-writing pre-read failed: {exc}')
+
+    _planner_task = (
+        'The harness pre-read the mandatory release-owned task-writing contract '
+        'before this model turn. Apply it to the next increment.\n\n'
+        '--- task-writing contract ---\n'
+        f'{_task_writing_contract}\n'
+        '--- end task-writing contract ---\n\n'
+        'Plan the next cycle.'
+    )
 
     # #789/#1456's spawn-boundary tamper detection covers the EXECUTOR's own
     # spawn window; this session gets its own bracket around ITS spawn, for
@@ -3146,7 +3184,7 @@ async def _run_planning_session(
             telemetry_component='planner',
         )
         await planner_manager.spawn(
-            task='Plan the next cycle.',
+            task=_planner_task,
             label='selfevo-planner',
             origin_channel='system',
             origin_chat_id='self-evolving-agent',
@@ -3198,15 +3236,8 @@ async def _run_planning_session(
     except Exception as exc:
         return _fail('spawn_failed', f'planner workspace cleanup failed: {exc}')
 
-    # #1865: release-owned task-writing is a mandatory planner input. The
-    # callback collected its successful read in memory; check it only after
-    # the sidecar integrity bracket closes so observation itself cannot look
-    # like a sidecar write during spawn.
-    _task_writing_path = "nanobot/skills/task-writing/SKILL.md"
-    _task_writing_read = _task_writing_path in getattr(planner_manager, '_planner_release_skill_reads', [])
-    if not _task_writing_read:
-        return _fail('refused', f'mandatory task-writing skill was not read: {_task_writing_path}')
-
+    # Timeout is its own durable outcome. The contract was already pre-read,
+    # so a later model timeout must never be misclassified as a missing read.
     if _timed_out:
         return _fail('timed_out', 'planner subagent exceeded its 600s wall-clock allowance')
     if not planner_task_id:
@@ -3237,6 +3268,10 @@ async def _run_planning_session(
             iterations_used=iterations_used, iterations_planned=None,
             reason=f'unparseable final response: {exc}',
             task_writing_read=_task_writing_read,
+            task_writing_source=_task_writing_source or None,
+            task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+            task_writing_bytes=_task_writing_bytes_count,
+            task_writing_sha256=_task_writing_sha256 or None,
         )
         print(f'planning-session: malformed final response ({exc})')
         return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
@@ -3262,6 +3297,10 @@ async def _run_planning_session(
         iterations_used=iterations_used, iterations_planned=iterations_planned,
         reason=write_result.get('reason', ''),
         task_writing_read=True,
+        task_writing_source=_task_writing_source,
+        task_writing_path=str(_task_writing_file),
+        task_writing_bytes=_task_writing_bytes_count,
+        task_writing_sha256=_task_writing_sha256,
     )
     return {
         'ran': True, 'iterations_used': iterations_used,
