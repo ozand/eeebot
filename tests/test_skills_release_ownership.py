@@ -57,6 +57,22 @@ def test_skills_index_labels_release_and_workspace_sources(tmp_path: Path, monke
     assert "- loop-only: loop procedure" in content
 
 
+def test_release_skill_is_not_hidden_by_instance_retirement_sidecar(tmp_path: Path, monkeypatch):
+    release = tmp_path / "release"
+    _skill(release, "memory-lookup", "release lookup")
+    state = tmp_path / "state" / "demand"
+    state.mkdir(parents=True)
+    (state / "skill_retirement_cooldown.json").write_text(
+        '{"paths":{"skills/memory-lookup/SKILL.md":{"status":"verified_absent"}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("NANOBOT_RUNTIME_STATE_ROOT", str(tmp_path / "state"))
+
+    summary = SkillsLoader(tmp_path, builtin_skills_dir=release).build_skills_summary()
+
+    assert '<name>memory-lookup</name>' in summary
+
+
 def test_selected_operator_skills_are_release_owned_and_readable():
     release = Path(__file__).parents[1] / "nanobot" / "skills"
     loader = SkillsLoader(Path("/nonexistent-workspace"), builtin_skills_dir=release)

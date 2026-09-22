@@ -172,7 +172,9 @@ class SkillsLoader:
             return None
 
     def _is_retired_skill(self, skill: dict[str, str], retired_paths: set[str] | None) -> bool:
-        if retired_paths is None:
+        # ADR-033: the retirement sidecar describes instance-repository paths;
+        # it must never hide a release-owned replacement with the same name.
+        if skill.get("source") == _RELEASE_SOURCE or retired_paths is None:
             return False
         rel = f"skills/{skill['name']}/SKILL.md"
         return rel in retired_paths or not Path(skill["path"]).is_file()
