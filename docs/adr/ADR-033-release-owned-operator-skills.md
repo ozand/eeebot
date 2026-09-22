@@ -9,7 +9,7 @@ tags: [skills, ownership, mutation-policy, runtime]
 
 # Status
 
-Proposed 2026-09-22 for #1863. No implementation has started. Operator approval is required before this record can become accepted or its implementation can begin.
+Proposed 2026-09-22; the operator approved this decision for implementation. Per `docs/adr/README.md`, it becomes accepted only when its named tests land on `main`.
 
 # Context
 
@@ -50,11 +50,11 @@ The loop retains its current `skills/` commit surface for loop-owned skills. `sk
 
 | Decision claim | Test | Currently |
 |---|---|---|
-| Release and workspace roots are both discoverable; release wins collisions | `tests/test_skills_release_ownership.py::test_loader_lists_both_roots_and_release_wins_name_collision` | not yet written |
-| The gate rejects a loop attempt to mutate a release-owned skill | `tests/test_skills_release_ownership.py::test_gate_rejects_release_owned_skill_mutation` | not yet written |
-| The derived index labels both sources and reuses loader output | `tests/test_skills_release_ownership.py::test_skills_index_labels_release_and_workspace_sources` | not yet written |
-| The three selected skills remain readable and the `author` field is absent from their release copies | `tests/test_skills_release_ownership.py::test_selected_operator_skills_are_release_owned_and_readable` | not yet written |
-| The compact index cost is reported before and after migration | `tests/test_skills_release_ownership.py::test_compact_index_cost_is_reported_before_and_after_migration` | not yet written |
+| Release and workspace roots are both discoverable; release wins collisions | `tests/test_skills_release_ownership.py::test_loader_lists_both_roots_and_release_wins_name_collision` | written; not yet on main |
+| The gate rejects a loop attempt to mutate a release-owned skill | `tests/test_skills_release_ownership.py::test_gate_rejects_release_owned_skill_mutation` | written; not yet on main |
+| The derived index labels both sources and reuses loader output | `tests/test_skills_release_ownership.py::test_skills_index_labels_release_and_workspace_sources` | written; not yet on main |
+| The three selected skills remain readable and the `author` field is absent from their release copies | `tests/test_skills_release_ownership.py::test_selected_operator_skills_are_release_owned_and_readable` | written; not yet on main |
+| The compact index cost is reported before and after migration | `tests/test_skills_release_ownership.py::test_compact_index_cost_is_reported_before_and_after_migration` | written; not yet on main |
 
 # References
 

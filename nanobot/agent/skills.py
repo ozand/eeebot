@@ -19,6 +19,12 @@ BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
 # loop inject arbitrary content into every future subagent context.  Only
 # builtin and operator-installed skills may carry always=true.
 _WORKSPACE_SOURCE = "workspace"
+_RELEASE_SOURCE = "release"
+# ADR-033 / #1863: these are package-shipped operator instructions, distinct
+# from generic builtin capabilities and never overrideable by the instance.
+_RELEASE_OWNED_SKILL_NAMES = frozenset({
+    "eeebot-agent-work-review", "memory-lookup", "run-tests",
+})
 # #1585: classify only the declared 30-day confirmed-read window. This is a
 # safety ordering signal, not a relevance rank; unavailable input never becomes
 # a valid zero-read result.
@@ -55,19 +61,29 @@ class SkillsLoader:
         """
         skills = []
 
-        # Workspace skills (highest priority)
-        # #1421: sorted, not raw iterdir. The order reaches the skills
-        # catalogue verbatim (nothing downstream re-sorts), so directory
-        # order made the prompt prefix change byte-for-byte whenever a
-        # skill was added, for reasons unrelated to any skill's content.
+        # ADR-033 / #1863: selected operator instructions ship with the
+        # release. They precede an identically named instance skill, so the
+        # loop cannot replace an instruction it must obey.
+        release_names: set[str] = set()
+        if self.builtin_skills and self.builtin_skills.exists():
+            for name in sorted(_RELEASE_OWNED_SKILL_NAMES):
+                skill_file = self.builtin_skills / name / "SKILL.md"
+                if skill_file.is_file():
+                    skills.append({"name": name, "path": str(skill_file), "source": _RELEASE_SOURCE})
+                    release_names.add(name)
+
+        # Workspace skills remain the loop-owned surface. They retain their
+        # existing precedence over generic builtins, but not over an actually
+        # installed release skill. Falling back when the release file is
+        # absent preserves readable skills across a failed/rolled-back deploy.
         if self.workspace_skills.exists():
             for skill_dir in sorted(self.workspace_skills.iterdir()):
                 if skill_dir.is_dir():
                     skill_file = skill_dir / "SKILL.md"
-                    if skill_file.exists():
-                        skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "workspace"})
+                    if skill_file.exists() and skill_dir.name not in release_names:
+                        skills.append({"name": skill_dir.name, "path": str(skill_file), "source": _WORKSPACE_SOURCE})
 
-        # Built-in skills
+        # Generic package skills retain their historical fallback role.
         if self.builtin_skills and self.builtin_skills.exists():
             for skill_dir in sorted(self.builtin_skills.iterdir()):
                 if skill_dir.is_dir():
@@ -90,12 +106,17 @@ class SkillsLoader:
         Returns:
             Skill content or None if not found.
         """
-        # Check workspace first
+        # ADR-033: a release-owned operator skill cannot be shadowed by a
+        # same-named instance skill.
+        if name in _RELEASE_OWNED_SKILL_NAMES and self.builtin_skills:
+            release_skill = self.builtin_skills / name / "SKILL.md"
+            if release_skill.exists():
+                return release_skill.read_text(encoding="utf-8")
+
         workspace_skill = self.workspace_skills / name / "SKILL.md"
         if workspace_skill.exists():
             return workspace_skill.read_text(encoding="utf-8")
 
-        # Check built-in
         if self.builtin_skills:
             builtin_skill = self.builtin_skills / name / "SKILL.md"
             if builtin_skill.exists():
@@ -209,8 +230,8 @@ class SkillsLoader:
     # this same canonical layout rule (~200 chars of wrapper per skill,
     # 66% of a 10,109-char catalogue measured on 33 skills).
     _COMPACT_HEADER = (
-        "Skills live at skills/<name>/SKILL.md; read one with read_file "
-        "when its description matches the task."
+        "Skills live at skills/<name>/SKILL.md unless marked release; read one "
+        "with read_file when its description matches the task."
     )
 
     def build_skills_summary(
@@ -278,10 +299,11 @@ class SkillsLoader:
                 name = s["name"]
                 desc = self._get_skill_description(s["name"]).replace("\n", " ").strip()
                 entry = f"- {name}: {desc}"
-                if source != _WORKSPACE_SOURCE:
-                    # Not under the "skills/<name>/SKILL.md" rule the header
-                    # states once — a builtin surviving exclusion (memory,
-                    # skill-creator) needs its real path named.
+                if source == _RELEASE_SOURCE:
+                    entry += f" (release: nanobot/skills/{name}/SKILL.md)"
+                elif source != _WORKSPACE_SOURCE:
+                    # Not under the workspace layout rule the header states
+                    # once — a generic builtin needs its real path named.
                     entry += f" (nanobot/skills/{name}/SKILL.md)"
                 if not available:
                     missing = self._get_missing_requirements(skill_meta)

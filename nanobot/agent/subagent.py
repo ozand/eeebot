@@ -318,6 +318,7 @@ class SubagentManager:
             # Build subagent tools (no message tool, no spawn tool)
             tools = ToolRegistry()
             allowed_dir = self.workspace if self.restrict_to_workspace else None
+            # ADR-033: package skills include release-owned operator instructions.
             extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
             # #939 Part C: wire SKILL.md read instrumentation callback.
             _on_skill_read = None
@@ -328,19 +329,25 @@ class SubagentManager:
             _on_skill_read_failed = None
             if self._skill_fitness_state_dir is not None:
                 workspace_skills = (self.workspace / "skills").resolve()
+                release_skills = BUILTIN_SKILLS_DIR.resolve()
 
                 def _on_skill_read(skill_path: Path) -> None:  # noqa: E301
                     try:
                         rel = skill_path.relative_to(workspace_skills)
+                        path = f"skills/{rel.as_posix()}"
                     except ValueError:
-                        return
+                        try:
+                            rel = skill_path.relative_to(release_skills)
+                            path = f"nanobot/skills/{rel.as_posix()}"
+                        except ValueError:
+                            return
                     if len(rel.parts) == 2 and rel.parts[1] == "SKILL.md":
                         # #1857: `iteration` (this method's own loop counter,
                         # read at call time) is the tool-call position the
                         # obligation needs to be checkable against -- same
                         # pattern as `_on_day_file_read` below.
                         self._skill_reads_this_cycle.append(
-                            {"skill": rel.parts[0], "path": f"skills/{rel.as_posix()}", "position": iteration}
+                            {"skill": rel.parts[0], "path": path, "position": iteration}
                         )
 
                 def _on_skill_read_failed(requested: str) -> None:  # noqa: E301
