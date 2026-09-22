@@ -3133,7 +3133,8 @@ async def _run_planning_session(
     # authority -- production showed it can ignore a pointer until timeout.
     _task_writing_file = RELEASE_ROOT / 'nanobot' / 'skills' / 'task-writing' / 'SKILL.md'
     try:
-        _task_writing_bytes = _task_writing_file.read_bytes()
+        with _task_writing_file.open('rb') as _task_writing_stream:
+            _task_writing_bytes = _task_writing_stream.read(16_385)
         if not _task_writing_bytes or len(_task_writing_bytes) > 16_384:
             raise ValueError(f'invalid size {len(_task_writing_bytes)} bytes')
         _task_writing_contract = _task_writing_bytes.decode('utf-8')

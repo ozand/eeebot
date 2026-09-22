@@ -263,6 +263,26 @@ def test_timeout_is_distinct_from_missing_read(tmp_path: Path, monkeypatch):
     assert row["task_writing_source"] == "harness_release_preread"
 
 
+def test_oversized_task_writing_preread_refuses_before_spawn(tmp_path: Path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    release = tmp_path / "release"
+    skill = release / "nanobot" / "skills" / "task-writing" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes(b"x" * 16_385)
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
+    manager_factory = _make_fake_mgr_factory(state, {"plan": "must not run"})
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["ran"] is False
+    assert manager_factory.last_task is None
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["outcome"] == "refused"
+    assert "invalid size 16385 bytes" in row["reason"]
+
+
 def test_missing_task_writing_preread_refuses_before_spawn(tmp_path: Path, monkeypatch):
     repo = _init_repo_with_origin(tmp_path)
     state = tmp_path / "state"
