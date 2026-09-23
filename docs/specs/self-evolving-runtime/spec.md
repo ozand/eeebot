@@ -431,8 +431,10 @@ not a success.
 
 ### Planner no-plan accounting (#1893)
 
-The separate, 20-iteration planning session preserves a successful task-writing
-harness pre-read as ledger evidence even if planning cannot finish. A bounded
+The separate, 20-iteration planning session reserves its final turn for a
+JSON response without tools; it never adds a 21st model call. It preserves a
+successful task-writing harness pre-read as ledger evidence even if planning
+cannot finish. A bounded
 subagent stop (`stop_reason`) or exhausted iterations with no final response
 records `planning_session.outcome=no_plan` with its specific reason, not
 `malformed` or `integrated`. An attempted final answer that fails the JSON

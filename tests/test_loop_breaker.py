@@ -139,7 +139,7 @@ class _RepeatProvider(_Provider):
         )
 
 
-async def _run_manager(tmp_path, provider, max_iterations=50, monkeypatch=None, wall_secs=None) -> dict:
+async def _run_manager(tmp_path, provider, max_iterations=50, monkeypatch=None, wall_secs=None, telemetry_component="") -> dict:
     """Spawn a task and wait for its telemetry JSON."""
     from nanobot.agent.subagent import SubagentManager
     from nanobot.bus.queue import MessageBus
@@ -152,6 +152,7 @@ async def _run_manager(tmp_path, provider, max_iterations=50, monkeypatch=None, 
         workspace=tmp_path,
         bus=MessageBus(),
         max_iterations=max_iterations,
+        telemetry_component=telemetry_component,
     )
     await manager.spawn(task="test-task", label="lbtest")
     await asyncio.gather(*list(manager._running_tasks.values()), return_exceptions=True)
@@ -164,6 +165,52 @@ async def _run_manager(tmp_path, provider, max_iterations=50, monkeypatch=None, 
         files = list(tmp_path.rglob("subagents/*.json"))
     assert files, "no telemetry file written"
     return json.loads(files[0].read_text(encoding="utf-8"))
+
+
+class TestPlannerFinalTurn:
+    async def test_final_tick_returns_json_without_tools(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NANOBOT_LOOP_BREAKER_K", "3")
+
+        class Provider(_Provider):
+            calls = 0
+
+            async def chat(self, messages=None, tools=None, model=None, **kwargs):
+                self.calls += 1
+                if self.calls == 20:
+                    assert tools == []
+                    assert "final planning turn" in messages[-1]["content"]
+                    return LLMResponse(content='{"plan":"do the next step","iterations_planned":12}')
+                assert tools
+                return LLMResponse(content=None, tool_calls=[ToolCallRequest(
+                    id=f"call-{self.calls}", name="exec", arguments={"cmd": f"pwd #{self.calls}"},
+                )])
+
+        provider = Provider()
+        telem = await _run_manager(tmp_path, provider, max_iterations=20, telemetry_component="planner")
+        assert provider.calls == 20
+        assert telem["status"] == "ok"
+        assert telem.get("stop_reason") is None
+        assert telem["result"] == '{"plan":"do the next step","iterations_planned":12}'
+
+    async def test_final_tick_refuses_unexpected_tool_call(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NANOBOT_LOOP_BREAKER_K", "3")
+
+        class Provider(_Provider):
+            calls = 0
+
+            async def chat(self, messages=None, tools=None, model=None, **kwargs):
+                self.calls += 1
+                if self.calls == 2:
+                    assert tools == []
+                return LLMResponse(content=None, tool_calls=[ToolCallRequest(
+                    id=f"call-{self.calls}", name="exec", arguments={"cmd": f"pwd #{self.calls}"},
+                )])
+
+        provider = Provider()
+        telem = await _run_manager(tmp_path, provider, max_iterations=2, telemetry_component="planner")
+        assert provider.calls == 2
+        assert telem["status"] == "bounded_stop"
+        assert telem["stop_reason"] == "finalization_tool_call"
 
 
 class TestSubagentLoopBreaker:

@@ -487,13 +487,24 @@ class SubagentManager:
                         str(messages[0].get("content") or ""), iteration, max_iterations,
                     )
 
+                # #1893: the planner's last tick belongs to its final answer,
+                # not another tool call. This uses (not extends) its 20-tick box.
+                _planner_final_turn = self._telemetry_component == "planner" and iteration == max_iterations
+                if _planner_final_turn:
+                    messages.append({
+                        "role": "user", "content": (
+                            "This is your final planning turn. Do not call tools. "
+                            "Return only the final JSON object with a non-empty plan "
+                            "and iterations_planned, using the evidence already read."
+                        ),
+                    })
                 if self._telemetry_component:
                     from nanobot.observability.llm_telemetry import call_context, current_cycle_id
 
                     with call_context(current_cycle_id(), self._telemetry_component):
                         response = await self.provider.chat_with_retry(
                             messages=messages,
-                            tools=tools.get_definitions(),
+                            tools=[] if _planner_final_turn else tools.get_definitions(),
                             model=self.model,
                         )
                 else:
@@ -537,6 +548,9 @@ class SubagentManager:
                 if response.finish_reason == "length" and not response.has_tool_calls:
                     _truncation["count"] += 1
                     _truncation["consecutive"] += 1
+                    if _planner_final_turn:
+                        stop_reason = "response_truncated"
+                        break
                     if _truncation["consecutive"] >= _MAX_CONSECUTIVE_TRUNCATIONS:
                         logger.warning(
                             "Subagent [{}] abort: {} consecutive truncated responses (max={})",
@@ -560,6 +574,11 @@ class SubagentManager:
                     _truncation["continued"] = True
                     _truncation["consecutive"] = 0
 
+                if _planner_final_turn and response.has_tool_calls:
+                    # A provider ignoring the empty tool set must not execute
+                    # another call outside the planner's final-response turn.
+                    stop_reason = "finalization_tool_call"
+                    break
                 if response.has_tool_calls:
                     tool_call_dicts = [
                         tc.to_openai_tool_call()
@@ -665,6 +684,8 @@ class SubagentManager:
                     "I reached the wall-clock time limit before completing the task. "
                     "You can try breaking the task into smaller steps."
                 )
+            elif stop_reason == "finalization_tool_call":
+                final_result = "Task aborted: planner final turn returned a tool call instead of a final answer."
             elif stop_reason == "response_truncated":
                 # #1774: distinguishable from a normal completion on purpose --
                 # before this, the same situation ended the cycle as a silent
