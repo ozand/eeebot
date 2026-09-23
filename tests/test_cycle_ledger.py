@@ -420,6 +420,16 @@ class TestRecordPlanningSession:
         assert row["iterations_used"] is None
         assert row["reason"] == "subagent spawn error"
 
+    def test_no_plan_is_a_distinct_outcome(self, tmp_path):
+        cycle_ledger.record_planning_session(
+            tmp_path, 'c1', 'no_plan', iterations_used=20,
+            iterations_planned=None, reason='iteration_budget_no_final',
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert row['outcome'] == 'no_plan'
+        assert row['iterations_used'] == 20
+        assert row['reason'] == 'iteration_budget_no_final'
+
     def test_unrecognized_outcome_coerces_to_malformed(self, tmp_path):
         cycle_ledger.record_planning_session(
             tmp_path, "c1", "made_up_outcome", iterations_used=1, iterations_planned=None,
