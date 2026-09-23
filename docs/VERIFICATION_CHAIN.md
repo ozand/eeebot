@@ -52,7 +52,8 @@ Two consequences worth stating before the table, because both are easy to miss:
 
 Units deliberately **not** verifiers, listed so their absence above is a
 decision rather than an omission: `eeebot-host-metrics`, `eeebot-host-capabilities`,
-`eeebot-archive-subagent-requests`, `eeebot-narrator`, `eeepc-self-evolving-subagent-bridge`.
+`eeebot-archive-subagent-requests`, `eeebot-narrator`, `eeepc-self-evolving-subagent-bridge`,
+`eeebot-techtree-publish`.
 
 ## Where the chain terminates
 

@@ -1,0 +1,26 @@
+[Unit]
+Description=eeebot tech-tree page autopublisher (issue #27, #1905)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=eeebot-publish
+Group=eeebot-publish
+
+EnvironmentFile=/etc/eeepc-agent/techtree-publish.env
+SupplementaryGroups=eeepc-agent
+ReadOnlyPaths=/var/lib/eeepc-agent
+
+ExecStartPre=-+/opt/eeebot-techtree/eeebot-techtree-sync.sh
+ExecStart=/usr/bin/python3 /opt/eeebot-techtree/scripts/techtree_autopublish.py
+
+TimeoutStartSec=300
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+StateDirectory=eeebot-techtree
+StateDirectoryMode=0700
+Environment=HOME=/var/lib/eeebot-techtree
+Environment=GH_CONFIG_DIR=/var/lib/eeebot-techtree/gh-config
