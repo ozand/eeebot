@@ -514,6 +514,8 @@ sync_timer eeebot-systemd-drift-check.timer optional
 # inert for fourteen days while its author believed it was running.
 sync_timer eeebot-daily-verdict.timer optional
 sync_timer eeebot-narrator.timer optional
+# #1905: periodically publish dashboard to gh-pages regardless of bridge loop outcome.
+sync_timer eeebot-techtree-publish.timer optional
 
 # Activate the long-running dashboard against the new current release. Unlike
 # the static oneshot bridge, it keeps the old Python process alive across a

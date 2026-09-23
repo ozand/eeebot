@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic autopublisher for eeebot tech-tree dashboard (issue #1905)
+Documentation=https://github.com/ozand/eeebot/issues/1905
+
+[Timer]
+# Fire every 15 minutes, independent of bridge loop outcome (#1905).
+# The publisher script dedupes publishes by state hash and handles concurrent runs gracefully.
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target
