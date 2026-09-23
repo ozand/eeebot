@@ -93,9 +93,12 @@ def test_urgency_is_flat_for_every_tier_except_moves_deliverable():
 
 
 def test_urgency_rises_toward_deep_sleep_only_for_moves_deliverable():
-    # Day starts at 03:30 local (00:30 UTC). 04:00 local (01:00 UTC) is early, 23:00 local (20:00 UTC) is late.
-    early = dr.compute_urgency("moves_deliverable", now=datetime(2026, 9, 20, 1, 0, tzinfo=timezone.utc))
-    late = dr.compute_urgency("moves_deliverable", now=datetime(2026, 9, 20, 20, 0, tzinfo=timezone.utc))
+    # Express the intended wall-clock positions in the host's local timezone:
+    # day_clock measures the day at local midnight, regardless of the machine
+    # running the test. Passing UTC datetimes here would instead select their
+    # converted local positions (which can cross a date boundary).
+    early = dr.compute_urgency("moves_deliverable", now=datetime(2026, 9, 20, 4, 0).astimezone())
+    late = dr.compute_urgency("moves_deliverable", now=datetime(2026, 9, 20, 23, 0).astimezone())
     assert late.score > early.score
 
 
