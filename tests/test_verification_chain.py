@@ -231,3 +231,31 @@ def test_the_cheap_move_is_named_with_an_estimate_and_not_built():
     assert "## The one place the termination could cheaply be moved" in text
     assert "Estimate:" in text
     assert "Not built here" in text
+
+
+def test_unit_sandboxing_readwrite_paths_no_extraneous_targets():
+    """#1895: Under ProtectSystem=strict, systemd fails sandbox creation with exit 226
+    (EXIT_NAMESPACE) if any path in ReadWritePaths= does not exist on the host unless
+    prefixed with '-' (optional).
+    Every unit in host/eeepc/systemd/ with ReadWritePaths must only reference standard
+    host paths or use '-' prefix. Specifically, /var/log/eeepc-agent does not exist on
+    eeepc and must never appear as a non-optional ReadWritePaths target.
+    """
+    allowed_mandatory_prefixes = (
+        "/var/lib/eeepc-agent",
+        "/var/lib/eeepc-promoted",
+    )
+    for service_file in sorted(UNIT_DIR.glob("*.service")):
+        text = service_file.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("ReadWritePaths="):
+                raw_paths = line.split("=", 1)[1].strip().split()
+                for p in raw_paths:
+                    if p.startswith("-"):
+                        continue
+                    assert p.startswith(allowed_mandatory_prefixes), (
+                        f"{service_file.name} defines mandatory ReadWritePath {p!r} which is "
+                        f"outside known host paths {allowed_mandatory_prefixes}. Under "
+                        f"ProtectSystem=strict, missing paths cause systemd 226/NAMESPACE failure."
+                    )
