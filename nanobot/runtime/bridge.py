@@ -3251,6 +3251,24 @@ async def _run_planning_session(
 
     iterations_used = len((telem.get('context_usage') or {}).get('iterations') or [])
     raw_result = str(telem.get('result') or '').strip()
+    # #1893: exhausted tool-call budgets and bounded stops are not malformed
+    # JSON attempts. They produced no final plan at all; keep their reason
+    # instead of reporting the parser's incidental Expecting value error.
+    stop_reason = str(telem.get('stop_reason') or '').strip()
+    no_final = raw_result == 'Task completed but no final response was generated.'
+    if stop_reason or no_final:
+        reason = f'bounded_stop:{stop_reason}' if stop_reason else 'iteration_budget_no_final'
+        record_planning_session(
+            state_dir, cycle_id, 'no_plan', iterations_used=iterations_used,
+            iterations_planned=None, reason=reason,
+            task_writing_read=_task_writing_read,
+            task_writing_source=_task_writing_source or None,
+            task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+            task_writing_bytes=_task_writing_bytes_count,
+            task_writing_sha256=_task_writing_sha256 or None,
+        )
+        print(f'planning-session: no_plan ({reason})')
+        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
     try:
         # roles/planner.md: "no markdown wrapping" -- same strict contract
         # strategist.py's own final-response parse enforces; a fenced

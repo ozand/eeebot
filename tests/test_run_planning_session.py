@@ -66,6 +66,7 @@ def _make_fake_mgr_factory(
     state_dir: Path, result_obj: object, *, dirty_repo: bool = False, raise_on_init: bool = False,
     tamper_sidecar_rel: "str | None" = None,
     task_writing_read: bool = True,
+    telemetry_status: str = "ok", stop_reason: str | None = None,
 ):
     """A factory returning a fake SubagentManager class bound to one test's
     expectations -- writes the telemetry file real SubagentManager.spawn's
@@ -102,6 +103,8 @@ def _make_fake_mgr_factory(
                 payload = {
                     "subagent_id": task_id,
                     "result": result_obj if isinstance(result_obj, str) else json.dumps(result_obj),
+                    "status": telemetry_status,
+                    "stop_reason": stop_reason,
                     "context_usage": {"peak_tokens": 100, "iterations": [10, 20, 30]},
                 }
                 (telem_dir / f"{task_id}.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -300,6 +303,33 @@ def test_missing_task_writing_preread_refuses_before_spawn(tmp_path: Path, monke
     assert row["outcome"] == "refused"
     assert row["task_writing_read"] is False
     assert "pre-read failed" in row["reason"]
+
+
+@pytest.mark.parametrize(
+    ('result', 'status', 'stop_reason', 'expected_reason'),
+    [
+        ('Task completed but no final response was generated.', 'ok', None, 'iteration_budget_no_final'),
+        ('Task aborted: subagent repeated the same tool call', 'bounded_stop', 'identical_call_loop', 'bounded_stop:identical_call_loop'),
+    ],
+)
+def test_real_shaped_no_final_is_not_malformed(tmp_path: Path, monkeypatch, result, status, stop_reason, expected_reason):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / 'state'
+    monkeypatch.setattr(
+        bridge, 'SubagentManager',
+        _make_fake_mgr_factory(state, result, telemetry_status=status, stop_reason=stop_reason),
+    )
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome['ran'] is True
+    assert outcome['iterations_planned'] is None
+    assert not (repo / diary_relpath()).exists()
+    [row] = _ledger_rows(state, 'planning_session')
+    assert row['outcome'] == 'no_plan'
+    assert row['reason'] == expected_reason
+    assert row['task_writing_read'] is True
+    assert not _ledger_rows(state, 'integrity')
 
 
 def test_malformed_final_response_degrades_without_touching_the_diary(tmp_path: Path, monkeypatch):

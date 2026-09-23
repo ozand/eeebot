@@ -293,7 +293,7 @@ def record_diary_open_entry(
 #: on the ranked queue as before) and say so here, not silently. "integrated"
 #: is the only success outcome, mirroring diary-open-entry's shape above.
 VALID_PLANNING_OUTCOMES = frozenset({
-    "integrated", "refused", "malformed", "spawn_failed", "commit_failed", "timed_out",
+    "integrated", "refused", "malformed", "no_plan", "spawn_failed", "commit_failed", "timed_out",
 })
 
 
