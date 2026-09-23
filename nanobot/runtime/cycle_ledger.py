@@ -24,6 +24,18 @@ and was last modified on a PRIOR day, it is gzip-archived to
 fresh ``cycles.jsonl`` is started; any ``cycles-*.jsonl.gz`` older than the
 retention window (``CYCLE_LEDGER_RETENTION_DAYS``, default 90) is pruned.
 
+ADR-029 (#1831) step 2: "its own last-modified day" is now the HOST-LOCAL
+calendar day (:mod:`nanobot.runtime.day_key`), not a UTC-midnight one --
+see :func:`_rotate_and_prune` and :func:`append_event`. :func:`append_event`
+also records, once, the exact instant a ledger with prior UTC-scheme
+history first rotates under this new code
+(:func:`day_key.record_cutover_if_absent`), and appends a ONE-TIME
+``"phase": "day_boundary_transition"`` row for that one short/long day
+(:func:`_append_transition_marker`) -- never for a brand-new ledger, which
+was never on the UTC scheme to begin with. Existing
+``cycles-<day>.jsonl.gz`` archives keep their old UTC-day names; only a
+FUTURE rotation is named on the new clock.
+
 Everything here is best-effort / fail-open: a ledger write must never crash
 the bridge or change its control flow.
 """
@@ -37,6 +49,8 @@ import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+
+from nanobot.runtime import day_key
 
 _LEDGER_SUBDIR = "ledger"
 _LEDGER_FILENAME = "cycles.jsonl"
@@ -122,6 +136,18 @@ def _day_str(name: str) -> str | None:
     return candidate
 
 
+def _file_mtime_local(path: Path) -> datetime:
+    """*path*'s last-modified time as a naive datetime -- treated as
+    already being in the host's local clock, per :func:`day_key.day_key`'s
+    own convention for a naive value. A seam (not inlined into
+    :func:`_rotate_and_prune`) so tests can monkeypatch it to pin what
+    timezone an mtime represents without depending on the TEST MACHINE's
+    own system timezone, exactly the way :func:`day_key.day_key` accepts
+    an explicit aware ``now`` for the same reason.
+    """
+    return datetime.fromtimestamp(path.stat().st_mtime)
+
+
 def _rotate_and_prune(ledger_dir: Path, active_path: Path, today: str, retention_days: int) -> None:
     """Archive a stale active file and prune expired archives.
 
@@ -129,12 +155,20 @@ def _rotate_and_prune(ledger_dir: Path, active_path: Path, today: str, retention
     prune expired ``.gz`` files, best-effort per file) but adapted to a single
     active filename: the active file is rotated by ITS OWN last-modified day
     rather than by filename, since there is only one filename to rotate.
+
+    ADR-029 (#1831) step 2: ``mtime_day`` is now the file's HOST-LOCAL
+    calendar day (:func:`nanobot.runtime.day_key.day_key`), not a
+    UTC-midnight one -- so an archive rotated after this PR is named by
+    the same clock ``today`` (also local, see :func:`append_event`) is
+    computed on, keeping the rotation trigger (``mtime_day != today``)
+    correct. Existing ``cycles-<day>.jsonl.gz`` archives already on disk
+    keep their old UTC-day names untouched -- this function only decides
+    the name for a FUTURE rotation, never renames history.
     """
     try:
         if active_path.exists():
-            mtime_day = datetime.fromtimestamp(
-                active_path.stat().st_mtime, tz=timezone.utc
-            ).strftime("%Y-%m-%d")
+            mtime = _file_mtime_local(active_path)
+            mtime_day = day_key.day_key(mtime)
             if mtime_day != today:
                 gz_path = ledger_dir / f"cycles-{mtime_day}.jsonl.gz"
                 with open(active_path, "rb") as f_in, gzip.open(gz_path, "wb") as f_out:
@@ -146,7 +180,8 @@ def _rotate_and_prune(ledger_dir: Path, active_path: Path, today: str, retention
     try:
         from datetime import timedelta
 
-        cutoff_ordinal = (datetime.now(timezone.utc).date() - timedelta(days=retention_days)).toordinal()
+        today_date = datetime.strptime(today, day_key.DAY_KEY_FORMAT).date()
+        cutoff_ordinal = (today_date - timedelta(days=retention_days)).toordinal()
     except Exception:
         return
 
@@ -162,22 +197,82 @@ def _rotate_and_prune(ledger_dir: Path, active_path: Path, today: str, retention
             continue
 
 
-def append_event(state_dir: Path, event: dict) -> None:
+def _append_transition_marker(active_path: Path, today: str, cutover_utc: datetime, moment: datetime) -> None:
+    """One-time row (ADR-029 condition 1) marking *today* as the day this
+    ledger's day-key boundary moved from UTC to host-local -- written
+    exactly once, by :func:`append_event`, at the instant
+    :func:`nanobot.runtime.day_key.record_cutover_if_absent` first records
+    the cutover. Never written retroactively and never by hand: a reader
+    (step 3) that finds this row for a given day knows that day's true
+    length is ``hours``, not 24, and can exclude it from a trend.
+
+    *moment* is the SAME clock instant (aware) ``append_event`` used to
+    just record *cutover_utc* -- ``hours`` is derived from
+    :func:`day_key.local_offset(moment)` explicitly rather than reading
+    the real system clock a second time, since *cutover_utc* itself is
+    already UTC-normalized (its original local offset is not recoverable
+    from it alone). This is also what makes the transition-day math
+    testable without depending on the test machine's own timezone (tests
+    pass *moment* pre-tagged with whatever offset they want to prove).
+    """
+    marker_row = {
+        "phase": "day_boundary_transition",
+        "ts": cutover_utc.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "day_key": today,
+        "hours": day_key.transition_day_hours(day_key.local_offset(moment), cutover_utc=cutover_utc),
+    }
+    with open(active_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(marker_row, ensure_ascii=False) + "\n")
+
+
+def append_event(state_dir: Path, event: dict, *, now: "datetime | None" = None) -> None:
     """Append one JSON line to the cycle ledger. Best-effort — never raises.
 
     Adds ``ts`` if not already present. Fail-open: any failure (unwritable
     dir, disk full, permission error, ...) is swallowed so the ledger can
     never break the bridge cycle it is observing.
+
+    *now* pins the clock instant for the row's own ``ts`` default, the
+    rotation day-key, and the cutover check below to one consistent
+    moment -- exposed for tests (ADR-029 #1831); production callers never
+    pass it, so behaviour is unchanged from before this parameter existed.
     """
     with contextlib.suppress(Exception):
         record = dict(event)
-        record.setdefault("ts", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+        moment = now if now is not None else datetime.now(timezone.utc)
+        record.setdefault("ts", moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))
 
         ledger_dir = _ledger_dir(state_dir)
         ledger_dir.mkdir(parents=True, exist_ok=True)
         active_path = ledger_dir / _LEDGER_FILENAME
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        # Evidence this ledger genuinely rotated under the OLD code at
+        # least once already: an ARCHIVE, not merely an active file. An
+        # active ``cycles.jsonl`` existing proves nothing on its own --
+        # any brand-new ledger has one moments after its first write too
+        # (including in a test), and treating mere existence as "prior
+        # history" would fabricate a transition marker for a ledger that
+        # was never on the UTC scheme. Checked BEFORE this call's own
+        # rotation so a fresh ``tmp_path`` in a test reads the same as a
+        # fresh ledger in production: no fabricated transition day.
+        had_prior_history = any(ledger_dir.glob("cycles-*.jsonl.gz"))
+
+        today = day_key.day_key(now)
         _rotate_and_prune(ledger_dir, active_path, today, _retention_days())
+
+        cutover, just_recorded = day_key.record_cutover_if_absent(day_key.cutover_marker_path(ledger_dir), moment)
+        # local_tz explicit, matching whatever clock basis produced `today`
+        # above (the same `now`, or the system's own tz when `now` is None,
+        # exactly like day_key.day_key()'s own default) -- otherwise
+        # is_transition_day would silently fall back to the REAL system tz
+        # even when `now` was overridden, an #1898-class bug (relying on
+        # two independent implicit-system-tz reads to agree by luck).
+        local_tz = now.tzinfo if now is not None else None
+        if just_recorded and had_prior_history and day_key.is_transition_day(
+            today, local_tz=local_tz, cutover_utc=cutover
+        ):
+            with contextlib.suppress(Exception):
+                _append_transition_marker(active_path, today, cutover, moment)
 
         with open(active_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")

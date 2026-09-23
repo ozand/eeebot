@@ -15,6 +15,8 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from nanobot.runtime import day_key
+
 _DEFAULT_LEDGER_BYTES = 4 * 2**20  # 4 MiB bounds uncompressed host parsing.
 _DEFAULT_ARTIFACT_FILES = 256  # bounded queue scan for the 2 GB host.
 _DEFAULT_RETENTION_DAYS = 90  # matches cycle_ledger's rotation retention.
@@ -99,7 +101,27 @@ def _row_ts(row: dict[str, Any]) -> datetime | None:
     return _parse_ts(row.get("ts") or row.get("timestamp"))
 
 
-def _ledger_sources(ledger_dir: Path, since: datetime) -> tuple[list[Path], list[str]]:
+def _ledger_sources(
+    ledger_dir: Path, since: datetime, *, local_tz: Any = None
+) -> tuple[list[Path], list[str]]:
+    """Active file plus every ``cycles-<day>.jsonl.gz`` archive whose real
+    time span could hold a row at or after *since*.
+
+    ADR-029 (#1831) step 2: *ledger_dir* may hold archives named under
+    BOTH the old UTC-day scheme and the new host-local one --
+    :func:`nanobot.runtime.day_key.archive_day_bounds` resolves each
+    archive's day-key to its correct real-world ``[start, end)`` using the
+    cutover this same ledger's writer recorded
+    (:func:`nanobot.runtime.day_key.load_cutover`), including the one
+    transition day's true (21h/27h) length instead of a flat 24h -- so an
+    archive right at the window boundary is neither dropped nor silently
+    excluded because of a 3-hour mismatch between key and clock basis.
+
+    *local_tz* defaults to the system's own timezone (like every other
+    function in :mod:`nanobot.runtime.day_key`); pass it explicitly in
+    tests so the boundary math does not depend on the test machine's own
+    timezone.
+    """
     notes: list[str] = []
     try:
         entries = list(ledger_dir.iterdir())
@@ -107,6 +129,7 @@ def _ledger_sources(ledger_dir: Path, since: datetime) -> tuple[list[Path], list
         return [], ["permission"]
     except OSError:
         return [], ["io_error"]
+    cutover = day_key.load_cutover(day_key.cutover_marker_path(ledger_dir))
     archives: list[tuple[datetime, Path]] = []
     for path in entries:
         if not path.name.startswith("cycles-") or not path.name.endswith(".jsonl.gz"):
@@ -116,13 +139,13 @@ def _ledger_sources(ledger_dir: Path, since: datetime) -> tuple[list[Path], list
             notes.append(f"invalid_archive:{path.name}")
             continue
         try:
-            day = datetime.strptime(match.group(1), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            _start, end = day_key.archive_day_bounds(match.group(1), cutover, local_tz=local_tz)
         except ValueError:
             notes.append(f"invalid_archive:{path.name}")
             continue
-        archives.append((day, path))
+        archives.append((end, path))
     archives.sort(key=lambda item: item[0], reverse=True)
-    return [ledger_dir / "cycles.jsonl"] + [path for day, path in archives if day + timedelta(days=1) >= since], notes
+    return [ledger_dir / "cycles.jsonl"] + [path for end, path in archives if end >= since], notes
 
 
 def _read_ledger_file(
@@ -178,8 +201,17 @@ def ledger_window(
     phases: frozenset[str] | None = None,
     max_bytes: int = _DEFAULT_LEDGER_BYTES,
     now: datetime | None = None,
+    local_tz: Any = None,
 ) -> Window:
-    """Read active and dated ledger archives newest-first, never raising."""
+    """Read active and dated ledger archives newest-first, never raising.
+
+    *local_tz* (ADR-029 #1831 step 2) is passed to
+    :func:`_ledger_sources`/:func:`nanobot.runtime.day_key.archive_day_bounds`
+    for resolving local-scheme archive day-keys; defaults to the system's
+    own timezone. Production callers never pass it -- it exists so tests
+    can pin the boundary math without depending on the test machine's own
+    timezone.
+    """
     requested = _parse_ts(since_ts)
     if requested is None:
         return Window((), "unavailable", since_ts, None, None, 0, 0, 0, ("invalid_since",))
@@ -187,7 +219,7 @@ def ledger_window(
     try:
         if not ledger_dir.is_dir():
             return Window((), "unavailable", _iso(requested), None, None, 0, 0, 0, ("dir_missing",))
-        sources, notes = _ledger_sources(ledger_dir, requested)
+        sources, notes = _ledger_sources(ledger_dir, requested, local_tz=local_tz)
     except PermissionError:
         return Window((), "unavailable", _iso(requested), None, None, 0, 0, 0, ("permission",))
     except OSError:
