@@ -261,7 +261,16 @@ def append_event(state_dir: Path, event: dict, *, now: "datetime | None" = None)
         _rotate_and_prune(ledger_dir, active_path, today, _retention_days())
 
         cutover, just_recorded = day_key.record_cutover_if_absent(day_key.cutover_marker_path(ledger_dir), moment)
-        if just_recorded and had_prior_history and day_key.is_transition_day(today, cutover_utc=cutover):
+        # local_tz explicit, matching whatever clock basis produced `today`
+        # above (the same `now`, or the system's own tz when `now` is None,
+        # exactly like day_key.day_key()'s own default) -- otherwise
+        # is_transition_day would silently fall back to the REAL system tz
+        # even when `now` was overridden, an #1898-class bug (relying on
+        # two independent implicit-system-tz reads to agree by luck).
+        local_tz = now.tzinfo if now is not None else None
+        if just_recorded and had_prior_history and day_key.is_transition_day(
+            today, local_tz=local_tz, cutover_utc=cutover
+        ):
             with contextlib.suppress(Exception):
                 _append_transition_marker(active_path, today, cutover, moment)
 
