@@ -19,7 +19,7 @@ TimeoutStartSec=180
 # Hardening
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state /var/log/eeepc-agent
+ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state
 PrivateTmp=true
 NoNewPrivileges=true
 CapabilityBoundingSet=
