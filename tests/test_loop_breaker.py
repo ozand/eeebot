@@ -213,6 +213,117 @@ class TestPlannerFinalTurn:
         assert telem["stop_reason"] == "finalization_tool_call"
 
 
+
+
+class TestExecutorTailAndFinalTurn:
+    async def test_step_position_in_tail_matches_system_prompt_counter_on_every_turn(self, tmp_path, monkeypatch):
+        """#1775: The executor's message tail (last tool result) carries
+        [Step N/M | remaining K] matching the system prompt's Step N of M
+        exactly on every turn after the first. Neither can diverge from the loop's
+        own counter."""
+        monkeypatch.setenv("NANOBOT_LOOP_BREAKER_K", "5")
+        import re
+
+        seen_turns: list[dict] = []
+
+        class Provider(_Provider):
+            calls = 0
+
+            async def chat(self, messages=None, tools=None, model=None, **kwargs):
+                self.calls += 1
+                sys_match = re.search(r"Step (\d+) of (\d+)\.", messages[0]["content"])
+                tail_match = None
+                if self.calls > 1:
+                    tool_content = messages[-1]["content"] if messages[-1]["role"] == "tool" else messages[-2]["content"]
+                    tail_match = re.search(r"\[Step (\d+)/(\d+) \| remaining (\d+)\]", tool_content)
+
+                seen_turns.append({
+                    "call": self.calls,
+                    "sys_step": int(sys_match.group(1)) if sys_match else None,
+                    "sys_total": int(sys_match.group(2)) if sys_match else None,
+                    "tail_step": int(tail_match.group(1)) if tail_match else None,
+                    "tail_total": int(tail_match.group(2)) if tail_match else None,
+                    "tail_rem": int(tail_match.group(3)) if tail_match else None,
+                })
+
+                if self.calls == 4:
+                    return LLMResponse(content="all done")
+                return LLMResponse(content=None, tool_calls=[ToolCallRequest(
+                    id=f"call-{self.calls}", name="exec", arguments={"cmd": f"echo {self.calls}"},
+                )])
+
+        provider = Provider()
+        telem = await _run_manager(tmp_path, provider, max_iterations=10, telemetry_component="executor")
+        assert telem["status"] == "ok"
+        assert provider.calls == 4
+
+        assert seen_turns[0]["call"] == 1
+        assert seen_turns[0]["sys_step"] == 1
+        assert seen_turns[0]["sys_total"] == 10
+        assert seen_turns[0]["tail_step"] is None
+
+        for turn in seen_turns[1:]:
+            c = turn["call"]
+            assert turn["sys_step"] == c
+            assert turn["sys_total"] == 10
+            assert turn["tail_step"] == c, f"tail step {turn['tail_step']} must match loop counter {c}"
+            assert turn["tail_total"] == 10
+            assert turn["tail_rem"] == 10 - c, f"remaining {turn['tail_rem']} must equal 10 - {c}"
+
+    async def test_final_tick_returns_response_without_tools(self, tmp_path, monkeypatch):
+        """#1775: The executor's final tick (iteration == max_iterations)
+        reserves tools=[], warns the model with a final execution turn notice,
+        and accepts a final response."""
+        monkeypatch.setenv("NANOBOT_LOOP_BREAKER_K", "3")
+
+        class Provider(_Provider):
+            calls = 0
+
+            async def chat(self, messages=None, tools=None, model=None, **kwargs):
+                self.calls += 1
+                if self.calls == 3:
+                    assert tools == []
+                    assert messages[-1]["role"] == "user"
+                    assert "final execution turn" in messages[-1]["content"]
+                    assert "Do not call tools" in messages[-1]["content"]
+                    assert "[Step 3/3 | remaining 0]" in messages[-2]["content"]
+                    return LLMResponse(content="Completed all requested tasks successfully.")
+                assert tools
+                return LLMResponse(content=None, tool_calls=[ToolCallRequest(
+                    id=f"call-{self.calls}", name="exec", arguments={"cmd": f"date #{self.calls}"},
+                )])
+
+        provider = Provider()
+        telem = await _run_manager(tmp_path, provider, max_iterations=3, telemetry_component="executor")
+        assert provider.calls == 3
+        assert telem["status"] == "ok"
+        assert telem.get("stop_reason") is None
+        assert telem["result"] == "Completed all requested tasks successfully."
+
+    async def test_final_tick_refuses_unexpected_tool_call(self, tmp_path, monkeypatch):
+        """#1775: If the executor returns a tool call on its final turn despite
+        tools=[], execution aborts with stop_reason=finalization_tool_call."""
+        monkeypatch.setenv("NANOBOT_LOOP_BREAKER_K", "3")
+
+        class Provider(_Provider):
+            calls = 0
+
+            async def chat(self, messages=None, tools=None, model=None, **kwargs):
+                self.calls += 1
+                if self.calls == 2:
+                    assert tools == []
+                return LLMResponse(content=None, tool_calls=[ToolCallRequest(
+                    id=f"call-{self.calls}", name="exec", arguments={"cmd": f"pwd #{self.calls}"},
+                )])
+
+        provider = Provider()
+        telem = await _run_manager(tmp_path, provider, max_iterations=2, telemetry_component="executor")
+        assert provider.calls == 2
+        assert telem["status"] == "bounded_stop"
+        assert telem["stop_reason"] == "finalization_tool_call"
+        assert "final execution turn" in telem["result"]
+
+
 class TestSubagentLoopBreaker:
     async def test_k_identical_calls_abort_with_stop_reason(self, tmp_path, monkeypatch):
         """K consecutive identical calls abort with stop_reason=identical_call_loop."""

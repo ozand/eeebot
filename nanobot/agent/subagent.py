@@ -487,30 +487,50 @@ class SubagentManager:
                         str(messages[0].get("content") or ""), iteration, max_iterations,
                     )
 
-                # #1893: the planner's last tick belongs to its final answer,
-                # not another tool call. This uses (not extends) its 20-tick box.
-                _planner_final_turn = self._telemetry_component == "planner" and iteration == max_iterations
-                if _planner_final_turn:
-                    messages.append({
-                        "role": "user", "content": (
-                            "This is your final planning turn. Do not call tools. "
-                            "Return only the final JSON object with a non-empty plan "
-                            "and iterations_planned, using the evidence already read."
-                        ),
-                    })
+                # #1775: inject step position notification into the tail of the
+                # conversation (the last tool result) for the active turn, so the
+                # model sees its position in the recency window. Numbering matches
+                # the system prompt's `Step {iteration} of {max_iterations}.` exactly.
+                if iteration > 1 and messages and messages[-1].get("role") == "tool":
+                    _remaining = max(0, max_iterations - iteration)
+                    _step_tail = f"\n\n[Step {iteration}/{max_iterations} | remaining {_remaining}]"
+                    _prev_content = str(messages[-1].get("content") or "")
+                    if not _prev_content.endswith(_step_tail):
+                        messages[-1]["content"] = f"{_prev_content}{_step_tail}"
+
+                # #1893/#1775: the subagent's last tick belongs to its final answer,
+                # not another tool call. This uses (not extends) its max_iterations box.
+                _is_final_turn = iteration == max_iterations
+                if _is_final_turn:
+                    if self._telemetry_component == "planner":
+                        messages.append({
+                            "role": "user", "content": (
+                                "This is your final planning turn. Do not call tools. "
+                                "Return only the final JSON object with a non-empty plan "
+                                "and iterations_planned, using the evidence already read."
+                            ),
+                        })
+                    else:
+                        messages.append({
+                            "role": "user", "content": (
+                                "This is your final execution turn. Do not call tools. "
+                                "Provide your final response and summary of work completed."
+                            ),
+                        })
+                _tools_def = [] if _is_final_turn else tools.get_definitions()
                 if self._telemetry_component:
                     from nanobot.observability.llm_telemetry import call_context, current_cycle_id
 
                     with call_context(current_cycle_id(), self._telemetry_component):
                         response = await self.provider.chat_with_retry(
                             messages=messages,
-                            tools=[] if _planner_final_turn else tools.get_definitions(),
+                            tools=_tools_def,
                             model=self.model,
                         )
                 else:
                     response = await self.provider.chat_with_retry(
                         messages=messages,
-                        tools=tools.get_definitions(),
+                        tools=_tools_def,
                         model=self.model,
                     )
                 usage = getattr(response, "usage", None)
@@ -548,7 +568,7 @@ class SubagentManager:
                 if response.finish_reason == "length" and not response.has_tool_calls:
                     _truncation["count"] += 1
                     _truncation["consecutive"] += 1
-                    if _planner_final_turn:
+                    if _is_final_turn:
                         stop_reason = "response_truncated"
                         break
                     if _truncation["consecutive"] >= _MAX_CONSECUTIVE_TRUNCATIONS:
@@ -574,9 +594,9 @@ class SubagentManager:
                     _truncation["continued"] = True
                     _truncation["consecutive"] = 0
 
-                if _planner_final_turn and response.has_tool_calls:
+                if _is_final_turn and response.has_tool_calls:
                     # A provider ignoring the empty tool set must not execute
-                    # another call outside the planner's final-response turn.
+                    # another call outside the subagent's final-response turn.
                     stop_reason = "finalization_tool_call"
                     break
                 if response.has_tool_calls:
@@ -685,7 +705,11 @@ class SubagentManager:
                     "You can try breaking the task into smaller steps."
                 )
             elif stop_reason == "finalization_tool_call":
-                final_result = "Task aborted: planner final turn returned a tool call instead of a final answer."
+                final_result = (
+                    "Task aborted: planner final turn returned a tool call instead of a final answer."
+                    if self._telemetry_component == "planner"
+                    else "Task aborted: final execution turn returned a tool call instead of a final answer."
+                )
             elif stop_reason == "response_truncated":
                 # #1774: distinguishable from a normal completion on purpose --
                 # before this, the same situation ended the cycle as a silent
