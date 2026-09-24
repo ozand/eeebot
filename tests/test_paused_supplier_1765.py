@@ -403,6 +403,29 @@ class TestScorecardPausedSupplierCounters:
             rows.append({"phase": "outcome", "cycle_id": cid, "outcome": "success", "ts": ts})
         return rows
 
+    def test_1765_breakdown_counts_events_tasks_and_keeps_legacy_rate(self):
+        rows = [
+            {"phase": "proposed", "cycle_id": "f1", "demand_id": "task-a", "ts": "2026-09-20T00:00:00Z"},
+            {"phase": "outcome", "cycle_id": "f1", "outcome": "failed", "ts": "2026-09-20T00:01:00Z"},
+            {"phase": "proposed", "cycle_id": "f2", "demand_id": "task-a", "ts": "2026-09-20T00:02:00Z"},
+            {"phase": "outcome", "cycle_id": "f2", "outcome": "failed", "ts": "2026-09-20T00:03:00Z"},
+            {"phase": "proposed", "cycle_id": "s1", "demand_id": "task-b", "ts": "2026-09-20T00:04:00Z"},
+            {"phase": "outcome", "cycle_id": "s1", "outcome": "paused-supplier", "ts": "2026-09-20T00:05:00Z"},
+            {"phase": "proposer_reject", "reason": "self_dedup", "demand_id": "task-c", "ts": "2026-09-20T00:06:00Z"},
+        ]
+        loop = scorecard._loop_section(rows, ledger_status="complete")
+        assert loop["execution_failure_events"] == 2
+        assert loop["execution_failure_tasks"] == 1
+        assert loop["model_unavailable_events"] == 1
+        assert loop["model_unavailable_tasks"] == 1
+        assert loop["self_dedup_events"] == 1
+        assert loop["self_dedup_tasks"] == 1
+        assert loop["repeat_failure_rate"] == round(1 / 4, 4)
+        assert loop["repeat_failure_rate_new"] == round(2 / 4, 4)
+        assert loop["repeat_failure_rate"] == round(1 / 4, 4)
+        assert loop["model_call_incomplete_events"] == "unavailable"
+        assert loop["unknown_failure_cause_events"] == "unavailable"
+
     def test_paused_supplier_counted_and_timed_separately_from_failed(self):
         loop = scorecard._loop_section(self._rows(paused=2, failed=1, success=1), ledger_status="complete")
         assert loop["paused_supplier_outcomes"] == 2

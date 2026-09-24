@@ -639,6 +639,9 @@ def _loop_section(
     self_dedup_rejects = 0
     duplicate_failure_skips = 0
     failed_outcomes = 0
+    execution_failure_task_ids: set[str] = set()
+    paused_supplier_task_ids: set[str] = set()
+    self_dedup_task_ids: set[str] = set()
     # #1765: 'paused-supplier' cycles (the LLM gateway/model provider could
     # not serve us) are counted and timed SEPARATELY from failed_outcomes —
     # they must never feed repeat_failure_rate/wasted_attempts. Duration is
@@ -650,6 +653,7 @@ def _loop_section(
     paused_supplier_seconds = 0.0
     paused_supplier_seconds_unknown_count = 0
     started_ts_by_cycle: dict[str, Any] = {}
+    proposed_task_by_cycle: dict[str, str] = {}
     skips_by_class: dict[str, int] = {}
     skips_by_reason: dict[str, int] = {}
     # #800 churn split: cycles whose proposed row served a decay demand
@@ -675,6 +679,9 @@ def _loop_section(
             decay_cycles.add(cycle_id)
         if demand_id:
             goal_linked_cycles.add(cycle_id)
+        task_id = str(row.get("task_id") or row.get("demand_id") or "").strip()
+        if task_id:
+            proposed_task_by_cycle[cycle_id] = task_id
     for row in rows:
         phase = row.get("phase")
         if phase == "idle":
@@ -701,6 +708,9 @@ def _loop_section(
             proposer_rejects += 1
             if str(row.get("reason") or "").strip() == "self_dedup":
                 self_dedup_rejects += 1
+                task_id = str(row.get("task_id") or row.get("demand_id") or "").strip()
+                if task_id:
+                    self_dedup_task_ids.add(task_id)
             cycle_id = str(row.get("cycle_id") or "").strip()
             if cycle_id.startswith("fallback-"):
                 fallback_rejects += 1
@@ -755,10 +765,16 @@ def _loop_section(
                     duplicate_failure_skips += 1
             elif outcome == "failed":
                 failed_outcomes += 1
+                task_id = proposed_task_by_cycle.get(cycle_id) or str(row.get("task_id") or row.get("demand_id") or "").strip()
+                if task_id:
+                    execution_failure_task_ids.add(task_id)
             elif outcome == "paused-supplier":
                 # #1765: never folds into failed_outcomes/wasted_attempts —
                 # its own counter, reported as a distinct dashboard line.
                 paused_supplier_outcomes += 1
+                task_id = proposed_task_by_cycle.get(cycle_id) or str(row.get("task_id") or row.get("demand_id") or "").strip()
+                if task_id:
+                    paused_supplier_task_ids.add(task_id)
                 _paused_start = _parse_ts(started_ts_by_cycle.get(cycle_id))
                 _paused_end = _parse_ts(row.get("ts"))
                 if _paused_start is not None and _paused_end is not None and _paused_end >= _paused_start:
@@ -830,6 +846,24 @@ def _loop_section(
         "idle_share": _ratio(idle_rows, cycleish),
         "repeat_failures": repeat_failures,
         "repeat_failure_rate": _ratio(repeat_failures, attempts),
+        "repeat_failure_rate_new": _ratio(duplicate_failure_skips + failed_outcomes, attempts),
+        # #1765 decomposition. Shares use the existing attempt denominator;
+        # task counts deduplicate only canonical task_id/demand_id values.
+        "execution_failure_events": failed_outcomes if fallback_visibility else "unavailable",
+        "execution_failure_tasks": len(execution_failure_task_ids) if fallback_visibility else "unavailable",
+        "execution_failure_share": _ratio(failed_outcomes, attempts) if fallback_visibility else "unavailable",
+        "model_unavailable_events": paused_supplier_outcomes if fallback_visibility else "unavailable",
+        "model_unavailable_tasks": len(paused_supplier_task_ids) if fallback_visibility else "unavailable",
+        "model_unavailable_share": _ratio(paused_supplier_outcomes, attempts) if fallback_visibility else "unavailable",
+        "self_dedup_events": self_dedup_rejects if fallback_visibility else "unavailable",
+        "self_dedup_tasks": len(self_dedup_task_ids) if fallback_visibility else "unavailable",
+        "self_dedup_share": _ratio(self_dedup_rejects, attempts) if fallback_visibility else "unavailable",
+        "model_call_incomplete_events": "unavailable",
+        "model_call_incomplete_tasks": "unavailable",
+        "model_call_incomplete_share": "unavailable",
+        "unknown_failure_cause_events": "unavailable",
+        "unknown_failure_cause_tasks": "unavailable",
+        "unknown_failure_cause_share": "unavailable",
         "wasted_attempt_rate": _ratio(wasted_attempts, attempts),
         # #1411: the fallback lane's own share and success rate, reported
         # next to the existing loop numbers so an operator can tell whether
