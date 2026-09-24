@@ -156,6 +156,34 @@ class TestSubjectDedupGlobFallback:
         assert "analyze_repeat_failures.py" in feedback
         assert matched == "subject-duplicate:scripts/analyze_repeat_failures.py"
 
+    def test_new_file_duplicate_title_requires_target_path_in_head(self, tmp_path):
+        repo = _init_repo_with_scripts(tmp_path, ["scripts/filter_fallback_targets.py"])
+        state = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Filter fallback candidates dedup (V1)",
+            "target_path": "scripts/filter_fallback_targets.py",
+        }
+        dup, _, _ = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+        assert dup is False
+
+    def test_existing_file_new_improvement_is_not_blocked_as_creation(self, tmp_path):
+        repo = _init_repo_with_scripts(tmp_path, ["scripts/filter_fallback_targets.py"])
+        state = _state_dir(tmp_path)
+        proposal = {
+            "task_title": "Filter fallback candidates dedup (V1)",
+            "target_path": "scripts/filter_fallback_targets.py",
+        }
+        (repo / "scripts/filter_fallback_targets.py").write_text(
+            "# existing implementation\n", encoding="utf-8"
+        )
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "demand").mkdir(parents=True, exist_ok=True)
+        (state / "demand" / "completed.json").write_text(
+            '{"entries": {"fallback-id": {"path_verified": true}}}', encoding="utf-8"
+        )
+        dup, _, _ = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+        assert dup is False
+
     def test_genuinely_new_subject_not_rejected(self, tmp_path):
         repo = _init_repo_with_scripts(
             tmp_path,

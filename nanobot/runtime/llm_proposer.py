@@ -2783,13 +2783,19 @@ def _is_duplicate_proposal(
             # ONE piece of work, and the completion was checked against it"
             # -- an instance-scoped fact, not the class-scoped one below.
             #
+            # #1785(a): only classify a verified completion as already done
+            # when the proposal's target exists in HEAD. A missing path is
+            # branch (a), regardless of a class-level completion chain.
             # Replayed against the 7 historical chain-fires audited when
             # this was still an unconditional reject (1 real duplicate, 6
             # not, 14% precision): none carry ``path_verified`` -- the field
             # did not exist when any of them folded, and append-only means
             # it never will retroactively. All 7 stay on the observe-only
             # path below, by construction, not by re-auditing each one.
-            if candidate_id in demand.completed_demand_ids_path_verified(state_dir):
+            if (
+                candidate_id in demand.completed_demand_ids_path_verified(state_dir)
+                and not _proposal_creates_new_file(selfevo_repo, proposal)
+            ):
                 return True, (
                     f"your proposal '{title}' duplicates work already "
                     f"completed under demand {candidate_id}; propose "

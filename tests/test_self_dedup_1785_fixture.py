@@ -8,9 +8,14 @@ from nanobot.runtime.goal_text_utils import _title_already_done_in_git_log
 FIXTURE = Path(__file__).parent / "fixtures" / "self_dedup_1785.json"
 
 
-def test_1785_labeled_cases_match_recorded_gate_baseline():
+def test_1785_labeled_cases_match_recorded_gate_baseline(tmp_path):
+    from nanobot.runtime import llm_proposer
+
     data = json.loads(FIXTURE.read_text(encoding="utf-8"))
     root = Path(__file__).resolve().parents[1]
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / ".git").mkdir()
 
     false_cases = data["false_new_file_rejections"]
     assert len(false_cases) == 13
@@ -27,6 +32,10 @@ def test_1785_labeled_cases_match_recorded_gate_baseline():
         assert case["label"] == "duplicate"
         assert case["matched_sha"]
         assert case["commit_subject"]
+        (repo / case["target_path"]).touch()
+        assert not llm_proposer._proposal_creates_new_file(
+            repo, {"task_title": case["task_title"], "target_path": case["target_path"]}
+        )
 
     legitimate = data["legitimate_existing_file_improvements"]
     confirmed = [case for case in legitimate if case["path_existed_before_commit"]]
