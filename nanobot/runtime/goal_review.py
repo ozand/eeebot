@@ -68,14 +68,17 @@ which used to erase every accepted priority this module ever appended (the
 "Priority 17" minted three days running). Accepted priorities are now
 appended-only to a separate, harness-owned sidecar,
 ``<state_dir>/goals/derived_priorities.json`` (see
-:func:`read_derived_priorities`), that deploy never touches. Priority
-NUMBERS are never stored there — they are assigned dynamically, at merge
-time, by :func:`merged_goal_text`, which folds the derived entries onto
-whatever goal_text the operator currently has using the exact same
-:func:`append_priorities` insertion/numbering logic. The only two readers
-that need to see derived priorities (``demand._priority_items`` and
-``llm_proposer._load_goal_text``) call :func:`merged_goal_text` before
-parsing; ``goal_text.json`` itself is never written by this module anymore.
+:func:`read_derived_priorities`), that deploy never touches. A priority's
+NUMBER is assigned once, AT ACCEPT TIME (:func:`maybe_goal_review`, past
+the highest "Priority N" in either the charter or the derived list — see
+:func:`_next_priority_number`) and stored in the sidecar entry itself, so
+its rendered title — and thus its demand item id — stays stable across a
+later deploy reseed regardless of what the operator's own document does.
+ADR-034 rule 4 (#1939, A3): readers that need derived priorities
+(``demand._priority_items``, ``llm_proposer._load_derived_priorities``)
+resolve them via :func:`operator_documents.resolve_derived_priorities_split`
+directly — never folded into the operator's/charter's own numbered list
+first; ``goal_text.json`` itself is never written by this module anymore.
 """
 from __future__ import annotations
 
@@ -116,7 +119,8 @@ _DECAY_DAYS = 14  # kept in sync with demand._DECAY_DAYS
 
 # #860: harness-owned canon for accepted priorities, separate from the
 # operator's goal_text.json (which deploy_release.sh reseeds every release).
-# No priority numbers stored — see merged_goal_text.
+# Each entry's priority number is assigned once, at accept time, and
+# stored here — see maybe_goal_review's base_number/_next_priority_number.
 _DERIVED_PRIORITIES_SCHEMA = "derived-priorities-v1"
 _DERIVED_PRIORITIES_MAX = 10
 
@@ -283,8 +287,9 @@ def _load_goal_data(
 
     #944: when ``release_root`` is given and ``goals.md`` exists there,
     the immutable charter is read from that file (release-tree read-only
-    path). Derived priorities are folded in separately by
-    :func:`merged_goal_text` in :func:`maybe_goal_review`.
+    path). ADR-034 rule 4 (A3): derived priorities are resolved separately
+    (:func:`_derived_priorities_as_text` in :func:`maybe_goal_review`),
+    never folded into this text.
 
     ADR-034 rule 2/3: charter + derived, exactly as before this migration
     (rule 3's own table: "review runs on charter + derived" when operator
@@ -310,11 +315,13 @@ def _derived_priorities_path(state_dir: Path) -> Path:
 
 
 def read_derived_priorities(state_dir: Path) -> list[dict[str, Any]]:
-    """Loop-derived priorities accepted by past reviews, not yet folded into
-    the operator's goal_text canon (#860) — from the harness-owned
-    ``derived_priorities.json`` sidecar deploy never touches. Each entry has
-    ``label``/``body``/``vector``/``added_utc``; no priority number (numbers
-    are assigned dynamically at merge time by :func:`merged_goal_text`).
+    """Loop-derived priorities accepted by past reviews — from the
+    harness-owned ``derived_priorities.json`` sidecar deploy never touches,
+    ADR-034 rule 4 (A3): never folded into the operator's/charter's own
+    text (#860/#1665's merge this migration replaces). Each entry has
+    ``label``/``body``/``vector``/``number``/``added_utc``; the number is
+    assigned once, at accept time (:func:`maybe_goal_review`'s
+    ``base_number``), and stays fixed thereafter.
 
     ADR-034 rule 2: a thin dict-shaped adapter over
     :func:`operator_documents.resolve_derived_priorities` — the resolver
@@ -360,53 +367,26 @@ def _write_derived_priorities(state_dir: Path, priorities: list[dict[str, Any]])
     )
 
 
-def active_derived_priorities(state_dir: Path, raw_text: str) -> list[dict[str, Any]]:
-    """Return the list of derived priorities active against ``raw_text``.
+def _derived_priorities_as_text(state_dir: Path) -> str:
+    """Every currently-listed derived priority (``derived_priorities.json``,
+    open or completed alike — this is a dedup/numbering baseline, not a
+    reader's filtered view), rendered in the same ``"(<letter>) Priority N
+    — Label (VECTOR): Body"`` shape :func:`append_priorities` writes.
 
-    Skips derived entries whose label or number already exists in ``raw_text``.
-    This exposes the exact derived priorities that :func:`merged_goal_text`
-    would fold in, preserving structural origin for callers that need
-    to distinguish operator charter entries from self-derived entries (#1665).
-    """
-    try:
-        derived = read_derived_priorities(state_dir)
-        if not derived:
-            return []
-        existing = _existing_priority_labels(raw_text)
-        existing_numbers = _existing_priority_numbers(raw_text)
-        return [
-            {
-                "label": d["label"],
-                "body": d["body"],
-                "vector": d["vector"],
-                "number": d["number"],
-            }
-            for d in derived
-            if _normalize_label(d["label"]) not in existing
-            and int(d.get("number") or 0) not in existing_numbers
-        ]
-    except Exception:
-        return []
-
-
-def merged_goal_text(state_dir: Path, raw_text: str) -> str:
-    """``raw_text`` (the operator's goal_text) with every derived priority
-    (#860) folded in via the SAME :func:`append_priorities` insertion/
-    numbering logic goal_review uses when minting — never duplicated. With
-    no derived priorities this returns ``raw_text`` completely UNCHANGED
-    (byte-identical), so a harness with the kill switch off, or with no
-    accepted priorities yet, sees zero behavior change. The two priority
-    readers (``demand._priority_items``, ``llm_proposer._load_goal_text``)
-    call this before parsing so a deploy's goal_text reseed can never erase
-    a derived priority out from under them. Fail-open to ``raw_text``."""
-    try:
-        entries = active_derived_priorities(state_dir, raw_text)
-        if not entries:
-            return raw_text
-        new_text, _titles = append_priorities(raw_text, entries)
-        return new_text
-    except Exception:
-        return raw_text
+    ADR-034 rule 4: a standalone text, on its own, never appended onto the
+    operator's — :func:`_existing_priority_labels`/:func:`_next_priority_number`
+    are called on this AND on the operator's raw text separately, and their
+    results unioned, rather than on one blob :func:`merged_goal_text` used
+    to build (#860/#1665's merge this migration replaces)."""
+    entries = read_derived_priorities(state_dir)
+    if not entries:
+        return ""
+    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    lines = [
+        f"({letters[i % 26]}) Priority {e['number']} — {e['label']} ({e['vector']}): {e['body']}"
+        for i, e in enumerate(entries)
+    ]
+    return _PRIORITY_MARKER + "\n" + "\n".join(lines)
 
 
 def _collect_evidence(
@@ -576,12 +556,18 @@ def build_context(
     snapshot: dict[str, Any],
     evidence: dict[str, str],
     history: list[str],
+    derived_text: str = "",
 ) -> str:
-    """Bounded review context: goal vectors verbatim, scorecard digest, the
-    citable evidence lines (id-keyed), recent integration history."""
+    """Bounded review context: goal vectors verbatim, derived priorities
+    (own section, ADR-034 rule 4 — never folded into the goal text),
+    scorecard digest, the citable evidence lines (id-keyed), recent
+    integration history."""
     parts = [
         "## Goal vectors (verbatim)",
         goal_text.strip()[:_MAX_GOAL_CHARS] or "(no goal text)",
+        "",
+        "## Derived priorities (source: derived; already accepted by past reviews)",
+        derived_text.strip()[:_MAX_GOAL_CHARS] or "(none)",
         "",
         "## Scorecard snapshot (last 7 days)",
         _snapshot_digest(snapshot) or "(no scorecard snapshot)",
@@ -619,22 +605,6 @@ def _existing_priority_labels(goal_text: str) -> set[str]:
         title = _TRAILING_VECTOR_TAG_RE.sub("", m.group(2))
         labels.add(_normalize_label(title))
     return labels
-
-
-_PRIORITY_NUMBER_RE = re.compile(r"Priority\s+(\d+)\b")
-
-
-def _existing_priority_numbers(goal_text: str) -> set[int]:
-    """Every ``Priority N`` number appearing ANYWHERE in ``goal_text`` — the
-    "Current priority targets:" section and the free-form "Completed (do not
-    repeat):" sentence alike (#1640: a stray derived entry whose number was
-    already used, active or completed, must never be re-appended. The
-    Completed sentence is operator-authored prose with no fixed shape
-    ("Priority N (description, commit X)" vs. this module's own
-    "Priority N — Title;" render), so it cannot be parsed for a label the
-    way :func:`_existing_priority_labels` parses the structured Current
-    section — the number is the only thing both shapes share)."""
-    return {int(n) for n in _PRIORITY_NUMBER_RE.findall(goal_text)}
 
 
 def _record_guard_key_event(
@@ -956,10 +926,14 @@ def maybe_goal_review(
             )
             return []
         goal_text = str(goal_data.get("text") or "")
-        # #860: dedup/context see goal_text + already-derived priorities
-        # merged in — a priority accepted yesterday (living only in
-        # derived_priorities.json now) must still block a re-mint today.
-        merged_text = merged_goal_text(state_dir, goal_text)
+        # ADR-034 rule 4: dedup/context/numbering see the operator's raw
+        # text AND the derived list's own entries, resolved SEPARATELY —
+        # never folded into one blob first (that was merged_goal_text,
+        # #860/#1665's merge this migration replaces). A priority accepted
+        # yesterday (living only in derived_priorities.json now) still
+        # blocks a re-mint today; it just does so via its own text rather
+        # than text appended onto the operator's.
+        derived_text = _derived_priorities_as_text(state_dir)
 
         snapshot_path = state_dir / "scorecard" / "latest.json"
         snapshot = _read_json(snapshot_path, None)
@@ -991,7 +965,8 @@ def maybe_goal_review(
             return []
 
         context = build_context(
-            merged_text, snapshot, evidence, _integration_history(state_dir, now)
+            goal_text, snapshot, evidence, _integration_history(state_dir, now),
+            derived_text=derived_text,
         )
         inputs_hash = hashlib.sha256(context.encode("utf-8", errors="replace")).hexdigest()[:16]
 
@@ -1020,7 +995,9 @@ def maybe_goal_review(
 
             candidates = sorted(candidates, key=_direction_rank)
 
-        existing_labels = _existing_priority_labels(merged_text)
+        # ADR-034 rule 4: dedup baseline unions labels from BOTH lists,
+        # each scanned on its own text — never one merged blob.
+        existing_labels = _existing_priority_labels(goal_text) | _existing_priority_labels(derived_text)
         _record_guard_key_event(
             state_dir, "baseline", "priority_labels", str(len(existing_labels)),
         )
@@ -1070,19 +1047,22 @@ def maybe_goal_review(
             )
             return []
 
-        # #860: numbering continues past merged_text's highest "Priority N"
-        # (same base append_priorities would use) and is ASSIGNED + STORED
-        # at accept time, so a derived priority's rendered title — and thus
-        # its demand item id — stays stable even when a deploy reseed later
-        # changes the operator's priority count (#860 review finding). The
-        # merged render is discarded — only the titles feed the ledger/
-        # return payload. goal_text.json is READ-ONLY here; the accepted
-        # entries land in derived_priorities.json, which deploy_release.sh
-        # never touches (the actual #860 fix).
-        base_number = _next_priority_number(merged_text)
+        # #860: numbering continues past the highest "Priority N" in EITHER
+        # list (ADR-034 rule 4: each checked on its own text, never a merged
+        # blob) and is ASSIGNED + STORED at accept time, so a derived
+        # priority's rendered title — and thus its demand item id — stays
+        # stable even when a deploy reseed later changes the operator's
+        # priority count (#860 review finding). append_priorities' own
+        # render is discarded — only the titles it derives from the
+        # already-assigned ``number`` feed the ledger/return payload, so
+        # which text it renders onto is immaterial here; goal_text.json is
+        # READ-ONLY in this function either way — the accepted entries land
+        # in derived_priorities.json, which deploy_release.sh never touches
+        # (the actual #860 fix).
+        base_number = max(_next_priority_number(goal_text), _next_priority_number(derived_text))
         for offset, cand in enumerate(accepted):
             cand["number"] = base_number + offset
-        _, titles = append_priorities(merged_text, accepted)
+        _, titles = append_priorities(goal_text, accepted)
         now_iso = _iso(now)
 
         def _derived_entry(cand: dict[str, Any]) -> dict[str, Any]:

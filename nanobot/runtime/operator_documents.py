@@ -74,6 +74,13 @@ _PRIORITY_ENTRY_PATTERN = re.compile(
     re.DOTALL,
 )
 
+# #1640: same "Priority N" ANYWHERE (the structured "Current priority
+# targets:" section AND the free-form "Completed (do not repeat):"
+# sentence alike) goal_review._existing_priority_numbers scans — the
+# operator's Completed prose has no fixed shape a label-only check can
+# rely on, so the number is the only thing both shapes share.
+_PRIORITY_NUMBER_ANYWHERE_RE = re.compile(r"Priority\s+(\d+)\b")
+
 
 @dataclass(frozen=True)
 class DocumentResolution:
@@ -222,6 +229,57 @@ def resolve_derived_priorities(state_dir: "Path | str") -> DerivedPrioritiesReso
     return DerivedPrioritiesResolution(state=STATE_TEXT, entries=tuple(entries), mtime_utc=mtime)
 
 
+def resolve_derived_priorities_split(
+    state_dir: "Path | str",
+    *,
+    selfevo_repo_root: "Path | str | None" = None,
+) -> "tuple[tuple[PriorityEntry, ...], tuple[PriorityEntry, ...]]":
+    """ADR-034 rule 4: the derived-priorities list's OWN open/completed
+    split — never inferred from the operator's merged text, and never
+    losing ``source="derived"`` to do it. Returns ``(open, completed)``.
+
+    Completion is judged by rendering the resolved entries into the same
+    ``"(<letter>) Priority N — Title: instructions"`` shape the operator
+    document uses, then running the SAME done-detection
+    (:func:`goal_text_utils.filter_completed_priorities_from_goal_text` —
+    completed-demand sidecar first, then git-log heuristics) independently
+    against that synthetic text. The rendering is discarded immediately;
+    only which numbers survived filtering is kept, so the returned entries
+    are the original, fully-populated ``PriorityEntry`` objects (vector/
+    added_utc/direction intact) — never reconstructed from the synthetic
+    text. Fail-open: any error returns ``(all entries, ())`` — i.e. every
+    derived priority stays open, matching this module's fail-open bias
+    toward not silently hiding outstanding work."""
+    res = resolve_derived_priorities(state_dir)
+    if res.state != STATE_TEXT or not res.entries:
+        return (), ()
+    try:
+        from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goal_text
+
+        letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        rendered = "\n".join(
+            f"({letters[i % 26]}) Priority {e.number} — {e.title}: {e.instructions}"
+            for i, e in enumerate(res.entries)
+        )
+        text = _PRIORITY_TARGETS_MARKER + "\n" + rendered
+        repo_root = Path(selfevo_repo_root) if selfevo_repo_root is not None else None
+        filtered = filter_completed_priorities_from_goal_text(
+            text, repo_root, state_dir=Path(state_dir)
+        )
+        filtered_idx = filtered.find(_PRIORITY_TARGETS_MARKER)
+        filtered_section = (
+            filtered[filtered_idx + len(_PRIORITY_TARGETS_MARKER):] if filtered_idx != -1 else ""
+        )
+        open_numbers = {
+            int(m.group(1)) for m in _PRIORITY_ENTRY_PATTERN.finditer(filtered_section)
+        }
+        open_entries = tuple(e for e in res.entries if e.number in open_numbers)
+        completed_entries = tuple(e for e in res.entries if e.number not in open_numbers)
+        return open_entries, completed_entries
+    except Exception:
+        return res.entries, ()
+
+
 def resolve_operator_priorities(
     state_dir: "Path | str",
     *,
@@ -280,19 +338,23 @@ def resolve_operator_priorities(
     )
 
 
-def resolve_operator_priorities_text(state_dir: "Path | str") -> DocumentResolution:
-    """Transitional/internal: the document-level text/absent/unreadable
-    resolution of ``goal_text.json`` (ADR-034 rule 3's general states,
-    mirroring :func:`resolve_charter`), for the runtime consumers that still
-    assemble a text blob to fold derived priorities into
-    (``goal_review.merged_goal_text`` and its callers — ``demand.py``,
-    ``llm_proposer.py``) until ADR-034 A3 removes that pipeline. NOT for
-    status surfaces — those call :func:`operator_priorities_status`
-    instead, which carries no text at all."""
-    doc, data = _resolve_operator_document(state_dir)
+def resolve_operator_priority_numbers(state_dir: "Path | str") -> "frozenset[int]":
+    """ADR-034 rule 4 (#1640): every "Priority N" number mentioned ANYWHERE
+    in the operator's raw text — the structured "Current priority
+    targets:" section AND the free-form "Completed (do not repeat):"
+    sentence alike (mirrors goal_review._existing_priority_numbers, the
+    retired merged_goal_text/active_derived_priorities pair's own scan).
+    For cross-document dedup only: a derived entry whose number already
+    appears here must never be presented as new/open — the operator's
+    Completed prose has no fixed shape a label-only check can rely on, so
+    the number is the only thing both shapes share. Returns a bare set of
+    ints, never the text itself; absent/unreadable/empty resolves to the
+    empty set (fail-open toward NOT hiding a derived entry)."""
+    _doc, data = _resolve_operator_document(state_dir)
     if data is None:
-        return doc
-    return DocumentResolution(state=STATE_TEXT, text=str(data.get("text") or ""))
+        return frozenset()
+    raw_text = str(data.get("text") or "")
+    return frozenset(int(n) for n in _PRIORITY_NUMBER_ANYWHERE_RE.findall(raw_text))
 
 
 def resolve_operator_priorities_metadata(state_dir: "Path | str") -> OperatorDocumentMetadata:
@@ -313,10 +375,10 @@ def resolve_operator_priorities_metadata(state_dir: "Path | str") -> OperatorDoc
 
 def _resolve_operator_document(state_dir: "Path | str") -> "tuple[DocumentResolution, dict | None]":
     """Shared read+parse of ``goal_text.json`` at the document level (not the
-    priority-list level) for :func:`resolve_operator_priorities_text` and
-    :func:`resolve_operator_priorities_metadata`. Returns the resolution and,
-    when it parsed as a JSON object, the parsed dict — never the priority
-    list's own four states."""
+    priority-list level) for :func:`resolve_operator_priorities_metadata`
+    (and, until ADR-034 A3 removed it, ``resolve_operator_priorities_text``).
+    Returns the resolution and, when it parsed as a JSON object, the parsed
+    dict — never the priority list's own four states."""
     doc = _resolve_text_file(Path(state_dir) / "goals" / "goal_text.json")
     if doc.state != STATE_TEXT:
         return doc, None

@@ -157,12 +157,16 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.runtime.operator_documents import (
+    PRIORITY_PRESENT,
+    SOURCE_DERIVED,
     STATE_ABSENT,
     STATE_TEXT,
     resolve_charter,
     resolve_derived_priorities,
+    resolve_derived_priorities_split,
+    resolve_operator_priorities,
     resolve_operator_priorities_metadata,
-    resolve_operator_priorities_text,
+    resolve_operator_priority_numbers,
 )
 from nanobot.runtime.schemas import QUALIFYING_ARTIFACT_DIRS
 from nanobot.runtime.state_access import Window, artifacts, evidence_status, ledger_window
@@ -281,6 +285,18 @@ _PRIORITY_PATTERN = re.compile(
 # misclassify the item. Only this explicit token is ever read — vector is
 # NEVER inferred from free-text semantics. Untagged text yields "" (unknown).
 _VECTOR_TAG_RE = re.compile(r"\((V1|V2)\)")
+
+# #1640/#1665: label identity for the operator-vs-derived dedup guard in
+# _priority_items — an operator entry's title may carry a trailing
+# "(V1)"/"(V2)" tag (stripped here, same as goal_review._normalize_label's
+# own _TRAILING_VECTOR_TAG_RE) a derived entry's clean title never does.
+_TRAILING_VECTOR_TAG_RE = re.compile(r"\s*\((V1|V2)\)\s*$")
+
+
+def _normalize_priority_label(title: str) -> str:
+    stripped = _TRAILING_VECTOR_TAG_RE.sub("", title)
+    return re.sub(r"\s+", " ", stripped.strip().lower())
+
 
 # #1665 (ADR-020 Rule 3): Provenance constants and ranking.
 # Operator charter outranks anything self-derived regardless of vector.
@@ -738,70 +754,73 @@ def _git_head(selfevo_repo: Path | None) -> str | None:
 
 
 def _priority_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str, str]]:
-    """Remaining goal_text priorities, done-filtering delegated to
+    """Remaining priorities across BOTH the operator's document and the
+    harness's own derived list, done-filtering delegated to
     ``goal_text_utils.filter_completed_priorities_from_goal_text`` (#748) —
     this preserves R30: a freshly-seeded operator priority is always demand.
 
-    ADR-034 rule 2: the raw text comes ONLY from
-    ``resolve_operator_priorities_text(state_dir)`` — ``state/goals/goal_text.json``,
-    the operator priorities' one root. The #944-era "charter-first from the
-    instance repo" step (always dead — an instance ``goals.md`` never
-    existed) and the legacy ``state_dir/goals.md`` fallback are deleted, not
-    kept."""
+    ADR-034 rule 4: operator and derived priorities are resolved
+    (``operator_documents.resolve_operator_priorities`` /
+    ``resolve_derived_priorities_split``) and completed-filtered
+    INDEPENDENTLY — never merged into one numbered list first
+    (supersedes the ``goal_review.merged_goal_text`` merge, #1665). Each
+    item's ``provenance`` comes directly from its resolved
+    ``PriorityEntry.source``, never inferred by checking a priority
+    number's membership in a merged blob's active-derived set.
+
+    Consequence of resolving independently (ADR-034 rules 2/3: "absence of
+    one never silences the others"): an absent/unreadable operator document
+    no longer suppresses derived priorities too — the pre-A3 code returned
+    ``[]`` immediately whenever the operator's raw text was empty, before
+    the derived list was ever looked at.
+
+    #1640 (pA review on #1939): a derived entry whose label or number
+    already appears among the operator's OWN entries (open or completed)
+    is excluded here — the read-time half of the guard the retired
+    ``merged_goal_text``/``active_derived_priorities`` pair used to
+    provide by text-scanning a merged blob; the write-time half (a NEW
+    candidate never gets minted with a colliding label/number in the
+    first place) already lives in ``goal_review.maybe_goal_review``. Only
+    the operator's STRUCTURED entries are checked — never its free-form
+    "Completed (do not repeat)" prose, which the retired mechanism also
+    scanned as a defense specifically against a since-retired per-deploy
+    migration script; nothing mints/reads through that prose today."""
     try:
-        from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goal_text
+        op_res = resolve_operator_priorities(state_dir, selfevo_repo_root=selfevo_repo)
+        op_entries = op_res.open_entries if op_res.state == PRIORITY_PRESENT else ()
+        op_all_entries = op_res.open_entries + op_res.completed_entries
 
-        text_res = resolve_operator_priorities_text(state_dir)
-        raw_text = text_res.text if text_res.state == STATE_TEXT else ""
-
-        if not raw_text:
-            return []
-        # #1665 (ADR-020 Rule 3): Identify which priorities are self-derived from
-        # derived_priorities.json versus operator charter from goal_text / GOALS.md.
-        # Provenance is tracked structurally by file origin (never from tokens in text).
-        derived_numbers: set[int] = set()
-        try:
-            from nanobot.runtime import goal_review
-
-            active_derived = goal_review.active_derived_priorities(state_dir, raw_text)
-            derived_numbers = {
-                int(d["number"])
-                for d in active_derived
-                if d.get("number") is not None
-            }
-            raw_text = goal_review.merged_goal_text(state_dir, raw_text)
-        except Exception:
-            pass
-        filtered = filter_completed_priorities_from_goal_text(
-            raw_text, selfevo_repo, state_dir=state_dir
+        derived_open, _derived_completed = resolve_derived_priorities_split(
+            state_dir, selfevo_repo_root=selfevo_repo
         )
-        marker = "Current priority targets:"
-        idx = filtered.find(marker)
-        if idx == -1:
-            return []
-        section = filtered[idx + len(marker):]
+        operator_labels = {_normalize_priority_label(e.title) for e in op_all_entries}
+        operator_numbers = {e.number for e in op_all_entries} | resolve_operator_priority_numbers(state_dir)
+        derived_open = tuple(
+            e for e in derived_open
+            if _normalize_priority_label(e.title) not in operator_labels
+            and e.number not in operator_numbers
+        )
+
         items: list[dict[str, str]] = []
-        for m in _PRIORITY_PATTERN.finditer(section):
-            num, title, instructions = m.group(1), m.group(2).strip(), m.group(3).strip()
-            # #815: explicit (V1)/(V2) tag, read from the TITLE group ONLY —
-            # the convention places it at the end of the title, right before
-            # the colon. Searching the instructions/body too would let a
-            # stray "(V1)"/"(V2)" mention in free-text instructions
-            # misclassify the item; never inferred from wording either way.
-            tag = _VECTOR_TAG_RE.search(title)
-            vector = tag.group(1) if tag else ""
-            # #1665: structural origin from derived_priorities.json vs operator charter
-            priority_num = int(num) if num.isdigit() else -1
+        for entry in (*op_entries, *derived_open):
             provenance = (
-                PROVENANCE_SELF_DERIVED
-                if priority_num in derived_numbers
-                else PROVENANCE_OPERATOR
+                PROVENANCE_SELF_DERIVED if entry.source == SOURCE_DERIVED else PROVENANCE_OPERATOR
             )
+            # #815: an operator entry's title may still carry a trailing
+            # "(V1)"/"(V2)" tag (the operator document's own authoring
+            # convention, read from the TITLE only — never the
+            # instructions/body, so a stray tag-like mention in free text
+            # can't misclassify the item). A derived entry's vector is
+            # already its own structured field, never embedded in its title.
+            vector = entry.vector
+            if not vector:
+                tag = _VECTOR_TAG_RE.search(entry.title)
+                vector = tag.group(1) if tag else ""
             items.append(
                 _make_item(
                     "priority",
-                    f"Priority {num} — {title}",
-                    instructions,
+                    f"Priority {entry.number} — {entry.title}",
+                    entry.instructions,
                     vector=vector,
                     provenance=provenance,
                 )

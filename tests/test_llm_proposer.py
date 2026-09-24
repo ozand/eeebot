@@ -70,6 +70,28 @@ def _write_charter(tmp_path: Path, text: str) -> None:
     (tmp_path / "_release_root" / "goals.md").write_text(text, encoding="utf-8")
 
 
+def _write_derived_priority(state_dir: Path, *, number: int = 1, vector: str = "V1") -> None:
+    """ADR-034 rule 4: a derived priority lives in
+    ``state/goals/derived_priorities.json`` — never embedded in the
+    synthetic charter :func:`_write_charter` writes. Tests that need
+    ``should_propose``'s pre-#760 fallback to see an open priority write
+    it here directly."""
+    goals_dir = state_dir / "goals"
+    goals_dir.mkdir(parents=True, exist_ok=True)
+    (goals_dir / "derived_priorities.json").write_text(
+        json.dumps({
+            "schema_version": "derived-priorities-v1",
+            "priorities": [{
+                "label": "Write scripts/cycle_logger.py",
+                "body": "helper function append_cycle_summary(...).",
+                "number": number,
+                "vector": vector,
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+
 def _append_proposed(state_dir: Path, cycle_id: str, task_title: str) -> None:
     cycle_ledger.append_event(
         state_dir,
@@ -207,7 +229,7 @@ class TestShouldPropose:
         request is still queued, so the queue is NOT empty — falls through
         to the unchanged priorities/dup-streak fallback clauses, both False."""
         state_dir = _state_dir(tmp_path)
-        _write_charter(tmp_path, json.loads(GOAL_TEXT_JSON)["text"])
+        _write_derived_priority(state_dir)
         req_dir = state_dir / "subagents" / "requests"
         req_dir.mkdir(parents=True)
         (req_dir / "request-planner.json").write_text(
@@ -244,7 +266,7 @@ class TestShouldPropose:
         make this True regardless of the dup-streak state, defeating the
         point of this test (isolating the dup-streak fallback clause)."""
         state_dir = _state_dir(tmp_path)
-        _write_charter(tmp_path, json.loads(GOAL_TEXT_JSON)["text"])
+        _write_derived_priority(state_dir)
         req_dir = state_dir / "subagents" / "requests"
         req_dir.mkdir(parents=True)
         (req_dir / "request-planner.json").write_text(
