@@ -174,6 +174,7 @@ def test_happy_path_writes_the_diary_and_journals_success(tmp_path: Path, monkey
     rows = _ledger_rows(state, "planning_session")
     assert len(rows) == 1
     assert rows[0]["outcome"] == "integrated"
+    assert rows[0]["parse_mode"] == "strict"
     assert rows[0]["iterations_used"] == 3
     assert rows[0]["iterations_planned"] == 35
     assert rows[0]["task_writing_read"] is True
@@ -338,6 +339,40 @@ def test_real_shaped_no_final_is_not_malformed(tmp_path: Path, monkeypatch, resu
     assert row['reason'] == expected_reason
     assert row['task_writing_read'] is True
     assert not _ledger_rows(state, 'integrity')
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_outcome", "expected_mode", "expected_violation", "expected_reason"),
+    [
+        ('{"insight":"i","plan":"p"}', "integrated", "strict", None, None),
+        ('Preface\n```json\n{"insight":"i","plan":"p"}\n```', "integrated", "fenced", "prose_prefix", None),
+        ('```json\n{"plan":"one"}\n```\n```json\n{"plan":"two"}\n```', "malformed", "malformed", None, "multiple_blocks"),
+        ('```json\n{"plan":"p"}\n``` trailing', "malformed", "malformed", None, "text_after_block"),
+        ('Reasoning example {"plan":"example"} then conclusion', "malformed", "malformed", None, "unfenced_embedded"),
+        ('```json\n{"plan":"unfinished"}', "malformed", "malformed", None, "truncated"),
+        ('{"insight":"i"}', "malformed", "strict", None, 'missing non-empty "plan" field'),
+        ('```json\n{"insight":"i"}\n```', "malformed", "fenced", None, 'missing non-empty "plan" field'),
+        ('ordinary garbage without object', "malformed", "malformed", None, "invalid_json"),
+    ],
+)
+def test_planner_final_response_parse_modes(
+    tmp_path: Path, monkeypatch, raw, expected_outcome, expected_mode,
+    expected_violation, expected_reason,
+):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    monkeypatch.setattr(bridge, "SubagentManager", _make_fake_mgr_factory(state, raw))
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["ran"] is True
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["outcome"] == expected_outcome
+    assert row["parse_mode"] == expected_mode
+    assert row.get("format_violation") == expected_violation
+    assert row.get("reason") == expected_reason
+    if expected_outcome == "integrated":
+        assert row["iterations_planned"] is None
 
 
 def test_malformed_final_response_degrades_without_touching_the_diary(tmp_path: Path, monkeypatch):

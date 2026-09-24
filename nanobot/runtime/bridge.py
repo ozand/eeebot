@@ -3082,6 +3082,57 @@ def _regenerate_skills_index_if_needed(repo_root: 'Path', files_changed: 'list[s
         return {'outcome': 'commit_failed', 'commit_sha': None, 'reason': f'unexpected error: {exc}'}
 
 
+def _parse_planner_final_response(raw_result: str) -> tuple[dict[str, Any] | None, str, str | None, str | None]:
+    """Parse only a whole JSON object or a single terminal JSON fence.
+
+    Returns parsed object, parse mode, optional format violation, and malformed
+    reason. Per architect decision #1903/#1925, prose may prefix one terminal
+    fence as a recorded format violation, but prose/object extraction is not
+    allowed and fenced examples inside reasoning are not treated as plans.
+    """
+    import json as _json
+
+    try:
+        parsed = _json.loads(raw_result)
+    except _json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed, "strict", None, None
+    if parsed is not None:
+        return None, "malformed", None, "invalid_json"
+
+    fence = re.compile(r"```(?:json)?[ \t]*\r?\n(.*?)```", re.IGNORECASE | re.DOTALL)
+    blocks = list(fence.finditer(raw_result))
+    if not blocks:
+        if "```" in raw_result:
+            return None, "malformed", None, "truncated"
+        # Distinguish embedded JSON examples from plain prose without ever
+        # accepting them as plans.
+        try:
+            decoder = _json.JSONDecoder()
+            for match in re.finditer(r"\{", raw_result):
+                decoder.raw_decode(raw_result[match.start():])
+                return None, "malformed", None, "unfenced_embedded"
+        except _json.JSONDecodeError:
+            pass
+        return None, "malformed", None, "invalid_json"
+    if len(blocks) > 1:
+        return None, "malformed", None, "multiple_blocks"
+    block = blocks[0]
+    if raw_result[block.end():].strip():
+        return None, "malformed", None, "text_after_block"
+    prefix = raw_result[:block.start()]
+    body = block.group(1)
+    try:
+        parsed = _json.loads(body)
+    except _json.JSONDecodeError:
+        return None, "malformed", None, "truncated"
+    if not isinstance(parsed, dict):
+        return None, "malformed", None, "invalid_json"
+    # A complete JSON value with the wrong shape is not truncation.
+    return parsed, "fenced", "prose_prefix" if prefix.strip() else None, None
+
+
 async def _run_planning_session(
     *, provider, bus, config, model: str, state_dir: 'Path', selfevo_repo: 'Path',
     denied_paths: set, cycle_id: str,
@@ -3307,22 +3358,29 @@ async def _run_planning_session(
         )
         print(f'planning-session: no_plan ({reason})')
         return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
+    # #1903/#1925: keep the role's no-wrapping instruction, but accept one
+    # terminal fenced object as a recorded format violation (never extract a
+    # JSON example from reasoning prose).
+    parsed, parse_mode, format_violation, parse_error = _parse_planner_final_response(raw_result)
+    if parse_error is None and (
+        not isinstance(parsed, dict)
+        or not isinstance(parsed.get('plan'), str)
+        or not parsed['plan'].strip()
+    ):
+        parse_error = 'missing non-empty "plan" field'
     try:
-        # roles/planner.md: "no markdown wrapping" -- same strict contract
-        # strategist.py's own final-response parse enforces; a fenced
-        # response is malformed, not silently unwrapped.
-        if raw_result.startswith('```'):
-            raise ValueError('final response must not be fenced')
-        parsed = json.loads(raw_result)
-        if not isinstance(parsed, dict) or not isinstance(parsed.get('plan'), str) or not parsed['plan'].strip():
-            raise ValueError('missing non-empty "plan" field')
+        if parse_error is not None:
+            raise ValueError(parse_error)
+        assert parsed is not None
         iterations_planned = parsed.get('iterations_planned')
         iterations_planned = int(iterations_planned) if isinstance(iterations_planned, (int, float)) else None
     except Exception as exc:
         record_planning_session(
             state_dir, cycle_id, 'malformed',
             iterations_used=iterations_used, iterations_planned=None,
-            reason=f'unparseable final response: {exc}',
+            reason=f'{exc}',
+            parse_mode=parse_mode,
+            format_violation=format_violation,
             task_writing_read=_task_writing_read,
             task_writing_source=_task_writing_source or None,
             task_writing_path=str(_task_writing_file) if _task_writing_read else None,
@@ -3351,6 +3409,8 @@ async def _run_planning_session(
     record_planning_session(
         state_dir, cycle_id, write_result['outcome'],
         iterations_used=iterations_used, iterations_planned=iterations_planned,
+        parse_mode=parse_mode,
+        format_violation=format_violation,
         reason=write_result.get('reason', ''),
         task_writing_read=True,
         task_writing_source=_task_writing_source,

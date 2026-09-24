@@ -408,6 +408,16 @@ class TestRecordPlanningSession:
         assert row["iterations_used"] == 7
         assert row["iterations_planned"] == 25
 
+    def test_records_parse_format_metadata(self, tmp_path):
+        cycle_ledger.record_planning_session(
+            tmp_path, "c1", "integrated", iterations_used=3, iterations_planned=None,
+            parse_mode="fenced", format_violation="prose_prefix",
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert row["parse_mode"] == "fenced"
+        assert row["format_violation"] == "prose_prefix"
+        assert row["iterations_planned"] is None
+
     def test_missing_forecast_stays_none_not_zero(self, tmp_path):
         """#1850-class distinction: a session that never produced a forecast
         must not be recorded as having forecast zero."""
