@@ -566,6 +566,15 @@ def test_priority_provenance_survives_end_to_end(tmp_path: Path, monkeypatch):
     assert "Derived done" not in context  # completed, filtered independently here too
     assert "Operator open" not in context  # operator priorities in this prompt are A4's job
 
+    # Through demand-driven mode's own "## Demand" section: when the
+    # collected items themselves are what the model sees (demand_items),
+    # each item's real source is labeled inline — never a merged,
+    # unlabeled list either.
+    demand_context = llm_proposer.build_context(state_dir, None, demand_items=items)
+    assert "## Demand" in demand_context
+    assert "Priority 1 — Operator open (V2) [source: operator]" in demand_context
+    assert "Priority 9 — Derived open [source: self-derived]" in demand_context
+
 
 def test_merged_text_consumers_migrated_with_source(tmp_path: Path, monkeypatch):
     """Test Contract: every consumer of the FORMER merged numbered text —

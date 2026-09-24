@@ -1107,9 +1107,10 @@ def _inventory_query(
 
 def _demand_section(demand_items: list[dict[str, str]]) -> str:
     """Bounded ``## Demand`` body (#760): one block per item with kind,
-    stable id, summary, and quoted evidence, capped at
-    :data:`_MAX_DEMAND_CHARS` (same separately-bounded-section precedent as
-    :data:`_MAX_INVENTORY_CHARS`). Fail-open: returns ``""`` on any error."""
+    stable id, summary, quoted evidence, and (ADR-034 rule 4) source when
+    the item carries one, capped at :data:`_MAX_DEMAND_CHARS` (same
+    separately-bounded-section precedent as :data:`_MAX_INVENTORY_CHARS`).
+    Fail-open: returns ``""`` on any error."""
     try:
         lines: list[str] = []
         for item in demand_items:
@@ -1119,6 +1120,16 @@ def _demand_section(demand_items: list[dict[str, str]]) -> str:
             if not summary:
                 continue
             line = f"- [{item.get('id') or '?'}] ({item.get('kind') or '?'}) {summary}"
+            # ADR-034 rule 4: a "priority" item's real source (operator vs
+            # self-derived, demand._priority_items' own PriorityEntry.source)
+            # — never rendered for kinds that carry no provenance (empty
+            # string default) and never a guess. This is NOT the operator's
+            # own priority text/block reaching this prompt — that remains
+            # ADR-034 A4's (#1940) job; only the label on a demand item this
+            # section already lists.
+            provenance = str(item.get("provenance") or "").strip()
+            if provenance:
+                line += f" [source: {provenance}]"
             evidence = str(item.get("evidence") or "").strip()
             if evidence:
                 line += f' — evidence: "{evidence}"'
