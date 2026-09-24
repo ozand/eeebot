@@ -65,7 +65,6 @@ from nanobot.runtime.existence_index import (  # noqa: E402
     intents_match,
 )
 from nanobot.runtime.goal_review import read_charter_text  # noqa: E402
-from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goal_text  # noqa: E402
 from nanobot.runtime.lesson_v2 import (  # noqa: E402
     bounded_load_yaml as _bounded_lesson_load,
 )
@@ -3626,40 +3625,28 @@ async def _main_impl_body():
 
         # #944/ADR-034 rule 2: read the executor mission's charter from
         # immutable goals.md at the release root, via read_charter_text's
-        # resolver (no path constructed here). A2 is a mechanical resolver
-        # migration, not a rule-5 rollout: when the charter is present, the
-        # mission is charter-only, exactly as it already was — folding the
-        # operator's own priority section in under its own heading (rule 5)
-        # is ADR-034 A4's job, on top of A3's source-tagged split. ADR-034
-        # rule 3: the top-of-run charter gate above already stopped this
-        # cycle if the charter were absent, so there is no operator-
-        # priorities/goal-id fallback to fall back to here any more — the
-        # #944-era legacy chain this replaced (which also tried
-        # RELEASE_ROOT/host/eeepc/etc/goal_text.json first, a path that
-        # exists on no host, #1699 census) is gone along with it. Derived
-        # priorities (derived_priorities.json) are always folded in next,
-        # by merged_goal_text.
+        # resolver (no path constructed here), so build_task's
+        # charter_in_system flag reflects reality. A2 is a mechanical
+        # resolver migration, not a rule-5 rollout: folding the operator's
+        # own priority section and the derived list in under their own
+        # headings (rule 5) is ADR-034 A4's job, on top of A3's
+        # source-tagged split. ADR-034 rule 3: the top-of-run charter gate
+        # above already stopped this cycle if the charter were absent.
+        #
+        # ADR-034 rule 4 (A3): build_task's own `goal_text` PARAMETER has
+        # been dead since #1727 — it `del`s it immediately on arrival at
+        # BOTH of its call sites in this function (here and the repair-turn
+        # call further down), replacing it with the one-line "operator
+        # priority P<n> / not an operator priority" mission statement
+        # instead. There is therefore nothing here to merge derived
+        # priorities into or preserve `source` for — the goal_text/
+        # merged_goal_text/filter_completed_priorities_from_goal_text/
+        # marker-extraction chain this replaced computed a value build_task
+        # discarded on receipt. Removed rather than migrated.
         try:
             _charter = read_charter_text(RELEASE_ROOT)
         except Exception:
             _charter = ''
-        _base_goal_text = _charter
-        try:
-            from nanobot.runtime.goal_review import merged_goal_text
-            goal_text = merged_goal_text(STATE_DIR, _base_goal_text)
-        except Exception:
-            goal_text = _base_goal_text
-        # #712: strip completed "Current priority target" entries (per the #575
-        # git-log done-detection heuristic) before this raw text is injected
-        # verbatim into the subagent prompt below — otherwise a priority the
-        # coordinator already treats as done keeps being shown/re-proposed every
-        # cycle (novelty collapse, per the #711 shadow run).
-        # #773: state_dir enables the completed-demand sidecar check — the
-        # ledger-chain done-truth that text evidence cannot provide for
-        # demand-mode integrations (refined titles carry no verbatim label).
-        goal_text = filter_completed_priorities_from_goal_text(
-            goal_text, _selfevo_repo_check, state_dir=STATE_DIR
-        )
         # #1222: the coordinator's per-goal subagent_policy (preferred_profile /
         # budget_class in goals/registry.json) went with the coordinator; the
         # live registry never carried the key, so this was always the default.
@@ -3669,12 +3656,8 @@ async def _main_impl_body():
         mode_at_start = 'auto' if gate_open else 'strict'
 
         resolved_iterations = resolve_max_tool_iterations(config.agents.defaults.max_tool_iterations)
-        task_goal_text = goal_text
-        if _charter:
-            marker = 'Current priority targets:'
-            task_goal_text = goal_text[goal_text.find(marker):] if marker in goal_text else ''
         task = build_task(
-            req, task_goal_text, report_source, state_dir=STATE_DIR,
+            req, '', report_source, state_dir=STATE_DIR,
             selfevo_repo_root=_selfevo_repo_check,
             max_iterations=resolved_iterations,
             charter_in_system=bool(_charter),
@@ -4368,7 +4351,7 @@ async def _main_impl_body():
                     print(f'smoke: FAIL — spawning repair turn {_repair_attempts}/{_max_repair_attempts}')
                     # Build repair prompt with traceback injected
                     _repair_prompt = build_task(
-                        req, goal_text, report_source,
+                        req, '', report_source,
                         state_dir=STATE_DIR,
                         repair_context=_smoke_output,
                         declared_tool_names=EXECUTOR_TOOL_NAMES,
