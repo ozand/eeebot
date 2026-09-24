@@ -2346,49 +2346,6 @@ for _prompt in (_PROPOSER_SYSTEM_PROMPT, _DEMAND_PROPOSER_SYSTEM_PROMPT):
         MUTATION_POLICY.validate_rendered_surfaces(_MUTATION_SURFACE_MARKER)
 
 
-_PERMANENT_DEDUP_MAX_COMMITS = 3000
-
-
-def _all_built_subjects(selfevo_repo: Path | None) -> str:
-    """Full-history commit subjects of the instance repo (#834 permanent novelty).
-
-    Unlike :func:`goal_text_utils._recent_git_log`'s 14-day window, this is the
-    complete catalogue of everything ever integrated into ``main``, so a
-    throwaway script cannot be silently rebuilt once its creation commit ages
-    out of the recency window. Bounded to the most recent
-    :data:`_PERMANENT_DEDUP_MAX_COMMITS` subjects. Fail-open: ``""`` on any
-    error.
-    """
-    if not selfevo_repo:
-        return ""
-    import subprocess as _sp_hist
-
-    repo = Path(selfevo_repo)
-    try:
-        raw = _sp_hist.check_output(
-            [
-                "git", "-c", f"safe.directory={repo}", "-C", str(repo),
-                "log",
-                "--invert-grep", "-i",
-                "--grep=^Selfevo-Residual: true",
-                "--grep=^selfevo: auto-commit uncommitted subagent work",
-                "--grep=^selfevo: auto-commit residual state",
-                "--format=%s", f"-n{_PERMANENT_DEDUP_MAX_COMMITS}",
-            ],
-            stderr=_sp_hist.DEVNULL,
-            timeout=15,
-        ).decode(errors="replace")
-        return "\n".join(
-            line for line in raw.splitlines()
-            if not line.strip().lower().startswith((
-                "selfevo: auto-commit residual state",
-                "selfevo: auto-commit uncommitted subagent work",
-            ))
-        )
-    except Exception:
-        return ""
-
-
 def _proposal_creates_new_file(selfevo_repo: Path | None, proposal: dict[str, Any]) -> bool:
     """True when the proposal would create a target_path that does NOT yet exist
     in the instance repo (#834).
@@ -2875,33 +2832,11 @@ def _is_duplicate_proposal(
                     "preferring the numbered Current priority targets"
                 ), f"refuted-hypothesis:{matched_refuted}"
 
-        # #834 permanent novelty guard: for proposals that CREATE A NEW file,
-        # also reject against the full commit history (not just the 14-day
-        # window above), so a throwaway artifact is not silently rebuilt once
-        # its creation commit ages out. Edits/improvements to an existing file
-        # are iteration, not churn, and are never blocked here.
+        # For an absent target, repository-wide subject history is evidence,
+        # not proof that the target is already done. Keep #903's distinct
+        # subject-duplicate rule below: it points to an existing script to extend.
         creates_new_file = _proposal_creates_new_file(selfevo_repo, proposal)
         if creates_new_file:
-            # #1785(a): history is evidence only, not proof the absent target
-            # is done. Recreating a missing target is valid work; retain the
-            # separate #903 subject-key rule for extending an existing script.
-            built_subjects = ""
-            if built_subjects and _title_already_done_in_git_log(title, built_subjects):
-                matched_built = next(
-                    (
-                        line.strip()
-                        for line in built_subjects.splitlines()
-                        if line.strip() and _title_already_done_in_git_log(title, line)
-                    ),
-                    "",
-                )
-                return True, (
-                    f"your proposal '{title}' re-creates an artifact that "
-                    "ALREADY EXISTS in the repo history (built previously); "
-                    "improve/reuse the existing one, or propose genuinely NEW "
-                    "work from the numbered Current priority targets"
-                ), matched_built
-
             # #903: verb-invariant subject dedup. Complements the exact-title
             # #834 guard above — a paraphrase (check/audit/analyze) clears
             # the lexical word-overlap threshold, so this compares SUBJECT
@@ -3687,14 +3622,6 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                 return None
             dup, dup_reason, dup_matched = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
         if dup:
-            # #762: double self-dedup rejection — the live-saturation case
-            # (every cycle burning 2-3 LLM calls with zero ledger trace).
-            # matched_against records what it actually matched (#757 spirit).
-            # #760: demand_id lets demand.py's exhaustion tracking stop
-            # presenting an item whose proposals keep self-dedup-rejecting.
-            # #1184/#1335: a futile-surface or enhancement-without-caller
-            # refusal is its own ledger reason so a suppressed surface is
-            # distinguishable from title dedup.
             reject_reason = _dedup_reject_reason(dup_matched)
             _record_proposer_reject(
                 state_dir,
@@ -3702,8 +3629,6 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                 task_title=str(proposal.get("task_title") or ""),
                 target_path=str(proposal.get("target_path") or ""),
                 matched_against=dup_matched,
-                # #1335: the deferral's steer names the caller index it read
-                # (files scanned, roots), so a row proves what was looked at.
                 detail=dup_reason if reject_reason == enhancement_gate.REASON else "",
                 demand_id=_candidate_identity(proposal),
             )

@@ -3271,13 +3271,11 @@ class TestProposeReasoningPassthrough:
         assert "reasoning_effort" not in captured
 
 
-# ─── #834: permanent (history-wide) novelty guard ──────────────────────────
+# ─── #903 subject dedup and #1785 target-path state ────────────────────────
 
 
 def _init_instance_repo(tmp_path, *, subject, script_rel, old=True):
-    """Minimal git repo with ONE commit (dated >14 days ago when old=True) that
-    creates `script_rel`, so the 14-day recency git_log misses it but the
-    full-history _all_built_subjects catches it."""
+    """Minimal git repo with ONE commit creating ``script_rel``."""
     import subprocess as _sp
     repo = tmp_path / "inst"
     repo.mkdir()
@@ -3299,7 +3297,7 @@ def _init_instance_repo(tmp_path, *, subject, script_rel, old=True):
     return repo
 
 
-class TestPermanentNoveltyGuard:
+class TestTargetPathState:
     def test_fixture_new_file_subject_matches_are_allowed(self, tmp_path):
         """#1785(a): commit-subject hits cannot make an absent target 'done'."""
         import json
@@ -3321,7 +3319,7 @@ class TestPermanentNoveltyGuard:
             duplicate, _, _ = llm_proposer._is_duplicate_proposal(state, repo, proposal)
             assert duplicate is False
 
-    def test_new_file_duplicating_old_built_artifact_rejected(self, tmp_path):
+    def test_subject_duplicate_points_to_existing_script(self, tmp_path):
         repo = _init_instance_repo(
             tmp_path,
             subject="create firewall log analyzer summary script",
@@ -3372,11 +3370,9 @@ class TestPermanentNoveltyGuard:
         dup, _, _ = llm_proposer._is_duplicate_proposal(state, None, proposal)
         assert dup is False
 
-    def test_helpers_direct(self, tmp_path):
+    def test_target_path_helpers_direct(self, tmp_path):
         repo = _init_instance_repo(
             tmp_path, subject="build token usage reporter", script_rel="scripts/token_usage_reporter.py")
-        assert "token usage reporter" in llm_proposer._all_built_subjects(repo).lower()
-        assert llm_proposer._all_built_subjects(None) == ""
         assert llm_proposer._proposal_creates_new_file(repo, {"target_path": "scripts/new.py"}) is True
         assert llm_proposer._proposal_creates_new_file(repo, {"target_path": "scripts/token_usage_reporter.py"}) is False
         assert llm_proposer._proposal_creates_new_file(repo, {"target_path": ""}) is False
