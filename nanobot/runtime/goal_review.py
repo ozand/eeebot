@@ -389,6 +389,28 @@ def active_derived_priorities(state_dir: Path, raw_text: str) -> list[dict[str, 
         return []
 
 
+def _derived_priorities_as_text(state_dir: Path) -> str:
+    """Every currently-listed derived priority (``derived_priorities.json``,
+    open or completed alike — this is a dedup/numbering baseline, not a
+    reader's filtered view), rendered in the same ``"(<letter>) Priority N
+    — Label (VECTOR): Body"`` shape :func:`append_priorities` writes.
+
+    ADR-034 rule 4: a standalone text, on its own, never appended onto the
+    operator's — :func:`_existing_priority_labels`/:func:`_next_priority_number`
+    are called on this AND on the operator's raw text separately, and their
+    results unioned, rather than on one blob :func:`merged_goal_text` used
+    to build (#860/#1665's merge this migration replaces)."""
+    entries = read_derived_priorities(state_dir)
+    if not entries:
+        return ""
+    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    lines = [
+        f"({letters[i % 26]}) Priority {e['number']} — {e['label']} ({e['vector']}): {e['body']}"
+        for i, e in enumerate(entries)
+    ]
+    return _PRIORITY_MARKER + "\n" + "\n".join(lines)
+
+
 def merged_goal_text(state_dir: Path, raw_text: str) -> str:
     """``raw_text`` (the operator's goal_text) with every derived priority
     (#860) folded in via the SAME :func:`append_priorities` insertion/
@@ -576,12 +598,18 @@ def build_context(
     snapshot: dict[str, Any],
     evidence: dict[str, str],
     history: list[str],
+    derived_text: str = "",
 ) -> str:
-    """Bounded review context: goal vectors verbatim, scorecard digest, the
-    citable evidence lines (id-keyed), recent integration history."""
+    """Bounded review context: goal vectors verbatim, derived priorities
+    (own section, ADR-034 rule 4 — never folded into the goal text),
+    scorecard digest, the citable evidence lines (id-keyed), recent
+    integration history."""
     parts = [
         "## Goal vectors (verbatim)",
         goal_text.strip()[:_MAX_GOAL_CHARS] or "(no goal text)",
+        "",
+        "## Derived priorities (source: derived; already accepted by past reviews)",
+        derived_text.strip()[:_MAX_GOAL_CHARS] or "(none)",
         "",
         "## Scorecard snapshot (last 7 days)",
         _snapshot_digest(snapshot) or "(no scorecard snapshot)",
@@ -956,10 +984,14 @@ def maybe_goal_review(
             )
             return []
         goal_text = str(goal_data.get("text") or "")
-        # #860: dedup/context see goal_text + already-derived priorities
-        # merged in — a priority accepted yesterday (living only in
-        # derived_priorities.json now) must still block a re-mint today.
-        merged_text = merged_goal_text(state_dir, goal_text)
+        # ADR-034 rule 4: dedup/context/numbering see the operator's raw
+        # text AND the derived list's own entries, resolved SEPARATELY —
+        # never folded into one blob first (that was merged_goal_text,
+        # #860/#1665's merge this migration replaces). A priority accepted
+        # yesterday (living only in derived_priorities.json now) still
+        # blocks a re-mint today; it just does so via its own text rather
+        # than text appended onto the operator's.
+        derived_text = _derived_priorities_as_text(state_dir)
 
         snapshot_path = state_dir / "scorecard" / "latest.json"
         snapshot = _read_json(snapshot_path, None)
@@ -991,7 +1023,8 @@ def maybe_goal_review(
             return []
 
         context = build_context(
-            merged_text, snapshot, evidence, _integration_history(state_dir, now)
+            goal_text, snapshot, evidence, _integration_history(state_dir, now),
+            derived_text=derived_text,
         )
         inputs_hash = hashlib.sha256(context.encode("utf-8", errors="replace")).hexdigest()[:16]
 
@@ -1020,7 +1053,9 @@ def maybe_goal_review(
 
             candidates = sorted(candidates, key=_direction_rank)
 
-        existing_labels = _existing_priority_labels(merged_text)
+        # ADR-034 rule 4: dedup baseline unions labels from BOTH lists,
+        # each scanned on its own text — never one merged blob.
+        existing_labels = _existing_priority_labels(goal_text) | _existing_priority_labels(derived_text)
         _record_guard_key_event(
             state_dir, "baseline", "priority_labels", str(len(existing_labels)),
         )
@@ -1070,19 +1105,22 @@ def maybe_goal_review(
             )
             return []
 
-        # #860: numbering continues past merged_text's highest "Priority N"
-        # (same base append_priorities would use) and is ASSIGNED + STORED
-        # at accept time, so a derived priority's rendered title — and thus
-        # its demand item id — stays stable even when a deploy reseed later
-        # changes the operator's priority count (#860 review finding). The
-        # merged render is discarded — only the titles feed the ledger/
-        # return payload. goal_text.json is READ-ONLY here; the accepted
-        # entries land in derived_priorities.json, which deploy_release.sh
-        # never touches (the actual #860 fix).
-        base_number = _next_priority_number(merged_text)
+        # #860: numbering continues past the highest "Priority N" in EITHER
+        # list (ADR-034 rule 4: each checked on its own text, never a merged
+        # blob) and is ASSIGNED + STORED at accept time, so a derived
+        # priority's rendered title — and thus its demand item id — stays
+        # stable even when a deploy reseed later changes the operator's
+        # priority count (#860 review finding). append_priorities' own
+        # render is discarded — only the titles it derives from the
+        # already-assigned ``number`` feed the ledger/return payload, so
+        # which text it renders onto is immaterial here; goal_text.json is
+        # READ-ONLY in this function either way — the accepted entries land
+        # in derived_priorities.json, which deploy_release.sh never touches
+        # (the actual #860 fix).
+        base_number = max(_next_priority_number(goal_text), _next_priority_number(derived_text))
         for offset, cand in enumerate(accepted):
             cand["number"] = base_number + offset
-        _, titles = append_priorities(merged_text, accepted)
+        _, titles = append_priorities(goal_text, accepted)
         now_iso = _iso(now)
 
         def _derived_entry(cand: dict[str, Any]) -> dict[str, Any]:
