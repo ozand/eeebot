@@ -119,30 +119,26 @@ def ledger_rows(state_root: Path, horizon_days: int = _FUNNEL_HORIZON_DAYS) -> t
     return list(window.rows), meta
 
 def charter_input(state_root: Path) -> tuple[str, dict[str, Any]]:
-    """The operator charter: ``<RELEASE_ROOT>/goals.md`` (the path the proposer
-    reads, #944), falling back to ``state/goals/goal_text.json`` ``text``."""
-    from nanobot.runtime.goal_review import read_charter_text
+    """The operator charter: ``<RELEASE_ROOT>/goals.md`` — ADR-034 rule 2's
+    one root, via ``operator_documents.resolve_charter``. ``state_root`` is
+    kept for call-site compatibility but no longer consulted: the #944-era
+    fallback to ``state/goals/goal_text.json`` mislabeled the operator's
+    private priority text as the charter and is deleted, not kept."""
     from nanobot.runtime.llm_proposer import _release_root_from_env
+    from nanobot.runtime.operator_documents import STATE_TEXT, resolve_charter
 
-    text = read_charter_text(_release_root_from_env())
-    source = "release_root"
-    if not text:
-        legacy = load_json(Path(state_root) / "goals" / "goal_text.json", {})
-        text = str(legacy.get("text") or "") if isinstance(legacy, dict) else ""
-        source = "goal_text.json" if text else "none"
-    text = text[:_MAX_TEXT]
-    # Missing is a genuine empty only when the source is readable and blank;
-    # failed reads remain unavailable. The refusal decision is intentionally
-    # unchanged in should_refuse() (#1444).
+    res = resolve_charter(_release_root_from_env())
+    text = res.text[:_MAX_TEXT] if res.state == STATE_TEXT else ""
+    source = "release_root" if text else "none"
+    # Missing is a genuine empty only when no file was even there to read;
+    # a present-but-unreadable/blank/oversize file remains unavailable. The
+    # refusal decision is intentionally unchanged in should_refuse() (#1444).
     if text:
         status = "complete"
-    elif source == "none":
-        release_path = Path(_release_root_from_env()) / "goals.md"
-        legacy_path = Path(state_root) / "goals" / "goal_text.json"
-        attempted = release_path.exists() or legacy_path.exists()
-        status = "unavailable" if attempted else "empty"
-    else:
+    elif res.reason == "no_file":
         status = "empty"
+    else:
+        status = "unavailable"
     return text, {"chars": len(text), "source": source, "status": status}
 
 def _history_rows(path: Path) -> list[dict[str, Any]]:

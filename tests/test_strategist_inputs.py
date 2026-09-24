@@ -116,13 +116,19 @@ def test_charter_is_read_from_release_root_not_instance_repo(roots):
     assert inputs["inputs_status"]["goals"] == {"chars": len(inputs["goals"]), "source": "release_root", "status": "complete"}
 
 
-def test_charter_falls_back_to_goal_text_json(roots):
+def test_charter_never_falls_back_to_goal_text_json(roots):
+    """ADR-034 rule 2: the operator's private priority text
+    (``goal_text.json``) is NEVER substituted as the charter — the
+    #944-era fallback this test used to cover is deleted, not kept. With
+    no ``goals.md`` under ``RELEASE_ROOT``, the charter is genuinely
+    empty (no file was ever there), never the operator's priorities."""
     state_root, repo_root, _ = roots
     (state_root / "goals").mkdir()
     (state_root / "goals" / "goal_text.json").write_text(json.dumps({"text": "fallback charter"}), encoding="utf-8")
     inputs = collect_inputs(state_root, repo_root)
-    assert inputs["goals"] == "fallback charter"
-    assert inputs["inputs_status"]["goals"]["source"] == "goal_text.json"
+    assert inputs["goals"] == ""
+    assert inputs["inputs_status"]["goals"]["source"] == "none"
+    assert inputs["inputs_status"]["goals"]["status"] == "empty"
 
 
 def test_insights_input_reads_the_real_origin_main_corpus(roots):

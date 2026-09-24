@@ -16,6 +16,7 @@ from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 from nanobot.runtime import day_clock
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
+from nanobot.runtime.operator_documents import STATE_TEXT, resolve_charter
 from nanobot.runtime.scorecard import SCORECARD_SCHEMA
 from nanobot.utils.helpers import (
     build_assistant_message,
@@ -373,6 +374,15 @@ Skills with available="false" need dependencies installed first - you can try in
                 effective_cap = cap
             if root is None:
                 text, meta = f"[missing: {filename}]", {"missing": True, "truncated": False}
+            elif root_kind == "release" and filename == "goals.md":
+                # ADR-034 rule 2: the charter's one root is
+                # ``<release root>/goals.md``, obtained via
+                # ``operator_documents.resolve_charter`` — never a second,
+                # hand-built path to it. Same (text, meta) contract as
+                # ``load_block`` (heading, pooled cap, line-boundary
+                # truncation with a notice), so the pool accounting below
+                # is unaffected.
+                text, meta = self._load_charter_block(root, effective_cap)
             else:
                 text, meta = self.load_block(filename, Path(root) / filename, effective_cap, required)
             if root_kind == "release":
@@ -386,6 +396,30 @@ Skills with available="false" need dependencies installed first - you can try in
         self._release_pool_usage = pool_usage
         self._release_pool_left = pool_left
         return sections, missing, truncated
+
+    @staticmethod
+    def _load_charter_block(root: "Path | None", cap: int) -> tuple[str, dict[str, Any]]:
+        """ADR-034 rule 2: same ``(text, meta)`` contract as
+        :func:`nanobot.agent.block_loader.load_block` for ``goals.md``, but
+        obtained via :func:`operator_documents.resolve_charter` instead of
+        a second, hand-built path to the release charter."""
+        name = "goals.md"
+        if root is None:
+            marker = f"[missing: {name}]"
+            return marker, {"missing": True, "truncated": False}
+        res = resolve_charter(root)
+        if res.state != STATE_TEXT:
+            marker = f"[missing: {name}]"
+            return marker, {"missing": True, "truncated": False}
+        heading = f"## {name}\n\n"
+        text = heading + res.text
+        if len(text) <= cap:
+            return text, {"missing": False, "truncated": False}
+        notice = f"\n\n[{name} truncated at {cap} chars; read the file for the rest]"
+        budget = max(0, cap - len(heading) - len(notice))
+        trimmed_body = trim_lines(res.text, budget)
+        text = heading + trimmed_body + notice
+        return text, {"missing": False, "truncated": True}
 
     @staticmethod
     def _scorecard_number(section: Any, key: str) -> "int | float | None":

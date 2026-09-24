@@ -1097,19 +1097,21 @@ def load_runtime_state_from_root(state_root: Path, source_kind: str = "workspace
     latest_promotion = _latest_json_file(promotions_dir, "latest.json") or _latest_json_file(promotions_dir, "*.json")
     latest_subagent = _latest_json_file(subagents_dir, "*.json")
 
-    goal_text_data = _safe_read_json(goal_text_path)
     promotion_data = _safe_read_json(latest_promotion)
     subagent_data = _safe_read_json(latest_subagent)
 
-    # The operator canon is the only goal source (goal_review.active_goal_id
-    # reads the same file for the bridge and the proposer).
-    active_goal = None
-    goal_text = None
-    if isinstance(goal_text_data, dict):
-        goal_id = goal_text_data.get("goal_id")
-        active_goal = goal_id.strip() if isinstance(goal_id, str) and goal_id.strip() else None
-        text = goal_text_data.get("text")
-        goal_text = text if isinstance(text, str) and text.strip() else None
+    # ADR-034 rule 2/3: the operator canon is the only goal source, read
+    # ONLY through its resolvers — never a direct read of goal_text.json
+    # here. ``goal_text`` is availability only (one of the four rule-3
+    # states), never the document's text: a status surface shows
+    # "unavailable", never the private priority wording.
+    from nanobot.runtime.operator_documents import (
+        operator_priorities_status,
+        resolve_operator_priorities_metadata,
+    )
+
+    active_goal = resolve_operator_priorities_metadata(state_root).goal_id or None
+    goal_text = operator_priorities_status(state_root).state
 
     # The bounded-apply gate is the operator's approvals/apply.ok (the same
     # file bridge.approval_open() consults); the coordinator used to copy its
@@ -1452,7 +1454,7 @@ def format_runtime_state(runtime: dict[str, Any]) -> list[str]:
     _render("Runtime state source", runtime.get("runtime_state_source"))
     _render("Runtime state root", runtime.get("runtime_state_root"))
     _render("Active goal", runtime.get("active_goal"))
-    _render("Goal text", runtime.get("goal_text"))
+    _render("Goal text status", runtime.get("goal_text"))
     _render("Goal source", runtime.get("goal_path"))
     _render("Approval gate (apply.ok)", runtime.get("approval_gate_state"))
     _render("Subagent telemetry root", runtime.get("subagent_telemetry_root"))
