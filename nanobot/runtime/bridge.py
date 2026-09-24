@@ -3630,29 +3630,20 @@ async def _main_impl_body():
         # migration, not a rule-5 rollout: when the charter is present, the
         # mission is charter-only, exactly as it already was — folding the
         # operator's own priority section in under its own heading (rule 5)
-        # is ADR-034 A4's job, on top of A3's source-tagged split. When the
-        # charter is absent, the operator's document stands alone (via
-        # resolve_operator_priorities_text, never a second path to it) or
-        # falls back to the goal id — the SAME branch this always had,
-        # except the deleted legacy chain here used to also try
-        # RELEASE_ROOT/host/eeepc/etc/goal_text.json first (a path that
-        # exists on no host, #1699 census). Derived priorities
-        # (derived_priorities.json) are always folded in next, by
-        # merged_goal_text.
+        # is ADR-034 A4's job, on top of A3's source-tagged split. ADR-034
+        # rule 3: the top-of-run charter gate above already stopped this
+        # cycle if the charter were absent, so there is no operator-
+        # priorities/goal-id fallback to fall back to here any more — the
+        # #944-era legacy chain this replaced (which also tried
+        # RELEASE_ROOT/host/eeepc/etc/goal_text.json first, a path that
+        # exists on no host, #1699 census) is gone along with it. Derived
+        # priorities (derived_priorities.json) are always folded in next,
+        # by merged_goal_text.
         try:
-            from nanobot.runtime.goal_review import merged_goal_text
             _charter = read_charter_text(RELEASE_ROOT)
         except Exception:
             _charter = ''
-        if _charter:
-            _base_goal_text = _charter
-        else:
-            from nanobot.runtime.operator_documents import STATE_TEXT as _OD_STATE_TEXT
-            from nanobot.runtime.operator_documents import resolve_operator_priorities_text as _resolve_priorities_text
-
-            _priorities_res = _resolve_priorities_text(STATE_DIR)
-            _priorities_text = _priorities_res.text if _priorities_res.state == _OD_STATE_TEXT else ''
-            _base_goal_text = _priorities_text or goal_id
+        _base_goal_text = _charter
         try:
             from nanobot.runtime.goal_review import merged_goal_text
             goal_text = merged_goal_text(STATE_DIR, _base_goal_text)
