@@ -17,6 +17,11 @@ ALLOW = {
     "scripts/eeebot_dashboard.py",
     "scripts/loop_metrics_report.py",
     "scripts/migrate_backlog_title.py",
+    # #1903: offline ADR-031 rule-7 measurement instrument, read-only,
+    # outside the bridge cycle path -- reads raw ledger/llm_calls files
+    # directly (not state_access) so its own verified reproduction of the
+    # recorded baselines (see PR #1928 / the #1903 comment) stays exact.
+    "scripts/measure_package_1903.py",
     "nanobot/runtime/action_index.py",
     "nanobot/runtime/bridge.py",
     "nanobot/runtime/existence_index.py",
