@@ -32,6 +32,13 @@ budget used at median: 12%
 ticks unused that day: 1,692
 ```
 
+> **Measurement correction (#1903; see also ADR-030's addendum on statistical power).**
+> The 24-cycle sample was incomplete: the standard median for its 24 executor-call
+> counts is 9.5, not 9 (9 is the lower of the two middle values); mean 13.8 and
+> maximum 45 are correct. Across all 42 cycles in the full day, the median is 8.5.
+> These small samples are preliminary by construction, not conclusive evidence of
+> a change; see #1903 and ADR-030's power-limit addendum.
+
 **No cycle has ever reached 80.** The largest was 45. Half the day's cycles
 finished in nine iterations or fewer.
 
