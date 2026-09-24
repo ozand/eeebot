@@ -3876,6 +3876,25 @@ class TestPublishDerivedView:
         assert result["ok"] is True
         assert view["charter"] == {"source": "none", "merged": False, "text": ""}
         assert view["priority_items"] == []
+        # ADR-034 rule 3: no real RELEASE_ROOT/goals.md here (same as the
+        # charter itself, above) — the artifact-gap reader's own status is
+        # "unavailable", never confused with its healthy "no gap named" empty.
+        assert view["artifact_gap_status"] == demand.ARTIFACT_GAP_STATUS_UNAVAILABLE
+
+    def test_artifact_gap_status_ok_when_charter_present(self, tmp_path, monkeypatch):
+        """A present, readable charter is a healthy artifact-gap reader,
+        regardless of whether it happens to name an owner-facing surface —
+        distinct from the charter-unavailable case above."""
+        state_dir = _state_dir(tmp_path)
+        release_root = tmp_path / "_release_root"
+        release_root.mkdir()
+        (release_root / "goals.md").write_text(self.CHARTER, encoding="utf-8")
+        monkeypatch.setenv("RELEASE_ROOT", str(release_root))
+
+        view = demand.build_derived_view(state_dir, None)
+
+        assert view["artifact_gap_status"] == demand.ARTIFACT_GAP_STATUS_OK
+        assert demand._artifact_gap_items(state_dir, None) == []
 
     def test_write_failure_never_raises_keeps_previous_file_and_records_ledger_event(self, tmp_path, monkeypatch):
         state_dir = _state_dir(tmp_path)

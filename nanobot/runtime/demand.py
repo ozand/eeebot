@@ -950,6 +950,13 @@ def build_derived_view(
             "derived_priorities_json": derived_res.mtime_utc,
         },
         "sort": "provenance(operator<self-derived), then vector(V1<V2), as demand._priority_items",
+        # ADR-034 rule 3: _artifact_gap_items silently emits [] whenever the
+        # charter is unavailable — structurally identical to its healthy
+        # "goals.md doesn't name a surface" empty result. artifact_gap_status
+        # is the separate accessor a consumer checks to tell those apart
+        # (mirroring operator_priorities_status for the priority-* kind);
+        # it was never actually wired into a consumer before this field.
+        "artifact_gap_status": artifact_gap_status(),
     }
 
 
