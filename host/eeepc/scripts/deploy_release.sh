@@ -251,7 +251,7 @@ else
     fi
   }
   trap cleanup_activation_dropin ERR
-  printf '%s\\n' '[Service]' \
+  printf '%s\n' '[Service]' \
     "Environment=ACTIVATION_CHECK_RELEASE=$RELEASE_DIR" \
     'Environment=ACTIVATION_CHECK_MODE=activation' \
     | sudo tee "$ACTIVATION_DROPIN" >/dev/null
