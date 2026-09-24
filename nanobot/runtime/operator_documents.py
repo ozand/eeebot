@@ -222,6 +222,57 @@ def resolve_derived_priorities(state_dir: "Path | str") -> DerivedPrioritiesReso
     return DerivedPrioritiesResolution(state=STATE_TEXT, entries=tuple(entries), mtime_utc=mtime)
 
 
+def resolve_derived_priorities_split(
+    state_dir: "Path | str",
+    *,
+    selfevo_repo_root: "Path | str | None" = None,
+) -> "tuple[tuple[PriorityEntry, ...], tuple[PriorityEntry, ...]]":
+    """ADR-034 rule 4: the derived-priorities list's OWN open/completed
+    split — never inferred from the operator's merged text, and never
+    losing ``source="derived"`` to do it. Returns ``(open, completed)``.
+
+    Completion is judged by rendering the resolved entries into the same
+    ``"(<letter>) Priority N — Title: instructions"`` shape the operator
+    document uses, then running the SAME done-detection
+    (:func:`goal_text_utils.filter_completed_priorities_from_goal_text` —
+    completed-demand sidecar first, then git-log heuristics) independently
+    against that synthetic text. The rendering is discarded immediately;
+    only which numbers survived filtering is kept, so the returned entries
+    are the original, fully-populated ``PriorityEntry`` objects (vector/
+    added_utc/direction intact) — never reconstructed from the synthetic
+    text. Fail-open: any error returns ``(all entries, ())`` — i.e. every
+    derived priority stays open, matching this module's fail-open bias
+    toward not silently hiding outstanding work."""
+    res = resolve_derived_priorities(state_dir)
+    if res.state != STATE_TEXT or not res.entries:
+        return (), ()
+    try:
+        from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goal_text
+
+        letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        rendered = "\n".join(
+            f"({letters[i % 26]}) Priority {e.number} — {e.title}: {e.instructions}"
+            for i, e in enumerate(res.entries)
+        )
+        text = _PRIORITY_TARGETS_MARKER + "\n" + rendered
+        repo_root = Path(selfevo_repo_root) if selfevo_repo_root is not None else None
+        filtered = filter_completed_priorities_from_goal_text(
+            text, repo_root, state_dir=Path(state_dir)
+        )
+        filtered_idx = filtered.find(_PRIORITY_TARGETS_MARKER)
+        filtered_section = (
+            filtered[filtered_idx + len(_PRIORITY_TARGETS_MARKER):] if filtered_idx != -1 else ""
+        )
+        open_numbers = {
+            int(m.group(1)) for m in _PRIORITY_ENTRY_PATTERN.finditer(filtered_section)
+        }
+        open_entries = tuple(e for e in res.entries if e.number in open_numbers)
+        completed_entries = tuple(e for e in res.entries if e.number not in open_numbers)
+        return open_entries, completed_entries
+    except Exception:
+        return res.entries, ()
+
+
 def resolve_operator_priorities(
     state_dir: "Path | str",
     *,
