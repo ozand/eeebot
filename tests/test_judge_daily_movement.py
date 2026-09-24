@@ -134,11 +134,11 @@ def test_run_judge_reads_killed_runs_through_state_access(tmp_path: Path, monkey
     bridge_dir.mkdir(parents=True)
     ledger_dir.mkdir()
     (ledger_dir / "cycles.jsonl").write_text(
-        json.dumps({"phase": "outcome", "outcome": "success", "files_changed": ["scripts/x.py"], "ts": "2026-09-21T02:00:00Z"}) + "\\n",
+        json.dumps({"phase": "outcome", "outcome": "success", "files_changed": ["scripts/x.py"], "ts": "2026-09-21T02:00:00Z"}) + "\n",
         encoding="utf-8",
     )
     (bridge_dir / "runs.jsonl").write_text(
-        json.dumps({"phase": "run_end", "classification": "unit_timeout", "source": "systemd", "finished_at": "2026-09-21T02:30:00Z"}) + "\\n",
+        json.dumps({"phase": "run_end", "classification": "unit_timeout", "source": "systemd", "finished_at": "2026-09-21T02:30:00Z"}) + "\n",
         encoding="utf-8",
     )
     verdict = run_judge(state_dir, now=datetime(2026, 9, 21, 3, 0, tzinfo=timezone.utc))
