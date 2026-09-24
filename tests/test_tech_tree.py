@@ -995,6 +995,10 @@ class TestGoalReviewWiring:
         monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [ALIGNED_PRIORITY]})
 
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        assert titles == ["Priority 6 — Cut proposer repeat failure rate"]
+        # ADR-034 rule 3: goal review's numbering baseline is charter +
+        # derived only (the operator's own priority list is a separate
+        # document, not folded in by A2) — this test's synthetic charter
+        # has no "Priority N" of its own, so numbering starts fresh.
+        assert titles == ["Priority 1 — Cut proposer repeat failure rate"]
         derived = goal_review.read_derived_priorities(state_dir)
         assert "direction" not in derived[0]

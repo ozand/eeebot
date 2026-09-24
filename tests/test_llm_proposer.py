@@ -26,16 +26,28 @@ DEMAND_ENV = demand.ENABLED_ENV
 
 
 @pytest.fixture(autouse=True)
-def _pre_760_mode(monkeypatch):
+def _pre_760_mode(tmp_path, monkeypatch):
     """#760: the tests in this module (written for #707-#762) pin the exact
     pre-#760 supply-driven behavior, which now lives behind
     ``SELFEVO_DEMAND_DRIVEN_ENABLED=0`` — the kill-switch-OFF contract this
     fixture is the regression suite for. Demand-driven-mode tests (see
     ``TestDemandDrivenMode`` below and ``tests/test_demand.py``) re-enable
     the switch inside their own bodies. Also resets the once-per-process
-    idle-heartbeat marker so tests are order-independent."""
+    idle-heartbeat marker so tests are order-independent.
+
+    ADR-034 rule 3: ``should_propose`` now hard-gates on the release
+    charter's presence (both demand-driven and supply-driven), matching
+    real production (a deployed release always has ``goals.md`` — #1938
+    census). Most of this file's tests predate that and call
+    ``should_propose``/``build_context`` with no real release root, so
+    give them a synthetic one; a test that specifically exercises the
+    charter-absent path points ``RELEASE_ROOT`` elsewhere itself."""
     monkeypatch.setenv(DEMAND_ENV, "0")
     monkeypatch.setattr(llm_proposer, "_idle_recorded_this_process", False)
+    release_root = tmp_path / "_release_root"
+    release_root.mkdir(exist_ok=True)
+    (release_root / "goals.md").write_text("test charter", encoding="utf-8")
+    monkeypatch.setenv("RELEASE_ROOT", str(release_root))
 
 
 def _state_dir(tmp_path: Path) -> Path:
@@ -48,6 +60,16 @@ def _write_goal_text(state_dir: Path, text: str) -> None:
     (state_dir / "goals" / "goal_text.json").write_text(
         json.dumps({"text": text}), encoding="utf-8"
     )
+
+
+def _write_charter(tmp_path: Path, text: str) -> None:
+    """ADR-034 rule 2: ``_load_goal_text`` is charter-only (A2 is a
+    mechanical resolver migration, not the rule-5 rollout that would fold
+    the operator's own priorities in — that is A4's job). A test that needs
+    ``build_context``/``should_propose`` to see "Current priority targets"
+    text writes it into the synthetic charter the ``_pre_760_mode``
+    fixture already points ``RELEASE_ROOT`` at, not into ``goal_text.json``."""
+    (tmp_path / "_release_root" / "goals.md").write_text(text, encoding="utf-8")
 
 
 def _append_proposed(state_dir: Path, cycle_id: str, task_title: str) -> None:
@@ -187,7 +209,7 @@ class TestShouldPropose:
         request is still queued, so the queue is NOT empty — falls through
         to the unchanged priorities/dup-streak fallback clauses, both False."""
         state_dir = _state_dir(tmp_path)
-        _write_goal_text(state_dir, GOAL_TEXT_JSON and json.loads(GOAL_TEXT_JSON)["text"])
+        _write_charter(tmp_path, json.loads(GOAL_TEXT_JSON)["text"])
         req_dir = state_dir / "subagents" / "requests"
         req_dir.mkdir(parents=True)
         (req_dir / "request-planner.json").write_text(
@@ -224,7 +246,7 @@ class TestShouldPropose:
         make this True regardless of the dup-streak state, defeating the
         point of this test (isolating the dup-streak fallback clause)."""
         state_dir = _state_dir(tmp_path)
-        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        _write_charter(tmp_path, json.loads(GOAL_TEXT_JSON)["text"])
         req_dir = state_dir / "subagents" / "requests"
         req_dir.mkdir(parents=True)
         (req_dir / "request-planner.json").write_text(
@@ -411,9 +433,13 @@ def test_digest_ledger_bounds_joined_title_line():
 
 class TestBuildContext:
     def test_bounded_and_includes_goal_and_digest(self, tmp_path):
+        """ADR-034 rule 2: build_context's goal text is charter-only (A2 is
+        a mechanical resolver migration, not A4's rule-5 rollout that would
+        fold the operator's own priorities in) — the "Priority 5" content
+        lives in the synthetic charter, not goal_text.json."""
         state_dir = _state_dir(tmp_path)
         goal_text = json.loads(GOAL_TEXT_JSON)["text"]
-        _write_goal_text(state_dir, goal_text)
+        _write_charter(tmp_path, goal_text)
         _append_outcome(state_dir, "c1", "success")
         _append_outcome(state_dir, "c2", "skipped-duplicate")
 

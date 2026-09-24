@@ -93,7 +93,6 @@ from nanobot.runtime.operator_documents import (
     STATE_TEXT,
     resolve_charter,
     resolve_operator_priorities_metadata,
-    resolve_operator_priorities_text,
 )
 from nanobot.runtime.role_prompt import load_role_text
 
@@ -278,45 +277,26 @@ def active_goal_id(state_dir: "Path | str") -> str:
 def _load_goal_data(
     state_dir: Path, release_root: "Path | None" = None
 ) -> "dict[str, Any] | None":
-    """Charter + the operator's own priority section, for the goal-review
-    context and its dedup/numbering baseline.
+    """Charter text for the goal review context.
 
     #944: when ``release_root`` is given and ``goals.md`` exists there,
     the immutable charter is read from that file (release-tree read-only
     path). Derived priorities are folded in separately by
     :func:`merged_goal_text` in :func:`maybe_goal_review`.
 
-    ADR-034 rule 2: the operator's priority text (``goal_text.json``) is
-    NEVER used as a charter SUBSTITUTE — that #944-era fallback mislabeled
-    the operator's private priorities as the charter and is deleted, not
-    kept. It is, however, still APPENDED alongside the charter (via
-    :func:`operator_documents.resolve_operator_priorities_text`, never a
-    second path to the file): goal-review's dedup/numbering
-    (``_existing_priority_labels``, ``_next_priority_number``) and its LLM
-    context have always needed to see the operator's existing "Priority N"
-    entries to avoid minting a derived priority that duplicates one, or
-    reusing its number (true since before #944's charter split; lost as a
-    side effect of #1920/#1921 wiring a real ``release_root`` through
-    today, restored here). Returns ``None`` when the charter is
-    absent/unreadable — the review must no-op BEFORE any LLM call; a
-    missing/unreadable operator priority section just means nothing to
-    append (an empty document is a valid, priority-free one).
+    ADR-034 rule 2/3: charter + derived, exactly as before this migration
+    (rule 3's own table: "review runs on charter + derived" when operator
+    priorities are absent/unreadable — goal review's inputs were never
+    supposed to include them). The operator's priority text
+    (``goal_text.json``) is NEVER used as a charter SUBSTITUTE either — the
+    #944-era fallback that mislabeled it as the charter is deleted, not
+    kept. Returns ``None`` when the charter is absent/unreadable — the
+    review must no-op BEFORE any LLM call.
     """
     charter = read_charter_text(release_root)
     if not charter:
         return None
-    priorities_res = resolve_operator_priorities_text(state_dir)
-    priorities_text = priorities_res.text if priorities_res.state == STATE_TEXT else ""
-    marker_idx = priorities_text.find(_PRIORITY_MARKER)
-    # Only the operator's OWN "Current priority targets:" section (and any
-    # trailing "Completed" sentence) is folded in — never prose that
-    # precedes it, so an operator document with no such section (or none
-    # at all) contributes nothing here, exactly like the "empty" rule-3
-    # state contributes nothing to the priority list.
-    priority_section = priorities_text[marker_idx:].strip() if marker_idx != -1 else ""
-    if not priority_section:
-        return {"text": charter}
-    return {"text": f"{charter.rstrip()}\n\n{priority_section}"}
+    return {"text": charter}
 
 
 def _derived_priorities_path(state_dir: Path) -> Path:
