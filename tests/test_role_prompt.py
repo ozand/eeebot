@@ -22,6 +22,7 @@ import pytest
 from nanobot.runtime import role_prompt
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
 from nanobot.runtime.role_prompt import (
+    CHARTER_MAX_CHARS,
     IDENTITY_SHORT_CAP,
     ROLE_FLAGS,
     ROLE_NAMES,
@@ -119,7 +120,11 @@ class TestCharterIntegrity:
                 "roles__planner.md": "---\nrole: planner\n---\n# Role: planner\n\nPlan.\n",
             },
         )
-        expected = "## goals.md\n\n" + charter
+        from nanobot.runtime.operator_documents import resolve_charter
+        resolved = resolve_charter(root)
+        assert resolved.state == "text"
+        assert resolved.text == charter
+        expected = "## goals.md\n\n" + resolved.text
         for role in ("proposer", "planner"):
             prompt, fit = build_role_system_prompt(role, release_root=root)
             assert expected in prompt
@@ -138,7 +143,7 @@ Test identity.\
 \
 Test soul.\
 ",
-                "goals.md": "X" * (role_prompt.CHARTER_MAX_CHARS + 1),
+                "goals.md": "X" * (CHARTER_MAX_CHARS + 1),
                 "roles__proposer.md": "---\
 role: proposer\
 ---\

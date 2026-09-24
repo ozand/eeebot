@@ -17,6 +17,7 @@ from pathlib import Path
 
 from nanobot.runtime import demand, goal_review, llm_proposer, strategist_inputs
 from nanobot.runtime.operator_documents import (
+    CHARTER_MAX_CHARS,
     DOCUMENT_SIZE_CAP_BYTES,
     PRIORITY_ALL_COMPLETED,
     PRIORITY_EMPTY,
@@ -249,11 +250,17 @@ def test_boundary_documents_leak_no_text(tmp_path: Path):
     assert sensitive not in repr(charter_present)
     assert sensitive not in str(charter_present)
 
+    near_limit_root = tmp_path / "release-near-limit"
+    near_limit_root.mkdir()
+    near_limit = "c" * 3900
+    (near_limit_root / "goals.md").write_text(near_limit, encoding="utf-8")
+    near_limit_result = resolve_charter(near_limit_root)
+    assert near_limit_result.state == STATE_TEXT
+    assert near_limit_result.text == near_limit
+
     oversize_release_root = tmp_path / "release-oversize"
     oversize_release_root.mkdir()
-    (oversize_release_root / "goals.md").write_text(
-        sensitive + ("x" * (DOCUMENT_SIZE_CAP_BYTES + 1)), encoding="utf-8"
-    )
+    (oversize_release_root / "goals.md").write_text("x" * (CHARTER_MAX_CHARS + 1), encoding="utf-8")
     charter_oversize = resolve_charter(oversize_release_root)
     assert charter_oversize.state == STATE_UNREADABLE
     assert charter_oversize.reason == "oversize"

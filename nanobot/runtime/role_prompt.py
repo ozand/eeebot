@@ -30,7 +30,7 @@ from typing import Any
 
 from nanobot.agent.block_loader import load_block, trim_lines
 from nanobot.observability.llm_telemetry import system_chars as _system_chars
-from nanobot.runtime.operator_documents import STATE_TEXT, resolve_charter
+from nanobot.runtime.operator_documents import CHARTER_MAX_CHARS, STATE_TEXT, resolve_charter
 
 
 class CharterTooLargeError(ValueError):
@@ -76,7 +76,6 @@ ROLES_DIRNAME = "roles"
 IDENTITY_SHORT_CAP = 300
 IDENTITY_FULL_CAP = 1500
 SOUL_CAP = 1800
-CHARTER_MAX_CHARS = 8000
 #: A role file with no ``budget_chars`` front-matter key gets this cap.
 DEFAULT_ROLE_BUDGET = 2600
 SECTION_SEPARATOR = "\n\n---\n\n"
@@ -330,13 +329,17 @@ def _load_charter_block(root: Path | None, *, role: str) -> tuple[str, dict[str,
         raise RolePromptBuildError(f"role prompt refused for {role}: goals.md is unavailable")
     res = resolve_charter(root)
     if res.state != STATE_TEXT:
+        if res.reason == "oversize":
+            raise CharterTooLargeError(
+                role, CHARTER_MAX_CHARS + 1, CHARTER_MAX_CHARS
+            )
         raise RolePromptBuildError(
-            f"role prompt refused for {role}: goals.md is {res.state}"
+            f"role prompt refused for {role}: goals.md is {res.state} ({res.reason})"
         )
     heading = f"## {name}\n\n"
     text = heading + res.text.strip()
-    if len(text) > CHARTER_MAX_CHARS:
-        raise CharterTooLargeError(role, len(text), CHARTER_MAX_CHARS)
+    if len(res.text.strip()) > CHARTER_MAX_CHARS:
+        raise CharterTooLargeError(role, len(res.text.strip()), CHARTER_MAX_CHARS)
     return text, {"missing": False, "truncated": False, "chars": len(text)}
 
 
