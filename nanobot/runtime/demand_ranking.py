@@ -40,14 +40,18 @@ distinguishable in the data rather than merging into one number.
 """
 from __future__ import annotations
 
+import json
+import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-import math
 from pathlib import Path
 from typing import Any
 
 from nanobot.runtime import day_clock
 from nanobot.runtime.artifact_graph import ArtifactGraph
+
+logger = logging.getLogger(__name__)
 
 #: ADR-027 decision 1's ordinal value tiers, highest first. A candidate's
 #: value category is always exactly one of these -- never a blended or
@@ -107,7 +111,7 @@ def classify_value(
     if candidate.get("moves_deliverable"):
         return "moves_deliverable", _VALUE_SCORE["moves_deliverable"]
 
-    target_path = str(candidate.get("target_path") or "").strip()
+    target_path = str(candidate.get("target_path") or candidate.get("affected_path") or "").strip()
     if not target_path:
         return "unknown", _VALUE_SCORE["unknown"]
 
@@ -194,7 +198,19 @@ def _shape_of(candidate: dict[str, Any]) -> str:
     finer-grained taxonomy this module would then own alone."""
     shape = str(candidate.get("change_shape") or "").strip().lower() if isinstance(candidate, dict) else ""
     accepted = {"feature", "maintenance", "documentation", "testing", "performance", "knowledge"}
-    return shape if shape in accepted else "unclassified"
+    if shape in accepted:
+        return shape
+    if isinstance(candidate, dict):
+        subject = str(candidate.get("task_title") or candidate.get("summary") or "").strip()
+        if subject:
+            try:
+                from scripts.change_shape import classify_subject
+                classified = classify_subject(subject)
+                if classified in accepted:
+                    return classified
+            except Exception:
+                pass
+    return "unclassified"
 
 
 def shape_cost(
@@ -391,3 +407,139 @@ def record_score(scored: ScoredCandidate) -> dict[str, Any]:
         "increment_fit": scored.increment_fit,
         "total": scored.total,
     }
+
+
+# ─── #1914: Shadow Ranking Telemetry ────────────────────────────────────────
+
+SHADOW_SUBPATH = ("ranking_shadow", "choices.jsonl")
+_MAX_SHADOW_ROWS = 5000
+_MAX_SHADOW_FILE_BYTES = 10 * 1024 * 1024  # 10 MiB safety cap
+
+
+def shadow_choices_path(state_dir: Path) -> Path:
+    return Path(state_dir).joinpath(*SHADOW_SUBPATH)
+
+
+def append_shadow_choice(state_dir: Path, record: dict[str, Any]) -> bool:
+    """Append one shadow choice row to state_dir/ranking_shadow/choices.jsonl (#1914).
+    Fail-open: never raises, returns True on write, False on any error.
+    """
+    try:
+        path = shadow_choices_path(state_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        encoded = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+        with path.open("ab") as fh:
+            fh.write(encoded)
+        return True
+    except Exception as exc:
+        logger.warning("ranking_shadow: failed to append choice: %s", exc)
+        return False
+
+
+def read_shadow_choices(state_dir: Path, *, limit: int | None = None) -> list[dict[str, Any]]:
+    """Read recorded shadow choice records, oldest first.
+    Fail-open: returns empty list on any error.
+    """
+    path = shadow_choices_path(state_dir)
+    try:
+        if not path.is_file():
+            return []
+        rows: list[dict[str, Any]] = []
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        parsed = json.loads(line)
+                        if isinstance(parsed, dict):
+                            rows.append(parsed)
+                    except Exception:
+                        continue
+        if limit is not None and limit > 0:
+            return rows[-limit:]
+        return rows
+    except Exception:
+        return []
+
+
+def record_shadow_choice(
+    state_dir: Path,
+    *,
+    candidates: list[dict[str, Any]],
+    rotation_choice: dict[str, Any],
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Record shadow ranking choice alongside rotation choice (#1914).
+
+    Scores all ``candidates`` using :func:`rank_candidates` without altering
+    the rotation's selection. Appends a record to
+    ``<state_dir>/ranking_shadow/choices.jsonl``.
+
+    Fail-open: never raises; any error returns None.
+    """
+    try:
+        if not candidates or not rotation_choice:
+            return None
+
+        state_dir = Path(state_dir)
+        ts = now or datetime.now(timezone.utc)
+
+        try:
+            from nanobot.runtime import artifact_graph
+            graph = artifact_graph.read_latest_artifact_graph(state_dir)
+            if graph.status != "complete":
+                graph = None
+        except Exception:
+            graph = None
+
+        ranked = rank_candidates(candidates, graph=graph, state_dir=state_dir, now=ts)
+        winner = ranked[0] if ranked else None
+
+        rotation_id = str(rotation_choice.get("id") or "")
+        ranking_id = str(winner.candidate.get("id") or "") if winner else ""
+
+        candidate_snapshots = []
+        for scored in ranked:
+            c = scored.candidate
+            candidate_snapshots.append({
+                "id": str(c.get("id") or ""),
+                "kind": str(c.get("kind") or ""),
+                "summary": str(c.get("summary") or "")[:200],
+                "ranking_score": scored.total,
+                "score_components": record_score(scored),
+                "size_term_components": {
+                    "shape": scored.size.shape,
+                    "cost": scored.size.cost,
+                    "estimated": scored.size.estimated,
+                    "self_reported_size": c.get("estimated_size") if isinstance(c, dict) else None,
+                    "estimated_lines": (c.get("estimated_lines") or c.get("lines")) if isinstance(c, dict) else None,
+                },
+            })
+
+        record: dict[str, Any] = {
+            "ts": ts.isoformat().replace("+00:00", "Z"),
+            "rotation_choice": rotation_id,
+            "ranking_choice": ranking_id,
+            "coincide": bool(rotation_id and ranking_id and rotation_id == ranking_id),
+            "rotation_item": {
+                "id": rotation_id,
+                "kind": str(rotation_choice.get("kind") or ""),
+                "summary": str(rotation_choice.get("summary") or "")[:200],
+                "vector": str(rotation_choice.get("vector") or ""),
+                "provenance": str(rotation_choice.get("provenance") or ""),
+            },
+            "ranking_item": {
+                "id": ranking_id,
+                "kind": str(winner.candidate.get("kind") or ""),
+                "summary": str(winner.candidate.get("summary") or "")[:200],
+                "vector": str(winner.candidate.get("vector") or ""),
+                "provenance": str(winner.candidate.get("provenance") or ""),
+            } if winner else None,
+            "candidates": candidate_snapshots,
+        }
+
+        append_shadow_choice(state_dir, record)
+        return record
+    except Exception as exc:
+        logger.warning("ranking_shadow: failed to record shadow choice: %s", exc)
+        return None

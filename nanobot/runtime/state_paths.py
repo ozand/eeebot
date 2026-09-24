@@ -115,6 +115,10 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
     # goals/goal_text.json (0600) directly. No in-repo reader — the reader is
     # ozand/eeebot-ops-dashboard (#271).
     "public": ("nanobot.runtime.demand:publish_derived_view",),
+    # #1914: shadow ranking counterfactuals (choices.jsonl).
+    "ranking_shadow": (
+        "nanobot.runtime.demand_ranking:record_shadow_choice",
+    ),
     "promotions": (
         "nanobot.runtime.bridge:_record_runtime_slice_candidate",
         "nanobot.runtime.promotions_rotation:rotate_promotions",
