@@ -114,7 +114,9 @@ def test_shape_cost_report_sufficient_history(tmp_path: Path):
 
     rates = shape_info["rates"]
     assert rates["integrated_share"] == 1.0
-    assert rates["rollback_share"] == 0.0
+    assert rates["gate_rejected_share"] == 0.0
+    assert rates["cut_before_execution_share"] == 0.0
+    assert rates["empty_noop_share"] == 0.0
 
     ests = shape_info["estimates"]
     assert ests["missing"] == 6
@@ -199,3 +201,55 @@ def test_wilson_confidence_interval():
     low, high = wilson_interval(12, 15)
     assert 0.54 <= low <= 0.60
     assert 0.90 <= high <= 0.95
+
+
+def test_three_non_integration_types(tmp_path: Path):
+    """Verify non-integration split: gate rejected, duplicate cut, empty no-op."""
+    state_dir = tmp_path / "state"
+    ledger_dir = state_dir / "ledger"
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    archive_dir = state_dir / "subagents" / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Gate rejected (real work rejected with violation)
+    cid_gate = "cycle-gate-reject"
+    p1 = dict(FIXTURE_PROPOSED, cycle_id=cid_gate, ts="2026-09-24T01:00:00Z")
+    s1 = {"phase": "started", "cycle_id": cid_gate, "ts": "2026-09-24T01:01:00Z"}
+    g1 = {"phase": "gate", "cycle_id": cid_gate, "allowed": False, "reason": "mutation_surface_violation", "ts": "2026-09-24T01:05:00Z"}
+    o1 = {"phase": "outcome", "cycle_id": cid_gate, "outcome": "failed", "reason": "mutation_surface_violation", "files_changed": ["AGENTS.md"], "ts": "2026-09-24T01:05:10Z"}
+    rb1 = {"cycle_id": cid_gate, "rollback": {"integrated": False, "reason": "mutation_surface_violation"}}
+    (archive_dir / f"result-{cid_gate}.json").write_text(json.dumps(rb1), encoding="utf-8")
+
+    # 2. Duplicate cut (pre-spawn duplicate)
+    cid_dup = "cycle-dup-cut"
+    p2 = dict(FIXTURE_PROPOSED, cycle_id=cid_dup, ts="2026-09-24T02:00:00Z")
+    o2 = {"phase": "outcome", "cycle_id": cid_dup, "outcome": "skipped-duplicate", "reason": "recent_duplicate_failure", "files_changed": [], "ts": "2026-09-24T02:01:00Z"}
+    rb2 = {"cycle_id": cid_dup, "rollback": {"integrated": False, "reason": "recent_duplicate_failure"}}
+    (archive_dir / f"result-{cid_dup}.json").write_text(json.dumps(rb2), encoding="utf-8")
+
+    (ledger_dir / "cycles.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in (p1, s1, g1, o1, p2, o2)) + "\n",
+        encoding="utf-8",
+    )
+
+    from datetime import datetime
+    ref_now = datetime.fromisoformat("2026-09-24T08:00:00+00:00")
+    report = analyze_shape_costs(state_dir, days=7, now=ref_now)
+
+    info = report["shapes"]["extend_existing_script"]
+    assert info["n"] == 2
+
+
+def test_split_at_utc_option(tmp_path: Path):
+    """Test --split-at <UTC> splits records before and after timestamp."""
+    state_dir = tmp_path / "state"
+    _seed_state(state_dir, count=2)
+
+    split_ts = "2026-09-24T00:00:00Z"
+    report = analyze_shape_costs(state_dir, days=7, split_at=split_ts)
+
+    assert "split" in report
+    split_info = report["split"]
+    assert "before" in split_info
+    assert "after" in split_info
+    assert "split_at" in split_info
