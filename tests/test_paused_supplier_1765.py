@@ -445,7 +445,9 @@ class TestScorecardPausedSupplierCounters:
         assert loop["repeat_failure_rate"] == round(1 / 4, 4)
         assert loop["repeat_failure_rate_new"] == round(2 / 4, 4)
         assert loop["repeat_failure_rate"] == round(1 / 4, 4)
-        assert loop["model_call_incomplete_events"] == "unavailable"
+        assert loop["model_call_incomplete_events"] == 0
+        assert loop["model_call_incomplete_tasks"] == 0
+        assert loop["model_call_incomplete_share"] == 0.0
         assert loop["unknown_failure_cause_events"] == "unavailable"
 
     def test_paused_supplier_counted_and_timed_separately_from_failed(self):
