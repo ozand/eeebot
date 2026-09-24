@@ -166,6 +166,7 @@ from nanobot.runtime.operator_documents import (
     resolve_derived_priorities_split,
     resolve_operator_priorities,
     resolve_operator_priorities_metadata,
+    resolve_operator_priority_numbers,
 )
 from nanobot.runtime.schemas import QUALIFYING_ARTIFACT_DIRS
 from nanobot.runtime.state_access import Window, artifacts, evidence_status, ledger_window
@@ -284,6 +285,18 @@ _PRIORITY_PATTERN = re.compile(
 # misclassify the item. Only this explicit token is ever read — vector is
 # NEVER inferred from free-text semantics. Untagged text yields "" (unknown).
 _VECTOR_TAG_RE = re.compile(r"\((V1|V2)\)")
+
+# #1640/#1665: label identity for the operator-vs-derived dedup guard in
+# _priority_items — an operator entry's title may carry a trailing
+# "(V1)"/"(V2)" tag (stripped here, same as goal_review._normalize_label's
+# own _TRAILING_VECTOR_TAG_RE) a derived entry's clean title never does.
+_TRAILING_VECTOR_TAG_RE = re.compile(r"\s*\((V1|V2)\)\s*$")
+
+
+def _normalize_priority_label(title: str) -> str:
+    stripped = _TRAILING_VECTOR_TAG_RE.sub("", title)
+    return re.sub(r"\s+", " ", stripped.strip().lower())
+
 
 # #1665 (ADR-020 Rule 3): Provenance constants and ranking.
 # Operator charter outranks anything self-derived regardless of vector.
@@ -759,13 +772,33 @@ def _priority_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str
     one never silences the others"): an absent/unreadable operator document
     no longer suppresses derived priorities too — the pre-A3 code returned
     ``[]`` immediately whenever the operator's raw text was empty, before
-    the derived list was ever looked at."""
+    the derived list was ever looked at.
+
+    #1640 (pA review on #1939): a derived entry whose label or number
+    already appears among the operator's OWN entries (open or completed)
+    is excluded here — the read-time half of the guard the retired
+    ``merged_goal_text``/``active_derived_priorities`` pair used to
+    provide by text-scanning a merged blob; the write-time half (a NEW
+    candidate never gets minted with a colliding label/number in the
+    first place) already lives in ``goal_review.maybe_goal_review``. Only
+    the operator's STRUCTURED entries are checked — never its free-form
+    "Completed (do not repeat)" prose, which the retired mechanism also
+    scanned as a defense specifically against a since-retired per-deploy
+    migration script; nothing mints/reads through that prose today."""
     try:
         op_res = resolve_operator_priorities(state_dir, selfevo_repo_root=selfevo_repo)
         op_entries = op_res.open_entries if op_res.state == PRIORITY_PRESENT else ()
+        op_all_entries = op_res.open_entries + op_res.completed_entries
 
         derived_open, _derived_completed = resolve_derived_priorities_split(
             state_dir, selfevo_repo_root=selfevo_repo
+        )
+        operator_labels = {_normalize_priority_label(e.title) for e in op_all_entries}
+        operator_numbers = {e.number for e in op_all_entries} | resolve_operator_priority_numbers(state_dir)
+        derived_open = tuple(
+            e for e in derived_open
+            if _normalize_priority_label(e.title) not in operator_labels
+            and e.number not in operator_numbers
         )
 
         items: list[dict[str, str]] = []

@@ -74,6 +74,13 @@ _PRIORITY_ENTRY_PATTERN = re.compile(
     re.DOTALL,
 )
 
+# #1640: same "Priority N" ANYWHERE (the structured "Current priority
+# targets:" section AND the free-form "Completed (do not repeat):"
+# sentence alike) goal_review._existing_priority_numbers scans — the
+# operator's Completed prose has no fixed shape a label-only check can
+# rely on, so the number is the only thing both shapes share.
+_PRIORITY_NUMBER_ANYWHERE_RE = re.compile(r"Priority\s+(\d+)\b")
+
 
 @dataclass(frozen=True)
 class DocumentResolution:
@@ -329,6 +336,25 @@ def resolve_operator_priorities(
         open_entries=tuple(open_entries),
         completed_entries=completed_entries,
     )
+
+
+def resolve_operator_priority_numbers(state_dir: "Path | str") -> "frozenset[int]":
+    """ADR-034 rule 4 (#1640): every "Priority N" number mentioned ANYWHERE
+    in the operator's raw text — the structured "Current priority
+    targets:" section AND the free-form "Completed (do not repeat):"
+    sentence alike (mirrors goal_review._existing_priority_numbers, the
+    retired merged_goal_text/active_derived_priorities pair's own scan).
+    For cross-document dedup only: a derived entry whose number already
+    appears here must never be presented as new/open — the operator's
+    Completed prose has no fixed shape a label-only check can rely on, so
+    the number is the only thing both shapes share. Returns a bare set of
+    ints, never the text itself; absent/unreadable/empty resolves to the
+    empty set (fail-open toward NOT hiding a derived entry)."""
+    _doc, data = _resolve_operator_document(state_dir)
+    if data is None:
+        return frozenset()
+    raw_text = str(data.get("text") or "")
+    return frozenset(int(n) for n in _PRIORITY_NUMBER_ANYWHERE_RE.findall(raw_text))
 
 
 def resolve_operator_priorities_metadata(state_dir: "Path | str") -> OperatorDocumentMetadata:
