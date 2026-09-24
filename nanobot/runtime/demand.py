@@ -1051,7 +1051,7 @@ def _ledger_defects(
     limit: int | None = _MAX_LEDGER_DEFECTS,
     ledger_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
-    """Terminal ledger outcome rows with a real failure in the last 48h.
+    """Terminal ledger failures, including incomplete model calls, in the last 48h.
     ``skipped-*`` outcomes are the dedup stack working, not defects."""
     items: list[dict[str, str]] = []
     seen_summaries: set[str] = set()
@@ -1065,7 +1065,7 @@ def _ledger_defects(
             outcome = str(row.get("outcome") or "").strip().lower()
             if outcome.startswith("skipped"):
                 continue
-            if outcome not in ("failed", "timeout", "error", "harness_failed"):
+            if outcome not in ("failed", "timeout", "error", "harness_failed", "model_call_incomplete"):
                 continue
             ts = _parse_ts(row.get("ts"))
             if ts is None or ts < cutoff:

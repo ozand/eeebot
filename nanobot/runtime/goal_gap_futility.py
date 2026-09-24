@@ -179,9 +179,9 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
     moved, or the branch aged out, through no fault of this attempt — and
     are excluded from both counts entirely, the same as ``push_pending``.
 
-    #1765: an ``outcome: paused-supplier`` row (the LLM gateway/model
-    provider could not serve us) joins the same exclusion set, for the same
-    reason as ``push_pending`` — it is a terminal ledger row, but says
+    #1765: ``paused-supplier`` and ``model_call_incomplete`` rows (provider
+    did not serve a completed model response) join the same exclusion set,
+    like ``push_pending`` — they are terminal rows, but say
     nothing about this attempt's own viability, so it must not spend the
     demand's futility budget any more than it spends its rotation turn
     (bridge.py) or its recent-failure suppression window (llm_proposer.py).

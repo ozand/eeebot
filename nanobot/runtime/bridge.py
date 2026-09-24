@@ -5368,7 +5368,7 @@ async def _main_impl_body():
     # ``outcome: skipped`` self-report upgrades the verdict reason so a
     # verified already-done skip records 'reject', not 'inconclusive'.
     _verdict_reason_hint = _rollback_reason
-    if _cycle_outcome in ('partial', 'failed') and not _rollback_reason:
+    if _cycle_outcome in ('partial', 'failed', 'model_call_incomplete') and not _rollback_reason:
         if _executor_reported_skipped(STATE_DIR, _subagent_task_id):
             _verdict_reason_hint = 'executor_reported_skipped'
     _verdict, _verdict_reason = _derive_cycle_verdict(_cycle_outcome, _verdict_reason_hint)
