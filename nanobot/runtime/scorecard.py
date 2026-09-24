@@ -1834,6 +1834,7 @@ def compute_scorecard(
     *,
     now: datetime | None = None,
     force: bool = False,
+    release_root: Path | None = None,
 ) -> dict[str, Any]:
     """Compute (or watermark-return) the instance scorecard snapshot.
 
@@ -1972,16 +1973,28 @@ def compute_scorecard(
         except Exception:
             pass
 
-        # #768: the periodic goal-review rides the same recompute cadence
+        # #768/#1920: the periodic goal-review rides the same recompute cadence
         # (itself hard-gated by SELFEVO_GOAL_REVIEW_ENABLED, default OFF,
         # plus its own daily watermark — a no-op in the common case). Runs
         # AFTER latest.json is written so the review reads THIS snapshot.
         # Wrapped fail-open on its own — a review bug must never break the
         # scorecard or demand collection.
+        # #1920: pass release_root (resolving via RELEASE_ROOT env var or
+        # deployed release tree default, matching bridge.RELEASE_ROOT) so the
+        # review reads the immutable charter from goals.md rather than
+        # falling back to legacy state/goals/goal_text.json.
         try:
             from nanobot.runtime import goal_review as _goal_review
+            from nanobot.runtime.role_prompt import RELEASE_ROOT_DEFAULT
 
-            _goal_review.maybe_goal_review(state_dir, selfevo_repo, now=now)
+            resolved_release_root = (
+                Path(release_root)
+                if release_root is not None
+                else Path(os.environ.get("RELEASE_ROOT", "").strip() or RELEASE_ROOT_DEFAULT)
+            )
+            _goal_review.maybe_goal_review(
+                state_dir, selfevo_repo, now=now, release_root=resolved_release_root,
+            )
         except Exception:
             pass
         return snapshot
