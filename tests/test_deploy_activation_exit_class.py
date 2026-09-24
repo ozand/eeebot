@@ -159,16 +159,19 @@ def test_failed_self_check_cleans_candidate_environment_before_rollback(tmp_path
         newline="\n",
     )
     script.chmod(0o755)
-    _write_mock(shims / "sudo", 'if [[ "$*" == *"rm -f"* ]]; then touch "$TEST_CLEANUP_MARKER"; fi; exec "$@"')
+    cleanup_marker = tmp_path / "dropin-cleaned"
+    _write_mock(shims / "sudo", f'if [[ "$*" == *"rm -f"* ]]; then touch "{cleanup_marker.as_posix()}"; fi; exec "$@"')
     _write_mock(shims / "tee", 'cat > "$1"')
     (shims / "systemctl").write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
     (shims / "systemctl").chmod(0o755)
     marker = tmp_path / "rollback-fired"
     release_dir = str(DEPLOY_SCRIPT.parents[3]).replace("\\\\", "/")
+    temp_dropin_dir = (tmp_path / "systemd" / "activation-check.service.d").as_posix()
     prelude = f"""
     set -eEuo pipefail
     die() {{ echo \\\"CRITICAL: $*\\\" >&2; return 1; }}
     ACTIVATION_CHECK_UNIT=eeepc-self-evolving-activation-check.service
+    ACTIVATION_CHECK_DROPIN_DIR=\\\"{temp_dropin_dir}\\\"
     RELEASE_DIR=\\\"{release_dir}\\\"
     PREV_RELEASE_PATH=/old
     CURRENT_SYMLINK=/current
@@ -176,8 +179,7 @@ def test_failed_self_check_cleans_candidate_environment_before_rollback(tmp_path
     trap rollback_remote ERR
     PATH=\\\"{shims.as_posix()}:$PATH\\\"
     """
-    cleanup_marker = tmp_path / "dropin-cleaned"
-    res = _bash(prelude + stanza + "\\n", env={"PATH": f"{shims.as_posix()}:{os.environ['PATH']}", "TEST_CLEANUP_MARKER": str(cleanup_marker).replace("\\\\", "/")})
+    res = _bash(prelude + stanza + "\\n", env={"PATH": f"{shims.as_posix()}:{os.environ['PATH']}"})
     assert res.returncode != 0
     assert marker.exists(), f"rollback trap did not run: stdout={res.stdout!r} stderr={res.stderr!r}"
     assert cleanup_marker.exists(), "candidate unit drop-in must be removed before rollback"
