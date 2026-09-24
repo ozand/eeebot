@@ -1124,6 +1124,15 @@ def _demand_section(demand_items: list[dict[str, str]]) -> str:
         return ""
 
 
+_RANKING_SHADOW_ENABLED_ENV = "SELFEVO_RANKING_SHADOW_ENABLED"
+
+
+def _ranking_shadow_enabled() -> bool:
+    """#1914 kill switch: default ON; only '0'/'false' disable it."""
+    raw = os.environ.get(_RANKING_SHADOW_ENABLED_ENV, "1").strip().lower()
+    return raw not in ("0", "false")
+
+
 def _rotation_enabled() -> bool:
     """#902 kill switch: default ON; only "0"/"false" disable it (falls back
     to presenting the full demand list, byte-identical to pre-#902)."""
@@ -1398,6 +1407,22 @@ def _select_assigned_demand(
                 state_dir, cooled_ids=cooled_here, items_considered=len(valid_items),
                 selected_id=str(selected["id"]), ledger_status=ledger_status,
             )
+
+        # #1914: shadow ranking -- record what ranking would have picked on the
+        # exact same candidate set (eligible) while rotation executes as normal.
+        # Fail-open: any error in the shadow path is logged and ignored; the cycle
+        # continues with rotation's selection unchanged.
+        try:
+            if _ranking_shadow_enabled():
+                demand_ranking.record_shadow_choice(
+                    state_dir,
+                    candidates=eligible,
+                    rotation_choice=selected,
+                )
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("ranking shadow choice failed: %s", exc)
+
         return [selected]
     except Exception:
         return demand_items
