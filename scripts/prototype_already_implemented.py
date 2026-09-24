@@ -89,18 +89,22 @@ def call_evaluator_llm(
             data = json.load(resp)
             choice = data["choices"][0]["message"]
             raw = (choice.get("content") or "").strip()
+            usage = data.get("usage", {})
             if not raw:
                 # Fallback to parsing reasoning if raw content was truncated
                 raw = (choice.get("reasoning_content") or "").strip()
             try:
-                return json.loads(raw)
+                parsed = json.loads(raw)
             except Exception:
                 m = re.search(r"\{[\s\S]*\}", raw)
                 if m:
-                    return json.loads(m.group(0))
-                return {"verdict": "insufficient_evidence", "citing_commit": None, "reason": f"Unparseable response: {raw[:150]}"}
+                    parsed = json.loads(m.group(0))
+                else:
+                    parsed = {"verdict": "insufficient_evidence", "citing_commit": None, "reason": f"Unparseable response: {raw[:150]}"}
+            parsed["usage"] = usage
+            return parsed
     except Exception as e:
-        return {"verdict": "insufficient_evidence", "citing_commit": None, "reason": f"API error: {e}"}
+        return {"verdict": "insufficient_evidence", "citing_commit": None, "reason": f"API error: {e}", "usage": {}}
 
 def extract_file_and_commits(
     repo: Path,

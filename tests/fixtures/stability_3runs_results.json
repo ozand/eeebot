@@ -1,0 +1,1039 @@
+[
+  {
+    "index": 1,
+    "group": "duplicate",
+    "task_title": "Filter fallback candidates dedup (V1)",
+    "target_path": "scripts/filter_fallback_targets.py",
+    "cycle_id": null,
+    "old_gate_match": null,
+    "expected_sha": "80fe9f4b",
+    "runs": [
+      {
+        "verdict": "done",
+        "citing_commit": "80fe9f4beaa3a40cd9498903d986c196165fd1c5",
+        "reason": "The file already implements filter_fallback_paths, which filters/deduplicates fallback candidate paths against recently-used paths while preserving order.",
+        "duration_s": 39.21
+      },
+      {
+        "verdict": "done",
+        "citing_commit": "80fe9f4beaa3a40cd9498903d986c196165fd1c5",
+        "reason": "scripts/filter_fallback_targets.py already implements filter_fallback_paths (alias filter_candidate_paths) to drop fallback candidate paths already present in recent paths, preserving order and handling invalid input.",
+        "usage": {
+          "completion_tokens": 1989,
+          "prompt_tokens": 2071,
+          "total_tokens": 4060,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 33.21
+      },
+      {
+        "verdict": "done",
+        "citing_commit": "80fe9f4beaa3a40cd9498903d986c196165fd1c5",
+        "reason": "scripts/filter_fallback_targets.py already implements filter_fallback_paths (alias filter_candidate_paths) to drop fallback candidate paths already present in recent paths, preserving order and handling invalid input.",
+        "usage": {
+          "completion_tokens": 1989,
+          "prompt_tokens": 2071,
+          "total_tokens": 4060,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 0.78
+      }
+    ],
+    "verdicts": [
+      "done",
+      "done",
+      "done"
+    ],
+    "citings": [
+      "80fe9f4b",
+      "80fe9f4b",
+      "80fe9f4b"
+    ],
+    "durations": [
+      39.21,
+      33.21,
+      0.78
+    ],
+    "tokens": [
+      0,
+      4060,
+      4060
+    ],
+    "completion_tokens": [
+      0,
+      1989,
+      1989
+    ],
+    "stable": true
+  },
+  {
+    "index": 2,
+    "group": "duplicate",
+    "task_title": "Priority 43 — Filter fallback candidates dedup (V1)",
+    "target_path": "scripts/filter_fallback_targets.py",
+    "cycle_id": null,
+    "old_gate_match": null,
+    "expected_sha": "4b7b29f6",
+    "runs": [
+      {
+        "verdict": "done",
+        "citing_commit": "4b7b29f67feaf9a44a90e289fd55d6dc7503c91b",
+        "reason": "The Priority 43 fallback candidate dedup behavior is already implemented via filter_fallback_paths and the filter_candidate_paths alias, with unit tests added in the cited commit.",
+        "duration_s": 37.24
+      },
+      {
+        "verdict": "done",
+        "citing_commit": "4b7b29f67feaf9a44a90e289fd55d6dc7503c91b",
+        "reason": "The Priority 43 dedup behavior is already present: filter_fallback_paths implements candidate dedup, and commit 4b7b29f6 adds the Priority 43 spec name alias filter_candidate_paths plus tests.",
+        "usage": {
+          "completion_tokens": 863,
+          "prompt_tokens": 2076,
+          "total_tokens": 2939,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 60.17
+      },
+      {
+        "verdict": "done",
+        "citing_commit": "4b7b29f67feaf9a44a90e289fd55d6dc7503c91b",
+        "reason": "The Priority 43 dedup behavior is already present: filter_fallback_paths implements candidate dedup, and commit 4b7b29f6 adds the Priority 43 spec name alias filter_candidate_paths plus tests.",
+        "usage": {
+          "completion_tokens": 863,
+          "prompt_tokens": 2076,
+          "total_tokens": 2939,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 1.02
+      }
+    ],
+    "verdicts": [
+      "done",
+      "done",
+      "done"
+    ],
+    "citings": [
+      "4b7b29f6",
+      "4b7b29f6",
+      "4b7b29f6"
+    ],
+    "durations": [
+      37.24,
+      60.17,
+      1.02
+    ],
+    "tokens": [
+      0,
+      2939,
+      2939
+    ],
+    "completion_tokens": [
+      0,
+      863,
+      863
+    ],
+    "stable": true
+  },
+  {
+    "index": 3,
+    "group": "duplicate",
+    "task_title": "Implement filter_candidate_paths in scripts/filter_fallback_targets.py",
+    "target_path": "scripts/filter_fallback_targets.py",
+    "cycle_id": null,
+    "old_gate_match": null,
+    "expected_sha": "ae773be1",
+    "runs": [
+      {
+        "verdict": "done",
+        "citing_commit": "4b7b29f67feaf9a44a90e289fd55d6dc7503c91b",
+        "reason": "Commit 4b7b29f6 adds filter_candidate_paths as an alias to filter_fallback_paths in scripts/filter_fallback_targets.py, satisfying the proposed task.",
+        "duration_s": 26.5
+      },
+      {
+        "verdict": "done",
+        "citing_commit": "4b7b29f67feaf9a44a90e289fd55d6dc7503c91b",
+        "reason": "Commit 4b7b29f6 adds filter_candidate_paths as an alias for filter_fallback_paths in scripts/filter_fallback_targets.py.",
+        "usage": {
+          "completion_tokens": 431,
+          "prompt_tokens": 2073,
+          "total_tokens": 2504,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 53.95
+      },
+      {
+        "verdict": "done",
+        "citing_commit": "4b7b29f67feaf9a44a90e289fd55d6dc7503c91b",
+        "reason": "Commit 4b7b29f6 adds filter_candidate_paths as an alias for filter_fallback_paths in scripts/filter_fallback_targets.py.",
+        "usage": {
+          "completion_tokens": 431,
+          "prompt_tokens": 2073,
+          "total_tokens": 2504,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 0.68
+      }
+    ],
+    "verdicts": [
+      "done",
+      "done",
+      "done"
+    ],
+    "citings": [
+      "4b7b29f6",
+      "4b7b29f6",
+      "4b7b29f6"
+    ],
+    "durations": [
+      26.5,
+      53.95,
+      0.68
+    ],
+    "tokens": [
+      0,
+      2504,
+      2504
+    ],
+    "completion_tokens": [
+      0,
+      431,
+      431
+    ],
+    "stable": true
+  },
+  {
+    "index": 4,
+    "group": "legitimate",
+    "task_title": "Optimize directory traversal and exclude ignored paths in scripts/validate_open_encoding.py to prevent timeout",
+    "target_path": "scripts/validate_open_encoding.py",
+    "cycle_id": "cycle-b50aa4fd6ccb",
+    "old_gate_match": false,
+    "expected_sha": null,
+    "runs": [
+      {
+        "verdict": "done",
+        "citing_commit": "e4e6313d",
+        "reason": "Commit e4e6313d explicitly prunes ignored directories during traversal and expands ignored path handling to avoid expensive traversal/timeouts.",
+        "duration_s": 27.24
+      },
+      {
+        "verdict": "done",
+        "citing_commit": "e4e6313d",
+        "reason": "Commit e4e6313d explicitly prunes ignored directories during traversal in scripts/validate_open_encoding.py to avoid expensive traversal and timeout.",
+        "usage": {
+          "completion_tokens": 492,
+          "prompt_tokens": 2995,
+          "total_tokens": 3487,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 63.28
+      },
+      {
+        "verdict": "done",
+        "citing_commit": "e4e6313d",
+        "reason": "Commit e4e6313d explicitly prunes ignored directories during traversal in scripts/validate_open_encoding.py to avoid expensive traversal and timeout.",
+        "usage": {
+          "completion_tokens": 492,
+          "prompt_tokens": 2995,
+          "total_tokens": 3487,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 0.62
+      }
+    ],
+    "verdicts": [
+      "done",
+      "done",
+      "done"
+    ],
+    "citings": [
+      "e4e6313d",
+      "e4e6313d",
+      "e4e6313d"
+    ],
+    "durations": [
+      27.24,
+      63.28,
+      0.62
+    ],
+    "tokens": [
+      0,
+      3487,
+      3487
+    ],
+    "completion_tokens": [
+      0,
+      492,
+      492
+    ],
+    "stable": true
+  },
+  {
+    "index": 5,
+    "group": "legitimate",
+    "task_title": "Restore tracked memory files after test execution in scripts/run_all_tests.py",
+    "target_path": "scripts/run_all_tests.py",
+    "cycle_id": "cycle-b6bfd7aa3b53",
+    "old_gate_match": false,
+    "expected_sha": null,
+    "runs": [
+      {
+        "verdict": "not_done",
+        "citing_commit": null,
+        "reason": "The provided commits and current file snippet do not show any implementation for restoring tracked memory files after test execution; the listed changes are unrelated filtering, discovery, and dual-harness features.",
+        "duration_s": 37.08
+      },
+      {
+        "verdict": "not_done",
+        "citing_commit": null,
+        "reason": "None of the provided commits or file snippets implement restoring tracked memory files after test execution; they only add unrelated filtering, discovery, and dual-harness features.",
+        "usage": {
+          "completion_tokens": 1157,
+          "prompt_tokens": 3117,
+          "total_tokens": 4274,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 85.28
+      },
+      {
+        "verdict": "not_done",
+        "citing_commit": null,
+        "reason": "None of the provided commits or file snippets implement restoring tracked memory files after test execution; they only add unrelated filtering, discovery, and dual-harness features.",
+        "usage": {
+          "completion_tokens": 1157,
+          "prompt_tokens": 3117,
+          "total_tokens": 4274,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 1.02
+      }
+    ],
+    "verdicts": [
+      "not_done",
+      "not_done",
+      "not_done"
+    ],
+    "citings": [
+      "",
+      "",
+      ""
+    ],
+    "durations": [
+      37.08,
+      85.28,
+      1.02
+    ],
+    "tokens": [
+      0,
+      4274,
+      4274
+    ],
+    "completion_tokens": [
+      0,
+      1157,
+      1157
+    ],
+    "stable": true
+  },
+  {
+    "index": 6,
+    "group": "legitimate",
+    "task_title": "Resolve unused import finding in scripts/validate_unused_imports.py",
+    "target_path": "scripts/validate_unused_imports.py",
+    "cycle_id": "cycle-261221f396ff",
+    "old_gate_match": true,
+    "expected_sha": null,
+    "runs": [
+      {
+        "verdict": "insufficient_evidence",
+        "citing_commit": null,
+        "reason": "Unparseable response: We need answer user's question: Is work described in proposed task already implemented? Need output JSON only with verdict, citing_commit, reason. Nee",
+        "duration_s": 92.89
+      },
+      {
+        "verdict": "insufficient_evidence",
+        "citing_commit": null,
+        "reason": "API error: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+        "usage": {},
+        "duration_s": 112.21
+      },
+      {
+        "verdict": "insufficient_evidence",
+        "citing_commit": null,
+        "reason": "API error: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+        "usage": {},
+        "duration_s": 0.75
+      }
+    ],
+    "verdicts": [
+      "insufficient_evidence",
+      "insufficient_evidence",
+      "insufficient_evidence"
+    ],
+    "citings": [
+      "",
+      "",
+      ""
+    ],
+    "durations": [
+      92.89,
+      112.21,
+      0.75
+    ],
+    "tokens": [
+      0,
+      0,
+      0
+    ],
+    "completion_tokens": [
+      0,
+      0,
+      0
+    ],
+    "stable": true
+  },
+  {
+    "index": 7,
+    "group": "legitimate",
+    "task_title": "Fix validation errors and exit status in scripts/validate_documentation_code_blocks.py",
+    "target_path": "scripts/validate_documentation_code_blocks.py",
+    "cycle_id": "cycle-13790f675ad7",
+    "old_gate_match": false,
+    "expected_sha": null,
+    "runs": [
+      {
+        "verdict": "insufficient_evidence",
+        "citing_commit": null,
+        "reason": "The provided file snippet and prior commit diffs do not show the main/exit-status logic or the specific validation-error fixes, so it cannot be determined with certainty whether this fix is already implemented.",
+        "duration_s": 73.43
+      },
+      {
+        "verdict": "insufficient_evidence",
+        "citing_commit": null,
+        "reason": "The provided snippet does not show the script's error aggregation or exit-status logic, and none of the listed commits explicitly fixes validation errors or exit status.",
+        "usage": {
+          "completion_tokens": 1954,
+          "prompt_tokens": 3101,
+          "total_tokens": 5055,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 81.4
+      },
+      {
+        "verdict": "insufficient_evidence",
+        "citing_commit": null,
+        "reason": "The provided snippet does not show the script's error aggregation or exit-status logic, and none of the listed commits explicitly fixes validation errors or exit status.",
+        "usage": {
+          "completion_tokens": 1954,
+          "prompt_tokens": 3101,
+          "total_tokens": 5055,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 0.69
+      }
+    ],
+    "verdicts": [
+      "insufficient_evidence",
+      "insufficient_evidence",
+      "insufficient_evidence"
+    ],
+    "citings": [
+      "",
+      "",
+      ""
+    ],
+    "durations": [
+      73.43,
+      81.4,
+      0.69
+    ],
+    "tokens": [
+      0,
+      5055,
+      5055
+    ],
+    "completion_tokens": [
+      0,
+      1954,
+      1954
+    ],
+    "stable": true
+  },
+  {
+    "index": 8,
+    "group": "legitimate",
+    "task_title": "Optimize directory scanning and test mapping in scripts/validate_test_existence.py",
+    "target_path": "scripts/validate_test_existence.py",
+    "cycle_id": "cycle-e3d9d2e37967",
+    "old_gate_match": false,
+    "expected_sha": null,
+    "runs": [
+      {
+        "verdict": "done",
+        "citing_commit": "c8d26f3cf56ae42d52dd2e91071f763f34412fba",
+        "reason": "Commit c8d26f3c implements single-pass directory indexing for test lookup and script/test mapping via build_test_file_index and build_script_file_index, matching the proposed optimization.",
+        "duration_s": 38.75
+      },
+      {
+        "verdict": "done",
+        "citing_commit": "c8d26f3c",
+        "reason": "Commit c8d26f3c already optimizes directory scanning and test mapping by replacing repeated glob/exists checks with single-pass build_test_file_index and build_script_file_index lookups.",
+        "usage": {
+          "completion_tokens": 568,
+          "prompt_tokens": 3004,
+          "total_tokens": 3572,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 64.02
+      },
+      {
+        "verdict": "done",
+        "citing_commit": "c8d26f3c",
+        "reason": "Commit c8d26f3c already optimizes directory scanning and test mapping by replacing repeated glob/exists checks with single-pass build_test_file_index and build_script_file_index lookups.",
+        "usage": {
+          "completion_tokens": 568,
+          "prompt_tokens": 3004,
+          "total_tokens": 3572,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 0.82
+      }
+    ],
+    "verdicts": [
+      "done",
+      "done",
+      "done"
+    ],
+    "citings": [
+      "c8d26f3c",
+      "c8d26f3c",
+      "c8d26f3c"
+    ],
+    "durations": [
+      38.75,
+      64.02,
+      0.82
+    ],
+    "tokens": [
+      0,
+      3572,
+      3572
+    ],
+    "completion_tokens": [
+      0,
+      568,
+      568
+    ],
+    "stable": true
+  },
+  {
+    "index": 9,
+    "group": "legitimate",
+    "task_title": "Eliminate per-script subprocess calls in scripts/validate_test_existence.py",
+    "target_path": "scripts/validate_test_existence.py",
+    "cycle_id": "cycle-a8ea16d1a3a3",
+    "old_gate_match": true,
+    "expected_sha": null,
+    "runs": [
+      {
+        "verdict": "insufficient_evidence",
+        "citing_commit": null,
+        "reason": "The provided snippets show single-pass indexing and AST import pairing, but do not expose subprocess usage or its removal, so per-script subprocess elimination cannot be confirmed.",
+        "duration_s": 79.39
+      },
+      {
+        "verdict": "insufficient_evidence",
+        "citing_commit": null,
+        "reason": "API error: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+        "usage": {},
+        "duration_s": 174.18
+      },
+      {
+        "verdict": "insufficient_evidence",
+        "citing_commit": null,
+        "reason": "API error: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
+        "usage": {},
+        "duration_s": 0.72
+      }
+    ],
+    "verdicts": [
+      "insufficient_evidence",
+      "insufficient_evidence",
+      "insufficient_evidence"
+    ],
+    "citings": [
+      "",
+      "",
+      ""
+    ],
+    "durations": [
+      79.39,
+      174.18,
+      0.72
+    ],
+    "tokens": [
+      0,
+      0,
+      0
+    ],
+    "completion_tokens": [
+      0,
+      0,
+      0
+    ],
+    "stable": true
+  },
+  {
+    "index": 10,
+    "group": "legitimate",
+    "task_title": "Add locate_result_file to scripts/search_subagent_archive.py to find result json files matching an incident id",
+    "target_path": "scripts/search_subagent_archive.py",
+    "cycle_id": "cycle-ebdbef57c967",
+    "old_gate_match": false,
+    "expected_sha": null,
+    "runs": [
+      {
+        "verdict": "insufficient_evidence",
+        "citing_commit": null,
+        "reason": "Unparseable response: We need answer user's question: Is work described in proposed task already implemented? Need output JSON with verdict, citing_commit, reason. Need ana",
+        "duration_s": 88.07
+      },
+      {
+        "verdict": "insufficient_evidence",
+        "citing_commit": null,
+        "reason": "Unparseable response: We need answer user's question: Is work described in proposed task already implemented? Need output JSON with verdict, citing_commit, reason. Need ana",
+        "usage": {
+          "completion_tokens": 4096,
+          "prompt_tokens": 3242,
+          "total_tokens": 7338,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 121.74
+      },
+      {
+        "verdict": "insufficient_evidence",
+        "citing_commit": null,
+        "reason": "Unparseable response: We need answer user's question: Is work described in proposed task already implemented? Need output JSON with verdict, citing_commit, reason. Need ana",
+        "usage": {
+          "completion_tokens": 4096,
+          "prompt_tokens": 3242,
+          "total_tokens": 7338,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 0.82
+      }
+    ],
+    "verdicts": [
+      "insufficient_evidence",
+      "insufficient_evidence",
+      "insufficient_evidence"
+    ],
+    "citings": [
+      "",
+      "",
+      ""
+    ],
+    "durations": [
+      88.07,
+      121.74,
+      0.82
+    ],
+    "tokens": [
+      0,
+      7338,
+      7338
+    ],
+    "completion_tokens": [
+      0,
+      4096,
+      4096
+    ],
+    "stable": true
+  },
+  {
+    "index": 11,
+    "group": "legitimate",
+    "task_title": "Add alternating command sequence detection to scripts/detect_repetitive_outputs.py",
+    "target_path": "scripts/detect_repetitive_outputs.py",
+    "cycle_id": "cycle-856ad0965865",
+    "old_gate_match": false,
+    "expected_sha": null,
+    "runs": [
+      {
+        "verdict": "not_done",
+        "citing_commit": null,
+        "reason": "The provided file content only describes detection of consecutive identical or near-identical outputs and does not implement alternating command sequence detection; no prior commits touching the file are listed.",
+        "duration_s": 10.25
+      },
+      {
+        "verdict": "not_done",
+        "citing_commit": null,
+        "reason": "The visible file content describes only identical/near-identical consecutive output detection and does not mention or implement alternating command sequence detection; no prior commits touch the file.",
+        "usage": {
+          "completion_tokens": 526,
+          "prompt_tokens": 825,
+          "total_tokens": 1351,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 66.9
+      },
+      {
+        "verdict": "not_done",
+        "citing_commit": null,
+        "reason": "The visible file content describes only identical/near-identical consecutive output detection and does not mention or implement alternating command sequence detection; no prior commits touch the file.",
+        "usage": {
+          "completion_tokens": 526,
+          "prompt_tokens": 825,
+          "total_tokens": 1351,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 0.78
+      }
+    ],
+    "verdicts": [
+      "not_done",
+      "not_done",
+      "not_done"
+    ],
+    "citings": [
+      "",
+      "",
+      ""
+    ],
+    "durations": [
+      10.25,
+      66.9,
+      0.78
+    ],
+    "tokens": [
+      0,
+      1351,
+      1351
+    ],
+    "completion_tokens": [
+      0,
+      526,
+      526
+    ],
+    "stable": true
+  },
+  {
+    "index": 12,
+    "group": "legitimate",
+    "task_title": "Implement /dev/fb0 frame writing and sysfs geometry inspection in scripts/fb_surface.py",
+    "target_path": "scripts/fb_surface.py",
+    "cycle_id": "cycle-41a556e4df97",
+    "old_gate_match": false,
+    "expected_sha": null,
+    "runs": [
+      {
+        "verdict": "not_done",
+        "citing_commit": null,
+        "reason": "The existing file and prior commits implement palette expansion, bounds-clipped blitting, and optional numpy acceleration, but do not implement /dev/fb0 frame writing or sysfs geometry inspection.",
+        "duration_s": 35.12
+      },
+      {
+        "verdict": "not_done",
+        "citing_commit": null,
+        "reason": "The provided commits and file snippet implement palette expansion, bounds-clipped blitting, and optional numpy acceleration, but do not show /dev/fb0 frame writing or sysfs geometry inspection.",
+        "usage": {
+          "completion_tokens": 457,
+          "prompt_tokens": 2576,
+          "total_tokens": 3033,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 64.17
+      },
+      {
+        "verdict": "not_done",
+        "citing_commit": null,
+        "reason": "The provided commits and file snippet implement palette expansion, bounds-clipped blitting, and optional numpy acceleration, but do not show /dev/fb0 frame writing or sysfs geometry inspection.",
+        "usage": {
+          "completion_tokens": 457,
+          "prompt_tokens": 2576,
+          "total_tokens": 3033,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 0.94
+      }
+    ],
+    "verdicts": [
+      "not_done",
+      "not_done",
+      "not_done"
+    ],
+    "citings": [
+      "",
+      "",
+      ""
+    ],
+    "durations": [
+      35.12,
+      64.17,
+      0.94
+    ],
+    "tokens": [
+      0,
+      3033,
+      3033
+    ],
+    "completion_tokens": [
+      0,
+      457,
+      457
+    ],
+    "stable": true
+  },
+  {
+    "index": 13,
+    "group": "legitimate",
+    "task_title": "Fix entrypoint validation failures and exemption handling in scripts/validate_script_entrypoints.py",
+    "target_path": "scripts/validate_script_entrypoints.py",
+    "cycle_id": "cycle-d0e3cb34aa23",
+    "old_gate_match": false,
+    "expected_sha": null,
+    "runs": [
+      {
+        "verdict": "done",
+        "citing_commit": "2c57a77d4cfb24c3d12abcc967a398d6cc9c5887",
+        "reason": "The file already contains exemption handling via DEFAULT_IGNORE_FILES for known utility helper modules, and prior commits implement the related entrypoint validation fixes.",
+        "duration_s": 92.09
+      },
+      {
+        "verdict": "done",
+        "citing_commit": "2c57a77d4cfb24c3d12abcc967a398d6cc9c5887",
+        "reason": "The current file already includes exemption handling via DEFAULT_IGNORE_FILES and prior commits fix entrypoint validation behavior, so the proposed work is already implemented.",
+        "usage": {
+          "completion_tokens": 1975,
+          "prompt_tokens": 2965,
+          "total_tokens": 4940,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 101.46
+      },
+      {
+        "verdict": "done",
+        "citing_commit": "2c57a77d4cfb24c3d12abcc967a398d6cc9c5887",
+        "reason": "The current file already includes exemption handling via DEFAULT_IGNORE_FILES and prior commits fix entrypoint validation behavior, so the proposed work is already implemented.",
+        "usage": {
+          "completion_tokens": 1975,
+          "prompt_tokens": 2965,
+          "total_tokens": 4940,
+          "prompt_tokens_details": {
+            "cached_tokens": 24
+          }
+        },
+        "duration_s": 0.66
+      }
+    ],
+    "verdicts": [
+      "done",
+      "done",
+      "done"
+    ],
+    "citings": [
+      "2c57a77d",
+      "2c57a77d",
+      "2c57a77d"
+    ],
+    "durations": [
+      92.09,
+      101.46,
+      0.66
+    ],
+    "tokens": [
+      0,
+      4940,
+      4940
+    ],
+    "completion_tokens": [
+      0,
+      1975,
+      1975
+    ],
+    "stable": true
+  },
+  {
+    "index": 14,
+    "group": "legitimate",
+    "task_title": "Deprecate and archive scripts/lesson_lookup.py",
+    "target_path": "scripts/lesson_lookup.py",
+    "cycle_id": "cycle-7a9b1ae2d009",
+    "old_gate_match": true,
+    "expected_sha": null,
+    "runs": [
+      {
+        "verdict": "not_done",
+        "citing_commit": null,
+        "reason": "The file still exists and contains active functionality; no prior commit or current content shows it has been deprecated or archived.",
+        "duration_s": 31.37
+      },
+      {
+        "verdict": "not_done",
+        "citing_commit": null,
+        "reason": "The file still exists as an active script with feature additions in prior commits, and no deprecation or archival change is evident.",
+        "usage": {
+          "completion_tokens": 229,
+          "prompt_tokens": 2525,
+          "total_tokens": 2754,
+          "prompt_tokens_details": {
+            "cached_tokens": 245
+          }
+        },
+        "duration_s": 7.31
+      },
+      {
+        "verdict": "not_done",
+        "citing_commit": null,
+        "reason": "The file still exists as an active script with feature additions in prior commits, and no deprecation or archival change is evident.",
+        "usage": {
+          "completion_tokens": 229,
+          "prompt_tokens": 2525,
+          "total_tokens": 2754,
+          "prompt_tokens_details": {
+            "cached_tokens": 245
+          }
+        },
+        "duration_s": 0.86
+      }
+    ],
+    "verdicts": [
+      "not_done",
+      "not_done",
+      "not_done"
+    ],
+    "citings": [
+      "",
+      "",
+      ""
+    ],
+    "durations": [
+      31.37,
+      7.31,
+      0.86
+    ],
+    "tokens": [
+      0,
+      2754,
+      2754
+    ],
+    "completion_tokens": [
+      0,
+      229,
+      229
+    ],
+    "stable": true
+  },
+  {
+    "index": 15,
+    "group": "legitimate",
+    "task_title": "Recognize inline self-test functions in scripts/validate_test_existence.py",
+    "target_path": "scripts/validate_test_existence.py",
+    "cycle_id": "cycle-18f940db9751",
+    "old_gate_match": false,
+    "expected_sha": null,
+    "runs": [
+      {
+        "verdict": "not_done",
+        "citing_commit": null,
+        "reason": "The current file snippet and listed commits mention detecting a --test self-test CLI handler and import-based pairing, but do not show recognition of inline self-test functions.",
+        "duration_s": 73.08
+      },
+      {
+        "verdict": "not_done",
+        "citing_commit": null,
+        "reason": "The current file only documents detection of a --test self-test CLI handler, not recognition of inline self-test functions, and none of the listed prior commits implement that specific feature.",
+        "usage": {
+          "completion_tokens": 3066,
+          "prompt_tokens": 3003,
+          "total_tokens": 6069,
+          "prompt_tokens_details": {
+            "cached_tokens": 245
+          }
+        },
+        "duration_s": 0.8
+      },
+      {
+        "verdict": "not_done",
+        "citing_commit": null,
+        "reason": "The current file only documents detection of a --test self-test CLI handler, not recognition of inline self-test functions, and none of the listed prior commits implement that specific feature.",
+        "usage": {
+          "completion_tokens": 3066,
+          "prompt_tokens": 3003,
+          "total_tokens": 6069,
+          "prompt_tokens_details": {
+            "cached_tokens": 245
+          }
+        },
+        "duration_s": 0.78
+      }
+    ],
+    "verdicts": [
+      "not_done",
+      "not_done",
+      "not_done"
+    ],
+    "citings": [
+      "",
+      "",
+      ""
+    ],
+    "durations": [
+      73.08,
+      0.8,
+      0.78
+    ],
+    "tokens": [
+      0,
+      6069,
+      6069
+    ],
+    "completion_tokens": [
+      0,
+      3066,
+      3066
+    ],
+    "stable": true
+  }
+]
