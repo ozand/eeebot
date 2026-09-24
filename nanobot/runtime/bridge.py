@@ -3142,6 +3142,15 @@ async def _run_planning_session(
             'tampered_files': tampered_files or [],
         }
 
+    # ADR-034 rule 3: a missing/unreadable release charter stops the
+    # planning session from running at all — never a silently degraded
+    # "[missing: goals.md]" prompt (role_prompt's own fail-open marker,
+    # meant for logging/diagnostics, not for a role to run on). The
+    # reason is recorded via the same _fail()/record_planning_session()
+    # path every other early-out in this function uses.
+    if not read_charter_text(RELEASE_ROOT):
+        return _fail('refused', 'no_charter')
+
     git = _git_cmd(selfevo_repo)
     pre_sha = _sp_run.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
 
@@ -3593,6 +3602,52 @@ async def _main_impl_body():
                 _selfevo_repo_check, STATE_DIR, _cycle_id,
                 req.get('task_title') or req.get('semantic_task_id') or 'subagent review task',
             )
+
+        # ADR-034 rule 3: a missing/unreadable release charter stops the
+        # executor cycle from starting, with the reason recorded — the SAME
+        # "aborted, no subagent spawned" idiom the HEAD-on-main precondition
+        # above uses. Diagnostics, health, deploy rollback and the
+        # publisher (publish_derived_view, near the top of this function)
+        # all keep running regardless — only task execution stops here.
+        if read_charter_text(RELEASE_ROOT) == '':
+            fail_reason = 'no_charter'
+            fail_summary = 'release charter (goals.md) absent or unreadable at RELEASE_ROOT'
+            print(
+                f'bridge: charter unavailable at {RELEASE_ROOT}; '
+                'aborting cycle (blocked), no subagent spawned'
+            )
+            handled_marker.write_text(str(req_path), encoding='utf-8')
+            _write_bridge_completed_result(
+                state_dir=STATE_DIR,
+                req=req,
+                request_id=request_id,
+                cycle_id=req.get('cycle_id') or '',
+                goal_id=goal_id,
+                files_changed=[],
+                commits_pushed=0,
+                result_status='blocked',
+                backlog_title='',
+                key_learnings=[
+                    f'{fail_summary}. Aborting cycle without spawning a subagent.',
+                ],
+                rollback={
+                    'integrated': False,
+                    'cycle_branch': None,
+                    'main_sha_before': None,
+                    'main_sha_after': None,
+                    'reason': fail_reason,
+                    'auto_committed': False,
+                },
+            )
+            _v, _vr = _derive_cycle_verdict('failed', fail_reason)
+            record_cycle_outcome(
+                STATE_DIR, _cycle_id, 'failed', fail_reason, [], None,
+                verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                real_result=_real_result_ledger_inputs('blocked'),
+            )
+            _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'failed')
+            _record_diary_fitness_marker(STATE_DIR, _cycle_id)
+            return 0
 
         # #944/ADR-034 rule 2: read the executor mission's charter from
         # immutable goals.md at the release root, via read_charter_text's

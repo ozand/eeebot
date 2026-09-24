@@ -217,6 +217,7 @@ def test_harness_prereads_task_contract_before_planner_spawn(tmp_path: Path, mon
     skill = release / "nanobot" / "skills" / "task-writing" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("# mandatory contract\nexternal criterion\n", encoding="utf-8")
+    (release / "goals.md").write_text("test charter", encoding="utf-8")
     manager_factory = _make_fake_mgr_factory(
         state, {"insight": "x", "plan": "y", "iterations_planned": 10},
         task_writing_read=False,
@@ -243,6 +244,7 @@ def test_timeout_is_distinct_from_missing_read(tmp_path: Path, monkeypatch):
     skill = release / "nanobot" / "skills" / "task-writing" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("# contract\n", encoding="utf-8")
+    (release / "goals.md").write_text("test charter", encoding="utf-8")
     monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
     manager_factory = _make_fake_mgr_factory(state, {"plan": "x"})
     monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
@@ -273,6 +275,7 @@ def test_oversized_task_writing_preread_refuses_before_spawn(tmp_path: Path, mon
     skill = release / "nanobot" / "skills" / "task-writing" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_bytes(b"x" * 16_385)
+    (release / "goals.md").write_text("test charter", encoding="utf-8")
     monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
     manager_factory = _make_fake_mgr_factory(state, {"plan": "must not run"})
     monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
@@ -291,6 +294,7 @@ def test_missing_task_writing_preread_refuses_before_spawn(tmp_path: Path, monke
     state = tmp_path / "state"
     release = tmp_path / "release"
     release.mkdir()
+    (release / "goals.md").write_text("test charter", encoding="utf-8")
     monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
     manager_factory = _make_fake_mgr_factory(state, {"plan": "must not run"})
     monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
