@@ -228,15 +228,38 @@ else
     die "/opt/eeepc-agent/runtimes/self-evolving-agent is not owned by root:root"
   fi
 
-  # Prove candidate imports/config/state/tool path before current changes. The
-  # self-check service receives the candidate release through systemd manager
-  # environment while retaining its identity, sandbox, EnvironmentFiles and state permissions.
-  sudo systemctl set-environment \
-    ACTIVATION_CHECK_RELEASE="$RELEASE_DIR" ACTIVATION_CHECK_MODE=activation
+  # --- #1904 candidate self-check begin ---
+  # Prove candidate imports/config/state/tool path before current changes. A
+  # runtime drop-in scopes candidate state to this service only: unlike
+  # systemctl set-environment it cannot leak to unrelated manager-started units.
+  ACTIVATION_DROPIN_DIR="/run/systemd/system/eeepc-self-evolving-activation-check.service.d"
+  sudo mkdir -p "$ACTIVATION_DROPIN_DIR"
+  ACTIVATION_DROPIN="$ACTIVATION_DROPIN_DIR/90-candidate.conf"
+  ACTIVATION_DROPIN_CLEANED=0
+  cleanup_activation_dropin() {
+    if [ "$ACTIVATION_DROPIN_CLEANED" -eq 0 ]; then
+      ACTIVATION_DROPIN_CLEANED=1
+      sudo rm -f "$ACTIVATION_DROPIN"
+      sudo rmdir "$ACTIVATION_DROPIN_DIR" 2>/dev/null || true
+      sudo systemctl daemon-reload
+    fi
+  }
+  trap cleanup_activation_dropin ERR
+  printf '[Service]\\nEnvironment=ACTIVATION_CHECK_RELEASE=%s\\nEnvironment=ACTIVATION_CHECK_MODE=activation\\n' "$RELEASE_DIR" \
+    | sudo tee "$ACTIVATION_DROPIN" >/dev/null
+  sudo chmod 0644 "$ACTIVATION_DROPIN"
   sudo systemctl daemon-reload
-  sudo systemctl start eeepc-self-evolving-activation-check.service
-  sudo systemctl unset-environment ACTIVATION_CHECK_RELEASE ACTIVATION_CHECK_MODE ACTIVATION_CHECK_RESULT ACTIVATION_CHECK_STATUS || true
+  if sudo systemctl start eeepc-self-evolving-activation-check.service; then
+    cleanup_activation_dropin
+    trap rollback_remote ERR
+  else
+    ACTIVATION_CHECK_RC=$?
+    cleanup_activation_dropin
+    trap rollback_remote ERR
+    die "model-free bridge activation self-check failed (rc=$ACTIVATION_CHECK_RC)"
+  fi
   echo "[remote] model-free bridge activation self-check passed; no model was called"
+  # --- #1904 candidate self-check end ---
 
   echo "[remote] updating current symlink"
   sudo ln -sfn "$RELEASE_DIR" "$CURRENT_SYMLINK"

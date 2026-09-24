@@ -133,8 +133,55 @@ def _drive_activation(tmp_path: Path, *, restart_rc: int, result: str, status: s
     RELEASE_DIR="{release_dir}"
     '''
     env = {"PATH": str(shims).replace("\\", "/") + ":" + os.environ["PATH"]}
-    res = _bash(prelude + _activation_stanza() + "\necho STANZA-COMPLETED\n", env=env)
+    self_check = DEPLOY_SCRIPT.read_text(encoding="utf-8").split(
+        "# --- #1904 candidate self-check begin ---", 1
+    )[1].split("# --- #1904 candidate self-check end ---", 1)[0]
+    res = _bash(prelude + self_check + _activation_stanza() + "\necho STANZA-COMPLETED\n", env=env)
     return res, marker.exists()
+
+
+def test_failed_self_check_cleans_candidate_environment_before_rollback(tmp_path):
+    stanza = DEPLOY_SCRIPT.read_text(encoding="utf-8").split(
+        "# --- #1904 candidate self-check begin ---", 1
+    )[1].split("# --- #1904 candidate self-check end ---", 1)[0]
+    shims = tmp_path / "cleanup-shims"
+    shims.mkdir()
+    events = tmp_path / "events.log"
+    script = tmp_path / "systemctl"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' \\\"$*\\\" >> '{events.as_posix()}'\n"
+        "if [[ $1 == start ]]; then exit 23; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    script.chmod(0o755)
+    _write_mock(shims / "sudo", 'printf "sudo %s\\n" "$*" >> "$TEST_ACTIONS"; exec "$@"')
+    _write_mock(shims / "tee", 'cat > "$1"')
+    (shims / "systemctl").write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
+    (shims / "systemctl").chmod(0o755)
+    marker = tmp_path / "rollback-fired"
+    release_dir = str(DEPLOY_SCRIPT.parents[3]).replace("\\\\", "/")
+    prelude = f"""
+    set -eEuo pipefail
+    die() {{ echo \\\"CRITICAL: $*\\\" >&2; return 1; }}
+    ACTIVATION_CHECK_UNIT=eeepc-self-evolving-activation-check.service
+    RELEASE_DIR=\\\"{release_dir}\\\"
+    PREV_RELEASE_PATH=/old
+    CURRENT_SYMLINK=/current
+    rollback_remote() {{ touch {marker.as_posix()}; }}
+    trap rollback_remote ERR
+    PATH=\\\"{shims.as_posix()}:$PATH\\\"
+    """
+    res = _bash(prelude + stanza + "\\n", env={"PATH": f"{shims.as_posix()}:{os.environ['PATH']}", "TEST_ACTIONS": str(events).replace("\\\\", "/")})
+    assert res.returncode != 0
+    assert marker.exists(), f"rollback trap did not run: stdout={res.stdout!r} stderr={res.stderr!r}"
+    actions = events.read_text(encoding="utf-8").splitlines()
+    assert any(line.startswith("sudo rm -f ") and "90-candidate.conf" in line for line in actions)
+    cleanup_index = actions.index(next(line for line in actions if line.startswith("sudo rm -f ")))
+    cleanup_reload = next(i for i, line in enumerate(actions) if i > cleanup_index and line.startswith("sudo systemctl daemon-reload"))
+    assert cleanup_index < cleanup_reload
 
 
 def test_activation_transport_exit_keeps_the_release(tmp_path):
