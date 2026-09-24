@@ -29,6 +29,7 @@ from typing import Any
 
 from nanobot.agent.block_loader import load_block, trim_lines
 from nanobot.observability.llm_telemetry import system_chars as _system_chars
+from nanobot.runtime.operator_documents import STATE_TEXT, resolve_charter
 
 #: Default deployed release tree (mirrors ``bridge.RELEASE_ROOT`` /
 #: ``llm_proposer._RELEASE_ROOT_DEFAULT``); the systemd units for the side
@@ -252,7 +253,7 @@ def build_role_system_prompt(
         text, meta = _load_release_file(root, "SOUL.md", SOUL_CAP)
         blocks.append(("soul", text, meta))
     if charter:
-        text, meta = _load_release_file(root, "goals.md", CHARTER_CAP)
+        text, meta = _load_charter_block(root, CHARTER_CAP)
         blocks.append(("goals", text, meta))
     if role_text is not None:
         blocks.append(("role", role_text, {"missing": False, "truncated": False, "chars": len(role_text)}))
@@ -280,6 +281,33 @@ def _load_release_file(root: Path | None, filename: str, cap: int) -> tuple[str,
         marker = f"[missing: {filename}]"
         return marker, {"missing": True, "truncated": False, "chars": len(marker)}
     return load_block(filename, Path(root) / filename, cap, True)
+
+
+def _load_charter_block(root: Path | None, cap: int) -> tuple[str, dict[str, Any]]:
+    """ADR-034 rule 2: the charter's one root is ``<release root>/goals.md``,
+    obtained via :func:`operator_documents.resolve_charter` — never a path
+    constructed here. Same ``(text, meta)`` contract as
+    :func:`nanobot.agent.block_loader.load_block` (heading, cap, line-boundary
+    truncation with a notice) so ``assemble_role_prompt``'s telemetry and
+    prompt-budget behavior are unchanged; only the read now goes through the
+    resolver instead of a second, hand-built path to ``goals.md``."""
+    name = "goals.md"
+    if root is None:
+        marker = f"[missing: {name}]"
+        return marker, {"missing": True, "truncated": False, "chars": len(marker)}
+    res = resolve_charter(root)
+    if res.state != STATE_TEXT:
+        marker = f"[missing: {name}]"
+        return marker, {"missing": True, "truncated": False, "chars": len(marker)}
+    heading = f"## {name}\n\n"
+    text = heading + res.text
+    if len(text) <= cap:
+        return text, {"missing": False, "truncated": False, "chars": len(text)}
+    notice = f"\n\n[{name} truncated at {cap} chars; read the file for the rest]"
+    budget = max(0, cap - len(heading) - len(notice))
+    trimmed_body = trim_lines(res.text, budget)
+    text = heading + trimmed_body + notice
+    return text, {"missing": False, "truncated": True, "chars": len(text)}
 
 
 #: Re-export (#1784). The definition moved to

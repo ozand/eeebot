@@ -74,6 +74,11 @@ from nanobot.runtime.goal_text_utils import (
 )
 from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
+from nanobot.runtime.operator_documents import (
+    STATE_TEXT,
+    resolve_charter,
+    resolve_operator_priorities_text,
+)
 from nanobot.runtime.reflection_context import build_reflection_hints
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
 
@@ -499,34 +504,34 @@ def _release_root_from_env() -> Path:
 def _load_goal_text(state_dir: Path, release_root: "Path | None" = None) -> str:
     """Assembled goal text for the proposer context.
 
-    #944: reads the immutable operator charter from ``goals.md`` in the
-    release tree (``release_root`` arg or ``RELEASE_ROOT`` env var).
-    Derived priorities from ``state/goals/derived_priorities.json`` are
-    folded in by :func:`goal_review.merged_goal_text` (#860). Falls back
-    to the pre-#944 behavior (``goal_text.json`` in state dir holds the
-    full text) when ``goals.md`` is absent.
+    #944/ADR-034 rule 2: reads the immutable operator charter from
+    ``goals.md`` in the release tree (``release_root`` arg or
+    ``RELEASE_ROOT`` env var) via :func:`operator_documents.resolve_charter`
+    — the charter's one resolver, no path constructed here. The operator's
+    own "Current priority targets" section (``state/goals/goal_text.json``,
+    via :func:`operator_documents.resolve_operator_priorities_text`) is
+    folded in ALONGSIDE the charter, never as a charter SUBSTITUTE (the
+    #944-era "goal_text.json holds the full text" fallback this used to
+    have mislabeled the operator's private priorities as the charter and
+    is deleted) — goal-review's dedup/`_priorities_remain` below have
+    always needed to see the operator's existing entries. Derived
+    priorities from ``state/goals/derived_priorities.json`` are folded in
+    by :func:`goal_review.merged_goal_text` (#860).
     """
-    from nanobot.runtime.goal_review import read_charter_text
-
     # Resolve release root: explicit arg wins, then RELEASE_ROOT/default.
     if release_root is None:
         release_root = _release_root_from_env()
 
-    charter = read_charter_text(release_root)
-    if charter:
-        raw_text = charter
-    else:
-        # Legacy fallback: goal_text.json holds the full text (charter + priorities).
-        state_path = Path(state_dir) / "goals" / "goal_text.json"
-        if not state_path.is_file():
-            return ""
-        try:
-            data = json.loads(state_path.read_text(encoding="utf-8"))
-        except Exception:
-            return ""
-        if not isinstance(data, dict):
-            return ""
-        raw_text = str(data.get("text") or "")
+    charter_res = resolve_charter(release_root)
+    charter = charter_res.text if charter_res.state == STATE_TEXT else ""
+    if not charter:
+        return ""
+
+    priorities_res = resolve_operator_priorities_text(state_dir)
+    priorities_text = priorities_res.text if priorities_res.state == STATE_TEXT else ""
+    marker_idx = priorities_text.find("Current priority targets:")
+    priority_section = priorities_text[marker_idx:].strip() if marker_idx != -1 else ""
+    raw_text = f"{charter.rstrip()}\n\n{priority_section}" if priority_section else charter
 
     if not raw_text:
         return ""
@@ -800,12 +805,12 @@ def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
                 return True
             _record_idle(state_dir)
             return False
-        goal_text_path = state_dir / "goals" / "goal_text.json"
-        # #944: the pre-#760 supply path also works when goals.md exists
-        # at the release root (RELEASE_ROOT env), even without goal_text.json.
-        _release_root = _release_root_from_env()
-        _has_goals_md = (_release_root / "goals.md").is_file()
-        if not goal_text_path.is_file() and not _has_goals_md:
+        # #944/ADR-034 rule 2: the pre-#760 supply path also works when
+        # goals.md exists at the release root, even without goal_text.json —
+        # checked via each document's one resolver, never a constructed path.
+        _has_goals_md = resolve_charter(_release_root_from_env()).state == STATE_TEXT
+        _has_goal_text = resolve_operator_priorities_text(state_dir).state == STATE_TEXT
+        if not _has_goal_text and not _has_goals_md:
             return False
         if _queue_effectively_empty(state_dir):
             return True

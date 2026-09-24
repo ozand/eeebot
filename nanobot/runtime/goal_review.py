@@ -89,6 +89,12 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.runtime.cycle_ledger import append_event
+from nanobot.runtime.operator_documents import (
+    STATE_TEXT,
+    resolve_charter,
+    resolve_operator_priorities_metadata,
+    resolve_operator_priorities_text,
+)
 from nanobot.runtime.role_prompt import load_role_text
 
 ENABLED_ENV = "SELFEVO_GOAL_REVIEW_ENABLED"
@@ -239,16 +245,13 @@ def read_charter_text(release_root: "Path | None") -> str:
     ``/opt/eeepc-agent/runtimes/self-evolving-agent/current``). Returns
     the charter text, or ``""`` when the file is absent, unreadable, or
     ``release_root`` is ``None`` — callers must treat empty as
-    unavailable. Fail-open: never raises."""
-    try:
-        if release_root is None:
-            return ""
-        p = Path(release_root) / _GOALS_MD_FILENAME
-        if not p.is_file():
-            return ""
-        return p.read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
+    unavailable. Fail-open: never raises.
+
+    ADR-034 rule 2: delegates to :func:`operator_documents.resolve_charter`,
+    the charter's one resolver — this wrapper exists only so the 7 existing
+    callers keep their ``str``-returning contract unchanged."""
+    res = resolve_charter(release_root)
+    return res.text.strip() if res.state == STATE_TEXT else ""
 
 
 def active_goal_id(state_dir: "Path | str") -> str:
@@ -261,15 +264,12 @@ def active_goal_id(state_dir: "Path | str") -> str:
     has carried ``goal_id`` all along, so it is the one source now. Returns
     ``""`` when the file is absent, unreadable or has no id. Fail-open:
     never raises.
-    """
-    try:
-        data = _read_json(Path(state_dir) / "goals" / "goal_text.json", None)
-    except Exception:
-        return ""
-    if not isinstance(data, dict):
-        return ""
-    goal_id = data.get("goal_id")
-    return goal_id.strip() if isinstance(goal_id, str) else ""
+
+    ADR-034 rule 2: delegates to
+    :func:`operator_documents.resolve_operator_priorities_metadata` — the
+    operator-priorities document's one resolver — instead of constructing
+    the ``goal_text.json`` path itself."""
+    return resolve_operator_priorities_metadata(state_dir).goal_id
 
 
 # ─── bounded inputs ─────────────────────────────────────────────────────────
@@ -278,28 +278,45 @@ def active_goal_id(state_dir: "Path | str") -> str:
 def _load_goal_data(
     state_dir: Path, release_root: "Path | None" = None
 ) -> "dict[str, Any] | None":
-    """Charter text for the goal review context.
+    """Charter + the operator's own priority section, for the goal-review
+    context and its dedup/numbering baseline.
 
     #944: when ``release_root`` is given and ``goals.md`` exists there,
     the immutable charter is read from that file (release-tree read-only
     path). Derived priorities are folded in separately by
     :func:`merged_goal_text` in :func:`maybe_goal_review`.
 
-    Falls back to the pre-#944 behavior (``goal_text.json`` in state holds
-    the full text) when ``goals.md`` is absent — safe for hosts that have
-    not yet deployed a release containing ``goals.md``.
-
-    Returns ``None`` when no usable text can be assembled — the review
-    must no-op BEFORE any LLM call.
+    ADR-034 rule 2: the operator's priority text (``goal_text.json``) is
+    NEVER used as a charter SUBSTITUTE — that #944-era fallback mislabeled
+    the operator's private priorities as the charter and is deleted, not
+    kept. It is, however, still APPENDED alongside the charter (via
+    :func:`operator_documents.resolve_operator_priorities_text`, never a
+    second path to the file): goal-review's dedup/numbering
+    (``_existing_priority_labels``, ``_next_priority_number``) and its LLM
+    context have always needed to see the operator's existing "Priority N"
+    entries to avoid minting a derived priority that duplicates one, or
+    reusing its number (true since before #944's charter split; lost as a
+    side effect of #1920/#1921 wiring a real ``release_root`` through
+    today, restored here). Returns ``None`` when the charter is
+    absent/unreadable — the review must no-op BEFORE any LLM call; a
+    missing/unreadable operator priority section just means nothing to
+    append (an empty document is a valid, priority-free one).
     """
     charter = read_charter_text(release_root)
-    if charter:
-        return {"text": charter}
-    # Legacy fallback: goal_text.json holds the full text (charter + priorities).
-    data = _read_json(Path(state_dir) / "goals" / "goal_text.json", None)
-    if not isinstance(data, dict) or not str(data.get("text") or "").strip():
+    if not charter:
         return None
-    return data
+    priorities_res = resolve_operator_priorities_text(state_dir)
+    priorities_text = priorities_res.text if priorities_res.state == STATE_TEXT else ""
+    marker_idx = priorities_text.find(_PRIORITY_MARKER)
+    # Only the operator's OWN "Current priority targets:" section (and any
+    # trailing "Completed" sentence) is folded in — never prose that
+    # precedes it, so an operator document with no such section (or none
+    # at all) contributes nothing here, exactly like the "empty" rule-3
+    # state contributes nothing to the priority list.
+    priority_section = priorities_text[marker_idx:].strip() if marker_idx != -1 else ""
+    if not priority_section:
+        return {"text": charter}
+    return {"text": f"{charter.rstrip()}\n\n{priority_section}"}
 
 
 def _derived_priorities_path(state_dir: Path) -> Path:

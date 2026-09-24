@@ -69,7 +69,7 @@ def test_each_document_resolves_from_its_one_root(tmp_path: Path):
 
     # Derived priorities: state/goals/derived_priorities.json only.
     (state_dir / "goals" / "derived_priorities.json").write_text(
-        json.dumps({"schema_version": "derived-v1", "priorities": [{"label": "D", "body": "do it", "number": 9}]}),
+        json.dumps({"schema_version": "derived-v1", "priorities": [{"label": "D", "body": "do it", "number": 9, "vector": "V1"}]}),
         encoding="utf-8",
     )
     (state_dir / "derived_priorities.json").write_text("decoy at the wrong root", encoding="utf-8")
@@ -228,11 +228,12 @@ def test_boundary_documents_leak_no_text(tmp_path: Path):
     goals_dir = state_derived_present / "goals"
     goals_dir.mkdir(parents=True)
     (goals_dir / "derived_priorities.json").write_text(
-        json.dumps({"priorities": [{"label": "Title", "body": sensitive, "number": 1}]}),
+        json.dumps({"priorities": [{"label": "Title", "body": sensitive, "number": 1, "vector": "V1"}]}),
         encoding="utf-8",
     )
     derived_present = resolve_derived_priorities(state_derived_present)
     assert derived_present.state == STATE_TEXT
+    assert len(derived_present.entries) == 1
     assert sensitive not in repr(derived_present)
     assert sensitive not in str(derived_present)
     for entry in derived_present.entries:
