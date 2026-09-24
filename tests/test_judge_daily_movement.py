@@ -101,6 +101,52 @@ def test_evaluate_daily_movement_true_movement() -> None:
     assert res.productive_ratio == 0.4
 
 
+def test_killed_runs_count_as_attempts_and_wasted_box_and_unattributed_is_incomplete() -> None:
+    w_start = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)
+    w_end = datetime(2026, 9, 21, 0, 0, tzinfo=timezone.utc)
+    rows = [
+        {"phase": "outcome", "outcome": "success", "files_changed": ["scripts/tool.py"]}
+        for _ in range(25)
+    ]
+    rows.extend(
+        {"phase": "run_end", "classification": "unit_timeout", "run_id": f"run-{i}", "cycle_id": f"cycle-{i}"}
+        for i in range(25)
+    )
+    rows.extend(
+        {"phase": "run_end", "classification": "unit_timeout", "run_id": f"unattributed-{i}"}
+        for i in range(9)
+    )
+
+    verdict = evaluate_daily_movement(rows, window_start=w_start, window_end=w_end)
+
+    assert verdict.total_attempts == 59
+    assert verdict.wasted_box_cycles == 34
+    assert verdict.verdict == "incomplete"
+    assert verdict.details["killed_by_timeout"] == 34
+    assert verdict.details["unattributed_killed_by_timeout"] == 9
+    assert sum(run["cycle_id"] is None for run in verdict.details["killed_runs"]) == 9
+
+
+def test_run_judge_reads_killed_runs_through_state_access(tmp_path: Path, monkeypatch) -> None:
+    state_dir = tmp_path / "state"
+    bridge_dir = state_dir / "bridge"
+    ledger_dir = state_dir / "ledger"
+    bridge_dir.mkdir(parents=True)
+    ledger_dir.mkdir()
+    (ledger_dir / "cycles.jsonl").write_text(
+        json.dumps({"phase": "outcome", "outcome": "success", "files_changed": ["scripts/x.py"], "ts": "2026-09-21T02:00:00Z"}) + "\\n",
+        encoding="utf-8",
+    )
+    (bridge_dir / "runs.jsonl").write_text(
+        json.dumps({"phase": "run_end", "classification": "unit_timeout", "source": "systemd", "finished_at": "2026-09-21T02:30:00Z"}) + "\\n",
+        encoding="utf-8",
+    )
+    verdict = run_judge(state_dir, now=datetime(2026, 9, 21, 3, 0, tzinfo=timezone.utc))
+    assert verdict.total_attempts == 2
+    assert verdict.wasted_box_cycles == 1
+    assert verdict.verdict == "incomplete"
+
+
 def test_run_judge_writes_state_and_read_distinguishes_missing(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     state_dir.mkdir()

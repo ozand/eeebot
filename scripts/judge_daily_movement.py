@@ -88,7 +88,14 @@ def evaluate_daily_movement(
         if r.get("phase") == "outcome"
     ]
 
-    total_attempts = len(outcomes)
+    run_ends = [r for r in rows if r.get("phase") == "run_end"]
+    killed = [
+        r for r in run_ends
+        if str(r.get("classification") or "") == "unit_timeout"
+        or (r.get("source") == "systemd" and str(r.get("outcome") or "") == "interrupted")
+    ]
+    unattributed_kills = [r for r in killed if not str(r.get("cycle_id") or "").strip()]
+    total_attempts = len(outcomes) + len(killed)
     successes = [r for r in outcomes if str(r.get("outcome")).strip().lower() == "success"]
     successful_cycles = len(successes)
 
@@ -112,6 +119,9 @@ def evaluate_daily_movement(
         if isinstance(frac, (int, float)) and frac >= 0.8:
             if r not in progressive:
                 wasted_box += 1
+    # A systemd-killed invocation consumed the box but never reached a cycle
+    # outcome; count it as wasted rather than letting the missing row look free.
+    wasted_box += len(killed)
     wasted_box_cycles = wasted_box
 
     productive_ratio = (
@@ -136,6 +146,9 @@ def evaluate_daily_movement(
             f"demonstrated code/functional delivery ({progressive_cycles} progressive cycles, "
             f"productive_ratio={productive_ratio})"
         )
+    if unattributed_kills:
+        verdict = "incomplete"
+        reason += f"; incomplete evidence: {len(unattributed_kills)} killed run(s) unattributed"
 
     return DailyVerdict(
         schema_version=SCHEMA_VERSION,
@@ -154,6 +167,12 @@ def evaluate_daily_movement(
         details={
             "trivial_paths": sorted(TRIVIAL_PATHS),
             "trivial_dir_prefixes": list(TRIVIAL_DIR_PREFIXES),
+            "killed_by_timeout": len(killed),
+            "unattributed_killed_by_timeout": len(unattributed_kills),
+            "killed_runs": [
+                {"run_id": r.get("run_id"), "cycle_id": r.get("cycle_id") or None}
+                for r in killed
+            ],
         },
     )
 
@@ -205,8 +224,12 @@ def run_judge(
         phases=frozenset({"outcome"}),
     )
 
+    run_rows = state_access.run_window(
+        state_dir,
+        since_ts=window_start.isoformat().replace("+00:00", "Z"),
+    )
     verdict = evaluate_daily_movement(
-        window.rows,
+        (*window.rows, *run_rows.rows),
         window_start=window_start,
         window_end=ref_now,
         evaluated_at=ref_now,

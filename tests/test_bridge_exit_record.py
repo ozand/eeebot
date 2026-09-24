@@ -88,6 +88,24 @@ def test_run_marker_and_exit_materialize_queryable_duration(tmp_path):
     assert not (state / "bridge" / "run.json").exists()
 
 
+def test_cycle_attribution_is_persisted_to_marker_before_systemd_kill(tmp_path, monkeypatch):
+    from nanobot import crash_record
+
+    state = tmp_path / "state"
+    crash_record._start_run_marker(state)
+    monkeypatch.setenv("STATE_DIR", str(state))
+    crash_record.set_run_metadata(cycle_id="cycle-killed")
+    crash_record.persist_run_attribution(state_root=state, cycle_id="cycle-killed")
+    marker = json.loads((state / "bridge" / "run.json").read_text(encoding="utf-8"))
+    assert marker["cycle_id"] == "cycle-killed"
+    crash_record.record_exit(
+        state, outcome="failure", exit_status="TIMEOUT", source="systemd",
+        service_result="timeout", exit_code="killed", now=NOW + timedelta(seconds=7),
+    )
+    assert _run_rows(state)[0]["cycle_id"] == "cycle-killed"
+    assert _run_rows(state)[0]["classification"] == "unit_timeout"
+
+
 def test_loop_breaker_run_classification_is_preserved(tmp_path):
     from nanobot import crash_record
 
