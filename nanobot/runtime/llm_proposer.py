@@ -44,6 +44,7 @@ from typing import Any
 
 from nanobot.runtime.role_prompt import (
     build_role_system_prompt,
+    build_role_system_prompt_or_refuse,
     load_role_text,
     system_chars,
 )
@@ -241,6 +242,40 @@ _DEFAULT_DEDUP_EXHAUSTION_DAYS = 3
 # response that arrived but was not valid JSON, without changing propose()'s
 # existing dict-or-None public contract.
 _last_propose_failure: str | None = None
+_role_prompt_refusal_state_dir: Path | None = None
+
+
+def _record_role_prompt_refusal(role_body: str, error: Exception, detail: str) -> None:
+    """Record oversized-charter refusal when an explicit state path exists."""
+    try:
+        if not isinstance(error, CharterTooLargeError):
+            return
+        state_dir = _role_prompt_refusal_state_dir
+        if state_dir is not None:
+            _record_proposer_reject(
+                state_dir, "charter_too_large", detail=detail[:500]
+            )
+    except Exception:
+        pass
+
+
+def _build_proposer_role_prompt(role_body: str) -> str | None:
+    """Build the system prompt or fail the proposal attempt with a reason.
+
+    Charter refusal must not become a gateway call with an empty/partial
+    system message; callers observe ``_last_propose_failure`` and record a
+    normal proposer rejection instead.
+    """
+    global _last_propose_failure
+    try:
+        system_content, _fit = build_role_system_prompt_or_refuse(
+            _role_name_for(role_body), role_text=role_body
+        )
+        return system_content
+    except Exception as exc:
+        _last_propose_failure = f"RolePromptBuildFailed: {exc}"
+        _record_role_prompt_refusal(role_body, exc, _last_propose_failure)
+        return None
 
 _PRIORITY_PATTERN = re.compile(
     r"\([A-Za-z]\)\s*Priority\s+(\d+)\s*[—-]\s*(.+?):\s*(.+?)(?=\n\([A-Za-z]\)|\Z)",
@@ -1945,8 +1980,9 @@ def propose(
     Fails open (returns ``None``) on any missing config, network error, or
     unparseable reply — never raises.
     """
-    global _last_propose_failure
+    global _last_propose_failure, _role_prompt_refusal_state_dir
     _last_propose_failure = None
+    _role_prompt_refusal_state_dir = None
     try:
         from openai import OpenAI
     except Exception as exc:
@@ -1966,10 +2002,12 @@ def propose(
         )
     # #1729: identity (short form) + soul + charter are prepended once, from
     # the release files; ``system_prompt`` carries only the role body.
+    state_dir = os.environ.get("STATE_DIR", "").strip()
+    _role_prompt_refusal_state_dir = Path(state_dir) if state_dir else None
     role_body = system_prompt or _PROPOSER_SYSTEM_PROMPT
-    system_content, _role_fit = build_role_system_prompt(
-        _role_name_for(role_body), role_text=role_body
-    )
+    system_content = _build_proposer_role_prompt(role_body)
+    if system_content is None:
+        return None
     try:
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         create_kwargs: dict[str, Any] = dict(
@@ -2041,8 +2079,9 @@ def propose_multi(
     "the call failed"; :data:`_last_propose_failure` still distinguishes
     them for the caller exactly as it does for :func:`propose`.
     """
-    global _last_propose_failure
+    global _last_propose_failure, _role_prompt_refusal_state_dir
     _last_propose_failure = None
+    _role_prompt_refusal_state_dir = None
     try:
         from openai import OpenAI
     except Exception as exc:
@@ -2059,10 +2098,12 @@ def propose_multi(
         "Reply with a JSON array of exactly that many objects, each shaped "
         "like the single-object schema described above."
     )
+    state_dir = os.environ.get("STATE_DIR", "").strip()
+    _role_prompt_refusal_state_dir = Path(state_dir) if state_dir else None
     role_body = system_prompt or _PROPOSER_SYSTEM_PROMPT
-    system_content, _role_fit = build_role_system_prompt(
-        _role_name_for(role_body), role_text=role_body
-    )
+    system_content = _build_proposer_role_prompt(role_body)
+    if system_content is None:
+        return None
     try:
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         create_kwargs: dict[str, Any] = dict(

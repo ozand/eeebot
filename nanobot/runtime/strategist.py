@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from nanobot.runtime import strategist_inputs
 from nanobot.runtime.model_registry import resolve_model
+from nanobot.runtime.role_prompt import CharterTooLargeError, RolePromptBuildError
 
 LOG = logging.getLogger(__name__)
 SCHEMA = "strategist-hadi-v1"
@@ -197,9 +198,9 @@ def _json_object(line: str) -> bool:
 def build_strategist_prompt(inputs: dict[str, Any], watermark: dict[str, Any]) -> tuple[str, str]:
     # #1729 (ADR-022 rule 2): identity (short form) + roles/strategist.md. No
     # soul and no charter: this role runs under a tight payload cap.
-    from nanobot.runtime.role_prompt import build_role_system_prompt
+    from nanobot.runtime.role_prompt import build_role_system_prompt_or_refuse
 
-    system, _role_fit = build_role_system_prompt("strategist")
+    system, _role_fit = build_role_system_prompt_or_refuse("strategist")
     watermark = _cap(watermark, 1_000) if isinstance(watermark, dict) else {}
     payload = {"schema": SCHEMA, "watermark": watermark, "archive": inputs, "output": {
         "schema": SCHEMA, "period_reviewed": "ISO period", "hypotheses": [{
@@ -387,6 +388,18 @@ def run_strategist(state_root: Path, repo_root: Path, llm: Callable[[list[dict[s
         counts = _apply(parsed, state_root, max_h, max_f)
         _atomic_json(Path(state_root) / "strategist" / "watermark.json", {"last_run": decision["timestamp"], "model": model, "total_runs": int(old.get("total_runs", 0)) + 1})
         decision.update({"success": True, "counts": counts, "hypotheses_count": counts["hypotheses_appended"], "advisories_count": counts["advisories_written"], "reason": "valid bounded advisory output applied"})
+    except (CharterTooLargeError, RolePromptBuildError) as exc:
+        decision.setdefault("prompt_chars", 0)
+        decision.update({"refused": True, "error": str(exc)[:500],
+                         "reason": f"role_prompt_refused: {exc}"})
+        try:
+            _append_jsonl(Path(state_root) / "strategist" / "errors.jsonl", {
+                "timestamp": decision["timestamp"], "error": decision["reason"],
+            })
+        except Exception:
+            LOG.exception("unable to record strategist prompt refusal")
+        _record_decision(state_root, decision)
+        return decision
     except Exception as exc:
         decision.setdefault("prompt_chars", 0)
         decision.update({"error": str(exc)[:500], "reason": "no writes applied; watermark unchanged"})
@@ -408,8 +421,15 @@ def inputs_report(state_root: Path, repo_root: Path) -> dict[str, Any]:
     and without writing anything: the operator's pre-enable check (#1182)."""
     state_root = Path(state_root)
     inputs = collect_inputs(state_root, Path(repo_root))
-    _, user = build_strategist_prompt(inputs, load_watermark(state_root))
     status = inputs["inputs_status"]
+    try:
+        _, user = build_strategist_prompt(inputs, load_watermark(state_root))
+    except (CharterTooLargeError, RolePromptBuildError) as exc:
+        return {"timestamp": _now(), "dry_run": True, "inputs_status": status,
+                "prompt_chars": 0, "refused": True,
+                "reason": f"role_prompt_refused: {exc}",
+                "empty_inputs": strategist_inputs.empty_inputs(status),
+                "would_refuse": True}
     return {"timestamp": _now(), "dry_run": True, "inputs_status": status, "prompt_chars": len(user),
             "empty_inputs": strategist_inputs.empty_inputs(status), "would_refuse": strategist_inputs.should_refuse(status)}
 

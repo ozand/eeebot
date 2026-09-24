@@ -242,6 +242,44 @@ def test_hadi_missing_insight_criterion_is_rejected(mock_state_and_repo):
     assert validate_strategist_output(output) is False
 
 
+def test_strategist_records_role_prompt_refusal_and_dry_run_reports_it(mock_state_and_repo, monkeypatch):
+    state_root, repo_root = mock_state_and_repo
+    from nanobot.runtime import role_prompt, strategist
+
+    error = role_prompt.CharterTooLargeError("strategist", 8001, 8000)
+    monkeypatch.setattr(
+        strategist, "build_strategist_prompt",
+        lambda *_args: (_ for _ in ()).throw(error),
+    )
+    called = False
+
+    def llm(*_args):
+        nonlocal called
+        called = True
+        return "{}"
+
+    result = run_strategist(state_root, repo_root, llm=llm)
+    assert result["refused"] is True
+    assert "role_prompt_refused" in result["reason"]
+    assert called is False
+    rows = [json.loads(line) for line in (state_root / "strategist" / "errors.jsonl").read_text().splitlines()]
+    assert "maximum is 8000" in rows[-1]["error"]
+
+    report = strategist.inputs_report(state_root, repo_root)
+    assert report["refused"] is True
+    assert "role_prompt_refused" in report["reason"]
+
+    monkeypatch.setattr(
+        strategist, "build_strategist_prompt",
+        lambda *_args: (_ for _ in ()).throw(
+            role_prompt.RolePromptBuildError("missing goals.md")
+        ),
+    )
+    unavailable = strategist.inputs_report(state_root, repo_root)
+    assert unavailable["refused"] is True
+    assert "missing goals.md" in unavailable["reason"]
+
+
 def test_run_strategist_end_to_end(mock_state_and_repo, monkeypatch):
     state_root, repo_root = mock_state_and_repo
     monkeypatch.setenv("SELFEVO_STRATEGIST_MODEL", "cl/test-strategist-model")

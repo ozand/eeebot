@@ -14,7 +14,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from nanobot.runtime.role_prompt import build_role_system_prompt, system_chars
+from nanobot.runtime.role_prompt import (
+    CharterTooLargeError,
+    RolePromptBuildError,
+    build_role_system_prompt_or_refuse,
+    system_chars,
+)
 from nanobot.observability.llm_telemetry import (
     MAX_LLM_PROMPT_PAYLOAD_BYTES,
     call_context,
@@ -420,7 +425,7 @@ def _build_prompt(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[s
     # #1729 (ADR-022 rule 2): identity (short form) + roles/reflector.md. No
     # soul and no charter: this role runs under a tight input cap, so its
     # growth is bounded by the first paragraph of IDENTITY.md.
-    system, _role_fit = build_role_system_prompt("reflector")
+    system, _role_fit = build_role_system_prompt_or_refuse("reflector")
     transcript_kept, transcript_fit = _fit_transcript(transcript, _MAX_TRANSCRIPT_CHARS)
     protect = 1 if ledger and isinstance(ledger[0], dict) and ledger[0].get("phase") == "proposed" else 0
     ledger_kept, ledger_fit = _fit_rows(ledger, _MAX_LEDGER_CHARS, protect_head=protect)
@@ -552,8 +557,18 @@ def run_reflector(
     max_cycles: int = _MAX_CYCLES,
     max_consecutive_errors: int = _MAX_CONSECUTIVE_ERRORS,
     max_runtime_seconds: float = _MAX_RUNTIME_SECONDS,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     state_dir = Path(state_dir)
+    try:
+        build_role_system_prompt_or_refuse("reflector")
+    except (CharterTooLargeError, RolePromptBuildError) as exc:
+        _append_journal(state_dir, {
+            "timestamp": _now(), "status": "refused",
+            "summary": f"role_prompt_refused: {exc}",
+        })
+        return {"candidates": 0, "processed": 0, "skipped_pruned": 0,
+                "errors": 0, "consecutive_errors": 0,
+                "input_truncated": 0, "status": "refused"}
     deadline = time.monotonic() + max(1.0, float(max_runtime_seconds))
     rows = _ledger_rows(state_dir)
     outcomes = [row for row in rows if row.get("phase") == "outcome" and row.get("cycle_id")]

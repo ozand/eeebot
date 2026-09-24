@@ -47,9 +47,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-#: ADR-034 rule 3: over this many bytes, a document resolves ``unreadable``
-#: with reason ``oversize`` rather than being read at all.
+#: ADR-034 rule 3: general operator documents over this many bytes resolve
+#: ``unreadable`` with reason ``oversize`` rather than being read at all.
 DOCUMENT_SIZE_CAP_BYTES = 65536
+#: Charter cap is defined in decoded characters for prompt construction; UTF-8
+#: can use up to four bytes per character, so this bounds the read safely.
+CHARTER_MAX_CHARS = 8000
+CHARTER_READ_CAP_BYTES = CHARTER_MAX_CHARS * 4
 
 STATE_TEXT = "text"
 STATE_ABSENT = "absent"
@@ -165,7 +169,11 @@ def resolve_charter(release_root: "Path | str | None") -> DocumentResolution:
     No other path is ever consulted, including any instance-repo copy."""
     if release_root is None:
         return DocumentResolution(state=STATE_ABSENT, reason="no_release_root")
-    return _resolve_text_file(Path(release_root) / _CHARTER_FILENAME)
+    return _resolve_text_file(
+        Path(release_root) / _CHARTER_FILENAME,
+        max_bytes=CHARTER_READ_CAP_BYTES,
+        max_chars=CHARTER_MAX_CHARS,
+    )
 
 
 def derived_priorities_path(state_dir: "Path | str") -> Path:
@@ -432,7 +440,10 @@ def _mtime_utc(path: Path) -> "str | None":
         return None
 
 
-def _resolve_text_file(path: Path) -> DocumentResolution:
+def _resolve_text_file(
+    path: Path, *, max_bytes: int = DOCUMENT_SIZE_CAP_BYTES,
+    max_chars: int | None = None,
+) -> DocumentResolution:
     """Shared read: absent / unreadable (incl. oversize) / text.
 
     Never truncates, and never lets the document's own bytes reach the
@@ -448,12 +459,14 @@ def _resolve_text_file(path: Path) -> DocumentResolution:
         size = path.stat().st_size
     except Exception:
         return DocumentResolution(state=STATE_UNREADABLE, reason="stat_failed")
-    if size > DOCUMENT_SIZE_CAP_BYTES:
+    if size > max_bytes:
         return DocumentResolution(state=STATE_UNREADABLE, reason="oversize")
     try:
         text = path.read_text(encoding="utf-8")
     except Exception:
         return DocumentResolution(state=STATE_UNREADABLE, reason="read_failed")
+    if max_chars is not None and len(text) > max_chars:
+        return DocumentResolution(state=STATE_UNREADABLE, reason="oversize")
     if not text.strip():
         return DocumentResolution(state=STATE_ABSENT, reason="empty_file")
     return DocumentResolution(state=STATE_TEXT, text=text)

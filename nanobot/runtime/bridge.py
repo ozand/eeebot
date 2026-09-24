@@ -3147,14 +3147,20 @@ async def _run_planning_session(
     # meant for logging/diagnostics, not for a role to run on). The
     # reason is recorded via the same _fail()/record_planning_session()
     # path every other early-out in this function uses.
-    if not read_charter_text(RELEASE_ROOT):
+    try:
+        charter_text = read_charter_text(RELEASE_ROOT)
+    except Exception as exc:
+        return _fail('refused', f'charter_unavailable: {exc}')
+    if not charter_text:
         return _fail('refused', 'no_charter')
 
     git = _git_cmd(selfevo_repo)
     pre_sha = _sp_run.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
 
     try:
-        role_text, _role_meta = role_prompt.build_role_system_prompt('planner', release_root=RELEASE_ROOT)
+        role_text, _role_meta = role_prompt.build_role_system_prompt_or_refuse('planner', release_root=RELEASE_ROOT)
+    except (role_prompt.CharterTooLargeError, role_prompt.RolePromptBuildError) as exc:
+        return _fail('refused', f'role prompt assembly failed: {exc}')
     except Exception as exc:
         return _fail('spawn_failed', f'role prompt assembly failed: {exc}')
 
