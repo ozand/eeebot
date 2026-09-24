@@ -235,3 +235,38 @@ ADR-028 rule 6's boundary fold, not a second write from the cycle.
   `state/hypotheses/lifecycle.json` (153 entries), `state/demand/completed.json`
   (905 entries, 543 confirmed), `state/ledger/cycles-2026-09-20.jsonl.gz`
   (46 proposals, 15 with a claim), all read 2026-09-21.
+
+## Addendum 2026-09-24 — the power limit of this environment (#1455)
+
+The standalone experiment ledger (`nanobot/runtime/experiment_ledger.py`,
+`state/experiments/results.jsonl`) is retired in #1455: it never had a
+production writer or reader, and the host never held the file. **Retiring it
+is not retiring experiments.** Hypotheses, their measurements and their
+verdicts live where this ADR puts them — `state/hypotheses/` and the day
+diary — and every HADI loop keeps its own before/after measurement.
+
+What #1455 established is worth more than the file, because it bounds what any
+measurement here can conclude. From 104 scorecard snapshots over 3.8 days
+(2026-09-13 → 2026-09-16) on `eeepc`:
+
+- **Intra-day wobble** of `confirmed_integration_ratio` was 3.20–4.26 pp per
+  day (6.16 pp across the window); of `repeat_failure_rate`, 2.50–4.21 pp per
+  day (7.97 pp across the window). Task-mix drift moves the baseline 4–6 pp.
+- **Detecting a 5 pp effect** (two-sided α = 0.05, power 0.80) with two
+  independent arms needs about **2,188 observations** (CIR, 75 → 80 %) or
+  **2,660** (RFR, 33 → 28 %) — at the host's ~40 terminal outcomes a day,
+  roughly 55–67 days.
+- A **paired replay** of the same proposal under two variants needs about
+  **626 pairs** (McNemar, discordant rate ≈ 20 %) — achievable in 10–16 days,
+  but only with double the inference load or an offline replay harness that
+  does not exist.
+
+Consequences for how results here are read:
+
+1. A rate compared across a few dozen cycles is **directional, not
+   conclusive**, unless the effect is far larger than the daily wobble. A
+   24-cycle measurement (as in #1903) yields a preliminary verdict and says so.
+2. Prefer paired or within-proposal comparisons, and structural evidence that
+   does not depend on sample size, over between-cycle rate comparisons.
+3. "No significant change" at this sample size is absence of evidence, not
+   evidence of absence.
