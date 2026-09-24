@@ -379,6 +379,14 @@ def unavailable_inputs(inputs_status: dict[str, Any]) -> list[str]:
     return [name for name in INPUT_NAMES if (inputs_status.get(name) or {}).get("status") == "unavailable"]
 
 def should_refuse(inputs_status: dict[str, Any]) -> bool:
+    # ADR-034 rule 3: the charter ("goals") is not one of the five equal
+    # inputs the _MAX_EMPTY_INPUTS budget below shares — absent or
+    # unreadable, it alone stops the strategist (role does not run,
+    # reason recorded via the SAME empty_inputs/unavailable_inputs
+    # mechanism run_strategist already journals on refusal).
+    charter_status = (inputs_status.get("goals") or {}).get("status")
+    if charter_status != "complete":
+        return True
     # Preserve the existing refusal decision exactly while #1444 records the
     # operator question separately: unavailable counts like empty for now.
     return len(empty_inputs(inputs_status) + unavailable_inputs(inputs_status)) > _MAX_EMPTY_INPUTS

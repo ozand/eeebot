@@ -344,13 +344,31 @@ def test_failed_lessons_read_is_unavailable_but_empty_corpus_is_empty(roots):
     assert empty_meta["status"] == "empty"
 
 
-def test_should_refuse_verdict_is_unchanged_for_empty_and_unavailable():
+def test_should_refuse_verdict_for_the_other_four_inputs_is_unchanged():
+    """ADR-034 rule 3: the charter ("goals") is not one of the five equal
+    inputs the shared _MAX_EMPTY_INPUTS budget applies to — it is fixed
+    "complete" in every case checked here, isolating the unchanged
+    refusal policy for the other four (empty_inputs()/unavailable_inputs()
+    still count either state identically, per #1444)."""
     from itertools import product
-    names = strategist_inputs.INPUT_NAMES
-    for states in product(("empty", "unavailable", "complete"), repeat=len(names)):
-        status = {name: {"status": value} for name, value in zip(names, states)}
+    other_names = [n for n in strategist_inputs.INPUT_NAMES if n != "goals"]
+    for states in product(("empty", "unavailable", "complete"), repeat=len(other_names)):
+        status = {"goals": {"status": "complete"}}
+        status.update({name: {"status": value} for name, value in zip(other_names, states)})
         expected = sum(value in {"empty", "unavailable"} for value in states) > strategist_inputs._MAX_EMPTY_INPUTS
         assert strategist_inputs.should_refuse(status) is expected
+
+
+def test_should_refuse_when_charter_absent_or_unreadable_regardless_of_others():
+    """ADR-034 rule 3: charter absent/unreadable alone stops the
+    strategist — never counted against the other four inputs' shared
+    budget, and never tolerated even when every other input is
+    "complete"."""
+    other_names = [n for n in strategist_inputs.INPUT_NAMES if n != "goals"]
+    all_complete = {name: {"status": "complete"} for name in other_names}
+    for charter_status in ("empty", "unavailable"):
+        status = {"goals": {"status": charter_status}, **all_complete}
+        assert strategist_inputs.should_refuse(status) is True
 
 
 def test_one_empty_input_is_tolerated(roots):
