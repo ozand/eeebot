@@ -35,12 +35,14 @@ describe_bridge_exit_status() {
 }
 
 # classify_bridge_run <systemctl-restart-rc> <Result> <ExecMainStatus>
-# Prints exactly one word:
-#   ok         the run exited 0
-#   transport  the run exited EXIT_EXECUTOR_LLM_ERROR (Result=exit-code)
-#   failed     any other failure, including signals and an unreadable status
+# Prints one of: ok, transport, timeout, failed. Timeout classifies only the
+# post-activation real cycle; the model-free activation check owns rollback.
 classify_bridge_run() {
   local rc="${1:-1}" result="${2:-}" status="${3:-}"
+  if [ "$result" = "timeout" ]; then
+    echo timeout
+    return 0
+  fi
   if [ "$rc" = "0" ]; then
     echo ok
     return 0

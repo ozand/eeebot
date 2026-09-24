@@ -1,16 +1,10 @@
-"""#1303: a deploy must tell "this release cannot run" from "this one cycle
-could not reach the gateway".
+"""#1303/#1904: classify transport, model-free activation, and real-cycle timeout.
 
-On 2026-09-05 06:38 the first post-flip bridge cycle of `a64470e5` drew a
-transient gateway 404, exited EXIT_EXECUTOR_LLM_ERROR (3) as #1280 requires,
-systemd reported the oneshot start job failed, and deploy_release.sh rolled the
-release back — un-deploying the fix for the lie it had just recorded honestly.
-
-Arm 1: the exit status is classified at both rollback points. Status 3 keeps
-the release; every other failure still rolls back. Both halves are DRIVEN here,
-not asserted: the remote activation stanza is executed with a scripted
-`systemctl`, and the local health gate is run through the full script with
-journal/streak fixtures, exactly as tests/test_deploy_release.py does.
+The model-free activation self-check owns rollback before `current` flips. The
+first real post-flip cycle is classified separately: transport and timeout do
+not roll back; crash/other exits do. The marked deploy stanza is driven with
+scripted systemctl and rollback fixtures; the later local health gate remains
+covered by the existing full-script journal/streak tests.
 """
 from __future__ import annotations
 
@@ -64,12 +58,11 @@ def test_describe_bridge_exit_status_names_known_codes_and_the_remedy():
         assert needle in res.stdout.strip() if needle else res.stdout.strip() == ""
 
 
-def test_activation_overflow_rollback_names_itself_and_the_remedy(tmp_path):
-    """#1300 deployed before the instance markers: the rollback still happens (exit 4 is a
-    release-plus-data failure, not a transient) and the deploy output says why and what to do."""
+def test_first_cycle_overflow_rolls_back_with_remedy(tmp_path):
+    """A non-timeout failure after activation remains rollback-worthy."""
     res, rolled_back = _drive_activation(tmp_path, restart_rc=4, result="exit-code", status="4")
     assert res.returncode != 0 and rolled_back is True
-    assert "CRITICAL: bridge activation failed" in res.stderr
+    assert "CRITICAL: bridge first real cycle failed" in res.stderr
     assert "EXIT_SYSTEM_PROMPT_OVERFLOW" in res.stderr and "prompt-fit: droppable" in res.stderr and "#1300" in res.stderr
 
 
@@ -82,6 +75,7 @@ def test_activation_overflow_rollback_names_itself_and_the_remedy(tmp_path):
     ("1", "signal", "9", "failed"),                # killed
     ("1", "exit-code", "", "failed"),              # status unreadable: never assume transport
     ("1", "", "3", "failed"),                      # status 3 but Result not exit-code: not the #1280 path
+    ("1", "timeout", "15", "timeout"),              # first real cycle timed out: do not roll back
 ])
 def test_classify_bridge_run(rc, result, status, expected):
     lib = str(LIB).replace("\\", "/")
@@ -103,26 +97,136 @@ def _drive_activation(tmp_path: Path, *, restart_rc: int, result: str, status: s
     systemctl. Returns the process and whether rollback_remote fired."""
     shims = tmp_path / "shims"
     shims.mkdir(exist_ok=True)
-    _write_mock(shims / "sudo", 'exec "$@"')
+    _write_mock(shims / "sudo", f'''
+    if [ "$1" = "install" ]; then exit 0; fi
+    if [ "$1" = "systemctl" ] && [ "$2" = "restart" ]; then exit {restart_rc}; fi
+    if [ "$1" = "-u" ] && [ "$2" = "eeepc-agent" ]; then
+      if [[ "$*" == *"ACTIVATION_CHECK_MODE=record-behavior-timeout"* ]]; then
+        echo activation-check:record-behavior-timeout
+      fi
+      exit 0
+    fi
+    exec "$@"
+    ''')
+    _write_mock(shims / "python", 'exit 0')
+    python_path = tmp_path / "opt/eeepc-agent/venv/bin/python"
+    python_path.parent.mkdir(parents=True, exist_ok=True)
+    python_path.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    python_path.chmod(0o755)
     _write_mock(shims / "systemctl", f'''
+    if [ "$1" = "set-environment" ] || [ "$1" = "unset-environment" ] || [ "$1" = "reset-failed" ]; then exit 0; fi
+    if [ "$1" = "show" ] && [[ "$*" == *"eeepc-self-evolving-activation-check.service"* ]]; then echo success; exit 0; fi
     if [ "$1" = "restart" ]; then exit {restart_rc}; fi
     if [ "$1" = "show" ] && [[ "$*" == *"-p Result"* ]]; then echo "{result}"; exit 0; fi
     if [ "$1" = "show" ] && [[ "$*" == *"-p ExecMainStatus"* ]]; then echo "{status}"; exit 0; fi
+    if [ "$1" = "start" ] && [ "$2" = "eeepc-self-evolving-activation-check.service" ]; then exit 0; fi
     exit 0
     ''')
     marker = tmp_path / "rolled_back"
     release_dir = str(DEPLOY_SCRIPT.parents[3]).replace("\\", "/")
+    temp_dropin = (tmp_path / "systemd" / "activation-check.service.d").as_posix()
     prelude = f'''
     set -eEuo pipefail
+    . "{str(LIB).replace(chr(92), "/")}"
     die() {{ echo "CRITICAL: $*" >&2; return 1; }}
     rollback_remote() {{ if [ "${{BASH_SUBSHELL:-0}}" -gt 0 ]; then return; fi; touch "{str(marker).replace(chr(92), "/")}"; echo "[remote] rollback after activation failure" >&2; }}
     trap rollback_remote ERR
     VERIFY_ONLY=0
     RELEASE_DIR="{release_dir}"
+    ACTIVATION_CHECK_DROPIN_DIR="{temp_dropin}"
     '''
     env = {"PATH": str(shims).replace("\\", "/") + ":" + os.environ["PATH"]}
-    res = _bash(prelude + _activation_stanza() + "\necho STANZA-COMPLETED\n", env=env)
+    self_check = DEPLOY_SCRIPT.read_text(encoding="utf-8").split(
+        "# --- #1904 candidate self-check begin ---", 1
+    )[1].split("# --- #1904 candidate self-check end ---", 1)[0]
+    res = _bash(prelude + self_check + _activation_stanza() + "\necho STANZA-COMPLETED\n", env=env)
     return res, marker.exists()
+
+
+def test_failed_self_check_cleans_candidate_environment_before_rollback(tmp_path):
+    stanza = DEPLOY_SCRIPT.read_text(encoding="utf-8").split(
+        "# --- #1904 candidate self-check begin ---", 1
+    )[1].split("# --- #1904 candidate self-check end ---", 1)[0]
+    shims = tmp_path / "cleanup-shims"
+    shims.mkdir()
+    events = tmp_path / "events.log"
+    script = tmp_path / "systemctl"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' \\\"$*\\\" >> '{events.as_posix()}'\n"
+        "if [[ $1 == start ]]; then exit 23; fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    script.chmod(0o755)
+    cleanup_marker = tmp_path / "dropin-cleaned"
+    dropin_content = tmp_path / "candidate.conf"
+    _write_mock(shims / "sudo", f'''
+    if [ "$1" = "install" ]; then exit 0; fi
+    if [ "$1" = "tee" ]; then cat > "{dropin_content.as_posix()}"; exit 0; fi
+    if [ "$1" = "systemctl" ] && [ "$2" = "daemon-reload" ]; then exit 0; fi
+    if [ "$1" = "chmod" ]; then exit 0; fi
+    if [[ "$*" == *"rm -f"* ]]; then touch "{cleanup_marker.as_posix()}"; fi
+    exec "$@"
+    ''')
+    _write_mock(shims / "tee", 'cat > "$1"')
+    (shims / "systemctl").write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
+    (shims / "systemctl").chmod(0o755)
+    marker = tmp_path / "rollback-fired"
+    release_dir = str(DEPLOY_SCRIPT.parents[3]).replace("\\\\", "/")
+    temp_dropin_dir = (tmp_path / "systemd" / "activation-check.service.d").as_posix()
+    prelude = f"""
+    set -eEuo pipefail
+    die() {{ echo \\\"CRITICAL: $*\\\" >&2; return 1; }}
+    ACTIVATION_CHECK_UNIT=eeepc-self-evolving-activation-check.service
+    ACTIVATION_CHECK_DROPIN_DIR=\\\"{temp_dropin_dir}\\\"
+    RELEASE_DIR=\\\"{release_dir}\\\"
+    PREV_RELEASE_PATH=/old
+    CURRENT_SYMLINK=/current
+    rollback_remote() {{ touch {marker.as_posix()}; }}
+    trap rollback_remote ERR
+    PATH=\\\"{shims.as_posix()}:$PATH\\\"
+    """
+    res = _bash(prelude + stanza + "\\n", env={"PATH": f"{shims.as_posix()}:{os.environ['PATH']}"})
+    assert res.returncode != 0
+    assert marker.exists(), f"rollback trap did not run: stdout={res.stdout!r} stderr={res.stderr!r}"
+    assert cleanup_marker.exists(), "candidate unit drop-in must be removed before rollback"
+
+
+def test_self_check_dropin_printf_writes_three_valid_directives(tmp_path):
+    stanza = DEPLOY_SCRIPT.read_text(encoding="utf-8").split(
+        "# --- #1904 candidate self-check begin ---", 1
+    )[1].split("# --- #1904 candidate self-check end ---", 1)[0]
+    shims = tmp_path / "tee-shim"
+    shims.mkdir()
+    output = tmp_path / "candidate.conf"
+    _write_mock(shims / "sudo", f'''
+    if [ "$1" = "tee" ]; then cat > "{output.as_posix()}"; exit 0; fi
+    if [ "$1" = "install" ] || {{ [ "$1" = "systemctl" ] && [ "$2" = "daemon-reload" ]; }}; then exit 0; fi
+    exec "$@"
+    ''')
+    _write_mock(shims / "tee", 'cat > "$1"')
+    _write_mock(shims / "systemctl", 'exit 0')
+    release_dir = "/releases/candidate"
+    start = stanza.index("  printf '%s")
+    end = stanza.index('  sudo chmod 0644 "$ACTIVATION_DROPIN"', start)
+    script = f'''
+    set -eEuo pipefail
+    RELEASE_DIR="{release_dir}"
+    ACTIVATION_DROPIN="{output.as_posix()}"
+    ''' + stanza[start:end] + "\n"
+    result = subprocess.run(
+        ["bash", "-c", script], env={**os.environ, "PATH": f"{shims.as_posix()}:{os.environ['PATH']}"},
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = output.read_text(encoding="utf-8").splitlines()
+    assert lines == [
+        "[Service]",
+        f"Environment=ACTIVATION_CHECK_RELEASE={release_dir}",
+        "Environment=ACTIVATION_CHECK_MODE=activation",
+    ]
 
 
 def test_activation_transport_exit_keeps_the_release(tmp_path):
@@ -131,6 +235,13 @@ def test_activation_transport_exit_keeps_the_release(tmp_path):
     assert rolled_back is False
     assert "STANZA-COMPLETED" in res.stdout
     assert "not an activation failure (#1303)" in res.stdout and "EXIT_EXECUTOR_LLM_ERROR (3)" in res.stdout
+
+
+def test_activation_timeout_is_not_failure(tmp_path):
+    res, rolled_back = _drive_activation(tmp_path, restart_rc=1, result="timeout", status="15")
+    assert res.returncode == 0 and not rolled_back, res.stderr
+    assert "model queue, outcome recorded, release remains active" in res.stdout
+    assert "activation-check:record-behavior-timeout" in res.stdout
 
 
 @pytest.mark.parametrize("restart_rc, result, status, why", [
@@ -145,7 +256,7 @@ def test_activation_genuine_failure_still_rolls_back(tmp_path, restart_rc, resul
     assert res.returncode != 0, why
     assert rolled_back is True, why
     assert "STANZA-COMPLETED" not in res.stdout, why
-    assert "CRITICAL: bridge activation failed" in res.stderr, why
+    assert "CRITICAL: bridge first real cycle failed" in res.stderr, why
 
 
 def test_activation_clean_exit_continues(tmp_path):
