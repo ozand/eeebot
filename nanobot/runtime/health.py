@@ -118,7 +118,7 @@ def read_cycle_progress(
         # sustained outage still trips the TIME alert; only the COUNT alert,
         # which specifically means "the loop tried and failed N times", is
         # exempted from counting attempts the loop never got to make.
-        if row.get("outcome") == "paused-supplier":
+        if row.get("outcome") in {"paused-supplier", "model_call_incomplete"}:
             continue
         trailing.append(row)
     reasons: dict[str, int] = {}

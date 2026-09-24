@@ -189,7 +189,7 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
     for; here it means "never counts as an attempt", not "will resolve
     later" — a supplier outage has no analogous later resolution row.
     """
-    _NOT_YET_TERMINAL = frozenset({"push_pending", "superseded", "abandoned", "paused-supplier"})
+    _NOT_YET_TERMINAL = frozenset({"push_pending", "superseded", "abandoned", "paused-supplier", "model_call_incomplete"})
     lane = _lane(gap_id)
     if lane not in _FAMILY_PREFIXES:
         proposed: set[str] = set()

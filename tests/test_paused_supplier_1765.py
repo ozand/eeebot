@@ -52,8 +52,6 @@ class TestClassifyLlmError:
         "OpenAIException - Connection error.",
         "litellm.APIConnectionError: connection refused",
         "connection reset by peer",
-        "Request timed out after 60s",
-        "litellm.Timeout: Read timeout",
         "Error code: 429 - {'error': 'rate limited'}",
         "Error code: 503 - Service Unavailable",
         "litellm.RateLimitError: Error code: 429",
@@ -95,6 +93,12 @@ class TestClassifyLlmError:
     def test_our_own_defect_signals_stay_failed(self, text):
         assert bridge._classify_llm_error(text) == "failed"
 
+    @pytest.mark.parametrize("text", ["socket timeout", "Request timed out after 60s", "litellm.Timeout: Read timeout"])
+    def test_model_call_timeout_needs_call_site_evidence(self, text):
+        assert bridge._classify_llm_error(text) == "failed"
+        assert bridge._classify_llm_error(text, model_call_failure={"stage": "model_call"}) == "model_call_incomplete"
+        assert bridge._classify_llm_error(text, model_call_failure={"stage": "tool_execution"}) == "failed"
+
     def test_default_is_conservative_not_a_catch_all(self):
         """An error text mentioning neither class's vocabulary at all stays
         'failed' -- the default direction the issue specifies, and the proof
@@ -135,6 +139,24 @@ def _read_ledger(state_dir: Path) -> list[dict]:
 
 
 class TestDecideHandledMarkerSupplierPaused:
+    def test_model_call_incomplete_has_separate_bounded_retry_stop(self, tmp_path):
+        marker = tmp_path / "handled_req.txt"
+        retry = tmp_path / "retry_incomplete_req.json"
+        for attempt in range(1, bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES + 1):
+            result = bridge._decide_handled_marker(
+                marker, "req.json", llm_error=True, model_call_incomplete=True,
+            )
+            if attempt < bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES:
+                assert result == "incomplete_retry"
+                assert not marker.exists()
+            else:
+                assert result == "incomplete_retries_paused"
+                assert marker.exists()
+        state = json.loads(retry.read_text(encoding="utf-8"))
+        assert state["count"] == bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES
+        assert state["operator_check"] == "check request size / budget"
+        assert not (tmp_path / "retry_req.json").exists()
+
     def test_supplier_paused_writes_no_marker_and_no_retry_counter(self, tmp_path):
         marker = tmp_path / "handled_req.txt"
         result = bridge._decide_handled_marker(
