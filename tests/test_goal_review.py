@@ -562,7 +562,7 @@ class TestWiring:
 
         calls: list[tuple] = []
         monkeypatch.setattr(
-            goal_review, "maybe_goal_review", lambda sd, repo, now=None: calls.append((sd, repo))
+            goal_review, "maybe_goal_review", lambda sd, repo, now=None, release_root=None: calls.append((sd, repo, release_root))
         )
         state_dir = tmp_path / "state"
         scorecard.compute_scorecard(state_dir, None, force=True)
@@ -571,13 +571,44 @@ class TestWiring:
     def test_review_exception_never_breaks_scorecard(self, tmp_path, monkeypatch):
         from nanobot.runtime import scorecard
 
-        def _boom(sd, repo, now=None):
+        def _boom(sd, repo, now=None, release_root=None):
             raise RuntimeError("review bug")
 
         monkeypatch.setattr(goal_review, "maybe_goal_review", _boom)
         state_dir = tmp_path / "state"
         snapshot = scorecard.compute_scorecard(state_dir, None, force=True)
         assert snapshot["schema_version"] == "scorecard-v1"
+
+    def test_compute_scorecard_passes_explicit_release_root(self, tmp_path, monkeypatch):
+        from nanobot.runtime import scorecard
+
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            goal_review,
+            "maybe_goal_review",
+            lambda sd, repo, now=None, release_root=None: calls.append({"sd": sd, "repo": repo, "release_root": release_root}),
+        )
+        state_dir = tmp_path / "state"
+        custom_release = tmp_path / "custom_release"
+        scorecard.compute_scorecard(state_dir, None, force=True, release_root=custom_release)
+        assert len(calls) == 1
+        assert calls[0]["release_root"] == custom_release
+
+    def test_compute_scorecard_resolves_default_release_root_when_unspecified(self, tmp_path, monkeypatch):
+        from nanobot.runtime import scorecard
+        from nanobot.runtime.role_prompt import RELEASE_ROOT_DEFAULT
+
+        monkeypatch.delenv("RELEASE_ROOT", raising=False)
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            goal_review,
+            "maybe_goal_review",
+            lambda sd, repo, now=None, release_root=None: calls.append({"sd": sd, "repo": repo, "release_root": release_root}),
+        )
+        state_dir = tmp_path / "state"
+        scorecard.compute_scorecard(state_dir, None, force=True)
+        assert len(calls) == 1
+        assert calls[0]["release_root"] == Path(RELEASE_ROOT_DEFAULT)
 
 
 # ─── #860: derived priorities survive deploy_release.sh's goal_text reseed ──
@@ -1347,5 +1378,59 @@ class TestADR020Rule1Contract:
         summary = build_cycle_health_summary(state)
         assert summary["success_signals"]["derived_priorities_queue_depth"] == 10
         assert summary["success_signals"]["derived_priorities_queue_limit"] == 10
+
+
+# ─── #1920: release_root passed to maybe_goal_review ───────────────────────
+
+
+class TestMaybeGoalReviewReleaseRoot:
+    def test_maybe_goal_review_prefers_release_charter_when_goals_md_present(self, tmp_path, monkeypatch, enabled):
+        """#1920 AC: when goals.md exists under release_root, goal review context
+        carries the immutable release charter instead of legacy goal_text.json."""
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir, "LEGACY_GOAL_TEXT_CONTENT")
+        _seed_valid_evidence(state_dir, monkeypatch)
+        _write_snapshot(state_dir, [])
+
+        release_root = tmp_path / "release"
+        release_root.mkdir(parents=True)
+        (release_root / "goals.md").write_text("RELEASE_CHARTER_CAPABILITY_LADDER", encoding="utf-8")
+
+        captured_contexts: list[str] = []
+
+        def _mock_call_llm(context: str):
+            captured_contexts.append(context)
+            return {"priorities": []}
+
+        monkeypatch.setattr(goal_review, "_call_llm", _mock_call_llm)
+
+        goal_review.maybe_goal_review(state_dir, None, now=NOW, release_root=release_root)
+        assert len(captured_contexts) == 1
+        assert "RELEASE_CHARTER_CAPABILITY_LADDER" in captured_contexts[0]
+        assert "LEGACY_GOAL_TEXT_CONTENT" not in captured_contexts[0]
+
+    def test_maybe_goal_review_falls_back_to_legacy_state_when_goals_md_absent(self, tmp_path, monkeypatch, enabled):
+        """#1920 AC: when release_root lacks goals.md, goal review context
+        falls back to legacy state/goals/goal_text.json."""
+        state_dir = tmp_path / "state"
+        _write_goal_text(state_dir, "LEGACY_GOAL_TEXT_FALLBACK")
+        _seed_valid_evidence(state_dir, monkeypatch)
+        _write_snapshot(state_dir, [])
+
+        empty_release_root = tmp_path / "empty_release"
+        empty_release_root.mkdir(parents=True)
+
+        captured_contexts: list[str] = []
+
+        def _mock_call_llm(context: str):
+            captured_contexts.append(context)
+            return {"priorities": []}
+
+        monkeypatch.setattr(goal_review, "_call_llm", _mock_call_llm)
+
+        goal_review.maybe_goal_review(state_dir, None, now=NOW, release_root=empty_release_root)
+        assert len(captured_contexts) == 1
+        assert "LEGACY_GOAL_TEXT_FALLBACK" in captured_contexts[0]
+
 
 
