@@ -510,11 +510,14 @@ def _load_goal_text(state_dir: Path, release_root: "Path | None" = None) -> str:
     — the charter's one resolver, no path constructed here. The operator's
     own "Current priority targets" section (``state/goals/goal_text.json``,
     via :func:`operator_documents.resolve_operator_priorities_text`) is
-    folded in ALONGSIDE the charter, never as a charter SUBSTITUTE (the
-    #944-era "goal_text.json holds the full text" fallback this used to
-    have mislabeled the operator's private priorities as the charter and
-    is deleted) — goal-review's dedup/`_priorities_remain` below have
-    always needed to see the operator's existing entries. Derived
+    folded in ALONGSIDE the charter when both are present, never as a
+    charter SUBSTITUTE (the #944-era "goal_text.json holds the full text
+    AS the charter" mislabeling is deleted). When the charter is absent —
+    the proposer must still see the operator's priorities: ADR-034 does not
+    let this migration remove content a reader used to see, and rule 3's
+    "role does not run" for a missing charter is enforced upstream, by
+    ``should_propose``'s own availability gate, not by this content
+    assembler silently going blank while still being called. Derived
     priorities from ``state/goals/derived_priorities.json`` are folded in
     by :func:`goal_review.merged_goal_text` (#860).
     """
@@ -524,14 +527,18 @@ def _load_goal_text(state_dir: Path, release_root: "Path | None" = None) -> str:
 
     charter_res = resolve_charter(release_root)
     charter = charter_res.text if charter_res.state == STATE_TEXT else ""
-    if not charter:
-        return ""
 
     priorities_res = resolve_operator_priorities_text(state_dir)
     priorities_text = priorities_res.text if priorities_res.state == STATE_TEXT else ""
-    marker_idx = priorities_text.find("Current priority targets:")
-    priority_section = priorities_text[marker_idx:].strip() if marker_idx != -1 else ""
-    raw_text = f"{charter.rstrip()}\n\n{priority_section}" if priority_section else charter
+
+    if charter:
+        marker_idx = priorities_text.find("Current priority targets:")
+        priority_section = priorities_text[marker_idx:].strip() if marker_idx != -1 else ""
+        raw_text = f"{charter.rstrip()}\n\n{priority_section}" if priority_section else charter
+    else:
+        # No release charter: the operator's own document stands alone,
+        # exactly as it did before #944 introduced the release charter.
+        raw_text = priorities_text
 
     if not raw_text:
         return ""
