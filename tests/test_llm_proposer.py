@@ -3345,7 +3345,8 @@ class TestTargetPathState:
         sha, subject = llm_proposer._latest_non_residual_commit_for_path(
             repo, "scripts/existing_target.py"
         )
-        assert row["matched_against"] == f"{sha}:scripts/existing_target.py"
+        assert row["matched_against"] == "legacy-subject-match"
+        assert row["evidence_commit"] == f"{sha}:scripts/existing_target.py"
         assert "Evidence only" in feedback[-1]
         assert f"commit {sha} '{subject}' already touched scripts/existing_target.py" in feedback[-1]
         assert "state how the new requirement differs" in feedback[-1]

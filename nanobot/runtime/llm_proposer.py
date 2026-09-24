@@ -2408,6 +2408,29 @@ def _latest_non_residual_commit_for_path(
         return None
 
 
+def _dedup_evidence_context(
+    selfevo_repo: Path | None,
+    proposal: dict[str, Any],
+    feedback: str,
+    matched_against: str,
+) -> tuple[str, str | None]:
+    """Add non-verdict evidence for existing-path dedup rejections."""
+    reason = _dedup_reject_reason(matched_against)
+    if reason != "self_dedup" or _proposal_creates_new_file(selfevo_repo, proposal):
+        return feedback, None
+    target = str(proposal.get("target_path") or "").strip()
+    commit = _latest_non_residual_commit_for_path(selfevo_repo, target)
+    if commit is None:
+        return feedback, None
+    sha, subject = commit
+    return (
+        f"{feedback} Evidence only: commit {sha} '{subject}' already touched {target}; "
+        "this may relate to your proposal. If you propose it, state how the new "
+        "requirement differs from what was done.",
+        f"{sha}:{target}",
+    )
+
+
 def _subject_dedup_enabled() -> bool:
     """#903 kill switch: default ON; only "0"/"false" disable it (falls back
     to the pre-#903 lexical-only dedup)."""
@@ -2991,6 +3014,7 @@ def _record_proposer_reject(
     task_title: str = "",
     target_path: str = "",
     matched_against: str = "",
+    evidence_commit: str | None = None,
     detail: str = "",
     demand_id: str = "",
 ) -> None:
@@ -3022,6 +3046,8 @@ def _record_proposer_reject(
             event["target_path"] = target_path.strip()[:200]
         if matched_against:
             event["matched_against"] = matched_against.strip()[:200]
+        if evidence_commit:
+            event["evidence_commit"] = evidence_commit.strip()[:200]
         if detail:
             event["detail"] = detail.strip()[:200]
         if demand_id:
@@ -3630,19 +3656,10 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             return None
 
         dup, dup_reason, dup_matched = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
+        retry_feedback, _ = _dedup_evidence_context(
+            selfevo_repo, proposal, dup_reason, dup_matched
+        ) if dup else (dup_reason, None)
         if dup and calls_made < _MAX_LLM_CALLS:
-            retry_feedback = dup_reason
-            if not _proposal_creates_new_file(selfevo_repo, proposal):
-                commit = _latest_non_residual_commit_for_path(
-                    selfevo_repo, str(proposal.get("target_path") or "")
-                )
-                if commit:
-                    sha, subject = commit
-                    retry_feedback = (
-                        f"{dup_reason} Evidence only: commit {sha} '{subject}' already touched "
-                        f"{proposal.get('target_path')}; this may relate to your proposal. "
-                        "If you propose it, state how the new requirement differs from what was done."
-                    )
             proposal = _call_propose(rejection_reason=retry_feedback)
             calls_made += 1
             _stamp_assigned_hypothesis_ref(proposal)
@@ -3671,24 +3688,16 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         if dup:
             reject_reason = _dedup_reject_reason(dup_matched)
             target_path = str(proposal.get("target_path") or "")
-            matched_record = dup_matched
-            rejection_feedback = dup_reason
-            if not _proposal_creates_new_file(selfevo_repo, proposal):
-                commit = _latest_non_residual_commit_for_path(selfevo_repo, target_path)
-                if commit:
-                    sha, subject = commit
-                    matched_record = f"{sha}:{target_path}"
-                    rejection_feedback = (
-                        f"{dup_reason} Evidence only: commit {sha} '{subject}' already touched "
-                        f"{target_path}; this may relate to your proposal. If you propose it, "
-                        "state how the new requirement differs from what was done."
-                    )
+            rejection_feedback, evidence_commit = _dedup_evidence_context(
+                selfevo_repo, proposal, dup_reason, dup_matched
+            )
             _record_proposer_reject(
                 state_dir,
                 reject_reason,
                 task_title=str(proposal.get("task_title") or ""),
                 target_path=target_path,
-                matched_against=matched_record,
+                matched_against=dup_matched,
+                evidence_commit=evidence_commit,
                 detail=rejection_feedback if reject_reason == "self_dedup" else (
                     dup_reason if reject_reason == enhancement_gate.REASON else ""
                 ),
