@@ -3,10 +3,22 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from nanobot.agent.context import ContextBuilder
 from nanobot.runtime import bridge
 from tests.test_bridge_system_prompt_overflow import _FittingManager, _wire
 from tests.test_cycle_ledger import _read_ledger, _seed_bridge_request
+
+
+@pytest.fixture(autouse=True)
+def _release_charter(monkeypatch, tmp_path):
+    # ADR-034 rule 3: the bridge does not start a cycle without a release
+    # charter. _wire's own module fixture does not apply when imported here.
+    release_root = tmp_path / "_adr034_release_root"
+    release_root.mkdir(exist_ok=True)
+    (release_root / "goals.md").write_text("test charter", encoding="utf-8")
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release_root)
 
 
 def test_uniform_trim_records_actual_per_section_losses(monkeypatch):
