@@ -34,12 +34,17 @@ def _set_common_paths(monkeypatch, state_dir, base, *, charter=True):
     # runs (see TestCharterPrecedesNoActiveGoal below). Every test here that
     # is actually about goal-id resolution needs a charter in place so it
     # can reach that logic; charter=False opts back out for the tests that
-    # cover the charter-absence precedence itself.
+    # cover the charter-absence precedence itself. Either way RELEASE_ROOT
+    # is explicitly pinned to a directory this test controls — never left
+    # at bridge.RELEASE_ROOT's ambient default, which in the full suite can
+    # carry another test's leftover charter dir (module-level state another
+    # test's monkeypatch/importlib.reload interaction restored it to,
+    # observed live as a CI-only failure here, #1947).
+    release_root = base / "_adr034_release_root"
+    release_root.mkdir(exist_ok=True)
     if charter:
-        release_root = base / "_adr034_release_root"
-        release_root.mkdir(exist_ok=True)
         (release_root / "goals.md").write_text("test charter", encoding="utf-8")
-        monkeypatch.setattr(bridge, "RELEASE_ROOT", release_root)
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release_root)
 
 
 def _write_goal_text(state_dir, goal_id: str) -> None:
