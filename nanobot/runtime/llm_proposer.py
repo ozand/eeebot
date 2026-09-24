@@ -2882,7 +2882,10 @@ def _is_duplicate_proposal(
         # are iteration, not churn, and are never blocked here.
         creates_new_file = _proposal_creates_new_file(selfevo_repo, proposal)
         if creates_new_file:
-            built_subjects = _all_built_subjects(selfevo_repo)
+            # #1785(a): history is evidence only, not proof the absent target
+            # is done. Recreating a missing target is valid work; retain the
+            # separate #903 subject-key rule for extending an existing script.
+            built_subjects = ""
             if built_subjects and _title_already_done_in_git_log(title, built_subjects):
                 matched_built = next(
                     (

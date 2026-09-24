@@ -3300,6 +3300,27 @@ def _init_instance_repo(tmp_path, *, subject, script_rel, old=True):
 
 
 class TestPermanentNoveltyGuard:
+    def test_fixture_new_file_subject_matches_are_allowed(self, tmp_path):
+        """#1785(a): commit-subject hits cannot make an absent target 'done'."""
+        import json
+
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "self_dedup_1785.json").read_text(encoding="utf-8")
+        )
+        state = tmp_path / "state"; state.mkdir()
+        for index, case in enumerate(fixture["false_new_file_rejections"]):
+            case_dir = tmp_path / f"case-{index}"
+            case_dir.mkdir()
+            repo = _init_instance_repo(
+                case_dir,
+                subject=case["matched_against"],
+                script_rel="scripts/history_subject.py",
+            )
+            proposal = {"task_title": case["task_title"], "target_path": case["target_path"]}
+            assert not (repo / case["target_path"]).exists()
+            duplicate, _, _ = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+            assert duplicate is False
+
     def test_new_file_duplicating_old_built_artifact_rejected(self, tmp_path):
         repo = _init_instance_repo(
             tmp_path,
@@ -3313,8 +3334,8 @@ class TestPermanentNoveltyGuard:
         }
         dup, feedback, matched = llm_proposer._is_duplicate_proposal(state, repo, proposal)
         assert dup is True
-        assert "ALREADY EXISTS" in feedback
-        assert "firewall" in matched.lower()
+        assert "existing script" in feedback
+        assert matched == "subject-duplicate:scripts/firewall_log_analyzer.py"
 
     def test_edit_of_existing_file_not_blocked(self, tmp_path):
         repo = _init_instance_repo(
