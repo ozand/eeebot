@@ -2782,7 +2782,10 @@ class TestProposerRejectLedger:
             demand_id=candidate_id,
         )
 
+        received_feedback = []
+
         def _always_clone(context, *, rejection_reason=None, timeout=120.0):
+            received_feedback.append(rejection_reason)
             return {
                 "task_title": "Implement lightweight memory usage tracker",
                 "rationale": "Tracks memory usage.",
@@ -2802,6 +2805,7 @@ class TestProposerRejectLedger:
         # matched_against records what it actually matched (the earlier
         # reject's own identity), not an echo of the proposal's own title.
         assert rows[-1]["matched_against"].startswith(f"repeat:{candidate_id} first-rejected")
+        assert received_feedback[-1]
 
     def test_self_dedup_via_forced_tuple_records_matched_against(self, tmp_path, monkeypatch):
         """Drive the dedup exit deterministically by monkeypatching
@@ -3271,13 +3275,11 @@ class TestProposeReasoningPassthrough:
         assert "reasoning_effort" not in captured
 
 
-# ─── #834: permanent (history-wide) novelty guard ──────────────────────────
+# ─── #903 subject dedup and #1785 target-path state ────────────────────────
 
 
 def _init_instance_repo(tmp_path, *, subject, script_rel, old=True):
-    """Minimal git repo with ONE commit (dated >14 days ago when old=True) that
-    creates `script_rel`, so the 14-day recency git_log misses it but the
-    full-history _all_built_subjects catches it."""
+    """Minimal git repo with ONE commit creating ``script_rel``."""
     import subprocess as _sp
     repo = tmp_path / "inst"
     repo.mkdir()
@@ -3299,8 +3301,81 @@ def _init_instance_repo(tmp_path, *, subject, script_rel, old=True):
     return repo
 
 
-class TestPermanentNoveltyGuard:
-    def test_new_file_duplicating_old_built_artifact_rejected(self, tmp_path):
+class TestTargetPathState:
+    def test_latest_non_residual_commit_for_path(self, tmp_path):
+        repo = _init_instance_repo(
+            tmp_path,
+            subject="feat: latest real target change",
+            script_rel="scripts/existing_target.py",
+        )
+        result = llm_proposer._latest_non_residual_commit_for_path(
+            repo, "scripts/existing_target.py"
+        )
+        assert result is not None
+        sha, subject = result
+        assert len(sha) == 12
+        assert subject == "feat: latest real target change"
+
+    def test_existing_path_dedup_passes_commit_as_evidence(self, tmp_path, monkeypatch):
+        repo = _init_instance_repo(
+            tmp_path, subject="feat: latest real target change",
+            script_rel="scripts/existing_target.py",
+        )
+        state = _state_dir(tmp_path)
+        _write_goal_text(state, "no priority section, so should_propose is True")
+        proposal = {
+            "task_title": "Improve existing target safely",
+            "rationale": "Correct the behavior",
+            "target_path": "scripts/existing_target.py",
+            "serves": "priority 4",
+        }
+        feedback = []
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            feedback.append(rejection_reason)
+            return proposal
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        monkeypatch.setattr(llm_proposer, "should_propose", lambda *a, **k: True)
+        monkeypatch.setattr(llm_proposer, "build_context", lambda *a, **k: "context")
+        monkeypatch.setattr(llm_proposer, "_is_duplicate_proposal", lambda *a, **k: (True, "old suppressor", "legacy-subject-match"))
+        monkeypatch.setattr(llm_proposer, "_proposal_creates_new_file", lambda *a: False)
+        result = llm_proposer.maybe_propose(state, repo)
+        assert result is None
+        assert feedback
+        row = _reject_rows(state)[-1]
+        sha, subject = llm_proposer._latest_non_residual_commit_for_path(
+            repo, "scripts/existing_target.py"
+        )
+        assert row["matched_against"] == "legacy-subject-match"
+        assert row["evidence_commit"] == f"{sha}:scripts/existing_target.py"
+        assert "Evidence only" in feedback[-1]
+        assert f"commit {sha} '{subject}' already touched scripts/existing_target.py" in feedback[-1]
+        assert "state how the new requirement differs" in feedback[-1]
+        assert llm_proposer._latest_non_residual_commit_for_path(
+            repo, "scripts/missing_target.py"
+        ) is None
+
+    def test_fixture_new_file_subject_matches_are_allowed(self, tmp_path):
+        """#1785(a): commit-subject hits cannot make an absent target 'done'."""
+        import json
+
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "self_dedup_1785.json").read_text(encoding="utf-8")
+        )
+        state = tmp_path / "state"; state.mkdir()
+        for index, case in enumerate(fixture["false_new_file_rejections"]):
+            case_dir = tmp_path / f"case-{index}"
+            case_dir.mkdir()
+            repo = _init_instance_repo(
+                case_dir,
+                subject=case["matched_against"],
+                script_rel="scripts/history_subject.py",
+            )
+            proposal = {"task_title": case["task_title"], "target_path": case["target_path"]}
+            assert not (repo / case["target_path"]).exists()
+            duplicate, _, _ = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+            assert duplicate is False
+
+    def test_subject_duplicate_points_to_existing_script(self, tmp_path):
         repo = _init_instance_repo(
             tmp_path,
             subject="create firewall log analyzer summary script",
@@ -3313,8 +3388,8 @@ class TestPermanentNoveltyGuard:
         }
         dup, feedback, matched = llm_proposer._is_duplicate_proposal(state, repo, proposal)
         assert dup is True
-        assert "ALREADY EXISTS" in feedback
-        assert "firewall" in matched.lower()
+        assert "existing script" in feedback
+        assert matched == "subject-duplicate:scripts/firewall_log_analyzer.py"
 
     def test_edit_of_existing_file_not_blocked(self, tmp_path):
         repo = _init_instance_repo(
@@ -3351,11 +3426,9 @@ class TestPermanentNoveltyGuard:
         dup, _, _ = llm_proposer._is_duplicate_proposal(state, None, proposal)
         assert dup is False
 
-    def test_helpers_direct(self, tmp_path):
+    def test_target_path_helpers_direct(self, tmp_path):
         repo = _init_instance_repo(
             tmp_path, subject="build token usage reporter", script_rel="scripts/token_usage_reporter.py")
-        assert "token usage reporter" in llm_proposer._all_built_subjects(repo).lower()
-        assert llm_proposer._all_built_subjects(None) == ""
         assert llm_proposer._proposal_creates_new_file(repo, {"target_path": "scripts/new.py"}) is True
         assert llm_proposer._proposal_creates_new_file(repo, {"target_path": "scripts/token_usage_reporter.py"}) is False
         assert llm_proposer._proposal_creates_new_file(repo, {"target_path": ""}) is False

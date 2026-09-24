@@ -34,6 +34,7 @@
     {
       "task_title": "Add validate_doc_structure function in scripts/validate_doc_structure.py",
       "target_path": "scripts/validate_doc_structure.py",
+      "matched_against": "853ea4d3 feat(validate_skill_format): add markdown signal table structure validation",
       "label": "legitimate",
       "count": 1,
       "path_absent_from_head": true
@@ -41,6 +42,7 @@
     {
       "task_title": "Add validate_doc_structure to scripts/validate_doc_structure.py to assert markdown heading and summary",
       "target_path": "scripts/validate_doc_structure.py",
+      "matched_against": "completed:goal-gap-5d4d5a9dc822",
       "label": "legitimate",
       "count": 1,
       "path_absent_from_head": true
@@ -48,6 +50,7 @@
     {
       "task_title": "Assert doc integration structure (V1)",
       "target_path": "scripts/validate_doc_structure.py",
+      "matched_against": "test(agents_structure): register remaining AGENTS.md sections and add key requirement assertions",
       "label": "legitimate",
       "count": 63,
       "path_absent_from_head": true
@@ -55,6 +58,7 @@
     {
       "task_title": "Create scripts/validate_doc_structure.py to check top-level header and summary presence",
       "target_path": "scripts/validate_doc_structure.py",
+      "matched_against": "repeat:priority-23b793c63463 first-rejected 2026-09-19T06:05:51.855566Z",
       "label": "legitimate",
       "count": 1,
       "path_absent_from_head": true
@@ -62,6 +66,7 @@
     {
       "task_title": "Add is_valid_skill_name in scripts/validate_skill_name.py to validate kebab-case skill names",
       "target_path": "scripts/validate_skill_name.py",
+      "matched_against": "e283f4fe refactor(validate_skill_format): use shared normalize_name_identifier for skill name checks",
       "label": "legitimate",
       "count": 1,
       "path_absent_from_head": true
@@ -69,6 +74,7 @@
     {
       "task_title": "Add is_valid_skill_name to scripts/validate_skill_name.py",
       "target_path": "scripts/validate_skill_name.py",
+      "matched_against": "8df62a90 selfevo: auto-commit uncommitted subagent work — Add scripts/verify_skill_keywords.py to validate literal presence of asserted ke",
       "label": "legitimate",
       "count": 1,
       "path_absent_from_head": true
@@ -76,6 +82,7 @@
     {
       "task_title": "Add is_valid_skill_name to scripts/validate_skill_name.py to validate skill naming format",
       "target_path": "scripts/validate_skill_name.py",
+      "matched_against": "completed:goal-gap-5d4d5a9dc822",
       "label": "legitimate",
       "count": 1,
       "path_absent_from_head": true
@@ -83,6 +90,7 @@
     {
       "task_title": "Add scripts/validate_skill_name.py to validate skill name format",
       "target_path": "scripts/validate_skill_name.py",
+      "matched_against": "8df62a90 selfevo: auto-commit uncommitted subagent work — Add scripts/verify_skill_keywords.py to validate literal presence of asserted ke",
       "label": "legitimate",
       "count": 2,
       "path_absent_from_head": true
@@ -90,6 +98,7 @@
     {
       "task_title": "Implement is_valid_skill_name in scripts/validate_skill_name.py",
       "target_path": "scripts/validate_skill_name.py",
+      "matched_against": "8df62a90 selfevo: auto-commit uncommitted subagent work — Add scripts/verify_skill_keywords.py to validate literal presence of asserted ke",
       "label": "legitimate",
       "count": 2,
       "path_absent_from_head": true
@@ -97,6 +106,7 @@
     {
       "task_title": "Implement scripts/validate_skill_name.py to validate skill name format",
       "target_path": "scripts/validate_skill_name.py",
+      "matched_against": "e283f4fe refactor(validate_skill_format): use shared normalize_name_identifier for skill name checks",
       "label": "legitimate",
       "count": 2,
       "path_absent_from_head": true
@@ -104,6 +114,7 @@
     {
       "task_title": "Implement skill name format validator in scripts/validate_skill_name.py",
       "target_path": "scripts/validate_skill_name.py",
+      "matched_against": "e283f4fe refactor(validate_skill_format): use shared normalize_name_identifier for skill name checks",
       "label": "legitimate",
       "count": 2,
       "path_absent_from_head": true
@@ -111,6 +122,7 @@
     {
       "task_title": "Validate skill name format (V1)",
       "target_path": "scripts/validate_skill_name.py",
+      "matched_against": "feat(validate_skill_format): add git mv remediation hints to layout violation issues",
       "label": "legitimate",
       "count": 43,
       "path_absent_from_head": true
@@ -118,6 +130,7 @@
     {
       "task_title": "Write scripts/validate_skill_name.py to validate skill name format",
       "target_path": "scripts/validate_skill_name.py",
+      "matched_against": "e283f4fe refactor(validate_skill_format): use shared normalize_name_identifier for skill name checks",
       "label": "legitimate",
       "count": 1,
       "path_absent_from_head": true
