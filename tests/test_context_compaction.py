@@ -120,7 +120,7 @@ def test_real_prompt_tokens_trigger_when_chars_estimate_is_under_threshold(tmp_p
         window_tokens=98_304,
         prompt_tokens=96_116,
     )
-    assert cc._OMIT_MARKER in result[3]["content"]
+    assert result[3]["content"].startswith("[Compaction summary")
 
 
 def test_missing_prompt_tokens_falls_back_to_whole_history_estimate(tmp_path):
@@ -129,7 +129,7 @@ def test_missing_prompt_tokens_falls_back_to_whole_history_estimate(tmp_path):
         messages, "fallback", 1, tmp_path,
         threshold=0.01, keep_tokens=1, window_tokens=98_304,
     )
-    assert cc._OMIT_MARKER in result[3]["content"]
+    assert result[3]["content"].startswith("[Compaction summary")
 
 
 def test_below_threshold_messages_are_byte_identical_with_usage(tmp_path):
@@ -168,7 +168,7 @@ def test_delta_triggers_compaction_when_base_prompt_is_under_threshold(tmp_path)
         prompt_tokens=70_000,
         prompt_token_delta=3_000,
     )
-    assert cc._OMIT_MARKER in result[3]["content"]
+    assert result[3]["content"].startswith("[Compaction summary")
 
 
 def test_reserve_tokens_parameter_affects_trigger_threshold(tmp_path):
@@ -185,7 +185,7 @@ def test_reserve_tokens_parameter_affects_trigger_threshold(tmp_path):
         reserve_tokens=20_000,
         prompt_tokens=65_000,
     )
-    assert cc._OMIT_MARKER in result[3]["content"]
+    assert result[3]["content"].startswith("[Compaction summary")
 
     result_no_reserve = cc.compact_messages(
         messages,
@@ -227,7 +227,7 @@ def test_above_threshold_compacts_old_tool_results(tmp_path):
     assert len(tool_results) == 4
     assert tool_results[-1]["content"] == big, "the newest result fits the keep-token span"
     for tr in tool_results[:-1]:
-        assert cc._OMIT_MARKER in tr["content"], (
+        assert tr["content"].startswith("[Compaction summary") or cc._OMIT_MARKER in tr["content"], (
             f"Expected omit marker in compacted content, got: {tr['content'][:100]!r}"
         )
 
@@ -250,6 +250,9 @@ def test_compacted_messages_not_recompacted_on_next_call(tmp_path):
     compacted_content_2 = [m["content"] for m in result2 if m.get("role") == "tool"]
 
     assert compacted_content_1 == compacted_content_2
+    assert any(text.startswith("[Compaction summary") for text in compacted_content_2)
+    chained = cc._structural_summary(result1, previous=compacted_content_1[0])
+    assert compacted_content_1[0] in chained
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +276,7 @@ def test_recent_token_span_protects_by_size_not_count(tmp_path):
     for tr in tool_results[-3:]:
         assert tr["content"] == big, "the last ~3 messages fit the 15,000-token span"
     for tr in tool_results[:3]:
-        assert cc._OMIT_MARKER in tr["content"], "older results should be compacted"
+        assert tr["content"].startswith("[Compaction summary") or cc._OMIT_MARKER in tr["content"], "older results should be compacted"
 
 
 def test_single_oversized_recent_tool_result_is_still_compactable(tmp_path):
@@ -344,7 +347,7 @@ def test_tool_call_and_result_pairing_survives_compaction(tmp_path):
     assert after_ids == before_ids, "message order/identity must be unchanged by compaction"
     assert len(result) == len(messages), "compaction replaces content, never removes messages"
     # Confirm compaction actually ran (not a no-op that trivially preserves pairing).
-    assert any(cc._OMIT_MARKER in m["content"] for m in result if m.get("role") == "tool")
+    assert any(m["content"].startswith("[Compaction summary") for m in result if m.get("role") == "tool")
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +383,7 @@ def test_system_and_user_always_protected(tmp_path):
 
 
 def test_assistant_messages_are_never_compacted(tmp_path):
-    """#1776 item 3 is deferred: assistant turns still accumulate unbounded."""
+    """Assistant tool-call turns stay paired and retain their call metadata."""
     big_assistant_text = "a" * 100_000
     messages = [
         {"role": "system", "content": "sys"},
@@ -557,6 +560,7 @@ def test_already_compact_decline_is_journalled(tmp_path):
     )
     ev = _last_journal_event(tmp_path)
     assert ev["reason"] == "already_compact"
+    assert ev["compacted_details"] == []
     assert ev["results_compacted"] == 0
 
 

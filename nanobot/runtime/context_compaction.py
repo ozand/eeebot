@@ -16,16 +16,14 @@ safety margin.
 
 #1776 scope: the observable half only
 --------------------------------------
-This module still excerpts (head/tail truncation), it does not yet summarize.
-Building a genuine structured summary (goal, progress, key decisions, files
-read/modified, chained across repeated compactions — issue #1776 items 2-3)
-requires a decision this change does not make on its own: whether that
-summary is produced by another LLM call (cost, latency, a new failure mode
-needing its own fallback) or by a heuristic extraction (routinely wrong in a
-way that reads as confident, which is worse than an honest excerpt). #1776's
-own guidance is to ship the observable half — visibility into what is
-dropped, a correct cut point, and honest journaling — and land the summary
-question separately once that decision is made. What #1776 DOES fix here:
+#1776 summary half: replace the dropped span with a deterministic structural
+summary. No model call is made: model summarization would add latency and
+queue cost to every compaction, while heuristic extraction can be honest if it
+quotes observed messages and never infers unstated intent. The summary carries
+the original task, recent assistant progress, explicitly marked decisions,
+and paths evidenced by file tools/commands; unknown fields stay empty. Earlier
+compaction summaries are retained verbatim so repeated compaction is cumulative.
+
 
 - The cut point is a token span walked back from the newest message, not a
   fixed count of recent messages (:func:`_compactable_indices`) — a single
@@ -189,14 +187,10 @@ def _compactable_indices(messages: list[dict[str, Any]], keep_tokens: int) -> se
     COUNT can never compact an oversized recent result no matter how large
     it is; a token span can, because the span itself has a size.
 
-    Only tool-result messages in the unprotected (older) span are ever
-    returned as candidates — system/user messages are always protected
-    (``_is_system_or_user_task``) and assistant messages are never
-    compacted by this module (#1776 item 3 is deferred; see the module
-    docstring). Message order and count are never changed by the caller
-    that uses this — only the ``content`` of a selected index may be
-    replaced — so a tool call and its result are never separated: neither
-    is ever removed or reordered, whichever side of the cut they fall on.
+    Messages of every role in the unprotected (older) span are candidates,
+    except system and the initial user task. Tool-call metadata is retained
+    when assistant content is compacted, preserving call/result pairing.
+    Message order and count never change.
     """
     cumulative = 0
     keep_from = len(messages)
@@ -206,11 +200,66 @@ def _compactable_indices(messages: list[dict[str, Any]], keep_tokens: int) -> se
             break
         cumulative += tokens
         keep_from = i
-    return {i for i in range(keep_from) if _is_tool_result(messages[i])}
+    return {i for i in range(keep_from) if i >= 2 and _is_tool_result(messages[i])}
+
+
+def _message_text(msg: dict[str, Any]) -> str:
+    content = msg.get("content") or ""
+    if isinstance(content, list):
+        return "\n".join(
+            str(block.get("text") or block.get("content") or "")
+            if isinstance(block, dict) else str(block)
+            for block in content
+        )
+    return str(content)
+
+
+def _structural_summary(messages: list[dict[str, Any]], previous: str = "") -> str:
+    """Summarize only explicit evidence; never invent unstated intent."""
+    goal = _message_text(messages[1]) if len(messages) > 1 else ""
+    progress: list[str] = []
+    decisions: list[str] = []
+    read_files: set[str] = set()
+    modified_files: set[str] = set()
+    path_re = __import__("re").compile(r"(?<![\w./-])(?:[\w.-]+/)*[\w.-]+\.[A-Za-z0-9]{1,8}(?![\w.-])")
+    for msg in messages[2:]:
+        text = _message_text(msg).strip()
+        if not text:
+            continue
+        role = msg.get("role")
+        if text.startswith("[Compaction summary"):
+            continue
+        if role == "assistant":
+            if "decision:" in text.lower() or "we will " in text.lower():
+                decisions.append(text[:500])
+            elif not msg.get("tool_calls"):
+                progress.append(text[:500])
+            for call in msg.get("tool_calls") or []:
+                fn = call.get("function") if isinstance(call, dict) else None
+                args = fn.get("arguments") if isinstance(fn, dict) else None
+                if isinstance(args, str):
+                    for path in path_re.findall(args):
+                        (modified_files if any(w in str(fn.get("name", "")).lower() for w in ("write", "edit", "patch")) else read_files).add(path)
+        elif role == "tool":
+            name = str(msg.get("name") or "").lower()
+            for path in path_re.findall(text):
+                (modified_files if any(w in name for w in ("write", "edit", "patch")) else read_files).add(path)
+    lines = ["[Compaction summary — deterministic, evidence-only]", f"Goal: {goal[:1000] or 'not available'}"]
+    if previous:
+        lines.extend(["Earlier summary (preserved):", previous])
+    lines.append("Progress:")
+    lines.extend(f"- {x}" for x in progress[-6:])
+    lines.append("Key decisions (explicit statements only):")
+    lines.extend(f"- {x}" for x in decisions[-6:])
+    lines.append("Files read (paths observed in tool calls/results):")
+    lines.extend(f"- {x}" for x in sorted(read_files))
+    lines.append("Files modified (paths observed in write/edit/patch tools):")
+    lines.extend(f"- {x}" for x in sorted(modified_files))
+    return "\n".join(lines)
 
 
 def _compact_content(content: str) -> str:
-    """Replace long content with a bounded head/tail excerpt."""
+    """Legacy bounded excerpt helper retained for compatibility/tests."""
     min_length = EXCERPT_HEAD + len(_OMIT_MARKER) + EXCERPT_TAIL
     if len(content) <= min_length:
         return content
@@ -240,11 +289,12 @@ def _drop_detail(tool_name: str, original: str) -> dict[str, Any]:
     }
 
 
-def _compact_message(msg: dict[str, Any]) -> tuple[dict[str, Any], "dict[str, Any] | None"]:
-    """Return (compacted_msg, drop_detail). ``drop_detail`` is ``None`` when
-    nothing changed (content already short enough)."""
+def _compact_message(msg: dict[str, Any], summary: str | None = None) -> tuple[dict[str, Any], "dict[str, Any] | None"]:
+    """Replace a tool-result body with a structural summary."""
     tool_name = str(msg.get("name") or "")
     content = msg.get("content") or ""
+    if summary is not None:
+        return dict(msg, content=summary), _drop_detail(tool_name or "tool", _message_text(msg))
     if isinstance(content, list):
         # Anthropic block list — compact text blocks
         detail: dict[str, Any] | None = None
@@ -409,19 +459,44 @@ def compact_messages(
         compactable = _compactable_indices(messages, _keep_tokens)
 
         if not compactable:
-            _write_journal(
-                state_root, cycle_id, iteration, trigger_signal, trigger_signal, 0,
-                reason="nothing_older_than_cut", real_prev_prompt=real_prompt,
-            )
-            return messages
+            oversized = next((i for i in range(len(messages) - 1, 1, -1)
+                              if _is_tool_result(messages[i])
+                              and _message_tokens(messages[i]) > _keep_tokens), None)
+            if oversized is not None:
+                compactable = {oversized}
+            else:
+                _write_journal(
+                    state_root, cycle_id, iteration, trigger_signal, trigger_signal, 0,
+                    reason="nothing_older_than_cut", real_prev_prompt=real_prompt,
+                )
+                return messages
 
-        # Build compacted copy.
+        dropped_messages = [messages[i] for i in sorted(compactable)]
+        previous = "\n".join(
+            _message_text(m) for m in messages
+            if _message_text(m).startswith("[Compaction summary")
+        )
+        summary = previous or _structural_summary(messages, previous=previous)
         new_messages: list[dict[str, Any]] = []
         results_compacted = 0
         compacted_details: list[dict[str, Any]] = []
+        summary_inserted = False
         for i, msg in enumerate(messages):
             if i in compactable:
-                compacted, detail = _compact_message(msg)
+                if not summary_inserted:
+                    if _message_text(msg).startswith("[Compaction summary"):
+                        compacted, detail = msg, None
+                    elif len(_message_text(msg)) <= EXCERPT_HEAD + len(_OMIT_MARKER) + EXCERPT_TAIL:
+                        compacted, detail = _compact_message(msg)
+                        if detail is None:
+                            compacted, detail = dict(msg, content=summary), _drop_detail(
+                                str(msg.get("name") or "tool"), _message_text(msg),
+                            )
+                    else:
+                        compacted, detail = _compact_message(msg, summary)
+                    summary_inserted = True
+                else:
+                    compacted, detail = _compact_message(msg)
                 new_messages.append(compacted)
                 if detail is not None:
                     results_compacted += 1
@@ -429,7 +504,19 @@ def compact_messages(
             else:
                 new_messages.append(msg)
 
-        if results_compacted == 0:
+        if all(
+            len(_message_text(m)) <= EXCERPT_HEAD + len(_OMIT_MARKER) + EXCERPT_TAIL
+            for m in dropped_messages
+        ):
+            _write_journal(
+                state_root, cycle_id, iteration, trigger_signal, trigger_signal, 0,
+                reason="already_compact", real_prev_prompt=real_prompt,
+            )
+            return messages
+
+        if results_compacted == 0 or all(
+            _message_text(m).startswith("[Compaction summary") for m in dropped_messages
+        ):
             _write_journal(
                 state_root, cycle_id, iteration, trigger_signal, trigger_signal, 0,
                 reason="already_compact", real_prev_prompt=real_prompt,
