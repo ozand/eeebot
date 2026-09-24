@@ -1786,6 +1786,21 @@ class TestProposeMockedClient:
         result = llm_proposer.propose("some context")
         assert result == payload
 
+    def test_oversized_charter_refuses_before_gateway_call_and_records_reason(self, monkeypatch, tmp_path):
+        self._patch_client(monkeypatch, "unused")
+        root = tmp_path / "release"
+        (root / "roles").mkdir(parents=True)
+        (root / "goals.md").write_text("X" * 8001, encoding="utf-8")
+        (root / "IDENTITY.md").write_text("# Identity\n\nTest.\n", encoding="utf-8")
+        (root / "SOUL.md").write_text("# Soul\n\nTest.\n", encoding="utf-8")
+        (root / "roles" / "proposer.md").write_text("---\nrole: proposer\n---\n# Role: proposer\n\nPropose.\n", encoding="utf-8")
+        monkeypatch.setenv("RELEASE_ROOT", str(root))
+        monkeypatch.setenv("STATE_DIR", str(tmp_path / "state"))
+        from nanobot.runtime.operator_documents import DOCUMENT_SIZE_CAP_BYTES
+        assert (root / "goals.md").stat().st_size <= DOCUMENT_SIZE_CAP_BYTES
+        assert llm_proposer.propose("context") is None
+        assert llm_proposer._last_propose_failure.startswith("RolePromptBuildFailed:")
+
     def test_garbage_reply_returns_none(self, monkeypatch):
         self._patch_client(monkeypatch, "not json at all, sorry")
         assert llm_proposer.propose("some context") is None

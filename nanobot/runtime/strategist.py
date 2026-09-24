@@ -197,9 +197,9 @@ def _json_object(line: str) -> bool:
 def build_strategist_prompt(inputs: dict[str, Any], watermark: dict[str, Any]) -> tuple[str, str]:
     # #1729 (ADR-022 rule 2): identity (short form) + roles/strategist.md. No
     # soul and no charter: this role runs under a tight payload cap.
-    from nanobot.runtime.role_prompt import build_role_system_prompt
+    from nanobot.runtime.role_prompt import build_role_system_prompt_or_refuse
 
-    system, _role_fit = build_role_system_prompt("strategist")
+    system, _role_fit = build_role_system_prompt_or_refuse("strategist")
     watermark = _cap(watermark, 1_000) if isinstance(watermark, dict) else {}
     payload = {"schema": SCHEMA, "watermark": watermark, "archive": inputs, "output": {
         "schema": SCHEMA, "period_reviewed": "ISO period", "hypotheses": [{

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from nanobot.runtime.role_prompt import build_role_system_prompt, system_chars
+from nanobot.runtime.role_prompt import build_role_system_prompt, build_role_system_prompt_or_refuse, system_chars
 from nanobot.observability.llm_telemetry import (
     MAX_LLM_PROMPT_PAYLOAD_BYTES,
     call_context,
@@ -554,6 +554,16 @@ def run_reflector(
     max_runtime_seconds: float = _MAX_RUNTIME_SECONDS,
 ) -> dict[str, int]:
     state_dir = Path(state_dir)
+    try:
+        prompt = build_role_system_prompt_or_refuse("reflector")[0]
+    except Exception as exc:
+        _append_journal(state_dir, {
+            "timestamp": _now(), "status": "refused",
+            "summary": f"role_prompt_refused: {exc}",
+        })
+        return {"candidates": 0, "processed": 0, "skipped_pruned": 0,
+                "errors": 0, "consecutive_errors": 0,
+                "input_truncated": 0, "status": "refused"}
     deadline = time.monotonic() + max(1.0, float(max_runtime_seconds))
     rows = _ledger_rows(state_dir)
     outcomes = [row for row in rows if row.get("phase") == "outcome" and row.get("cycle_id")]

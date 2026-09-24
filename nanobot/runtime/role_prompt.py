@@ -7,8 +7,9 @@ a Python string literal. This module replaces those literals with files under
     IDENTITY.md (short form) -> SOUL.md (optional) -> goals.md (optional) -> roles/<role>.md
 
 with the same ``[missing: <name>]`` marker and per-block telemetry semantics as
-the executor loader (:func:`nanobot.agent.block_loader.load_block`).
-There is one convention for a block that is absent or over its cap, not two.
+the executor loader (:func:`nanobot.agent.block_loader.load_block`). The
+operator charter is never truncated: it passes whole under an explicit hard
+limit, or prompt construction raises a recorded, typed refusal.
 
 Per-role flags (issue #1729, revision 2026-09-18):
 
@@ -31,6 +32,39 @@ from nanobot.agent.block_loader import load_block, trim_lines
 from nanobot.observability.llm_telemetry import system_chars as _system_chars
 from nanobot.runtime.operator_documents import STATE_TEXT, resolve_charter
 
+
+class CharterTooLargeError(ValueError):
+    """Role prompt refused because the immutable charter exceeds the hard cap."""
+
+    def __init__(self, role: str, chars: int, limit: int) -> None:
+        self.role = role
+        self.chars = chars
+        self.limit = limit
+        super().__init__(
+            f"role prompt refused for {role}: goals.md is {chars} chars; maximum is {limit}"
+        )
+
+
+class RolePromptBuildError(RuntimeError):
+    """The role prompt could not be built completely enough to launch."""
+
+
+def build_role_system_prompt_or_refuse(*args: Any, **kwargs: Any) -> tuple[str, dict[str, Any]]:
+    """Build a role prompt; wrap any missing/oversized charter refusal loudly.
+
+    The general builder retains marker semantics for non-charter optional
+    blocks. Any charter-derived error is raised so role callers cannot launch
+    on an empty or partial charter.
+    """
+    try:
+        return build_role_system_prompt(*args, **kwargs)
+    except CharterTooLargeError:
+        raise
+    except Exception as exc:
+        raise RolePromptBuildError(f"role prompt assembly failed: {type(exc).__name__}: {exc}") from exc
+
+
+
 #: Default deployed release tree (mirrors ``bridge.RELEASE_ROOT`` /
 #: ``llm_proposer._RELEASE_ROOT_DEFAULT``); the systemd units for the side
 #: roles do not all export ``RELEASE_ROOT``, so the package's own tree and
@@ -42,7 +76,7 @@ ROLES_DIRNAME = "roles"
 IDENTITY_SHORT_CAP = 300
 IDENTITY_FULL_CAP = 1500
 SOUL_CAP = 1800
-CHARTER_CAP = 3200
+CHARTER_MAX_CHARS = 8000
 #: A role file with no ``budget_chars`` front-matter key gets this cap.
 DEFAULT_ROLE_BUDGET = 2600
 SECTION_SEPARATOR = "\n\n---\n\n"
@@ -238,8 +272,9 @@ def build_role_system_prompt(
 
     Returns ``(text, telemetry)`` where telemetry is
     ``{"role", "blocks": {name: chars}, "missing": [...], "truncated": [...],
-    "chars", "with_charter", "with_soul"}``. Never raises: a missing role
-    file leaves the caller running on identity (+ soul) plus the marker.
+    "chars", "with_charter", "with_soul"}``. Missing role files still render a
+    marker, but an oversized charter raises :class:`CharterTooLargeError` and
+    must prevent the caller from launching that role.
     """
     flags = ROLE_FLAGS.get(role, (False, False))
     charter = flags[0] if with_charter is None else with_charter
@@ -253,7 +288,7 @@ def build_role_system_prompt(
         text, meta = _load_release_file(root, "SOUL.md", SOUL_CAP)
         blocks.append(("soul", text, meta))
     if charter:
-        text, meta = _load_charter_block(root, CHARTER_CAP)
+        text, meta = _load_charter_block(root, role=role)
         blocks.append(("goals", text, meta))
     if role_text is not None:
         blocks.append(("role", role_text, {"missing": False, "truncated": False, "chars": len(role_text)}))
@@ -283,31 +318,26 @@ def _load_release_file(root: Path | None, filename: str, cap: int) -> tuple[str,
     return load_block(filename, Path(root) / filename, cap, True)
 
 
-def _load_charter_block(root: Path | None, cap: int) -> tuple[str, dict[str, Any]]:
-    """ADR-034 rule 2: the charter's one root is ``<release root>/goals.md``,
-    obtained via :func:`operator_documents.resolve_charter` — never a path
-    constructed here. Same ``(text, meta)`` contract as
-    :func:`nanobot.agent.block_loader.load_block` (heading, cap, line-boundary
-    truncation with a notice) so ``assemble_role_prompt``'s telemetry and
-    prompt-budget behavior are unchanged; only the read now goes through the
-    resolver instead of a second, hand-built path to ``goals.md``."""
+def _load_charter_block(root: Path | None, *, role: str) -> tuple[str, dict[str, Any]]:
+    """Resolve the single release charter and keep its text whole.
+
+    It is never positionally truncated. If the heading plus body exceeds the
+    explicit hard limit, raise :class:`CharterTooLargeError`; the caller must
+    refuse that role rather than run with an incomplete charter.
+    """
     name = "goals.md"
     if root is None:
-        marker = f"[missing: {name}]"
-        return marker, {"missing": True, "truncated": False, "chars": len(marker)}
+        raise RolePromptBuildError(f"role prompt refused for {role}: goals.md is unavailable")
     res = resolve_charter(root)
     if res.state != STATE_TEXT:
-        marker = f"[missing: {name}]"
-        return marker, {"missing": True, "truncated": False, "chars": len(marker)}
+        raise RolePromptBuildError(
+            f"role prompt refused for {role}: goals.md is {res.state}"
+        )
     heading = f"## {name}\n\n"
-    text = heading + res.text
-    if len(text) <= cap:
-        return text, {"missing": False, "truncated": False, "chars": len(text)}
-    notice = f"\n\n[{name} truncated at {cap} chars; read the file for the rest]"
-    budget = max(0, cap - len(heading) - len(notice))
-    trimmed_body = trim_lines(res.text, budget)
-    text = heading + trimmed_body + notice
-    return text, {"missing": False, "truncated": True, "chars": len(text)}
+    text = heading + res.text.strip()
+    if len(text) > CHARTER_MAX_CHARS:
+        raise CharterTooLargeError(role, len(text), CHARTER_MAX_CHARS)
+    return text, {"missing": False, "truncated": False, "chars": len(text)}
 
 
 #: Re-export (#1784). The definition moved to

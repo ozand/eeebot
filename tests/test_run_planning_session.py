@@ -129,6 +129,10 @@ def _stub_role_prompt(monkeypatch):
         role_prompt_mod, "build_role_system_prompt",
         lambda role, **kwargs: ("fixed planner prompt", {"role": role}),
     )
+    monkeypatch.setattr(
+        role_prompt_mod, "build_role_system_prompt_or_refuse",
+        lambda role, **kwargs: ("fixed planner prompt", {"role": role}),
+    )
     release = Path(__file__).resolve().parents[1]
     monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
 
@@ -434,6 +438,36 @@ def test_refuses_without_spawning_when_charter_absent(tmp_path: Path, monkeypatc
     [row] = _ledger_rows(state, "planning_session")
     assert row["outcome"] == "refused"
     assert row["reason"] == "no_charter"
+
+
+def test_refuses_without_spawning_when_charter_exceeds_role_prompt_limit(tmp_path: Path, monkeypatch):
+    import nanobot.runtime.role_prompt as role_prompt_mod
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "goals.md").write_text("X" * 8001, encoding="utf-8")
+    skill = release / "nanobot" / "skills" / "task-writing" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# task contract\\n", encoding="utf-8")
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
+    manager_factory = _make_fake_mgr_factory(state, {"plan": "must not run"})
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+    monkeypatch.setattr(bridge, "read_charter_text", lambda _root: "X" * 8001)
+    monkeypatch.setattr(
+        role_prompt_mod, "build_role_system_prompt_or_refuse",
+        lambda role, **kwargs: (_ for _ in ()).throw(
+            role_prompt_mod.CharterTooLargeError(role, 8001, 8000)
+        ),
+    )
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["ran"] is False
+    assert manager_factory.last_task is None
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["outcome"] == "refused"
+    assert "maximum is 8000" in row["reason"]
 
 
 def test_refuses_without_spawning_when_charter_unreadable(tmp_path: Path, monkeypatch):
