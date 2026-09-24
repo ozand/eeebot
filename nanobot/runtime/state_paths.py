@@ -88,9 +88,10 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
     ),
     # llm-proposed requests remain live; materialized-cycle evidence is retired.
     "improvements": ("nanobot.runtime.llm_proposer:write_request",),
-    "experiments": (
-        "nanobot.runtime.experiment_ledger:append_experiment_result",
-    ),
+    # "experiments" (state/experiments/results.jsonl) retired in #1455 with its
+    # only writer, nanobot.runtime.experiment_ledger: zero production callers,
+    # no file on the host. Hypotheses and verdicts live in "hypotheses" and
+    # the day diary (ADR-030), not here.
     "ledger": ("nanobot.runtime.cycle_ledger:append_event",),
     # scans.jsonl/scan-failures.jsonl (#1516/#1546/#1570). The separate
     # citations.jsonl this comment used to also name was retired in #1654 —
