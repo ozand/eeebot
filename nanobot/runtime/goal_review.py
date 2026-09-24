@@ -91,7 +91,9 @@ from typing import Any
 from nanobot.runtime.cycle_ledger import append_event
 from nanobot.runtime.operator_documents import (
     STATE_TEXT,
+    derived_priorities_path,
     resolve_charter,
+    resolve_derived_priorities,
     resolve_operator_priorities_metadata,
 )
 from nanobot.runtime.role_prompt import load_role_text
@@ -300,50 +302,44 @@ def _load_goal_data(
 
 
 def _derived_priorities_path(state_dir: Path) -> Path:
-    return Path(state_dir) / "goals" / "derived_priorities.json"
+    """The writer's path (``_write_derived_priorities`` below) — ADR-034
+    rule 2 is about readers; this delegates to
+    :func:`operator_documents.derived_priorities_path` so reader and writer
+    never drift onto two different paths, but the resolver owns the path."""
+    return derived_priorities_path(Path(state_dir))
 
 
 def read_derived_priorities(state_dir: Path) -> list[dict[str, Any]]:
     """Loop-derived priorities accepted by past reviews, not yet folded into
-    the operator's goal_text canon (#860) — read from the harness-owned
+    the operator's goal_text canon (#860) — from the harness-owned
     ``derived_priorities.json`` sidecar deploy never touches. Each entry has
     ``label``/``body``/``vector``/``added_utc``; no priority number (numbers
     are assigned dynamically at merge time by :func:`merged_goal_text`).
-    Malformed entries are dropped individually; fail-open to ``[]``."""
-    data = _read_json(_derived_priorities_path(Path(state_dir)), None)
-    if not isinstance(data, dict):
-        return []
-    raw = data.get("priorities")
-    if not isinstance(raw, list):
+
+    ADR-034 rule 2: a thin dict-shaped adapter over
+    :func:`operator_documents.resolve_derived_priorities` — the resolver
+    locates, cap-checks and validates the file; this function never reads
+    it itself. Malformed entries are dropped individually (by the
+    resolver); fail-open to ``[]`` when absent/unreadable."""
+    res = resolve_derived_priorities(state_dir)
+    if res.state != STATE_TEXT:
         return []
     out: list[dict[str, Any]] = []
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        label = str(entry.get("label") or "").strip()
-        body = str(entry.get("body") or "").strip()
-        vector = str(entry.get("vector") or "").strip().upper()
-        try:
-            number = int(entry.get("number") or 0)
-        except (TypeError, ValueError):
-            number = 0
-        if not label or not body or vector not in ("V1", "V2") or number <= 0:
-            continue  # number is required (#860 review: stable demand ids)
+    for e in res.entries:
         item: dict[str, Any] = {
-            "label": label,
-            "body": body,
-            "vector": vector,
-            "number": number,
-            "added_utc": str(entry.get("added_utc") or ""),
+            "label": e.title,
+            "body": e.instructions,
+            "vector": e.vector,
+            "number": e.number,
+            "added_utc": e.added_utc,
         }
         # #879: which tech-tree investment direction was current at mint
         # time, when the priority's own text matched it — additive,
         # OMITTED entirely (not just "") for any entry that predates this
         # field or never matched one, so existing exact-shape comparisons
         # of older entries are unaffected.
-        direction = str(entry.get("direction") or "").strip()
-        if direction:
-            item["direction"] = direction
+        if e.direction:
+            item["direction"] = e.direction
         out.append(item)
     return out
 

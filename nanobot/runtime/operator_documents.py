@@ -161,19 +161,26 @@ def resolve_charter(release_root: "Path | str | None") -> DocumentResolution:
     return _resolve_text_file(Path(release_root) / _CHARTER_FILENAME)
 
 
+def derived_priorities_path(state_dir: "Path | str") -> Path:
+    """ADR-034 rule 2: the ONE path to ``derived_priorities.json`` — owned by
+    this resolver module, not by any reader (including
+    :mod:`nanobot.runtime.goal_review`, whose own
+    ``read_derived_priorities`` delegates to :func:`resolve_derived_priorities`
+    below rather than constructing this path itself). The writer
+    (``goal_review._write_derived_priorities``) is a separate concern —
+    rule 2 is about readers — and keeps its own path for now."""
+    return Path(state_dir) / "goals" / "derived_priorities.json"
+
+
 def resolve_derived_priorities(state_dir: "Path | str") -> DerivedPrioritiesResolution:
     """ADR-034 rule 2: derived priorities' one root is
-    ``state/goals/derived_priorities.json``. Returns its priority entries,
-    labeled ``source="derived"`` (ADR-034 rule 4 provenance), never the raw
-    JSON blob.
-
-    Entry validation (label/body/vector-in-{V1,V2}/number) delegates to
-    :func:`nanobot.runtime.goal_review.read_derived_priorities` — the
-    existing, tested parser — rather than re-implementing it here; this
-    function is the one place that locates and cap-checks the file."""
-    from nanobot.runtime import goal_review
-
-    path = goal_review._derived_priorities_path(Path(state_dir))
+    ``state/goals/derived_priorities.json``, located and cap-checked ONLY
+    here. Returns its priority entries, labeled ``source="derived"``
+    (ADR-034 rule 4 provenance), never the raw JSON blob. Entry validation
+    (label/body/vector-in-{V1,V2}/number>0) lives here, not in
+    :mod:`goal_review` — its ``read_derived_priorities`` is the thin
+    dict-shaped adapter over this resolver, not the other way around."""
+    path = derived_priorities_path(state_dir)
     doc = _resolve_text_file(path)
     mtime = _mtime_utc(path)
     if doc.state != STATE_TEXT:
@@ -186,19 +193,33 @@ def resolve_derived_priorities(state_dir: "Path | str") -> DerivedPrioritiesReso
     if not isinstance(data, dict):
         return DerivedPrioritiesResolution(state=STATE_UNREADABLE, reason="malformed_json", mtime_utc=mtime)
 
-    entries = tuple(
-        PriorityEntry(
-            number=e["number"],
-            source=SOURCE_DERIVED,
-            title=e["label"],
-            instructions=e["body"],
-            vector=e.get("vector", ""),
-            added_utc=e.get("added_utc", ""),
-            direction=e.get("direction", ""),
-        )
-        for e in goal_review.read_derived_priorities(Path(state_dir))
-    )
-    return DerivedPrioritiesResolution(state=STATE_TEXT, entries=entries, mtime_utc=mtime)
+    raw_entries = data.get("priorities")
+    entries: list[PriorityEntry] = []
+    if isinstance(raw_entries, list):
+        for entry in raw_entries:
+            if not isinstance(entry, dict):
+                continue
+            label = str(entry.get("label") or "").strip()
+            body = str(entry.get("body") or "").strip()
+            vector = str(entry.get("vector") or "").strip().upper()
+            try:
+                number = int(entry.get("number") or 0)
+            except (TypeError, ValueError):
+                number = 0
+            if not label or not body or vector not in ("V1", "V2") or number <= 0:
+                continue
+            entries.append(
+                PriorityEntry(
+                    number=number,
+                    source=SOURCE_DERIVED,
+                    title=label,
+                    instructions=body,
+                    vector=vector,
+                    added_utc=str(entry.get("added_utc") or ""),
+                    direction=str(entry.get("direction") or "").strip(),
+                )
+            )
+    return DerivedPrioritiesResolution(state=STATE_TEXT, entries=tuple(entries), mtime_utc=mtime)
 
 
 def resolve_operator_priorities(
