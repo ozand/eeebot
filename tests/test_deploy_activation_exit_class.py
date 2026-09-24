@@ -123,6 +123,7 @@ def _drive_activation(tmp_path: Path, *, restart_rc: int, result: str, status: s
     ''')
     marker = tmp_path / "rolled_back"
     release_dir = str(DEPLOY_SCRIPT.parents[3]).replace("\\", "/")
+    temp_dropin = (tmp_path / "systemd" / "activation-check.service.d").as_posix()
     prelude = f'''
     set -eEuo pipefail
     . "{str(LIB).replace(chr(92), "/")}"
@@ -131,6 +132,7 @@ def _drive_activation(tmp_path: Path, *, restart_rc: int, result: str, status: s
     trap rollback_remote ERR
     VERIFY_ONLY=0
     RELEASE_DIR="{release_dir}"
+    ACTIVATION_CHECK_DROPIN_DIR="{temp_dropin}"
     '''
     env = {"PATH": str(shims).replace("\\", "/") + ":" + os.environ["PATH"]}
     self_check = DEPLOY_SCRIPT.read_text(encoding="utf-8").split(

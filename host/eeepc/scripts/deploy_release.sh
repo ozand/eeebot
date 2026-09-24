@@ -232,7 +232,7 @@ else
   # Prove candidate imports/config/state/tool path before current changes. A
   # runtime drop-in scopes candidate state to this service only: unlike
   # systemctl set-environment it cannot leak to unrelated manager-started units.
-  ACTIVATION_DROPIN_DIR="/run/systemd/system/eeepc-self-evolving-activation-check.service.d"
+  ACTIVATION_DROPIN_DIR="${ACTIVATION_CHECK_DROPIN_DIR:-/run/systemd/system/eeepc-self-evolving-activation-check.service.d}"
   sudo mkdir -p "$ACTIVATION_DROPIN_DIR"
   ACTIVATION_DROPIN="$ACTIVATION_DROPIN_DIR/90-candidate.conf"
   ACTIVATION_DROPIN_CLEANED=0
