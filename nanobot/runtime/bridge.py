@@ -3594,24 +3594,35 @@ async def _main_impl_body():
                 req.get('task_title') or req.get('semantic_task_id') or 'subagent review task',
             )
 
-        # #944: read executor mission from immutable goals.md at the release
-        # root when available; fall back to the legacy goal_text.json chain.
-        # Derived priorities (derived_priorities.json) are always folded in.
+        # #944/ADR-034 rule 2: read the executor mission's charter from
+        # immutable goals.md at the release root, via read_charter_text's
+        # resolver (no path constructed here). ADR-034 rule 5: the
+        # operator's own "Current priority targets" section
+        # (state/goals/goal_text.json, via resolve_operator_priorities_text
+        # — never a second path to it) is folded in ALONGSIDE the charter,
+        # never as a charter substitute — the deleted legacy chain here
+        # used to read RELEASE_ROOT/host/eeepc/etc/goal_text.json (a path
+        # that exists on no host, #1699 census) and, when the charter was
+        # present, dropped the operator's priorities from the executor
+        # mission entirely (rule 5 requires the executor to see them).
+        # Derived priorities (derived_priorities.json) are always folded in
+        # next, by merged_goal_text.
         try:
             from nanobot.runtime.goal_review import merged_goal_text
             _charter = read_charter_text(RELEASE_ROOT)
         except Exception:
             _charter = ''
+        from nanobot.runtime.operator_documents import STATE_TEXT as _OD_STATE_TEXT
+        from nanobot.runtime.operator_documents import resolve_operator_priorities_text as _resolve_priorities_text
+
+        _priorities_res = _resolve_priorities_text(STATE_DIR)
+        _priorities_text = _priorities_res.text if _priorities_res.state == _OD_STATE_TEXT else ''
+        _priority_marker_idx = _priorities_text.find('Current priority targets:')
+        _priority_section = _priorities_text[_priority_marker_idx:].strip() if _priority_marker_idx != -1 else ''
         if _charter:
-            _base_goal_text = _charter
+            _base_goal_text = f"{_charter.rstrip()}\n\n{_priority_section}" if _priority_section else _charter
         else:
-            _base_goal_text = (
-                # Prefer goal_text.json in state dir
-                (load_json(STATE_DIR / 'goals' / 'goal_text.json') or {}).get('text')
-                # Fallback: read from release root (deployed with release)
-                or (load_json(RELEASE_ROOT / 'host' / 'eeepc' / 'etc' / 'goal_text.json') or {}).get('text')
-                or goal_id
-            )
+            _base_goal_text = _priority_section or goal_id
         try:
             from nanobot.runtime.goal_review import merged_goal_text
             goal_text = merged_goal_text(STATE_DIR, _base_goal_text)
