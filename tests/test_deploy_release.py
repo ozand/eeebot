@@ -280,6 +280,9 @@ def test_dashboard_activation_and_rollback_are_in_deploy_script(repo, mock_bin):
     assert 'sudo systemctl restart eeebot-dashboard.service && sudo systemctl restart eeepc-self-evolving-subagent-bridge.service' in content
     assert content.index("updating current symlink") < content.index('sudo systemctl restart "$DASHBOARD_UNIT"')
     assert content.index('sudo systemctl restart "$DASHBOARD_UNIT"') < content.index("Ensure bridge service is restarted correctly")
+    assert 'sudo systemctl start eeepc-self-evolving-activation-check.service' in content
+    assert 'sudo systemctl restart eeepc-self-evolving-subagent-bridge.service' in content
+    assert 'outcome recorded, release remains active' in content
 
 
 def test_dashboard_activation_fails_when_enabled_unit_restart_fails(repo, mock_bin):

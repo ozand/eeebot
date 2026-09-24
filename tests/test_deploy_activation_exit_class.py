@@ -1,16 +1,10 @@
-"""#1303: a deploy must tell "this release cannot run" from "this one cycle
-could not reach the gateway".
+"""#1303/#1904: classify transport, model-free activation, and real-cycle timeout.
 
-On 2026-09-05 06:38 the first post-flip bridge cycle of `a64470e5` drew a
-transient gateway 404, exited EXIT_EXECUTOR_LLM_ERROR (3) as #1280 requires,
-systemd reported the oneshot start job failed, and deploy_release.sh rolled the
-release back — un-deploying the fix for the lie it had just recorded honestly.
-
-Arm 1: the exit status is classified at both rollback points. Status 3 keeps
-the release; every other failure still rolls back. Both halves are DRIVEN here,
-not asserted: the remote activation stanza is executed with a scripted
-`systemctl`, and the local health gate is run through the full script with
-journal/streak fixtures, exactly as tests/test_deploy_release.py does.
+The model-free activation self-check owns rollback before `current` flips. The
+first real post-flip cycle is classified separately: transport and timeout do
+not roll back; crash/other exits do. The marked deploy stanza is driven with
+scripted systemctl and rollback fixtures; the later local health gate remains
+covered by the existing full-script journal/streak tests.
 """
 from __future__ import annotations
 
@@ -64,12 +58,11 @@ def test_describe_bridge_exit_status_names_known_codes_and_the_remedy():
         assert needle in res.stdout.strip() if needle else res.stdout.strip() == ""
 
 
-def test_activation_overflow_rollback_names_itself_and_the_remedy(tmp_path):
-    """#1300 deployed before the instance markers: the rollback still happens (exit 4 is a
-    release-plus-data failure, not a transient) and the deploy output says why and what to do."""
+def test_first_cycle_overflow_rolls_back_with_remedy(tmp_path):
+    """A non-timeout failure after activation remains rollback-worthy."""
     res, rolled_back = _drive_activation(tmp_path, restart_rc=4, result="exit-code", status="4")
     assert res.returncode != 0 and rolled_back is True
-    assert "CRITICAL: bridge activation failed" in res.stderr
+    assert "CRITICAL: bridge first real cycle failed" in res.stderr
     assert "EXIT_SYSTEM_PROMPT_OVERFLOW" in res.stderr and "prompt-fit: droppable" in res.stderr and "#1300" in res.stderr
 
 
@@ -82,6 +75,7 @@ def test_activation_overflow_rollback_names_itself_and_the_remedy(tmp_path):
     ("1", "signal", "9", "failed"),                # killed
     ("1", "exit-code", "", "failed"),              # status unreadable: never assume transport
     ("1", "", "3", "failed"),                      # status 3 but Result not exit-code: not the #1280 path
+    ("1", "timeout", "15", "timeout"),              # first real cycle timed out: do not roll back
 ])
 def test_classify_bridge_run(rc, result, status, expected):
     lib = str(LIB).replace("\\", "/")
@@ -103,17 +97,35 @@ def _drive_activation(tmp_path: Path, *, restart_rc: int, result: str, status: s
     systemctl. Returns the process and whether rollback_remote fired."""
     shims = tmp_path / "shims"
     shims.mkdir(exist_ok=True)
-    _write_mock(shims / "sudo", 'exec "$@"')
+    _write_mock(shims / "sudo", f'''
+    if [ "$1" = "systemctl" ] && [ "$2" = "restart" ]; then exit {restart_rc}; fi
+    if [ "$1" = "-u" ] && [ "$2" = "eeepc-agent" ]; then
+      if [[ "$*" == *"ACTIVATION_CHECK_MODE=record-behavior-timeout"* ]]; then
+        echo activation-check:record-behavior-timeout
+      fi
+      exit 0
+    fi
+    exec "$@"
+    ''')
+    _write_mock(shims / "python", 'exit 0')
+    python_path = tmp_path / "opt/eeepc-agent/venv/bin/python"
+    python_path.parent.mkdir(parents=True, exist_ok=True)
+    python_path.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+    python_path.chmod(0o755)
     _write_mock(shims / "systemctl", f'''
+    if [ "$1" = "set-environment" ] || [ "$1" = "unset-environment" ] || [ "$1" = "reset-failed" ]; then exit 0; fi
+    if [ "$1" = "show" ] && [[ "$*" == *"eeepc-self-evolving-activation-check.service"* ]]; then echo success; exit 0; fi
     if [ "$1" = "restart" ]; then exit {restart_rc}; fi
     if [ "$1" = "show" ] && [[ "$*" == *"-p Result"* ]]; then echo "{result}"; exit 0; fi
     if [ "$1" = "show" ] && [[ "$*" == *"-p ExecMainStatus"* ]]; then echo "{status}"; exit 0; fi
+    if [ "$1" = "start" ] && [ "$2" = "eeepc-self-evolving-activation-check.service" ]; then exit 0; fi
     exit 0
     ''')
     marker = tmp_path / "rolled_back"
     release_dir = str(DEPLOY_SCRIPT.parents[3]).replace("\\", "/")
     prelude = f'''
     set -eEuo pipefail
+    . "{str(LIB).replace(chr(92), "/")}"
     die() {{ echo "CRITICAL: $*" >&2; return 1; }}
     rollback_remote() {{ if [ "${{BASH_SUBSHELL:-0}}" -gt 0 ]; then return; fi; touch "{str(marker).replace(chr(92), "/")}"; echo "[remote] rollback after activation failure" >&2; }}
     trap rollback_remote ERR
@@ -133,6 +145,13 @@ def test_activation_transport_exit_keeps_the_release(tmp_path):
     assert "not an activation failure (#1303)" in res.stdout and "EXIT_EXECUTOR_LLM_ERROR (3)" in res.stdout
 
 
+def test_activation_timeout_is_not_failure(tmp_path):
+    res, rolled_back = _drive_activation(tmp_path, restart_rc=1, result="timeout", status="15")
+    assert res.returncode == 0 and not rolled_back, res.stderr
+    assert "model queue, outcome recorded, release remains active" in res.stdout
+    assert "activation-check:record-behavior-timeout" in res.stdout
+
+
 @pytest.mark.parametrize("restart_rc, result, status, why", [
     (1, "exit-code", "1", "import error / internal error"),
     (203, "exit-code", "203", "missing venv or interpreter"),
@@ -145,7 +164,7 @@ def test_activation_genuine_failure_still_rolls_back(tmp_path, restart_rc, resul
     assert res.returncode != 0, why
     assert rolled_back is True, why
     assert "STANZA-COMPLETED" not in res.stdout, why
-    assert "CRITICAL: bridge activation failed" in res.stderr, why
+    assert "CRITICAL: bridge first real cycle failed" in res.stderr, why
 
 
 def test_activation_clean_exit_continues(tmp_path):

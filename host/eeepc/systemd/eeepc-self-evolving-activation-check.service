@@ -1,0 +1,26 @@
+[Unit]
+Description=Model-free eeebot release activation self-check
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=eeepc-agent
+Group=eeepc-agent
+WorkingDirectory=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+EnvironmentFile=-/etc/eeepc-agent/preset.env
+EnvironmentFile=/etc/eeepc-agent/instances/self-evolving-subagent-bridge.env
+EnvironmentFile=/etc/eeepc-agent/litellm.env
+EnvironmentFile=-/etc/eeepc-agent/instances/self-evolving-subagent-bridge-workspace.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=NANOBOT_RUNTIME_STATE_ROOT=/var/lib/eeepc-agent/self-evolving-agent/state
+Environment=NANOBOT_RUNTIME_STATE_SOURCE=host_control_plane
+Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
+ExecStart=/bin/bash -c 'export PYTHONPATH="$ACTIVATION_CHECK_RELEASE"; exec /opt/eeepc-agent/venv/bin/python -m nanobot.runtime.activation_check'
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=false
+ProtectSystem=strict
+ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state
+TimeoutStartSec=60
+CPUQuota=150%
+MemoryMax=512M

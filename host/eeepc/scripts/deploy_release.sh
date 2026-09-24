@@ -228,6 +228,16 @@ else
     die "/opt/eeepc-agent/runtimes/self-evolving-agent is not owned by root:root"
   fi
 
+  # Prove candidate imports/config/state/tool path before current changes. The
+  # self-check service receives the candidate release through systemd manager
+  # environment while retaining its identity, sandbox, EnvironmentFiles and state permissions.
+  sudo systemctl set-environment \
+    ACTIVATION_CHECK_RELEASE="$RELEASE_DIR" ACTIVATION_CHECK_MODE=activation
+  sudo systemctl daemon-reload
+  sudo systemctl start eeepc-self-evolving-activation-check.service
+  sudo systemctl unset-environment ACTIVATION_CHECK_RELEASE ACTIVATION_CHECK_MODE ACTIVATION_CHECK_RESULT ACTIVATION_CHECK_STATUS || true
+  echo "[remote] model-free bridge activation self-check passed; no model was called"
+
   echo "[remote] updating current symlink"
   sudo ln -sfn "$RELEASE_DIR" "$CURRENT_SYMLINK"
   sudo chown -h root:root "$CURRENT_SYMLINK"
@@ -720,30 +730,16 @@ else
   die "unexpected $DASHBOARD_UNIT LoadState=$DASHBOARD_LOAD_STATE"
 fi
 
-# Ensure bridge service is restarted correctly. Keep the activation rollback trap
-# installed through this restart so a bridge failure restores the previous release.
-#
+# Ensure bridge service is restarted correctly after model-free activation.
+# The model-free activation check above is the only activation rollback gate.
+# The first real candidate cycle is behavioural evidence only: timeout is
+# inconclusive (keep release active); every other non-clean exit rolls back.
 # --- #1303 bridge activation begin ---
-# The bridge is Type=oneshot, so `systemctl restart` blocks until its first
-# post-flip cycle ends and returns that cycle's exit status. Since #1280 a cycle
-# whose model call never returned exits EXIT_EXECUTOR_LLM_ERROR (3) so the
-# failure streak stays honest; on 2026-09-05 06:38 a transient gateway 404 in
-# that first cycle turned into "Failed to start … status=3", the ERR trap rolled
-# `a64470e5` back, and the release carrying #1280 became un-deployable by the
-# mechanism its own fix trips.
-#
-# Arm 1 of #1303, deliberately: distinguish the exit status here. Status 3 is
-# "this cycle could not reach the gateway" — the process imported, started, ran
-# a cycle and recorded it `blocked` — not "this release cannot run"; every other
-# non-zero status or signal still is, and still rolls back. Not arm 2 (retry the
-# activation once): it costs a full cycle and a second model call, and the
-# health gate below would still need this same distinction for the journal and
-# streak it reads. Not arm 3 (exit 0 and read the outcome instead): that moves
-# the signal #1280 put on the exit status, and the streak semantics stay exactly
-# as they are. The lib is the single home of the value, pinned to
-# bridge.EXIT_EXECUTOR_LLM_ERROR by test.
 if [ "$VERIFY_ONLY" -eq 0 ]; then
   . "$RELEASE_DIR/host/eeepc/scripts/lib_bridge_exit.sh"
+  sudo systemctl stop eeepc-self-evolving-subagent-bridge.service 2>/dev/null || true
+  sudo systemctl reset-failed eeepc-self-evolving-subagent-bridge.service 2>/dev/null || true
+  sudo systemctl daemon-reload
   BRIDGE_RESTART_RC=0
   sudo systemctl restart eeepc-self-evolving-subagent-bridge.service || BRIDGE_RESTART_RC=$?
   BRIDGE_RESULT="$(systemctl show -p Result --value eeepc-self-evolving-subagent-bridge.service 2>/dev/null || true)"
@@ -751,11 +747,26 @@ if [ "$VERIFY_ONLY" -eq 0 ]; then
   case "$(classify_bridge_run "$BRIDGE_RESTART_RC" "$BRIDGE_RESULT" "$BRIDGE_EXIT_STATUS")" in
     ok) ;;
     transport)
-      echo "[remote] bridge first post-flip cycle exited EXIT_EXECUTOR_LLM_ERROR ($BRIDGE_EXIT_EXECUTOR_LLM_ERROR): transport failure recorded as blocked, not an activation failure (#1303); release stays active" ;;
+      echo "[remote] bridge first real cycle exited EXIT_EXECUTOR_LLM_ERROR ($BRIDGE_EXIT_EXECUTOR_LLM_ERROR): transport failure recorded as blocked, not an activation failure (#1303); release stays active" ;;
+    timeout)
+      BRIDGE_TIMEOUT_RECORD_RC=0
+      sudo -u eeepc-agent env \
+        ACTIVATION_CHECK_RELEASE="$RELEASE_DIR" ACTIVATION_CHECK_MODE=record-behavior-timeout \
+        ACTIVATION_CHECK_RESULT="$BRIDGE_RESULT" ACTIVATION_CHECK_STATUS="$BRIDGE_EXIT_STATUS" \
+        PYTHONPATH="$RELEASE_DIR" PYTHONDONTWRITEBYTECODE=1 \
+        STATE_DIR=/var/lib/eeepc-agent/self-evolving-agent/state \
+        NANOBOT_RUNTIME_STATE_ROOT=/var/lib/eeepc-agent/self-evolving-agent/state \
+        HOME=/opt/eeepc-agent \
+        /opt/eeepc-agent/venv/bin/python -m nanobot.runtime.activation_check \
+        || BRIDGE_TIMEOUT_RECORD_RC=$?
+      sudo systemctl unset-environment ACTIVATION_CHECK_RELEASE ACTIVATION_CHECK_MODE ACTIVATION_CHECK_RESULT ACTIVATION_CHECK_STATUS || true
+      if [ "$BRIDGE_TIMEOUT_RECORD_RC" -ne 0 ]; then
+        die "bridge timed out and behavioral outcome recorder could not start (rc=$BRIDGE_TIMEOUT_RECORD_RC)"
+      fi
+      sudo systemctl show eeepc-self-evolving-activation-check.service -p Result --value >/dev/null
+      echo "[remote] first real cycle timed out at TimeoutStartSec; behavior is not measured because of the model queue, outcome recorded, release remains active" ;;
     *)
-      # #1300: a known status names itself and its remedy here, so the deployer
-      # reads the cause in the deploy output instead of in the bridge journal.
-      die "bridge activation failed (restart rc=$BRIDGE_RESTART_RC Result=$BRIDGE_RESULT ExecMainStatus=$BRIDGE_EXIT_STATUS) $(describe_bridge_exit_status "$BRIDGE_EXIT_STATUS")" ;;
+      die "bridge first real cycle failed (restart rc=$BRIDGE_RESTART_RC Result=$BRIDGE_RESULT ExecMainStatus=$BRIDGE_EXIT_STATUS) $(describe_bridge_exit_status "$BRIDGE_EXIT_STATUS")" ;;
   esac
 fi
 # --- #1303 bridge activation end ---
