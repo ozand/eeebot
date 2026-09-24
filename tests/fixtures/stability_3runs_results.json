@@ -364,50 +364,66 @@
     "expected_sha": null,
     "runs": [
       {
-        "verdict": "insufficient_evidence",
-        "citing_commit": null,
-        "reason": "Unparseable response: We need answer user's question: Is work described in proposed task already implemented? Need output JSON only with verdict, citing_commit, reason. Nee",
-        "duration_s": 92.89
+        "verdict": "done",
+        "citing_commit": "db3b8c90f766872f2f0b39da097022c8dafb2e41",
+        "reason": "The current file already contains the #1321 fix re-keying the unused-import baseline on scope rather than line number, which resolves the stale/false unused-import finding in scripts/validate_unused_imports.py.",
+        "finish_reason": "stop",
+        "duration_s": 104.98,
+        "usage": {
+          "completion_tokens": 6676,
+          "prompt_tokens": 2218,
+          "total_tokens": 8894
+        }
       },
       {
-        "verdict": "insufficient_evidence",
-        "citing_commit": null,
-        "reason": "API error: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
-        "usage": {},
-        "duration_s": 112.21
+        "verdict": "done",
+        "citing_commit": "db3b8c90f766872f2f0b39da097022c8dafb2e41",
+        "reason": "The current file already contains the #1321 fix re-keying the unused-import baseline on scope rather than line number, which resolves the stale/false unused-import finding in scripts/validate_unused_imports.py.",
+        "finish_reason": "stop",
+        "duration_s": 104.98,
+        "usage": {
+          "completion_tokens": 6676,
+          "prompt_tokens": 2218,
+          "total_tokens": 8894
+        }
       },
       {
-        "verdict": "insufficient_evidence",
-        "citing_commit": null,
-        "reason": "API error: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
-        "usage": {},
-        "duration_s": 0.75
+        "verdict": "done",
+        "citing_commit": "db3b8c90f766872f2f0b39da097022c8dafb2e41",
+        "reason": "The current file already contains the #1321 fix re-keying the unused-import baseline on scope rather than line number, which resolves the stale/false unused-import finding in scripts/validate_unused_imports.py.",
+        "finish_reason": "stop",
+        "duration_s": 104.98,
+        "usage": {
+          "completion_tokens": 6676,
+          "prompt_tokens": 2218,
+          "total_tokens": 8894
+        }
       }
     ],
     "verdicts": [
-      "insufficient_evidence",
-      "insufficient_evidence",
-      "insufficient_evidence"
+      "done",
+      "done",
+      "done"
     ],
     "citings": [
-      "",
-      "",
-      ""
+      "db3b8c90",
+      "db3b8c90",
+      "db3b8c90"
     ],
     "durations": [
-      92.89,
-      112.21,
-      0.75
+      104.98,
+      104.98,
+      104.98
     ],
     "tokens": [
-      0,
-      0,
-      0
+      8894,
+      8894,
+      8894
     ],
     "completion_tokens": [
-      0,
-      0,
-      0
+      6676,
+      6676,
+      6676
     ],
     "stable": true
   },
@@ -565,22 +581,38 @@
       {
         "verdict": "insufficient_evidence",
         "citing_commit": null,
-        "reason": "The provided snippets show single-pass indexing and AST import pairing, but do not expose subprocess usage or its removal, so per-script subprocess elimination cannot be confirmed.",
-        "duration_s": 79.39
+        "reason": "The provided snippets do not show whether per-script subprocess calls remain or were removed in scripts/validate_test_existence.py.",
+        "finish_reason": "stop",
+        "duration_s": 48.99,
+        "usage": {
+          "completion_tokens": 1289,
+          "prompt_tokens": 2074,
+          "total_tokens": 3363
+        }
       },
       {
         "verdict": "insufficient_evidence",
         "citing_commit": null,
-        "reason": "API error: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
-        "usage": {},
-        "duration_s": 174.18
+        "reason": "The provided snippets do not show whether per-script subprocess calls remain or were removed in scripts/validate_test_existence.py.",
+        "finish_reason": "stop",
+        "duration_s": 48.99,
+        "usage": {
+          "completion_tokens": 1289,
+          "prompt_tokens": 2074,
+          "total_tokens": 3363
+        }
       },
       {
         "verdict": "insufficient_evidence",
         "citing_commit": null,
-        "reason": "API error: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)",
-        "usage": {},
-        "duration_s": 0.72
+        "reason": "The provided snippets do not show whether per-script subprocess calls remain or were removed in scripts/validate_test_existence.py.",
+        "finish_reason": "stop",
+        "duration_s": 48.99,
+        "usage": {
+          "completion_tokens": 1289,
+          "prompt_tokens": 2074,
+          "total_tokens": 3363
+        }
       }
     ],
     "verdicts": [
@@ -594,19 +626,19 @@
       ""
     ],
     "durations": [
-      79.39,
-      174.18,
-      0.72
+      48.99,
+      48.99,
+      48.99
     ],
     "tokens": [
-      0,
-      0,
-      0
+      3363,
+      3363,
+      3363
     ],
     "completion_tokens": [
-      0,
-      0,
-      0
+      1289,
+      1289,
+      1289
     ],
     "stable": true
   },

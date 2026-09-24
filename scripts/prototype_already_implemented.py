@@ -55,7 +55,7 @@ def call_evaluator_llm(
 
     system_prompt = (
         "You are an independent code reviewer determining whether a proposed task has already been implemented in a repository.\n"
-        "Respond strictly in JSON format with the following keys:\n"
+        "Keep your internal analysis focused, then respond strictly in JSON format with the following keys:\n"
         "{\n"
         '  "verdict": "done" | "not_done" | "insufficient_evidence",\n'
         '  "citing_commit": "<sha or null>",\n'
@@ -87,24 +87,54 @@ def call_evaluator_llm(
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.load(resp)
-            choice = data["choices"][0]["message"]
-            raw = (choice.get("content") or "").strip()
+            choice = data["choices"][0]
+            msg = choice["message"]
+            raw = (msg.get("content") or "").strip()
+            finish_reason = choice.get("finish_reason")
             usage = data.get("usage", {})
+            reasoning = (msg.get("reasoning_content") or "").strip()
+
+            if finish_reason == "length" and not raw:
+                return {
+                    "verdict": "no_verdict",
+                    "citing_commit": None,
+                    "reason": "Execution cut off: model exhausted completion tokens during reasoning before producing a verdict (finish_reason=length)",
+                    "finish_reason": finish_reason,
+                    "usage": usage,
+                    "raw_content": raw,
+                    "reasoning_snippet": reasoning[-300:],
+                }
+
             if not raw:
-                # Fallback to parsing reasoning if raw content was truncated
-                raw = (choice.get("reasoning_content") or "").strip()
+                raw = reasoning
+
+            parsed = None
             try:
                 parsed = json.loads(raw)
             except Exception:
                 m = re.search(r"\{[\s\S]*\}", raw)
                 if m:
-                    parsed = json.loads(m.group(0))
-                else:
-                    parsed = {"verdict": "insufficient_evidence", "citing_commit": None, "reason": f"Unparseable response: {raw[:150]}"}
+                    try:
+                        parsed = json.loads(m.group(0))
+                    except Exception:
+                        parsed = None
+
+            if not isinstance(parsed, dict) or "verdict" not in parsed:
+                return {
+                    "verdict": "no_verdict",
+                    "citing_commit": None,
+                    "reason": f"Unparseable response: {raw[:150]}",
+                    "finish_reason": finish_reason,
+                    "usage": usage,
+                    "raw_content": raw,
+                    "reasoning_snippet": reasoning[-300:],
+                }
+
+            parsed["finish_reason"] = finish_reason
             parsed["usage"] = usage
             return parsed
     except Exception as e:
-        return {"verdict": "insufficient_evidence", "citing_commit": None, "reason": f"API error: {e}", "usage": {}}
+        return {"verdict": "no_verdict", "citing_commit": None, "reason": f"API error: {e}", "usage": {}}
 
 def extract_file_and_commits(
     repo: Path,
