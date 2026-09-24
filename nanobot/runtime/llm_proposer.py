@@ -75,9 +75,13 @@ from nanobot.runtime.goal_text_utils import (
 from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
 from nanobot.runtime.operator_documents import (
+    PRIORITY_UNAVAILABLE,
     STATE_TEXT,
+    PriorityResolution,
+    render_priorities_block,
     resolve_charter,
     resolve_derived_priorities_split,
+    resolve_operator_priorities,
 )
 from nanobot.runtime.reflection_context import build_reflection_hints
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
@@ -1655,6 +1659,17 @@ def build_context(
         # folded into the charter's own "## Goal" text (that was
         # goal_review.merged_goal_text, #860/#1665).
         derived_text = _render_derived_priorities(_load_derived_priorities(state_dir, selfevo_repo))
+        # ADR-034 rule 5 (#1940, A4): the operator's OWN priority list (with
+        # its Completed headers), which nothing in this context previously
+        # showed -- "## Goal" above is the release charter, not this
+        # document. derived_entries=() here: this context already renders
+        # derived priorities in its own section right below, so the shared
+        # renderer's optional second heading would only duplicate it.
+        try:
+            _operator_priorities_res = resolve_operator_priorities(state_dir, selfevo_repo_root=selfevo_repo)
+        except Exception:
+            _operator_priorities_res = PriorityResolution(state=PRIORITY_UNAVAILABLE, reason="resolve_failed")
+        operator_priorities_block = render_priorities_block(_operator_priorities_res, ())
         ledger_rows = _load_ledger_rows(state_dir)
         digest_lines = _digest_ledger(ledger_rows)
         recent_proposed_titles = _recent_proposed_titles(ledger_rows)
@@ -1688,6 +1703,8 @@ def build_context(
         blob_parts = [
             "## Goal (charter, filtered — already-completed priorities removed)",
             filtered_goal.strip() or "(no goal text available)",
+            "",
+            operator_priorities_block,
             "",
             "## Derived priorities (source: derived; filtered — already-completed removed)",
             derived_text or "(none)",

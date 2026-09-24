@@ -18,6 +18,7 @@ from pathlib import Path
 from nanobot.runtime import demand, goal_review, llm_proposer, strategist_inputs
 from nanobot.runtime.operator_documents import (
     DOCUMENT_SIZE_CAP_BYTES,
+    PRIORITIES_BLOCK_CAP,
     PRIORITY_ALL_COMPLETED,
     PRIORITY_EMPTY,
     PRIORITY_PRESENT,
@@ -28,6 +29,7 @@ from nanobot.runtime.operator_documents import (
     STATE_TEXT,
     STATE_UNREADABLE,
     operator_priorities_status,
+    render_priorities_block,
     resolve_charter,
     resolve_derived_priorities,
     resolve_operator_priorities,
@@ -168,6 +170,31 @@ def test_four_priority_states_are_distinct(tmp_path: Path):
         result_empty.state,
         result_missing.state,
     } == {PRIORITY_PRESENT, PRIORITY_ALL_COMPLETED, PRIORITY_EMPTY, PRIORITY_UNAVAILABLE}
+
+    # ─── prompt half (ADR-034 rule 5, #1940/A4) ────────────────────────────
+    # The four states stay distinguishable once rendered into the prompt
+    # block every A4 reader shows — `unavailable` in particular is worded so
+    # it is never mistaken for "the operator has no priorities" (rule 3).
+    block_present = render_priorities_block(result_present, ())
+    block_done = render_priorities_block(result_done, ())
+    block_empty = render_priorities_block(result_empty, ())
+    block_missing = render_priorities_block(result_missing, ())
+
+    assert "Do a thing" in block_present
+    assert "Open:" in block_present
+
+    assert "completed" in block_done.lower()
+    assert "write scripts/x.py and commit." not in block_done  # instructions never shown, headers only
+
+    assert "no priorities" in block_empty.lower()
+
+    assert "unavailable" in block_missing.lower()
+    # Worded as a negation ("NOT the same as ... no priorities"), never as
+    # a bare claim that none exist.
+    assert "not the same as" in block_missing.lower()
+
+    # Pairwise distinct as rendered text too.
+    assert len({block_present, block_done, block_empty, block_missing}) == 4
 
 
 def test_whitespace_only_goal_text_json_is_unavailable_not_empty(tmp_path: Path):
@@ -564,7 +591,15 @@ def test_priority_provenance_survives_end_to_end(tmp_path: Path, monkeypatch):
     assert "## Derived priorities (source: derived" in context
     assert "Derived open" in context
     assert "Derived done" not in context  # completed, filtered independently here too
-    assert "Operator open" not in context  # operator priorities in this prompt are A4's job
+    # ADR-034 rule 5 (A4): the operator's OWN list now reaches this prompt
+    # too, under its own heading, distinct from the charter and from the
+    # derived section above.
+    assert "## Operator priorities" in context
+    assert "Operator open" in context
+    # Completed is headers only (architect decision): the title survives as
+    # a do-not-repeat marker, its instructions body does not.
+    assert "- 2. Operator done" in context
+    assert op_done_body not in context
 
     # Through demand-driven mode's own "## Demand" section: when the
     # collected items themselves are what the model sees (demand_items),
@@ -655,3 +690,144 @@ def test_merged_text_consumers_migrated_with_source(tmp_path: Path, monkeypatch)
     assert titles2 == ["Priority 18 — A brand new priority"]
     derived = goal_review.read_derived_priorities(state_dir)
     assert [d["number"] for d in derived] == [17, 18]
+
+
+# ─── ADR-034 rule 5 (issue #1940, A4): executor, proposer and planner see
+# the operator priorities ──────────────────────────────────────────────────
+
+
+def test_proposer_sees_operator_priorities_end_to_end(tmp_path: Path, monkeypatch):
+    """Test Contract: with operator priorities present and not completed,
+    the proposer's own context carries the entry (number, title and
+    instructions) under its own heading so a proposal can cite it; with
+    every listed priority completed, the context shows the rule-3
+    one-line notice instead — Completed headers only, never the
+    instructions body (architect decision, 2026-09-24)."""
+    monkeypatch.delenv("RELEASE_ROOT", raising=False)
+    release_root = tmp_path / "release"
+    release_root.mkdir()
+    (release_root / "goals.md").write_text("the charter", encoding="utf-8")
+    monkeypatch.setenv("RELEASE_ROOT", str(release_root))
+
+    state_present = tmp_path / "present"
+    _goal_text_json(
+        state_present,
+        "Current priority targets:\n(A) Priority 4 — Trim the retry loop: cut wasted calls.",
+    )
+    context_present = llm_proposer.build_context(state_present, None)
+    assert "## Operator priorities" in context_present
+    assert "4. Trim the retry loop: cut wasted calls." in context_present
+
+    state_done = tmp_path / "done"
+    instructions = "cut wasted calls."
+    _goal_text_json(
+        state_done,
+        f"Current priority targets:\n(A) Priority 4 — Trim the retry loop: {instructions}",
+    )
+    _mark_completed(state_done, "4", "Trim the retry loop", instructions)
+    context_done = llm_proposer.build_context(state_done, None)
+    assert "## Operator priorities" in context_done
+    assert "completed" in context_done.lower()
+    assert "4. Trim the retry loop: cut wasted calls." not in context_done  # headers only
+
+
+def test_prompt_blocks_present_and_bounded(tmp_path: Path, monkeypatch):
+    """Test Contract: executor and planner prompts carry the operator-
+    priorities block under its own heading, within its own fixed budget
+    (:data:`PRIORITIES_BLOCK_CAP`), counted only in the caller's overall
+    prompt cap -- never displacing the charter or the release ontology's
+    OPERATING.md floor (ADR-034 rule 5, architect decision 2026-09-24).
+    Over the block's own cap it renders whole as ``unavailable``/
+    ``oversize``, never a partial, silently-truncated render."""
+    from nanobot.agent.context import ContextBuilder
+
+    release_root = tmp_path / "release"
+    release_root.mkdir()
+    (release_root / "goals.md").write_text("the charter", encoding="utf-8")
+    (release_root / "IDENTITY.md").write_text("# IDENTITY\n\nWho I am.", encoding="utf-8")
+    (release_root / "SOUL.md").write_text("# SOUL\n\nWhat I value.", encoding="utf-8")
+    (release_root / "USER.md").write_text("# USER\n\nOperator profile.", encoding="utf-8")
+    (release_root / "OPERATING.md").write_text("# OPERATING\n\n" + ("cycle rule. " * 50), encoding="utf-8")
+
+    state_dir = tmp_path / "state"
+    _goal_text_json(
+        state_dir,
+        "Current priority targets:\n(A) Priority 1 — Do a thing: write scripts/x.py.",
+    )
+
+    builder = ContextBuilder(tmp_path / "workspace", release_root=release_root, state_dir=state_dir)
+    prompt = builder.build_system_prompt(loop_profile=True)
+
+    assert len(prompt) <= ContextBuilder.MAX_SYSTEM_PROMPT_CHARS
+    assert "## Operator priorities" in prompt
+    assert "## goals.md" in prompt  # the charter, never displaced
+    assert "# OPERATING" in prompt  # the release floor, never displaced
+    operating_chars = builder.last_fit["sections"].get("operating", 0)
+    assert operating_chars >= len("# OPERATING\n\n" + "cycle rule. " * 50) - 1
+
+    # Over the block's own cap: unavailable/oversize whole, never a partial
+    # render silently cut down to fit.
+    huge_state = tmp_path / "state-huge"
+    lines = "\n".join(
+        f"(A) Priority {n} — Do thing {n}: " + ("word " * 80) for n in range(1, 20)
+    )
+    _goal_text_json(huge_state, f"Current priority targets:\n{lines}")
+    huge_builder = ContextBuilder(tmp_path / "workspace2", release_root=release_root, state_dir=huge_state)
+    huge_block = huge_builder._load_priorities_block()
+    assert len(huge_block) <= PRIORITIES_BLOCK_CAP + len("## Operator priorities\n\n")
+    assert "unavailable" in huge_block.lower()
+    assert "reason: oversize" in huge_block.lower()
+    assert "Do thing 1" not in huge_block  # no partial content, ever
+
+    # Planner: same renderer, same shared budget, end to end through
+    # bridge._run_planning_session's own task message.
+    import asyncio
+
+    from nanobot.runtime import bridge
+    from tests.test_run_planning_session import _fake_config, _init_repo_with_origin, _make_fake_mgr_factory
+
+    repo = _init_repo_with_origin(tmp_path)
+    skill = release_root / "nanobot" / "skills" / "task-writing" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# task-writing contract\n", encoding="utf-8")
+    manager_factory = _make_fake_mgr_factory(state_dir, {"insight": "x", "plan": "y", "iterations_planned": 10})
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release_root)
+
+    outcome = asyncio.run(bridge._run_planning_session(
+        provider=object(), bus=object(), config=_fake_config(), model="test-model",
+        state_dir=state_dir, selfevo_repo=repo, denied_paths=set(), cycle_id="cycle-1",
+    ))
+
+    assert outcome["ran"] is True
+    planner_task = manager_factory.last_task or ""
+    assert "## Operator priorities" in planner_task
+    assert "Do a thing" in planner_task  # the one open entry seeded above
+    assert len(planner_task) <= 20_000  # generously bounded; not swamped by the priorities block
+
+
+def test_prompt_never_picks_a_priority_for_the_executor(tmp_path: Path):
+    """Test Contract: nothing in prompt assembly selects an item for the
+    executor. The operator-priorities block states the order is intent,
+    not instruction (ADR-034 rule 5); and the executor's own task message
+    (``bridge.build_task``) still reads generically -- "priorities are
+    handled by the proposer" -- when the request carries no
+    ``curriculum_level``, unaffected by the new block's presence."""
+    from nanobot.runtime.bridge import build_task
+    from nanobot.runtime.operator_documents import PRIORITY_INTENT_LINE
+
+    state_dir = tmp_path / "state"
+    _goal_text_json(
+        state_dir,
+        "Current priority targets:\n"
+        "(A) Priority 1 — First thing: do it.\n"
+        "(B) Priority 2 — Second thing: do it too.",
+    )
+    res = resolve_operator_priorities(state_dir)
+    block = render_priorities_block(res, ())
+    assert PRIORITY_INTENT_LINE in block
+    assert "you must work on priority 1" not in block.lower()
+    assert "start with priority" not in block.lower()
+
+    task = build_task({}, "goal text", "")
+    assert "This task is not an operator priority; priorities are handled by the proposer." in task

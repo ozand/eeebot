@@ -68,6 +68,13 @@ from nanobot.runtime.goal_review import read_charter_text  # noqa: E402
 from nanobot.runtime.lesson_v2 import (  # noqa: E402
     bounded_load_yaml as _bounded_lesson_load,
 )
+from nanobot.runtime.operator_documents import (  # noqa: E402
+    PRIORITY_UNAVAILABLE,
+    PriorityResolution,
+    render_priorities_block,
+    resolve_derived_priorities_split,
+    resolve_operator_priorities,
+)
 from nanobot.runtime.lessons_context import selection_provenance as _lesson_selection_provenance
 from nanobot.runtime.lesson_v2 import (
     find_duplicate as _find_lesson_duplicate,
@@ -3178,12 +3185,28 @@ async def _run_planning_session(
     except Exception as exc:
         return _fail('refused', f'task-writing pre-read failed: {exc}')
 
+    # ADR-034 rule 5 (issue #1940, A4): the planning session sees the
+    # operator's priorities (with Completed) and the derived list, same
+    # renderer and same 3000-char budget as the executor's own section
+    # (architect decision, 2026-09-24) -- read-only context, never a
+    # selection made on the planner's behalf.
+    try:
+        _planner_operator_res = resolve_operator_priorities(state_dir, selfevo_repo_root=selfevo_repo)
+    except Exception:
+        _planner_operator_res = PriorityResolution(state=PRIORITY_UNAVAILABLE, reason='resolve_failed')
+    try:
+        _planner_derived_entries, _ = resolve_derived_priorities_split(state_dir, selfevo_repo_root=selfevo_repo)
+    except Exception:
+        _planner_derived_entries = ()
+    _priorities_block = render_priorities_block(_planner_operator_res, _planner_derived_entries)
+
     _planner_task = (
         'The harness pre-read the mandatory release-owned task-writing contract '
         'before this model turn. Apply it to the next increment.\n\n'
         '--- task-writing contract ---\n'
         f'{_task_writing_contract}\n'
         '--- end task-writing contract ---\n\n'
+        f'{_priorities_block}\n\n'
         'Plan the next cycle.'
     )
 

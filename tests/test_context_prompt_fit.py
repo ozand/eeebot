@@ -16,6 +16,7 @@ import pytest
 
 from nanobot.agent import context as context_module
 from nanobot.agent.context import ContextBuilder, SystemPromptOverflowError
+from nanobot.runtime.operator_documents import PRIORITIES_BLOCK_CAP
 
 MARK = ContextBuilder.DROPPABLE_MARKER
 
@@ -57,7 +58,7 @@ def _builder(tmp_path, bootstrap_body: str, *, catalogue_lines: int = 40, memory
 #: current time is always available), which the generic fit/strict/
 #: droppable ladder tests below have no reason to depend on.
 LOOP_FIXED_SECTION_NAMES = ("identity", "soul", "goals", "user", "operating", "memory", "runtime", "scorecard", "position")
-LOOP_SECTION_NAMES = ("identity", "soul", "goals", "user", "operating", "agents", "skills_catalogue", "memory", "runtime", "scorecard", "position")
+LOOP_SECTION_NAMES = ("identity", "soul", "goals", "user", "operating", "agents", "priorities", "skills_catalogue", "memory", "runtime", "scorecard", "position")
 
 
 def _loop_builder(tmp_path, agents_md_body: str, *, catalogue_lines: int = 40, memory_lines: int = 20) -> ContextBuilder:
@@ -273,6 +274,11 @@ def _loop_builder_at_declared_caps(tmp_path, *, catalogue_lines: int = 40) -> Co
         return sections, [], []
 
     builder._load_ontology_blocks = _stub_ontology_blocks
+    # ADR-034 rule 5 (#1940, A4): worst case for the new priorities section
+    # too -- its own fixed cap, entirely outside the release pool stubbed
+    # above, so it must be modeled here for the combined worst case to mean
+    # anything.
+    builder._load_priorities_block = lambda: _sized("Operator priorities", PRIORITIES_BLOCK_CAP)
     # Trimmed to _RUNTIME_BLOCK_CAP by build_system_prompt itself (_trim_lines
     # call) regardless of what this returns -- feeding something at least that
     # long models the worst case without duplicating the cap value here.
