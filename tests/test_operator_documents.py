@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from nanobot.runtime import demand, goal_review
+from nanobot.runtime import demand, goal_review, llm_proposer, strategist_inputs
 from nanobot.runtime.operator_documents import (
     DOCUMENT_SIZE_CAP_BYTES,
     PRIORITY_ALL_COMPLETED,
@@ -359,6 +359,57 @@ def test_absent_and_unreadable_follow_the_reader_table(tmp_path: Path, monkeypat
     view = demand.build_derived_view(state_dir_no_priorities, None)
     assert view["priority_items"] == []
 
+    # --- charter UNREADABLE (oversize) follows the same path as absent —
+    # goal review stops here too, not just on a genuinely missing file ---
+    oversize_release_root = tmp_path / "oversize-release"
+    oversize_release_root.mkdir()
+    (oversize_release_root / "goals.md").write_text(
+        "x" * (DOCUMENT_SIZE_CAP_BYTES + 1), encoding="utf-8"
+    )
+    state_dir_unreadable = tmp_path / "state-unreadable-charter"
+    titles_unreadable = goal_review.maybe_goal_review(
+        state_dir_unreadable, None, release_root=oversize_release_root
+    )
+    assert titles_unreadable == []
+    rows_unreadable = _goal_review_rows(state_dir_unreadable)
+    assert len(rows_unreadable) == 1
+    assert rows_unreadable[0]["outcome"] == "no_goal_text"
+
+    good_release_root = tmp_path / "good-release"
+    good_release_root.mkdir()
+    (good_release_root / "goals.md").write_text("a real charter", encoding="utf-8")
+
+    # --- proposer: charter absent/unreadable stops should_propose ---
+    monkeypatch.setenv(llm_proposer.ENABLED_ENV, "1")
+    monkeypatch.setenv("SELFEVO_DEMAND_DRIVEN_ENABLED", "0")
+    for bad_release_root in (empty_release_root, oversize_release_root):
+        proposer_state = tmp_path / f"proposer-{bad_release_root.name}"
+        (proposer_state / "goals").mkdir(parents=True)
+        monkeypatch.setenv("RELEASE_ROOT", str(bad_release_root))
+        assert llm_proposer.should_propose(proposer_state, None) is False
+    proposer_state_ok = tmp_path / "proposer-ok"
+    (proposer_state_ok / "goals").mkdir(parents=True)
+    monkeypatch.setenv("RELEASE_ROOT", str(good_release_root))
+    assert llm_proposer.should_propose(proposer_state_ok, None) is True
+
+    # --- strategist: charter absent/unreadable refuses, regardless of the
+    # other four inputs being "complete" ---
+    for charter_status in ("empty", "unavailable"):
+        status = {
+            "goals": {"status": charter_status},
+            "scorecard": {"status": "complete"},
+            "funnel": {"status": "complete"},
+            "insights": {"status": "complete"},
+            "evolution_tree": {"status": "complete"},
+        }
+        assert strategist_inputs.should_refuse(status) is True
+
+    # --- artifact-gap: reader status "unavailable" when charter
+    # absent/unreadable, never conflated with "ok, just no surface named" ---
+    for bad_release_root in (empty_release_root, oversize_release_root):
+        assert demand.artifact_gap_status(bad_release_root) == demand.ARTIFACT_GAP_STATUS_UNAVAILABLE
+    assert demand.artifact_gap_status(good_release_root) == demand.ARTIFACT_GAP_STATUS_OK
+
 
 def test_charter_view_is_the_charter(tmp_path: Path, monkeypatch):
     """ADR-034 rule 2: ``demand._charter_as_loop_sees_it`` never returns the
@@ -404,6 +455,16 @@ def test_missing_charter_keeps_diagnostics_running(tmp_path: Path, monkeypatch):
 
     queue = read_derived_priorities_queue(state_dir)
     assert queue == {"depth": 0, "limit": goal_review._DERIVED_PRIORITIES_MAX}
+
+    # The publisher (demand.build_derived_view/publish_derived_view) keeps
+    # running too: it still produces a full, well-formed view — showing
+    # the charter as unavailable, never raising or going silent.
+    monkeypatch.setenv("RELEASE_ROOT", str(empty_release_root))
+    view = demand.build_derived_view(state_dir, None)
+    assert view["charter"] == {"source": "none", "merged": False, "text": ""}
+    assert view["schema_version"] == demand.DERIVED_VIEW_SCHEMA
+    result_dict = demand.publish_derived_view(state_dir, None)
+    assert result_dict["ok"] is True
 
 
 def test_status_surface_never_renders_priority_text(tmp_path: Path, monkeypatch):

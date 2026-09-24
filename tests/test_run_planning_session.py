@@ -413,3 +413,47 @@ def test_planning_session_includes_dor_and_dod_in_plan_block(tmp_path: Path, mon
     ).stdout
     assert "DoR: baseline tokens_per_integration established" in pushed
     assert "DoD: tokens_per_integration improves by 1%" in pushed
+
+
+def test_refuses_without_spawning_when_charter_absent(tmp_path: Path, monkeypatch):
+    """ADR-034 rule 3: a missing release charter stops the planning session
+    before any spawn -- reason recorded via record_planning_session, same
+    as every other early-out in this function."""
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    release = tmp_path / "release"
+    release.mkdir()  # no goals.md
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
+    manager_factory = _make_fake_mgr_factory(state, {"plan": "must not run"})
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["ran"] is False
+    assert manager_factory.last_task is None
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["outcome"] == "refused"
+    assert row["reason"] == "no_charter"
+
+
+def test_refuses_without_spawning_when_charter_unreadable(tmp_path: Path, monkeypatch):
+    """ADR-034 rule 3: an unreadable (here, oversize) release charter
+    follows the same "refused, no spawn" path as an absent one."""
+    from nanobot.runtime.operator_documents import DOCUMENT_SIZE_CAP_BYTES
+
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "goals.md").write_text("x" * (DOCUMENT_SIZE_CAP_BYTES + 1), encoding="utf-8")
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
+    manager_factory = _make_fake_mgr_factory(state, {"plan": "must not run"})
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["ran"] is False
+    assert manager_factory.last_task is None
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["outcome"] == "refused"
+    assert row["reason"] == "no_charter"

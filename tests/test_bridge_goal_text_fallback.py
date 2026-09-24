@@ -1,18 +1,25 @@
-"""
-Tests for issue #508: goal_text fallback in subagent bridge.
+"""ADR-034 rules 2/3: the executor mission's base goal text.
 
-Verifies that the bridge reads goal_text from:
-1. STATE_DIR/goals/goal_text.json (primary)
-2. TARGET_WORKSPACE/host/eeepc/etc/goal_text.json (fallback when primary missing)
-3. goal_id string (last resort)
+Was #508's goal_text fallback chain (STATE_DIR primary ->
+TARGET_WORKSPACE/host/eeepc/etc fallback -> goal_id last resort) --
+ADR-034 A2 deleted that chain (the workspace fallback path exists on no
+host, #1699/#1938 census) and moved the resolution onto
+``operator_documents.resolve_charter``/``resolve_operator_priorities_text``,
+the same functions ``bridge.py``'s mission-assembly block calls. This file
+now tests that resolver-level contract directly: charter present -> used
+alone; charter absent/unreadable -> the operator's own document stands
+alone; both absent -> the caller falls back to the bare goal id (bridge.py's
+own ``_base_goal_text = _priorities_text or goal_id``).
 """
 import json
-import importlib
-import sys
-import types
 from pathlib import Path
-import pytest
 
+from nanobot.runtime.operator_documents import (
+    DOCUMENT_SIZE_CAP_BYTES,
+    STATE_TEXT,
+    resolve_charter,
+    resolve_operator_priorities_text,
+)
 
 MISSION_TEXT = (
     "eeebot is a resource-aware, self-evolving autonomous agent on a weak eeepc host. "
@@ -21,117 +28,87 @@ MISSION_TEXT = (
 )
 
 
-def _load_bridge_load_json(tmp_path: Path):
-    """
-    Import load_json from the bridge script without executing its __main__ block.
-    We do a minimal import via importlib machinery.
-    """
-    bridge_path = (
-        Path(__file__).parent.parent / "nanobot" / "runtime" / "bridge.py"
+def _base_goal_text(release_root: Path, state_dir: Path, goal_id: str) -> str:
+    """The same precedence bridge.py's mission-assembly block uses."""
+    charter_res = resolve_charter(release_root)
+    if charter_res.state == STATE_TEXT:
+        return charter_res.text
+    priorities_res = resolve_operator_priorities_text(state_dir)
+    priorities_text = priorities_res.text if priorities_res.state == STATE_TEXT else ""
+    return priorities_text or goal_id
+
+
+def _goal_text_json(state_dir: Path, text: str) -> None:
+    (state_dir / "goals").mkdir(parents=True, exist_ok=True)
+    (state_dir / "goals" / "goal_text.json").write_text(
+        json.dumps({"text": text}), encoding="utf-8"
     )
-    spec = importlib.util.spec_from_file_location("bridge_module", bridge_path)
-    assert spec is not None
-    mod = types.ModuleType("bridge_module")
-    mod.__spec__ = spec
-    # Stub heavy deps so the module-level code doesn't fail in test env
-    for dep in ["nanobot", "nanobot.config", "nanobot.config.schema",
-                "nanobot.runtime", "nanobot.runtime.subagent_manager",
-                "nanobot.agent", "nanobot.agent.subagent"]:
-        if dep not in sys.modules:
-            sys.modules[dep] = types.ModuleType(dep)
-    return mod
-
-
-def _simulate_goal_text_resolution(state_dir: Path, target_workspace: Path, goal_id: str) -> str:
-    """
-    Replicate the exact goal_text resolution logic from the bridge (lines 271-278).
-    This avoids importing the full bridge but tests the same logic path.
-    """
-    def load_json(p: Path) -> dict | None:
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            return None
-
-    goal_text = (
-        (load_json(state_dir / "goals" / "goal_text.json") or {}).get("text")
-        or (load_json(target_workspace / "host" / "eeepc" / "etc" / "goal_text.json") or {}).get("text")
-        or goal_id
-    )
-    return goal_text
 
 
 class TestGoalTextResolution:
-    def test_primary_state_dir_file_used_when_present(self, tmp_path):
-        """STATE_DIR/goals/goal_text.json is the primary source."""
+    def test_charter_present_wins_over_operator_document(self, tmp_path):
+        """ADR-034 rule 2: when a real release charter exists, it is the
+        mission text alone -- never merged with or replaced by the
+        operator's own priority document."""
         state_dir = tmp_path / "state"
-        target_ws = tmp_path / "workspace"
-        (state_dir / "goals").mkdir(parents=True)
-        (state_dir / "goals" / "goal_text.json").write_text(
-            json.dumps({"text": "primary mission text"}), encoding="utf-8"
-        )
-        # Also create fallback to confirm primary wins
-        (target_ws / "host" / "eeepc" / "etc").mkdir(parents=True)
-        (target_ws / "host" / "eeepc" / "etc" / "goal_text.json").write_text(
-            json.dumps({"text": "fallback mission text"}), encoding="utf-8"
-        )
-        result = _simulate_goal_text_resolution(state_dir, target_ws, "goal-bootstrap")
-        assert result == "primary mission text"
+        release_root = tmp_path / "release"
+        release_root.mkdir()
+        (release_root / "goals.md").write_text("the release charter", encoding="utf-8")
+        _goal_text_json(state_dir, MISSION_TEXT)
 
-    def test_fallback_to_workspace_when_state_missing(self, tmp_path):
-        """Falls back to TARGET_WORKSPACE/host/eeepc/etc/goal_text.json when primary absent."""
+        result = _base_goal_text(release_root, state_dir, "goal-bootstrap")
+
+        assert result == "the release charter"
+
+    def test_charter_absent_falls_back_to_operator_document(self, tmp_path):
+        """ADR-034 rule 3: charter absent -- the operator's own document
+        (state/goals/goal_text.json) stands alone."""
         state_dir = tmp_path / "state"
-        target_ws = tmp_path / "workspace"
-        (state_dir / "goals").mkdir(parents=True)
-        # No goal_text.json in state/goals/
-        (target_ws / "host" / "eeepc" / "etc").mkdir(parents=True)
-        (target_ws / "host" / "eeepc" / "etc" / "goal_text.json").write_text(
-            json.dumps({"text": MISSION_TEXT}), encoding="utf-8"
-        )
-        result = _simulate_goal_text_resolution(state_dir, target_ws, "goal-bootstrap")
+        release_root = tmp_path / "release"
+        release_root.mkdir()  # no goals.md
+        _goal_text_json(state_dir, MISSION_TEXT)
+
+        result = _base_goal_text(release_root, state_dir, "goal-bootstrap")
+
         assert result == MISSION_TEXT
 
-    def test_fallback_contains_priority_targets(self, tmp_path):
-        """Fallback text should contain Priority A/B/C/D content (not just goal ID)."""
+    def test_charter_unreadable_follows_the_same_path_as_absent(self, tmp_path):
+        """ADR-034 rule 3: an unreadable charter (here, oversize) is
+        indistinguishable from an absent one to this caller -- both fall
+        back to the operator's document, never truncated content."""
         state_dir = tmp_path / "state"
-        target_ws = tmp_path / "workspace"
-        (state_dir / "goals").mkdir(parents=True)
-        (target_ws / "host" / "eeepc" / "etc").mkdir(parents=True)
-
-        # Use actual goal_text.json from the repo
-        actual_goal_text_path = (
-            Path(__file__).parent.parent / "host" / "eeepc" / "etc" / "goal_text.json"
+        release_root = tmp_path / "release"
+        release_root.mkdir()
+        (release_root / "goals.md").write_text(
+            "x" * (DOCUMENT_SIZE_CAP_BYTES + 1), encoding="utf-8"
         )
-        if actual_goal_text_path.exists():
-            (target_ws / "host" / "eeepc" / "etc" / "goal_text.json").write_bytes(
-                actual_goal_text_path.read_bytes()
-            )
-            result = _simulate_goal_text_resolution(state_dir, target_ws, "goal-bootstrap")
-            assert len(result) > 100, "goal_text should be a real mission, not a short ID"
-            assert "goal-bootstrap" not in result or len(result) > 50
+        _goal_text_json(state_dir, MISSION_TEXT)
+
+        result = _base_goal_text(release_root, state_dir, "goal-bootstrap")
+
+        assert result == MISSION_TEXT
 
     def test_last_resort_returns_goal_id(self, tmp_path):
-        """When both files are missing, returns goal_id string."""
+        """Charter and operator document both absent -- the bare goal id."""
         state_dir = tmp_path / "state"
-        target_ws = tmp_path / "workspace"
+        release_root = tmp_path / "release"
+        release_root.mkdir()
         (state_dir / "goals").mkdir(parents=True)
-        (target_ws / "host" / "eeepc" / "etc").mkdir(parents=True)
-        # Neither file exists
-        result = _simulate_goal_text_resolution(state_dir, target_ws, "goal-bootstrap")
+
+        result = _base_goal_text(release_root, state_dir, "goal-bootstrap")
+
         assert result == "goal-bootstrap"
 
-    def test_state_file_with_empty_text_falls_back(self, tmp_path):
-        """Empty text field in state file should fall through to workspace fallback."""
+    def test_operator_document_with_empty_text_falls_back_to_goal_id(self, tmp_path):
+        """An empty "text" field is a valid, priority-free document at the
+        resolver level, not a reason to substitute anything else -- but
+        this caller (bridge.py) still has nothing usable to show, so it
+        falls back to the goal id, same as if the file were absent."""
         state_dir = tmp_path / "state"
-        target_ws = tmp_path / "workspace"
-        (state_dir / "goals").mkdir(parents=True)
-        (state_dir / "goals" / "goal_text.json").write_text(
-            json.dumps({"text": ""}), encoding="utf-8"
-        )
-        (target_ws / "host" / "eeepc" / "etc").mkdir(parents=True)
-        (target_ws / "host" / "eeepc" / "etc" / "goal_text.json").write_text(
-            json.dumps({"text": "fallback mission text"}), encoding="utf-8"
-        )
-        result = _simulate_goal_text_resolution(state_dir, target_ws, "goal-bootstrap")
-        # Empty string is falsy → fallback is used
-        assert result == "fallback mission text"
+        release_root = tmp_path / "release"
+        release_root.mkdir()
+        _goal_text_json(state_dir, "")
+
+        result = _base_goal_text(release_root, state_dir, "goal-bootstrap")
+
+        assert result == "goal-bootstrap"
