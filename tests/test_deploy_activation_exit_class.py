@@ -208,12 +208,33 @@ def test_self_check_block_precedes_rollback_and_does_not_reference_it():
     assert begin < text.index("rollback_remote() {")
 
 
-def test_activation_unit_runs_from_the_candidate_directory():
+def test_activation_unit_runs_from_the_candidate_directory(tmp_path):
     # `python -m` puts the cwd ahead of PYTHONPATH; WorkingDirectory is the
-    # current release, so the unit must cd into the candidate first.
+    # current release, so the unit must cd into the candidate first. Executes
+    # the unit's real ExecStart body (second deploy 2026-09-24 died on
+    # "exec/opt/...": a text-order assertion passed on a command that could
+    # not run), with the venv python swapped for a probe.
     unit = (DEPLOY_SCRIPT.parents[1] / "systemd" / "eeepc-self-evolving-activation-check.service").read_text(encoding="utf-8")
     exec_start = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
-    assert exec_start.index('cd "$ACTIVATION_CHECK_RELEASE"') < exec_start.index("python -m nanobot.runtime.activation_check")
+    prefix = "ExecStart=/bin/bash -c '"
+    assert exec_start.startswith(prefix) and exec_start.endswith("'")
+    body = exec_start[len(prefix):-1]
+    venv_python = "/opt/eeepc-agent/venv/bin/python"
+    assert venv_python in body
+    probe = tmp_path / "probe-python"
+    _write_mock(probe, 'printf "%s|%s|%s\\n" "$PWD" "$PYTHONPATH" "$*"')
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    res = subprocess.run(
+        ["bash", "-c", body.replace(venv_python, probe.as_posix())],
+        env={**os.environ, "ACTIVATION_CHECK_RELEASE": candidate.as_posix()},
+        capture_output=True, text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    cwd, pythonpath, args = res.stdout.strip().split("|")
+    assert cwd.rstrip("/").endswith(f"/{tmp_path.name}/candidate"), cwd
+    assert pythonpath == candidate.as_posix()
+    assert args == "-m nanobot.runtime.activation_check"
 
 
 def test_self_check_dropin_printf_writes_three_valid_directives(tmp_path):
