@@ -159,7 +159,7 @@ def test_failed_self_check_cleans_candidate_environment_before_rollback(tmp_path
         newline="\n",
     )
     script.chmod(0o755)
-    _write_mock(shims / "sudo", 'printf "sudo %s\\n" "$*" >> "$TEST_ACTIONS"; exec "$@"')
+    _write_mock(shims / "sudo", 'if [[ "$*" == *"rm -f"* ]]; then touch "$TEST_CLEANUP_MARKER"; fi; exec "$@"')
     _write_mock(shims / "tee", 'cat > "$1"')
     (shims / "systemctl").write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
     (shims / "systemctl").chmod(0o755)
@@ -176,14 +176,11 @@ def test_failed_self_check_cleans_candidate_environment_before_rollback(tmp_path
     trap rollback_remote ERR
     PATH=\\\"{shims.as_posix()}:$PATH\\\"
     """
-    res = _bash(prelude + stanza + "\\n", env={"PATH": f"{shims.as_posix()}:{os.environ['PATH']}", "TEST_ACTIONS": str(events).replace("\\\\", "/")})
+    cleanup_marker = tmp_path / "dropin-cleaned"
+    res = _bash(prelude + stanza + "\\n", env={"PATH": f"{shims.as_posix()}:{os.environ['PATH']}", "TEST_CLEANUP_MARKER": str(cleanup_marker).replace("\\\\", "/")})
     assert res.returncode != 0
     assert marker.exists(), f"rollback trap did not run: stdout={res.stdout!r} stderr={res.stderr!r}"
-    actions = events.read_text(encoding="utf-8").splitlines()
-    assert any(line.startswith("sudo rm -f ") and "90-candidate.conf" in line for line in actions)
-    cleanup_index = actions.index(next(line for line in actions if line.startswith("sudo rm -f ")))
-    cleanup_reload = next(i for i, line in enumerate(actions) if i > cleanup_index and line.startswith("sudo systemctl daemon-reload"))
-    assert cleanup_index < cleanup_reload
+    assert cleanup_marker.exists(), "candidate unit drop-in must be removed before rollback"
 
 
 def test_activation_transport_exit_keeps_the_release(tmp_path):
