@@ -74,7 +74,11 @@ from nanobot.runtime.goal_text_utils import (
 )
 from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
-from nanobot.runtime.operator_documents import STATE_TEXT, resolve_charter
+from nanobot.runtime.operator_documents import (
+    STATE_TEXT,
+    resolve_charter,
+    resolve_derived_priorities_split,
+)
 from nanobot.runtime.reflection_context import build_reflection_hints
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
 
@@ -498,45 +502,58 @@ def _release_root_from_env() -> Path:
 
 
 def _load_goal_text(state_dir: Path, release_root: "Path | None" = None) -> str:
-    """Assembled goal text for the proposer context.
+    """The immutable operator charter, verbatim.
 
-    #944/ADR-034 rule 2: reads the immutable operator charter from
-    ``goals.md`` in the release tree (``release_root`` arg or
-    ``RELEASE_ROOT`` env var) via :func:`operator_documents.resolve_charter`
-    — the charter's one resolver, no path constructed here.
+    #944/ADR-034 rule 2: reads it from ``goals.md`` in the release tree
+    (``release_root`` arg or ``RELEASE_ROOT`` env var) via
+    :func:`operator_documents.resolve_charter` — the charter's one
+    resolver, no path constructed here.
 
-    A2 is a mechanical resolver migration, not a rule-5 rollout: this stays
-    charter + derived exactly as it already was (the operator's own
-    priority text is NOT folded in here — that structured, four-state,
-    "intent not instruction" presentation is ADR-034 A4's job, on top of
-    A3's source-tagged split). ``should_propose`` gates this role on the
-    charter's presence (rule 3); by the time this is called the charter is
-    expected to be there, but a defensive absent/unreadable charter still
-    degrades to ``""`` rather than raising. Derived priorities from
-    ``state/goals/derived_priorities.json`` are folded in by
-    :func:`goal_review.merged_goal_text` (#860).
+    ADR-034 rule 4 (A3): no longer folds derived priorities into this text
+    (that was ``goal_review.merged_goal_text``, #860/#1665) — a caller that
+    needs the derived list calls :func:`_load_derived_priorities` for it,
+    tagged ``source="derived"``, kept separate rather than merged into one
+    numbered blob. The operator's own priority text is still NOT folded in
+    here either way — that structured, four-state, "intent not instruction"
+    presentation is ADR-034 A4's job, on top of this rule's source-tagged
+    split. ``should_propose`` gates this role on the charter's presence
+    (rule 3); by the time this is called the charter is expected to be
+    there, but a defensive absent/unreadable charter still degrades to
+    ``""`` rather than raising.
     """
-    # Resolve release root: explicit arg wins, then RELEASE_ROOT/default.
     if release_root is None:
         release_root = _release_root_from_env()
-
     charter_res = resolve_charter(release_root)
-    raw_text = charter_res.text if charter_res.state == STATE_TEXT else ""
+    return charter_res.text if charter_res.state == STATE_TEXT else ""
 
-    if not raw_text:
-        return ""
 
-    # #860/#944: fold in goal_review's harness-owned derived priorities —
-    # the sidecar deploy_release.sh never touches — so a deploy's reseed
-    # can't erase an already-accepted priority out from under the proposer's
-    # context or should_propose's filter_completed path.
+def _load_derived_priorities(
+    state_dir: Path, selfevo_repo: "Path | None" = None
+) -> "tuple[Any, ...]":
+    """The harness's own derived priorities still open (not yet completed),
+    ``source="derived"`` — ADR-034 rule 4: resolved and completed-filtered
+    independently of the charter, never folded into its text. Each entry is
+    an ``operator_documents.PriorityEntry``. Fail-open to ``()``."""
     try:
-        from nanobot.runtime import goal_review
-
-        raw_text = goal_review.merged_goal_text(state_dir, raw_text)
+        open_entries, _completed = resolve_derived_priorities_split(
+            state_dir, selfevo_repo_root=selfevo_repo
+        )
+        return open_entries
     except Exception:
-        pass
-    return raw_text
+        return ()
+
+
+def _render_derived_priorities(entries: "tuple[Any, ...]") -> str:
+    """Render open derived-priority entries as their own labeled block —
+    never mixed into the charter's own numbering (ADR-034 rule 4)."""
+    if not entries:
+        return ""
+    lines = [
+        f"Priority {e.number} — {e.title} ({e.vector}): {e.instructions}" if e.vector
+        else f"Priority {e.number} — {e.title}: {e.instructions}"
+        for e in entries
+    ]
+    return "\n".join(lines)
 
 
 def _priorities_remain(filtered_goal_text: str) -> bool:
@@ -805,11 +822,10 @@ def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
             return False
         if _queue_effectively_empty(state_dir):
             return True
-        raw_goal_text = _load_goal_text(state_dir)
-        filtered = filter_completed_priorities_from_goal_text(
-            raw_goal_text, selfevo_repo, state_dir=state_dir
-        )
-        if not _priorities_remain(filtered):
+        # ADR-034 rule 4: "priorities remain" was always about the derived
+        # list (the charter text itself never carries a priority section);
+        # resolved directly rather than via the retired merged-text check.
+        if not _load_derived_priorities(state_dir, selfevo_repo):
             return True
         return _last_k_all_duplicate(state_dir)
     except Exception:
@@ -1623,6 +1639,11 @@ def build_context(
         filtered_goal = filter_completed_priorities_from_goal_text(
             raw_goal_text, selfevo_repo, state_dir=state_dir
         )
+        # ADR-034 rule 4: derived priorities are resolved and completed-
+        # filtered independently, rendered under their own heading — never
+        # folded into the charter's own "## Goal" text (that was
+        # goal_review.merged_goal_text, #860/#1665).
+        derived_text = _render_derived_priorities(_load_derived_priorities(state_dir, selfevo_repo))
         ledger_rows = _load_ledger_rows(state_dir)
         digest_lines = _digest_ledger(ledger_rows)
         recent_proposed_titles = _recent_proposed_titles(ledger_rows)
@@ -1654,8 +1675,11 @@ def build_context(
         # dedup caught them, but the wasted LLM call already happened). Now only
         # the blob is trimmed; guardrails + surface_rule are appended after.
         blob_parts = [
-            "## Goal (filtered — already-completed priorities removed)",
+            "## Goal (charter, filtered — already-completed priorities removed)",
             filtered_goal.strip() or "(no goal text available)",
+            "",
+            "## Derived priorities (source: derived; filtered — already-completed removed)",
+            derived_text or "(none)",
             "",
             "## Recent cycle outcomes (most recent last — do not repeat done/failed work)",
             "\n".join(f"- {line}" for line in digest_lines) or "(no ledger history yet)",
