@@ -1,41 +1,302 @@
 {
   "issue": 1785,
-  "window": ["2026-09-16T00:00:00Z", "2026-09-24T00:00:00Z"],
+  "window": [
+    "2026-09-16T00:00:00Z",
+    "2026-09-24T00:00:00Z"
+  ],
   "duplicates": [
-    {"task_title": "Filter fallback candidates dedup (V1)", "target_path": "scripts/filter_fallback_targets.py", "label": "duplicate", "count": 101, "matched_sha": "80fe9f4b", "commit_subject": "feat(filter_fallback_targets): add filter_fallback_paths for Priority 40"},
-    {"task_title": "Priority 43 — Filter fallback candidates dedup (V1)", "target_path": "scripts/filter_fallback_targets.py", "label": "duplicate", "count": 5, "matched_sha": "4b7b29f6", "commit_subject": "test(filter_fallback_targets): add filter_candidate_paths alias and unit tests for Priority 43 spec name"},
-    {"task_title": "Implement filter_candidate_paths in scripts/filter_fallback_targets.py", "target_path": "scripts/filter_fallback_targets.py", "label": "duplicate", "count": 2, "matched_sha": "ae773be1", "commit_subject": "feat(filter_fallback_targets): add filter_doc_targets to prune doc paths when doc budget exhausted"}
+    {
+      "task_title": "Filter fallback candidates dedup (V1)",
+      "target_path": "scripts/filter_fallback_targets.py",
+      "label": "duplicate",
+      "count": 101,
+      "matched_sha": "80fe9f4b",
+      "commit_subject": "feat(filter_fallback_targets): add filter_fallback_paths for Priority 40"
+    },
+    {
+      "task_title": "Priority 43 — Filter fallback candidates dedup (V1)",
+      "target_path": "scripts/filter_fallback_targets.py",
+      "label": "duplicate",
+      "count": 5,
+      "matched_sha": "4b7b29f6",
+      "commit_subject": "test(filter_fallback_targets): add filter_candidate_paths alias and unit tests for Priority 43 spec name"
+    },
+    {
+      "task_title": "Implement filter_candidate_paths in scripts/filter_fallback_targets.py",
+      "target_path": "scripts/filter_fallback_targets.py",
+      "label": "duplicate",
+      "count": 2,
+      "matched_sha": "ae773be1",
+      "commit_subject": "feat(filter_fallback_targets): add filter_doc_targets to prune doc paths when doc budget exhausted"
+    }
   ],
   "false_new_file_rejections": [
-    {"task_title": "Add validate_doc_structure function in scripts/validate_doc_structure.py", "target_path": "scripts/validate_doc_structure.py", "label": "legitimate", "count": 1, "path_absent_from_head": true},
-    {"task_title": "Add validate_doc_structure to scripts/validate_doc_structure.py to assert markdown heading and summary", "target_path": "scripts/validate_doc_structure.py", "label": "legitimate", "count": 1, "path_absent_from_head": true},
-    {"task_title": "Assert doc integration structure (V1)", "target_path": "scripts/validate_doc_structure.py", "label": "legitimate", "count": 63, "path_absent_from_head": true},
-    {"task_title": "Create scripts/validate_doc_structure.py to check top-level header and summary presence", "target_path": "scripts/validate_doc_structure.py", "label": "legitimate", "count": 1, "path_absent_from_head": true},
-    {"task_title": "Add is_valid_skill_name in scripts/validate_skill_name.py to validate kebab-case skill names", "target_path": "scripts/validate_skill_name.py", "label": "legitimate", "count": 1, "path_absent_from_head": true},
-    {"task_title": "Add is_valid_skill_name to scripts/validate_skill_name.py", "target_path": "scripts/validate_skill_name.py", "label": "legitimate", "count": 1, "path_absent_from_head": true},
-    {"task_title": "Add is_valid_skill_name to scripts/validate_skill_name.py to validate skill naming format", "target_path": "scripts/validate_skill_name.py", "label": "legitimate", "count": 1, "path_absent_from_head": true},
-    {"task_title": "Add scripts/validate_skill_name.py to validate skill name format", "target_path": "scripts/validate_skill_name.py", "label": "legitimate", "count": 2, "path_absent_from_head": true},
-    {"task_title": "Implement is_valid_skill_name in scripts/validate_skill_name.py", "target_path": "scripts/validate_skill_name.py", "label": "legitimate", "count": 2, "path_absent_from_head": true},
-    {"task_title": "Implement scripts/validate_skill_name.py to validate skill name format", "target_path": "scripts/validate_skill_name.py", "label": "legitimate", "count": 2, "path_absent_from_head": true},
-    {"task_title": "Implement skill name format validator in scripts/validate_skill_name.py", "target_path": "scripts/validate_skill_name.py", "label": "legitimate", "count": 2, "path_absent_from_head": true},
-    {"task_title": "Validate skill name format (V1)", "target_path": "scripts/validate_skill_name.py", "label": "legitimate", "count": 43, "path_absent_from_head": true},
-    {"task_title": "Write scripts/validate_skill_name.py to validate skill name format", "target_path": "scripts/validate_skill_name.py", "label": "legitimate", "count": 1, "path_absent_from_head": true}
+    {
+      "task_title": "Add validate_doc_structure function in scripts/validate_doc_structure.py",
+      "target_path": "scripts/validate_doc_structure.py",
+      "label": "legitimate",
+      "count": 1,
+      "path_absent_from_head": true
+    },
+    {
+      "task_title": "Add validate_doc_structure to scripts/validate_doc_structure.py to assert markdown heading and summary",
+      "target_path": "scripts/validate_doc_structure.py",
+      "label": "legitimate",
+      "count": 1,
+      "path_absent_from_head": true
+    },
+    {
+      "task_title": "Assert doc integration structure (V1)",
+      "target_path": "scripts/validate_doc_structure.py",
+      "label": "legitimate",
+      "count": 63,
+      "path_absent_from_head": true
+    },
+    {
+      "task_title": "Create scripts/validate_doc_structure.py to check top-level header and summary presence",
+      "target_path": "scripts/validate_doc_structure.py",
+      "label": "legitimate",
+      "count": 1,
+      "path_absent_from_head": true
+    },
+    {
+      "task_title": "Add is_valid_skill_name in scripts/validate_skill_name.py to validate kebab-case skill names",
+      "target_path": "scripts/validate_skill_name.py",
+      "label": "legitimate",
+      "count": 1,
+      "path_absent_from_head": true
+    },
+    {
+      "task_title": "Add is_valid_skill_name to scripts/validate_skill_name.py",
+      "target_path": "scripts/validate_skill_name.py",
+      "label": "legitimate",
+      "count": 1,
+      "path_absent_from_head": true
+    },
+    {
+      "task_title": "Add is_valid_skill_name to scripts/validate_skill_name.py to validate skill naming format",
+      "target_path": "scripts/validate_skill_name.py",
+      "label": "legitimate",
+      "count": 1,
+      "path_absent_from_head": true
+    },
+    {
+      "task_title": "Add scripts/validate_skill_name.py to validate skill name format",
+      "target_path": "scripts/validate_skill_name.py",
+      "label": "legitimate",
+      "count": 2,
+      "path_absent_from_head": true
+    },
+    {
+      "task_title": "Implement is_valid_skill_name in scripts/validate_skill_name.py",
+      "target_path": "scripts/validate_skill_name.py",
+      "label": "legitimate",
+      "count": 2,
+      "path_absent_from_head": true
+    },
+    {
+      "task_title": "Implement scripts/validate_skill_name.py to validate skill name format",
+      "target_path": "scripts/validate_skill_name.py",
+      "label": "legitimate",
+      "count": 2,
+      "path_absent_from_head": true
+    },
+    {
+      "task_title": "Implement skill name format validator in scripts/validate_skill_name.py",
+      "target_path": "scripts/validate_skill_name.py",
+      "label": "legitimate",
+      "count": 2,
+      "path_absent_from_head": true
+    },
+    {
+      "task_title": "Validate skill name format (V1)",
+      "target_path": "scripts/validate_skill_name.py",
+      "label": "legitimate",
+      "count": 43,
+      "path_absent_from_head": true
+    },
+    {
+      "task_title": "Write scripts/validate_skill_name.py to validate skill name format",
+      "target_path": "scripts/validate_skill_name.py",
+      "label": "legitimate",
+      "count": 1,
+      "path_absent_from_head": true
+    }
   ],
   "legitimate_existing_file_improvements": [
-    {"task_title": "Optimize directory traversal and exclude ignored paths in scripts/validate_open_encoding.py to prevent timeout", "target_path": "scripts/validate_open_encoding.py", "label": "legitimate", "commit_sha": "bc919c3b", "creation_sha": "6a9d0a71", "path_existed_before_commit": true, "duplicate_gate_match": true},
-    {"task_title": "Restore tracked memory files after test execution in scripts/run_all_tests.py", "target_path": "scripts/run_all_tests.py", "label": "legitimate", "commit_sha": "feef689c", "creation_sha": "6dbe6a38", "path_existed_before_commit": true, "duplicate_gate_match": true},
-    {"task_title": "Resolve unused import finding in scripts/validate_unused_imports.py", "target_path": "scripts/validate_unused_imports.py", "label": "legitimate", "commit_sha": "2bbf8583", "creation_sha": "b8831b51", "path_existed_before_commit": true, "duplicate_gate_match": true},
-    {"task_title": "Fix validation errors and exit status in scripts/validate_documentation_code_blocks.py", "target_path": "scripts/validate_documentation_code_blocks.py", "label": "legitimate", "commit_sha": "e459e43f", "creation_sha": "865659b3", "path_existed_before_commit": true, "duplicate_gate_match": true},
-    {"task_title": "Optimize directory scanning and test mapping in scripts/validate_test_existence.py", "target_path": "scripts/validate_test_existence.py", "label": "legitimate", "commit_sha": "144613b8", "creation_sha": "d497cc8c", "path_existed_before_commit": true, "duplicate_gate_match": true},
-    {"task_title": "Eliminate per-script subprocess calls in scripts/validate_test_existence.py", "target_path": "scripts/validate_test_existence.py", "label": "legitimate", "commit_sha": "8d452e27", "creation_sha": "d497cc8c", "path_existed_before_commit": true, "duplicate_gate_match": true},
-    {"task_title": "Add locate_result_file to scripts/search_subagent_archive.py to find result json files matching an incident id", "target_path": "scripts/search_subagent_archive.py", "label": "legitimate", "commit_sha": "bd7fc18f", "creation_sha": "5116eb66", "path_existed_before_commit": true, "duplicate_gate_match": true},
-    {"task_title": "Add alternating command sequence detection to scripts/detect_repetitive_outputs.py", "target_path": "scripts/detect_repetitive_outputs.py", "label": "legitimate", "commit_sha": "4cc812f4", "creation_sha": "ccc63709", "path_existed_before_commit": true, "duplicate_gate_match": true},
-    {"task_title": "Implement /dev/fb0 frame writing and sysfs geometry inspection in scripts/fb_surface.py", "target_path": "scripts/fb_surface.py", "label": "legitimate", "commit_sha": "c337136f", "creation_sha": "41c159c4", "path_existed_before_commit": true, "duplicate_gate_match": true},
-    {"task_title": "Fix entrypoint validation failures and exemption handling in scripts/validate_script_entrypoints.py", "target_path": "scripts/validate_script_entrypoints.py", "label": "legitimate", "commit_sha": "3fa9281d", "creation_sha": "06d7f32a", "path_existed_before_commit": true, "duplicate_gate_match": false},
-    {"task_title": "Add scripts/detect_chained_git_commands.py to flag compound test and git staging commands", "target_path": "scripts/detect_chained_git_commands.py", "label": "legitimate", "commit_sha": "3fb835de", "creation_sha": "3fb835de", "path_existed_before_commit": false, "duplicate_gate_match": true},
-    {"task_title": "Deprecate and archive scripts/lesson_lookup.py", "target_path": "scripts/lesson_lookup.py", "label": "legitimate", "commit_sha": "1168927f", "creation_sha": "0cd35266", "path_existed_before_commit": true, "duplicate_gate_match": true},
-    {"task_title": "Recognize inline self-test functions in scripts/validate_test_existence.py", "target_path": "scripts/validate_test_existence.py", "label": "legitimate", "commit_sha": "59363a7c", "creation_sha": "d497cc8c", "path_existed_before_commit": true, "duplicate_gate_match": true},
-    {"task_title": "Add direct parse_args CLI option tests for scan_archive", "target_path": "scripts/scan_archive.py", "label": "legitimate", "commit_sha": "e66691e3", "creation_sha": "d7e0a5fc", "path_existed_before_commit": true, "duplicate_gate_match": true},
-    {"task_title": "Add URL allowlisting and inline suppression to scripts/validate_heredoc_urls.py", "target_path": "scripts/validate_heredoc_urls.py", "label": "legitimate", "commit_sha": "37a52d4f", "creation_sha": "bad33db1", "path_existed_before_commit": true, "duplicate_gate_match": true}
+    {
+      "task_title": "Optimize directory traversal and exclude ignored paths in scripts/validate_open_encoding.py to prevent timeout",
+      "target_path": "scripts/validate_open_encoding.py",
+      "label": "legitimate",
+      "commit_sha": "bc919c3b",
+      "creation_sha": "6a9d0a71",
+      "path_existed_before_commit": true,
+      "duplicate_gate_match": false,
+      "cycle_id": "cycle-b50aa4fd6ccb",
+      "proposal_ts": "2026-09-23T06:03:42Z",
+      "matched_prior_subject": null
+    },
+    {
+      "task_title": "Restore tracked memory files after test execution in scripts/run_all_tests.py",
+      "target_path": "scripts/run_all_tests.py",
+      "label": "legitimate",
+      "commit_sha": "feef689c",
+      "creation_sha": "6dbe6a38",
+      "path_existed_before_commit": true,
+      "duplicate_gate_match": false,
+      "cycle_id": "cycle-b6bfd7aa3b53",
+      "proposal_ts": "2026-09-16T17:48:23Z",
+      "matched_prior_subject": null
+    },
+    {
+      "task_title": "Resolve unused import finding in scripts/validate_unused_imports.py",
+      "target_path": "scripts/validate_unused_imports.py",
+      "label": "legitimate",
+      "commit_sha": "2bbf8583",
+      "creation_sha": "b8831b51",
+      "path_existed_before_commit": true,
+      "duplicate_gate_match": true,
+      "cycle_id": "cycle-261221f396ff",
+      "proposal_ts": "2026-09-20T06:09:15Z",
+      "matched_prior_subject": "fix(validate_unused_imports): re-key the baseline on scope, not line number (#1321) (#187)"
+    },
+    {
+      "task_title": "Fix validation errors and exit status in scripts/validate_documentation_code_blocks.py",
+      "target_path": "scripts/validate_documentation_code_blocks.py",
+      "label": "legitimate",
+      "commit_sha": "e459e43f",
+      "creation_sha": "865659b3",
+      "path_existed_before_commit": true,
+      "duplicate_gate_match": false,
+      "cycle_id": "cycle-13790f675ad7",
+      "proposal_ts": "2026-09-20T15:03:59Z",
+      "matched_prior_subject": null
+    },
+    {
+      "task_title": "Optimize directory scanning and test mapping in scripts/validate_test_existence.py",
+      "target_path": "scripts/validate_test_existence.py",
+      "label": "legitimate",
+      "commit_sha": "144613b8",
+      "creation_sha": "d497cc8c",
+      "path_existed_before_commit": true,
+      "duplicate_gate_match": false,
+      "cycle_id": "cycle-e3d9d2e37967",
+      "proposal_ts": "2026-09-20T17:08:58Z",
+      "matched_prior_subject": null
+    },
+    {
+      "task_title": "Eliminate per-script subprocess calls in scripts/validate_test_existence.py",
+      "target_path": "scripts/validate_test_existence.py",
+      "label": "legitimate",
+      "commit_sha": "8d452e27",
+      "creation_sha": "d497cc8c",
+      "path_existed_before_commit": true,
+      "duplicate_gate_match": true,
+      "cycle_id": "cycle-a8ea16d1a3a3",
+      "proposal_ts": "2026-09-20T22:55:57Z",
+      "matched_prior_subject": "feat(validate_test_existence): add baseline ratchet for legacy untested scripts"
+    },
+    {
+      "task_title": "Add locate_result_file to scripts/search_subagent_archive.py to find result json files matching an incident id",
+      "target_path": "scripts/search_subagent_archive.py",
+      "label": "legitimate",
+      "commit_sha": "bd7fc18f",
+      "creation_sha": "5116eb66",
+      "path_existed_before_commit": true,
+      "duplicate_gate_match": false,
+      "cycle_id": "cycle-ebdbef57c967",
+      "proposal_ts": "2026-09-19T15:20:56Z",
+      "matched_prior_subject": null
+    },
+    {
+      "task_title": "Add alternating command sequence detection to scripts/detect_repetitive_outputs.py",
+      "target_path": "scripts/detect_repetitive_outputs.py",
+      "label": "legitimate",
+      "commit_sha": "4cc812f4",
+      "creation_sha": "ccc63709",
+      "path_existed_before_commit": true,
+      "duplicate_gate_match": false,
+      "cycle_id": "cycle-856ad0965865",
+      "proposal_ts": "2026-09-17T02:30:15Z",
+      "matched_prior_subject": null
+    },
+    {
+      "task_title": "Implement /dev/fb0 frame writing and sysfs geometry inspection in scripts/fb_surface.py",
+      "target_path": "scripts/fb_surface.py",
+      "label": "legitimate",
+      "commit_sha": "c337136f",
+      "creation_sha": "41c159c4",
+      "path_existed_before_commit": true,
+      "duplicate_gate_match": false,
+      "cycle_id": "cycle-41a556e4df97",
+      "proposal_ts": "2026-09-17T12:28:56Z",
+      "matched_prior_subject": null
+    },
+    {
+      "task_title": "Fix entrypoint validation failures and exemption handling in scripts/validate_script_entrypoints.py",
+      "target_path": "scripts/validate_script_entrypoints.py",
+      "label": "legitimate",
+      "commit_sha": "3fa9281d",
+      "creation_sha": "06d7f32a",
+      "path_existed_before_commit": true,
+      "duplicate_gate_match": false,
+      "cycle_id": "cycle-d0e3cb34aa23",
+      "proposal_ts": "2026-09-17T13:03:18Z",
+      "matched_prior_subject": null
+    },
+    {
+      "task_title": "Add scripts/detect_chained_git_commands.py to flag compound test and git staging commands",
+      "target_path": "scripts/detect_chained_git_commands.py",
+      "label": "legitimate",
+      "commit_sha": "3fb835de",
+      "creation_sha": "3fb835de",
+      "path_existed_before_commit": false,
+      "duplicate_gate_match": true,
+      "cycle_id": "cycle-79357569a2d5",
+      "proposal_ts": "2026-09-21T16:00:09Z",
+      "matched_prior_subject": "feat(detect_chained_git_commands): flag compound commands chaining test runs with git staging/commit"
+    },
+    {
+      "task_title": "Deprecate and archive scripts/lesson_lookup.py",
+      "target_path": "scripts/lesson_lookup.py",
+      "label": "legitimate",
+      "commit_sha": "1168927f",
+      "creation_sha": "0cd35266",
+      "path_existed_before_commit": true,
+      "duplicate_gate_match": true,
+      "cycle_id": "cycle-7a9b1ae2d009",
+      "proposal_ts": "2026-09-22T03:02:06Z",
+      "matched_prior_subject": "chore: deprecate and archive scripts/lesson_lookup.py"
+    },
+    {
+      "task_title": "Recognize inline self-test functions in scripts/validate_test_existence.py",
+      "target_path": "scripts/validate_test_existence.py",
+      "label": "legitimate",
+      "commit_sha": "59363a7c",
+      "creation_sha": "d497cc8c",
+      "path_existed_before_commit": true,
+      "duplicate_gate_match": false,
+      "cycle_id": "cycle-18f940db9751",
+      "proposal_ts": "2026-09-16T15:10:51Z",
+      "matched_prior_subject": null
+    },
+    {
+      "task_title": "Add direct parse_args CLI option tests for scan_archive",
+      "target_path": "scripts/scan_archive.py",
+      "label": "legitimate",
+      "commit_sha": "e66691e3",
+      "creation_sha": "d7e0a5fc",
+      "path_existed_before_commit": true,
+      "duplicate_gate_match": true
+    },
+    {
+      "task_title": "Add URL allowlisting and inline suppression to scripts/validate_heredoc_urls.py",
+      "target_path": "scripts/validate_heredoc_urls.py",
+      "label": "legitimate",
+      "commit_sha": "37a52d4f",
+      "creation_sha": "bad33db1",
+      "path_existed_before_commit": true,
+      "duplicate_gate_match": true
+    }
   ]
 }
