@@ -18,7 +18,7 @@ Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 # `python -m` puts the working directory first on sys.path, ahead of
 # PYTHONPATH: cd into the candidate, or the CURRENT release's nanobot is
 # imported and the candidate is never checked (first deploy, 2026-09-24).
-ExecStart=/bin/bash -c 'test -n "$ACTIVATION_CHECK_RELEASE" || { echo "ACTIVATION_CHECK_RELEASE is required" >&2; exit 1; }; export PYTHONPATH="$ACTIVATION_CHECK_RELEASE"; cd "$ACTIVATION_CHECK_RELEASE" || exit 1; exec/opt/eeepc-agent/venv/bin/python -m nanobot.runtime.activation_check'
+ExecStart=/bin/bash -c 'test -n "$ACTIVATION_CHECK_RELEASE" || { echo "ACTIVATION_CHECK_RELEASE is required" >&2; exit 1; }; export PYTHONPATH="$ACTIVATION_CHECK_RELEASE"; cd "$ACTIVATION_CHECK_RELEASE" || exit 1; exec /opt/eeepc-agent/venv/bin/python -m nanobot.runtime.activation_check'
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=false
