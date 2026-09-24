@@ -30,6 +30,15 @@ from nanobot.runtime import cycle_ledger, demand, llm_proposer
 ENV_VAR = llm_proposer.ENABLED_ENV
 DEMAND_ENV = demand.ENABLED_ENV
 
+
+@pytest.fixture(autouse=True)
+def _release_charter(synthetic_release_charter):
+    """ADR-034 rule 3: should_propose/build_context now hard-gate on the
+    release charter's presence. This module's tests are about the
+    proposer/bridge cycle-id join, not charter absence, so opt into the
+    shared conftest fixture at module scope (never suite-wide — see its
+    docstring)."""
+
 CYCLE_ID_RE = re.compile(r"^cycle-[0-9a-f]{12}$")
 
 

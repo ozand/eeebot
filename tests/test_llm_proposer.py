@@ -26,7 +26,7 @@ DEMAND_ENV = demand.ENABLED_ENV
 
 
 @pytest.fixture(autouse=True)
-def _pre_760_mode(tmp_path, monkeypatch):
+def _pre_760_mode(synthetic_release_charter, monkeypatch):
     """#760: the tests in this module (written for #707-#762) pin the exact
     pre-#760 supply-driven behavior, which now lives behind
     ``SELFEVO_DEMAND_DRIVEN_ENABLED=0`` — the kill-switch-OFF contract this
@@ -39,15 +39,13 @@ def _pre_760_mode(tmp_path, monkeypatch):
     charter's presence (both demand-driven and supply-driven), matching
     real production (a deployed release always has ``goals.md`` — #1938
     census). Most of this file's tests predate that and call
-    ``should_propose``/``build_context`` with no real release root, so
-    give them a synthetic one; a test that specifically exercises the
+    ``should_propose``/``build_context`` with no real release root, so this
+    module opts into the shared ``synthetic_release_charter`` conftest
+    fixture at module scope (deliberately not a suite-wide autouse — see
+    that fixture's docstring); a test that specifically exercises the
     charter-absent path points ``RELEASE_ROOT`` elsewhere itself."""
     monkeypatch.setenv(DEMAND_ENV, "0")
     monkeypatch.setattr(llm_proposer, "_idle_recorded_this_process", False)
-    release_root = tmp_path / "_release_root"
-    release_root.mkdir(exist_ok=True)
-    (release_root / "goals.md").write_text("test charter", encoding="utf-8")
-    monkeypatch.setenv("RELEASE_ROOT", str(release_root))
 
 
 def _state_dir(tmp_path: Path) -> Path:
