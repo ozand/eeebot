@@ -14,12 +14,23 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from nanobot.runtime import demand, goal_gap_futility, llm_proposer, scorecard
 from nanobot.runtime.heldout import checkers
 
 NOW = datetime.now(timezone.utc)
 SURFACE = ["host_metrics", "stale_feed"]
 GAP_ID = "goal-gap-a820ca0c8bb3"
+
+
+@pytest.fixture(autouse=True)
+def _release_charter(synthetic_release_charter):
+    """ADR-034 rule 3: should_propose/build_context now hard-gate on the
+    release charter's presence. This module's tests are about goal-gap
+    futility/lever-surface suppression, not charter absence, so opt into
+    the shared conftest fixture at module scope (never suite-wide — see
+    its docstring)."""
 
 
 def _iso(hours_ago: float) -> str:

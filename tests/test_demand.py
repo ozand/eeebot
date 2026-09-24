@@ -3305,11 +3305,17 @@ class TestIssue1038DemandLanesReproduction:
         # Bounded by _MAX_REFLECTION_ITEMS (5)
         assert len(items) <= demand._MAX_REFLECTION_ITEMS
 
-    def test_repro_priority_items_charter_fallback(self, tmp_path):
-        """(5) Priority items falls back to charter like llm_proposer / goal_review."""
+    def test_repro_priority_items_ignores_instance_repo_charter(self, tmp_path):
+        """ADR-034 rule 2: an instance-repo ``goals.md`` is NEVER parsed for
+        priorities \u2014 that #944-era "charter-first from the instance repo"
+        step (this test used to reproduce as the intended behavior) is
+        deleted, not kept: it was always dead in production (an instance
+        ``goals.md`` never existed) and would have dropped every operator
+        priority the moment one did. With no ``state/goals/goal_text.json``,
+        ``_priority_items`` returns nothing, regardless of what the
+        instance repo's ``goals.md`` contains."""
         state_dir = _state_dir(tmp_path)
         repo_dir = _git_repo(tmp_path)
-        # Create derived_priorities fixture to ensure test environment realism
         demand_dir = state_dir / "demand"
         demand_dir.mkdir(parents=True, exist_ok=True)
         (state_dir / "goals").mkdir(parents=True, exist_ok=True)
@@ -3317,7 +3323,8 @@ class TestIssue1038DemandLanesReproduction:
             json.dumps({"schema_version": "derived-priorities-v1", "priorities": []}),
             encoding="utf-8",
         )
-        # No state goal_text file, but repo has goals.md / charter
+        # No state goal_text file; the instance repo has a goals.md with a
+        # priority section \u2014 must never be read as the operator's priorities.
         goals_file = repo_dir / "goals.md"
         goals_file.write_text(
             "eeebot\n\nCurrent priority targets:\n(A) Priority 1 \u2014 Charter goal 1: instructions.\n(B) Priority 2 \u2014 Charter goal 2: instructions.\n",
@@ -3326,8 +3333,7 @@ class TestIssue1038DemandLanesReproduction:
         _commit_all(repo_dir, "add goals.md")
 
         items = demand._priority_items(state_dir, repo_dir)
-        assert len(items) == 2
-        assert any("Charter goal 1" in i["summary"] for i in items)
+        assert items == []
 
     def test_repro_completed_front_candidate_advances_to_later_decay(self, tmp_path):
         """(2c) Completed front candidate in decay lane does not starve later active candidates."""
@@ -3809,7 +3815,11 @@ class TestPublishDerivedView:
         assert view["schema_version"] == "derived-view-v1"
         assert view["generated_at_utc"].endswith("Z")
         assert view["derived_status"] == "present"
-        assert view["charter"] == {"source": "goal_text_json", "merged": False, "text": self.CHARTER}
+        # ADR-034 rule 2: no real RELEASE_ROOT/goals.md in this test, so the
+        # charter resolves absent — it is NEVER the operator's private
+        # goal_text.json content relabelled as the charter (the exact
+        # privacy bug this class's docstring says must never happen).
+        assert view["charter"] == {"source": "none", "merged": False, "text": ""}
         assert view["input_mtimes_utc"]["goal_text_json"] is not None
         assert view["input_mtimes_utc"]["derived_priorities_json"] is not None
         # Two origins stay apart: the self-derived list is its own array.
@@ -3866,6 +3876,25 @@ class TestPublishDerivedView:
         assert result["ok"] is True
         assert view["charter"] == {"source": "none", "merged": False, "text": ""}
         assert view["priority_items"] == []
+        # ADR-034 rule 3: no real RELEASE_ROOT/goals.md here (same as the
+        # charter itself, above) — the artifact-gap reader's own status is
+        # "unavailable", never confused with its healthy "no gap named" empty.
+        assert view["artifact_gap_status"] == demand.ARTIFACT_GAP_STATUS_UNAVAILABLE
+
+    def test_artifact_gap_status_ok_when_charter_present(self, tmp_path, monkeypatch):
+        """A present, readable charter is a healthy artifact-gap reader,
+        regardless of whether it happens to name an owner-facing surface —
+        distinct from the charter-unavailable case above."""
+        state_dir = _state_dir(tmp_path)
+        release_root = tmp_path / "_release_root"
+        release_root.mkdir()
+        (release_root / "goals.md").write_text(self.CHARTER, encoding="utf-8")
+        monkeypatch.setenv("RELEASE_ROOT", str(release_root))
+
+        view = demand.build_derived_view(state_dir, None)
+
+        assert view["artifact_gap_status"] == demand.ARTIFACT_GAP_STATUS_OK
+        assert demand._artifact_gap_items(state_dir, None) == []
 
     def test_write_failure_never_raises_keeps_previous_file_and_records_ledger_event(self, tmp_path, monkeypatch):
         state_dir = _state_dir(tmp_path)

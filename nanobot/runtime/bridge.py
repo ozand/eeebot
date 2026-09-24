@@ -3142,6 +3142,15 @@ async def _run_planning_session(
             'tampered_files': tampered_files or [],
         }
 
+    # ADR-034 rule 3: a missing/unreadable release charter stops the
+    # planning session from running at all — never a silently degraded
+    # "[missing: goals.md]" prompt (role_prompt's own fail-open marker,
+    # meant for logging/diagnostics, not for a role to run on). The
+    # reason is recorded via the same _fail()/record_planning_session()
+    # path every other early-out in this function uses.
+    if not read_charter_text(RELEASE_ROOT):
+        return _fail('refused', 'no_charter')
+
     git = _git_cmd(selfevo_repo)
     pre_sha = _sp_run.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
 
@@ -3398,6 +3407,27 @@ async def _main_impl_body():
     except Exception:
         pass
 
+    # ADR-034 rule 3 (pA review, #1947): the release charter is a more
+    # fundamental precondition than the active goal id — checked here,
+    # before no_active_goal and before any request is even looked up, so
+    # an absent charter is never masked by the downstream no_active_goal/
+    # already_handled early-outs, and no per-request side effect (diary
+    # open, curator pickup, pending-push repair, further down the loop)
+    # ever runs on a cycle that cannot proceed anyway. Diagnostics, health,
+    # deploy rollback and the publisher (publish_derived_view, just above)
+    # all keep running regardless — only task execution stops here. Same
+    # "print the reason, return 0, no bookkeeping" shape as the
+    # no_active_goal/already_handled/bridge_disabled siblings: no request
+    # has been dequeued yet, so there is nothing to mark handled — the
+    # next run's find_pending_request() sees the same queue unchanged.
+    if read_charter_text(RELEASE_ROOT) == '':
+        print(
+            f'bridge: charter unavailable at {RELEASE_ROOT}; '
+            'aborting run (no_charter), no subagent spawned'
+        )
+        print('no_charter')
+        return 0
+
     if not goal_id:
         print('no_active_goal')
         return 0
@@ -3594,24 +3624,26 @@ async def _main_impl_body():
                 req.get('task_title') or req.get('semantic_task_id') or 'subagent review task',
             )
 
-        # #944: read executor mission from immutable goals.md at the release
-        # root when available; fall back to the legacy goal_text.json chain.
-        # Derived priorities (derived_priorities.json) are always folded in.
+        # #944/ADR-034 rule 2: read the executor mission's charter from
+        # immutable goals.md at the release root, via read_charter_text's
+        # resolver (no path constructed here). A2 is a mechanical resolver
+        # migration, not a rule-5 rollout: when the charter is present, the
+        # mission is charter-only, exactly as it already was — folding the
+        # operator's own priority section in under its own heading (rule 5)
+        # is ADR-034 A4's job, on top of A3's source-tagged split. ADR-034
+        # rule 3: the top-of-run charter gate above already stopped this
+        # cycle if the charter were absent, so there is no operator-
+        # priorities/goal-id fallback to fall back to here any more — the
+        # #944-era legacy chain this replaced (which also tried
+        # RELEASE_ROOT/host/eeepc/etc/goal_text.json first, a path that
+        # exists on no host, #1699 census) is gone along with it. Derived
+        # priorities (derived_priorities.json) are always folded in next,
+        # by merged_goal_text.
         try:
-            from nanobot.runtime.goal_review import merged_goal_text
             _charter = read_charter_text(RELEASE_ROOT)
         except Exception:
             _charter = ''
-        if _charter:
-            _base_goal_text = _charter
-        else:
-            _base_goal_text = (
-                # Prefer goal_text.json in state dir
-                (load_json(STATE_DIR / 'goals' / 'goal_text.json') or {}).get('text')
-                # Fallback: read from release root (deployed with release)
-                or (load_json(RELEASE_ROOT / 'host' / 'eeepc' / 'etc' / 'goal_text.json') or {}).get('text')
-                or goal_id
-            )
+        _base_goal_text = _charter
         try:
             from nanobot.runtime.goal_review import merged_goal_text
             goal_text = merged_goal_text(STATE_DIR, _base_goal_text)

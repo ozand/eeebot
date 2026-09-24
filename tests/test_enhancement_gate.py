@@ -19,6 +19,14 @@ from nanobot.runtime import demand, enhancement_gate, llm_proposer
 
 
 @pytest.fixture(autouse=True)
+def _release_charter(synthetic_release_charter):
+    """ADR-034 rule 3: should_propose/build_context now hard-gate on the
+    release charter's presence. This module's tests are about the
+    enhancement gate, not charter absence, so opt into the shared conftest
+    fixture at module scope (never suite-wide — see its docstring)."""
+
+
+@pytest.fixture(autouse=True)
 def _clear_caller_index_cache():
     """The module caches ``build_caller_index`` results per-process by
     ``(root, selfevo_repo)`` key; tests must not share that cache."""

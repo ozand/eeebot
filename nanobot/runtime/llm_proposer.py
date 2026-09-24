@@ -74,6 +74,7 @@ from nanobot.runtime.goal_text_utils import (
 )
 from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
+from nanobot.runtime.operator_documents import STATE_TEXT, resolve_charter
 from nanobot.runtime.reflection_context import build_reflection_hints
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
 
@@ -499,34 +500,28 @@ def _release_root_from_env() -> Path:
 def _load_goal_text(state_dir: Path, release_root: "Path | None" = None) -> str:
     """Assembled goal text for the proposer context.
 
-    #944: reads the immutable operator charter from ``goals.md`` in the
-    release tree (``release_root`` arg or ``RELEASE_ROOT`` env var).
-    Derived priorities from ``state/goals/derived_priorities.json`` are
-    folded in by :func:`goal_review.merged_goal_text` (#860). Falls back
-    to the pre-#944 behavior (``goal_text.json`` in state dir holds the
-    full text) when ``goals.md`` is absent.
-    """
-    from nanobot.runtime.goal_review import read_charter_text
+    #944/ADR-034 rule 2: reads the immutable operator charter from
+    ``goals.md`` in the release tree (``release_root`` arg or
+    ``RELEASE_ROOT`` env var) via :func:`operator_documents.resolve_charter`
+    — the charter's one resolver, no path constructed here.
 
+    A2 is a mechanical resolver migration, not a rule-5 rollout: this stays
+    charter + derived exactly as it already was (the operator's own
+    priority text is NOT folded in here — that structured, four-state,
+    "intent not instruction" presentation is ADR-034 A4's job, on top of
+    A3's source-tagged split). ``should_propose`` gates this role on the
+    charter's presence (rule 3); by the time this is called the charter is
+    expected to be there, but a defensive absent/unreadable charter still
+    degrades to ``""`` rather than raising. Derived priorities from
+    ``state/goals/derived_priorities.json`` are folded in by
+    :func:`goal_review.merged_goal_text` (#860).
+    """
     # Resolve release root: explicit arg wins, then RELEASE_ROOT/default.
     if release_root is None:
         release_root = _release_root_from_env()
 
-    charter = read_charter_text(release_root)
-    if charter:
-        raw_text = charter
-    else:
-        # Legacy fallback: goal_text.json holds the full text (charter + priorities).
-        state_path = Path(state_dir) / "goals" / "goal_text.json"
-        if not state_path.is_file():
-            return ""
-        try:
-            data = json.loads(state_path.read_text(encoding="utf-8"))
-        except Exception:
-            return ""
-        if not isinstance(data, dict):
-            return ""
-        raw_text = str(data.get("text") or "")
+    charter_res = resolve_charter(release_root)
+    raw_text = charter_res.text if charter_res.state == STATE_TEXT else ""
 
     if not raw_text:
         return ""
@@ -716,24 +711,25 @@ def _last_k_all_duplicate(state_dir: Path, k: int = _DUP_STREAK_K) -> bool:
 _idle_recorded_this_process = False
 
 
-def _record_idle(state_dir: Path) -> None:
+def _record_idle(state_dir: Path, reason: str = "no_demand") -> None:
     """#760 idle heartbeat: a distinct ``'idle'`` ledger phase recording that
-    the cycle deliberately made ZERO LLM calls because there was no demand —
-    structurally different from ``proposer_skip`` (an LLM call was made and
-    the model declined) and from silence (which is indistinguishable from a
-    crash). Fail-open (``append_event`` is best-effort); no ``cycle_id`` —
-    an idle attempt makes zero LLM calls, so there is no paid call to join it
-    to (#1374 deliberately leaves it without one). Recorded from inside
+    the cycle deliberately made ZERO LLM calls because there was no demand
+    (or, ADR-034 rule 3, no release charter) — structurally different from
+    ``proposer_skip`` (an LLM call was made and the model declined) and from
+    silence (which is indistinguishable from a crash). Fail-open
+    (``append_event`` is best-effort); no ``cycle_id`` — an idle attempt
+    makes zero LLM calls, so there is no paid call to join it to (#1374
+    deliberately leaves it without one). Recorded from inside
     ``should_propose`` (not ``maybe_propose``) because ``should_propose`` is
-    the single point that knows the failure reason is "no demand" rather
-    than e.g. the anti-stacking guard — recording from ``maybe_propose``
-    would force ``should_propose`` to grow a richer return type or the
-    demand to be collected twice."""
+    the single point that knows the failure reason is "no demand"/"no
+    charter" rather than e.g. the anti-stacking guard — recording from
+    ``maybe_propose`` would force ``should_propose`` to grow a richer return
+    type or the demand to be collected twice."""
     global _idle_recorded_this_process
     if _idle_recorded_this_process:
         return
     _idle_recorded_this_process = True
-    append_event(state_dir, {"phase": "idle", "reason": "no_demand"})
+    append_event(state_dir, {"phase": "idle", "reason": reason})
 
 
 def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
@@ -791,6 +787,13 @@ def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
             return False
         if _has_queued_proposer_request(state_dir):
             return False
+        # ADR-034 rule 3: a missing/unreadable release charter stops this
+        # role entirely, with the reason recorded — both the demand-driven
+        # branch and the pre-#760 supply path below assume a charter is
+        # available; neither checked for one before.
+        if resolve_charter(_release_root_from_env()).state != STATE_TEXT:
+            _record_idle(state_dir, reason="no_charter")
+            return False
         if demand.demand_driven_enabled():
             # #760: demand gate. Both prior gates passed, so an empty
             # collection means "no demand" is the ONLY reason not to
@@ -799,13 +802,6 @@ def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
             if demand.collect_demand(state_dir, selfevo_repo):
                 return True
             _record_idle(state_dir)
-            return False
-        goal_text_path = state_dir / "goals" / "goal_text.json"
-        # #944: the pre-#760 supply path also works when goals.md exists
-        # at the release root (RELEASE_ROOT env), even without goal_text.json.
-        _release_root = _release_root_from_env()
-        _has_goals_md = (_release_root / "goals.md").is_file()
-        if not goal_text_path.is_file() and not _has_goals_md:
             return False
         if _queue_effectively_empty(state_dir):
             return True

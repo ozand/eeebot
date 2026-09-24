@@ -25,10 +25,26 @@ import json
 from nanobot.runtime import bridge
 
 
-def _set_common_paths(monkeypatch, state_dir, base):
+def _set_common_paths(monkeypatch, state_dir, base, *, charter=True):
     monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
     monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
     monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+    # ADR-034 rule 3: the executor now refuses to run at all without a real
+    # release charter, checked before this module's own goal-id logic ever
+    # runs (see TestCharterPrecedesNoActiveGoal below). Every test here that
+    # is actually about goal-id resolution needs a charter in place so it
+    # can reach that logic; charter=False opts back out for the tests that
+    # cover the charter-absence precedence itself. Either way RELEASE_ROOT
+    # is explicitly pinned to a directory this test controls — never left
+    # at bridge.RELEASE_ROOT's ambient default, which in the full suite can
+    # carry another test's leftover charter dir (module-level state another
+    # test's monkeypatch/importlib.reload interaction restored it to,
+    # observed live as a CI-only failure here, #1947).
+    release_root = base / "_adr034_release_root"
+    release_root.mkdir(exist_ok=True)
+    if charter:
+        (release_root / "goals.md").write_text("test charter", encoding="utf-8")
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release_root)
 
 
 def _write_goal_text(state_dir, goal_id: str) -> None:
@@ -140,6 +156,43 @@ class TestGoalIdBootstrap:
         _set_common_paths(monkeypatch, state_dir, tmp_path)
 
         assert asyncio.run(bridge._main_impl()) == 0
+
+
+class TestCharterPrecedesNoActiveGoal:
+    """ADR-034 rule 3 (pA review comment on #1947): a missing/unreadable
+    release charter is a more fundamental precondition failure than a
+    missing goal id — it must be reported, and the run must stop, BEFORE
+    the no_active_goal/already_handled early-outs below, and before any
+    request is even looked up. Previously the charter check lived deep
+    inside the per-request loop (gated behind both a resolvable goal id
+    AND a pending request existing), so an absent charter with no
+    resolvable goal id printed the misleading no_active_goal instead of
+    the real blocker."""
+
+    def test_charter_absent_and_goal_id_absent_prints_no_charter(self, tmp_path, monkeypatch, capsys):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        _set_common_paths(monkeypatch, state_dir, tmp_path, charter=False)
+
+        result = asyncio.run(bridge._main_impl())
+        assert result == 0
+
+        out = capsys.readouterr().out
+        assert "no_charter" in out
+        assert "no_active_goal" not in out
+
+    def test_charter_absent_takes_priority_even_with_a_resolvable_goal_id(self, tmp_path, monkeypatch, capsys):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        _set_common_paths(monkeypatch, state_dir, tmp_path, charter=False)
+        _write_goal_text(state_dir, "goal-canon")
+
+        result = asyncio.run(bridge._main_impl())
+        assert result == 0
+
+        out = capsys.readouterr().out
+        assert "no_charter" in out
+        assert "already_handled" not in out
 
 
 class TestNoBacklogSnapshot:

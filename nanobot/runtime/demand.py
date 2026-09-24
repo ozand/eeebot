@@ -156,6 +156,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from nanobot.runtime.operator_documents import (
+    STATE_ABSENT,
+    STATE_TEXT,
+    resolve_charter,
+    resolve_derived_priorities,
+    resolve_operator_priorities_metadata,
+    resolve_operator_priorities_text,
+)
 from nanobot.runtime.schemas import QUALIFYING_ARTIFACT_DIRS
 from nanobot.runtime.state_access import Window, artifacts, evidence_status, ledger_window
 
@@ -732,35 +740,19 @@ def _git_head(selfevo_repo: Path | None) -> str | None:
 def _priority_items(state_dir: Path, selfevo_repo: Path | None) -> list[dict[str, str]]:
     """Remaining goal_text priorities, done-filtering delegated to
     ``goal_text_utils.filter_completed_priorities_from_goal_text`` (#748) —
-    this preserves R30: a freshly-seeded operator priority is always demand."""
+    this preserves R30: a freshly-seeded operator priority is always demand.
+
+    ADR-034 rule 2: the raw text comes ONLY from
+    ``resolve_operator_priorities_text(state_dir)`` — ``state/goals/goal_text.json``,
+    the operator priorities' one root. The #944-era "charter-first from the
+    instance repo" step (always dead — an instance ``goals.md`` never
+    existed) and the legacy ``state_dir/goals.md`` fallback are deleted, not
+    kept."""
     try:
         from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goal_text
 
-        raw_text = ""
-        # 1. Charter-first from selfevo_repo/GOALS.md
-        if selfevo_repo:
-            try:
-                from nanobot.runtime.goal_review import read_charter_text
-
-                raw_text = read_charter_text(selfevo_repo) or ""
-            except Exception:
-                raw_text = ""
-
-        # 2. Workspace goal_text.json
-        if not raw_text:
-            path = Path(state_dir) / "goals" / "goal_text.json"
-            data = _read_json(path, None)
-            if isinstance(data, dict):
-                raw_text = str(data.get("text") or "")
-
-        # 3. Fallback to goals.md
-        if not raw_text:
-            legacy = Path(state_dir) / "goals.md"
-            if legacy.is_file():
-                try:
-                    raw_text = legacy.read_text(encoding="utf-8")
-                except Exception:
-                    raw_text = ""
+        text_res = resolve_operator_priorities_text(state_dir)
+        raw_text = text_res.text if text_res.state == STATE_TEXT else ""
 
         if not raw_text:
             return []
@@ -854,50 +846,23 @@ def _mtime_utc(path: Path) -> str | None:
         return None
 
 
-def _probe_derived_status(derived_file: Path) -> str:
-    """Three-state status of ``derived_priorities.json`` (#1684): ``absent``
-    when the file does not exist (an absent self-derived list must never read
-    as an empty one), ``present`` when it exists and parses as a JSON object,
-    ``probe_unavailable`` when it exists but cannot be stat'ed or parsed —
-    i.e. the writer cannot say either way."""
-    try:
-        if not derived_file.is_file():
-            return DERIVED_STATUS_ABSENT
-        data = json.loads(derived_file.read_text(encoding="utf-8"))
-        return DERIVED_STATUS_PRESENT if isinstance(data, dict) else DERIVED_STATUS_PROBE_UNAVAILABLE
-    except Exception:
-        return DERIVED_STATUS_PROBE_UNAVAILABLE
-
-
 def _charter_as_loop_sees_it(state_dir: Path, selfevo_repo: Path | None) -> tuple[str, str, Path | None]:
-    """The operator-origin charter text in the SAME precedence
-    :func:`_priority_items` uses (release ``goals.md`` -> ``goals/goal_text.json``
-    ``text`` -> legacy ``goals.md``), plus which source won and its path.
-    This is the raw operator text, NOT ``goal_review.merged_goal_text`` — the
-    self-derived entries are published separately so the two origins stay
-    apart (ADR-020 Rule 3). Only the ``text`` field of goal_text.json is
-    published; every other key of that file stays private."""
-    if selfevo_repo:
-        try:
-            from nanobot.runtime.goal_review import _GOALS_MD_FILENAME, read_charter_text
+    """The release charter — ADR-034 rule 2's ONE root — resolved via
+    :func:`operator_documents.resolve_charter`. Returns the charter,
+    NEVER the operator's priority text (``goal_text.json``) relabelled as
+    one: the pre-ADR-034 code fell back to publishing the operator's
+    PRIVATE priority text into ``derived_view.json`` (0644, public) under
+    ``source="goal_text_json"`` whenever the instance repo had no
+    ``goals.md`` (i.e. always, in practice) — that was the privacy bug
+    rule 2 closes. ``state_dir``/``selfevo_repo`` are kept for call-site
+    compatibility but are no longer consulted; the charter's root is
+    ``RELEASE_ROOT`` (env), never the instance repo or the state dir."""
+    from nanobot.runtime.llm_proposer import _release_root_from_env
 
-            text = read_charter_text(selfevo_repo) or ""
-            if text:
-                return text, "release_goals_md", Path(selfevo_repo) / _GOALS_MD_FILENAME
-        except Exception:
-            pass
-    canon = Path(state_dir) / "goals" / "goal_text.json"
-    data = _read_json(canon, None)
-    if isinstance(data, dict) and str(data.get("text") or ""):
-        return str(data.get("text") or ""), "goal_text_json", canon
-    legacy = Path(state_dir) / "goals.md"
-    if legacy.is_file():
-        try:
-            text = legacy.read_text(encoding="utf-8")
-            if text:
-                return text, "legacy_goals_md", legacy
-        except Exception:
-            pass
+    release_root = _release_root_from_env()
+    res = resolve_charter(release_root)
+    if res.state == STATE_TEXT:
+        return res.text.strip(), "release_goals_md", Path(release_root) / "goals.md"
     return "", "none", None
 
 
@@ -909,33 +874,34 @@ def build_derived_view(
 ) -> dict[str, Any]:
     """Assemble the #1684 view payload without writing it. Reads only; fail-open
     per section (a section that cannot be read publishes its explicit
-    unavailable marker, never a silent blank)."""
-    from nanobot.runtime import goal_review
+    unavailable marker, never a silent blank).
 
+    ADR-034 rule 2: charter, derived priorities and goal_text.json's mtime
+    all come from their one resolver — no path is constructed here."""
     state_dir = Path(state_dir)
     charter_text, charter_source, charter_path = _charter_as_loop_sees_it(state_dir, selfevo_repo)
-    derived_file = goal_review._derived_priorities_path(state_dir)
-    derived_status = _probe_derived_status(derived_file)
+
+    derived_res = resolve_derived_priorities(state_dir)
+    if derived_res.state == STATE_TEXT:
+        derived_status = DERIVED_STATUS_PRESENT
+    elif derived_res.state == STATE_ABSENT:
+        derived_status = DERIVED_STATUS_ABSENT
+    else:
+        derived_status = DERIVED_STATUS_PROBE_UNAVAILABLE
 
     derived_entries: list[dict[str, Any]] = []
     direction_by_number: dict[int, str] = {}
-    if derived_status == DERIVED_STATUS_PRESENT:
-        try:
-            for d in goal_review.read_derived_priorities(state_dir):
-                derived_entries.append(
-                    {
-                        "number": d.get("number"),
-                        "label": d.get("label", ""),
-                        "vector": d.get("vector", ""),
-                        "direction": d.get("direction", ""),
-                        "added_utc": d.get("added_utc", ""),
-                    }
-                )
-                if isinstance(d.get("number"), int):
-                    direction_by_number[d["number"]] = str(d.get("direction") or "")
-        except Exception:
-            derived_status = DERIVED_STATUS_PROBE_UNAVAILABLE
-            derived_entries = []
+    for e in derived_res.entries:
+        derived_entries.append(
+            {
+                "number": e.number,
+                "label": e.title,
+                "vector": e.vector,
+                "direction": e.direction,
+                "added_utc": e.added_utc,
+            }
+        )
+        direction_by_number[e.number] = e.direction
 
     # The production ranking, in the order the production sort produced it —
     # never re-sorted here (#271 renders it byte-for-byte).
@@ -980,10 +946,17 @@ def build_derived_view(
         "priority_items": ranked,
         "input_mtimes_utc": {
             "charter": _mtime_utc(charter_path) if charter_path else None,
-            "goal_text_json": _mtime_utc(state_dir / "goals" / "goal_text.json"),
-            "derived_priorities_json": _mtime_utc(derived_file),
+            "goal_text_json": resolve_operator_priorities_metadata(state_dir).mtime_utc,
+            "derived_priorities_json": derived_res.mtime_utc,
         },
         "sort": "provenance(operator<self-derived), then vector(V1<V2), as demand._priority_items",
+        # ADR-034 rule 3: _artifact_gap_items silently emits [] whenever the
+        # charter is unavailable — structurally identical to its healthy
+        # "goals.md doesn't name a surface" empty result. artifact_gap_status
+        # is the separate accessor a consumer checks to tell those apart
+        # (mirroring operator_priorities_status for the priority-* kind);
+        # it was never actually wired into a consumer before this field.
+        "artifact_gap_status": artifact_gap_status(),
     }
 
 
@@ -1801,19 +1774,53 @@ def _tamper_defect_items(
 
 # ─── kind: goal-gap (#765) ──────────────────────────────────────────────────
 
+ARTIFACT_GAP_STATUS_OK = "ok"
+ARTIFACT_GAP_STATUS_UNAVAILABLE = "unavailable"
+
+
+def artifact_gap_status(release_root: "Path | None" = None) -> str:
+    """ADR-034 rule 3: the ``artifact-gap`` demand kind's reader status —
+    ``"unavailable"`` when its only precondition, the charter, cannot be
+    read, ``"ok"`` otherwise. :func:`_artifact_gap_items` emitting ``[]``
+    is structurally identical whether the charter is unavailable or simply
+    doesn't name a surface; this is the separate status accessor a caller
+    checks to tell those apart, mirroring
+    :func:`operator_documents.operator_priorities_status` for the
+    analogous ``priority-*`` kind."""
+    from nanobot.runtime.llm_proposer import _release_root_from_env
+
+    root = release_root if release_root is not None else _release_root_from_env()
+    return (
+        ARTIFACT_GAP_STATUS_OK
+        if resolve_charter(root).state == STATE_TEXT
+        else ARTIFACT_GAP_STATUS_UNAVAILABLE
+    )
+
 
 def _artifact_gap_items(
     state_dir: Path, selfevo_repo: Path | None, *, limit: int | None = None
 ) -> list[dict[str, str]]:
-    """Emit a V2 artifact-gap only when a goal explicitly names a surface."""
+    """Emit a V2 artifact-gap only when the charter explicitly names a
+    surface. ADR-034 rule 2: the charter check moves to
+    :func:`operator_documents.resolve_charter` (``RELEASE_ROOT``, never the
+    instance repo — an instance ``goals.md`` never existed, so this check
+    was always dead before). The ``surfaces/*.py`` check stays against the
+    instance repo (``selfevo_repo``), unchanged — that part of the check is
+    genuinely about the instance's own artifacts, not the charter. ADR-034
+    rule 3: emits nothing when the charter is unavailable — see
+    :func:`artifact_gap_status` for the separate status accessor."""
     if not selfevo_repo or not Path(selfevo_repo).is_dir():
         return []
     try:
-        goal_text = Path(selfevo_repo, "goals.md")
-        if not goal_text.is_file():
+        from nanobot.runtime.llm_proposer import _release_root_from_env
+
+        charter = resolve_charter(_release_root_from_env())
+        if charter.state != STATE_TEXT:
             return []
-        text = goal_text.read_text(encoding="utf-8", errors="replace")
-        names_surface = any(token in text.lower() for token in ("dashboard", "tui", "status interface", "owner-facing"))
+        names_surface = any(
+            token in charter.text.lower()
+            for token in ("dashboard", "tui", "status interface", "owner-facing")
+        )
         if not names_surface:
             return []
         surfaces = Path(selfevo_repo) / "surfaces"

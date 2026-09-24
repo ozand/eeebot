@@ -1,14 +1,16 @@
 """ADR-034 (docs/adr/ADR-034-two-operator-documents-one-root-each.md) rules 2
 and 3: one resolver per operator document, and the operator priority list's
-four rule-3 states. Issue #1937 lands the resolver half of the ADR-034 Test
-Contract only — no reader is migrated here (that is A2-A4, separate PRs).
+four rule-3 states. Issue #1937 (A1) landed the resolver half of the
+Test Contract; issue #1938 (A2) migrates the #1699-census readers onto
+these resolvers, deletes their fallback paths, and closes the reader half
+of the contract — covered by the tests below.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from nanobot.runtime import demand
+from nanobot.runtime import demand, goal_review, llm_proposer, strategist_inputs
 from nanobot.runtime.operator_documents import (
     DOCUMENT_SIZE_CAP_BYTES,
     PRIORITY_ALL_COMPLETED,
@@ -20,10 +22,12 @@ from nanobot.runtime.operator_documents import (
     STATE_ABSENT,
     STATE_TEXT,
     STATE_UNREADABLE,
+    operator_priorities_status,
     resolve_charter,
     resolve_derived_priorities,
     resolve_operator_priorities,
 )
+from nanobot.runtime.state import load_runtime_state_from_root
 
 
 def _goal_text_json(state_dir: Path, raw_text: str) -> None:
@@ -48,7 +52,11 @@ def _mark_completed(state_dir: Path, num: str, title: str, instructions: str) ->
     )
 
 
-def test_each_document_resolves_from_its_one_root(tmp_path: Path):
+def test_each_document_resolves_from_its_one_root(tmp_path: Path, monkeypatch):
+    """ADR-034 rule 2: resolver half (#1937/A1) — each resolver reads only
+    its one root; reader half (#1938/A2) — every migrated reader obtains
+    each document only through its resolver, ignoring decoys planted at
+    every other (legacy/instance/state) path the ADR condemns."""
     # Charter: <release root>/goals.md only.
     release_root = tmp_path / "release"
     release_root.mkdir()
@@ -69,7 +77,7 @@ def test_each_document_resolves_from_its_one_root(tmp_path: Path):
 
     # Derived priorities: state/goals/derived_priorities.json only.
     (state_dir / "goals" / "derived_priorities.json").write_text(
-        json.dumps({"schema_version": "derived-v1", "priorities": [{"label": "D", "body": "do it", "number": 9}]}),
+        json.dumps({"schema_version": "derived-v1", "priorities": [{"label": "D", "body": "do it", "number": 9, "vector": "V1"}]}),
         encoding="utf-8",
     )
     (state_dir / "derived_priorities.json").write_text("decoy at the wrong root", encoding="utf-8")
@@ -90,6 +98,29 @@ def test_each_document_resolves_from_its_one_root(tmp_path: Path):
     assert entry.number == 1
     assert entry.title == "Do a thing"
     assert entry.instructions == "write scripts/x.py."
+
+    # ─── reader half (#1938/A2) ──────────────────────────────────────────
+    monkeypatch.setenv("RELEASE_ROOT", str(release_root))
+    instance_repo = tmp_path / "instance"
+    instance_repo.mkdir()
+    (instance_repo / "goals.md").write_text("decoy instance charter", encoding="utf-8")
+
+    # goal_review.read_charter_text: release root only.
+    assert goal_review.read_charter_text(release_root) == "the charter text"
+
+    # demand._charter_as_loop_sees_it: release root only (env), ignoring
+    # both decoys even though selfevo_repo=instance_repo is passed.
+    text, source, _path = demand._charter_as_loop_sees_it(state_dir, instance_repo)
+    assert text == "the charter text"
+    assert source == "release_goals_md"
+
+    # state.py's dashboard surface: active_goal from state/goals/goal_text.json only.
+    (state_dir / "goals" / "goal_text.json").write_text(
+        json.dumps({"goal_id": "goal-from-state-root", "text": "just operator priorities, never a charter"}),
+        encoding="utf-8",
+    )
+    runtime = load_runtime_state_from_root(state_dir)
+    assert runtime["active_goal"] == "goal-from-state-root"
 
 
 def test_four_priority_states_are_distinct(tmp_path: Path):
@@ -228,11 +259,12 @@ def test_boundary_documents_leak_no_text(tmp_path: Path):
     goals_dir = state_derived_present / "goals"
     goals_dir.mkdir(parents=True)
     (goals_dir / "derived_priorities.json").write_text(
-        json.dumps({"priorities": [{"label": "Title", "body": sensitive, "number": 1}]}),
+        json.dumps({"priorities": [{"label": "Title", "body": sensitive, "number": 1, "vector": "V1"}]}),
         encoding="utf-8",
     )
     derived_present = resolve_derived_priorities(state_derived_present)
     assert derived_present.state == STATE_TEXT
+    assert len(derived_present.entries) == 1
     assert sensitive not in repr(derived_present)
     assert sensitive not in str(derived_present)
     for entry in derived_present.entries:
@@ -252,3 +284,204 @@ def test_boundary_documents_leak_no_text(tmp_path: Path):
     # No boundary priority resolution ever exposes a raw-text field.
     for result in (result_empty, result_corrupt, result_oversize):
         assert not hasattr(result, "text")
+
+
+def _goal_review_rows(state_dir: Path) -> list[dict]:
+    path = state_dir / "ledger" / "cycles.jsonl"
+    if not path.is_file():
+        return []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [r for r in rows if r.get("phase") == "goal_review"]
+
+
+def test_instance_goals_md_is_ignored_by_every_reader(tmp_path: Path, monkeypatch):
+    """ADR-034 rule 2: an instance-repo ``goals.md`` is never consulted by
+    any A2-migrated reader — the #944-era "charter-first from the instance
+    repo" step (always dead in production: an instance ``goals.md`` never
+    existed) is deleted, not kept."""
+    monkeypatch.delenv("RELEASE_ROOT", raising=False)
+    state_dir = tmp_path / "state"
+    instance_repo = tmp_path / "instance"
+    instance_repo.mkdir()
+    (instance_repo / "goals.md").write_text(
+        "Current priority targets:\n(A) Priority 1 — Instance decoy: never read.\n",
+        encoding="utf-8",
+    )
+
+    assert demand._priority_items(state_dir, instance_repo) == []
+    assert demand._artifact_gap_items(state_dir, instance_repo) == []
+
+    text, _source, path = demand._charter_as_loop_sees_it(state_dir, instance_repo)
+    assert "Instance decoy" not in text
+    assert path is None or path.parent != instance_repo
+
+    assert goal_review._load_goal_data(state_dir, None) is None
+
+    from nanobot.runtime.llm_proposer import _load_goal_text
+
+    assert _load_goal_text(state_dir) == ""
+
+
+def test_absent_and_unreadable_follow_the_reader_table(tmp_path: Path, monkeypatch):
+    """ADR-034 rule 3: a missing/unreadable charter stops the reader (with a
+    reason recorded); a missing/unreadable operator-priority document never
+    stops the reader and is reported "unavailable" — never read as "no
+    priorities" (that is ``empty``, a different state)."""
+    monkeypatch.setenv(goal_review.ENABLED_ENV, "1")
+
+    # --- charter absent: goal-review stops, but the reason is recorded ---
+    state_dir = tmp_path / "state"
+    empty_release_root = tmp_path / "empty-release"
+    empty_release_root.mkdir()
+
+    titles = goal_review.maybe_goal_review(state_dir, None, release_root=empty_release_root)
+
+    assert titles == []
+    rows = _goal_review_rows(state_dir)
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "no_goal_text"
+
+    # --- operator priorities absent: the reader still runs; the priority
+    # queue reports nothing and "unavailable", never "no priorities" ---
+    release_root = tmp_path / "release"
+    release_root.mkdir()
+    (release_root / "goals.md").write_text("a real charter", encoding="utf-8")
+    state_dir_no_priorities = tmp_path / "state-no-priorities"
+
+    items = demand._priority_items(state_dir_no_priorities, None)
+    assert items == []  # "priority-*" emits nothing
+    status = operator_priorities_status(state_dir_no_priorities)
+    assert status.state == PRIORITY_UNAVAILABLE
+    assert status.state != PRIORITY_EMPTY  # never mistaken for "no priorities"
+
+    # The charter section is unaffected by the operator priorities being
+    # absent — absence of one never silences the other.
+    view = demand.build_derived_view(state_dir_no_priorities, None)
+    assert view["priority_items"] == []
+
+    # --- charter UNREADABLE (oversize) follows the same path as absent —
+    # goal review stops here too, not just on a genuinely missing file ---
+    oversize_release_root = tmp_path / "oversize-release"
+    oversize_release_root.mkdir()
+    (oversize_release_root / "goals.md").write_text(
+        "x" * (DOCUMENT_SIZE_CAP_BYTES + 1), encoding="utf-8"
+    )
+    state_dir_unreadable = tmp_path / "state-unreadable-charter"
+    titles_unreadable = goal_review.maybe_goal_review(
+        state_dir_unreadable, None, release_root=oversize_release_root
+    )
+    assert titles_unreadable == []
+    rows_unreadable = _goal_review_rows(state_dir_unreadable)
+    assert len(rows_unreadable) == 1
+    assert rows_unreadable[0]["outcome"] == "no_goal_text"
+
+    good_release_root = tmp_path / "good-release"
+    good_release_root.mkdir()
+    (good_release_root / "goals.md").write_text("a real charter", encoding="utf-8")
+
+    # --- proposer: charter absent/unreadable stops should_propose ---
+    monkeypatch.setenv(llm_proposer.ENABLED_ENV, "1")
+    monkeypatch.setenv("SELFEVO_DEMAND_DRIVEN_ENABLED", "0")
+    for bad_release_root in (empty_release_root, oversize_release_root):
+        proposer_state = tmp_path / f"proposer-{bad_release_root.name}"
+        (proposer_state / "goals").mkdir(parents=True)
+        monkeypatch.setenv("RELEASE_ROOT", str(bad_release_root))
+        assert llm_proposer.should_propose(proposer_state, None) is False
+    proposer_state_ok = tmp_path / "proposer-ok"
+    (proposer_state_ok / "goals").mkdir(parents=True)
+    monkeypatch.setenv("RELEASE_ROOT", str(good_release_root))
+    assert llm_proposer.should_propose(proposer_state_ok, None) is True
+
+    # --- strategist: charter absent/unreadable refuses, regardless of the
+    # other four inputs being "complete" ---
+    for charter_status in ("empty", "unavailable"):
+        status = {
+            "goals": {"status": charter_status},
+            "scorecard": {"status": "complete"},
+            "funnel": {"status": "complete"},
+            "insights": {"status": "complete"},
+            "evolution_tree": {"status": "complete"},
+        }
+        assert strategist_inputs.should_refuse(status) is True
+
+    # --- artifact-gap: reader status "unavailable" when charter
+    # absent/unreadable, never conflated with "ok, just no surface named" ---
+    for bad_release_root in (empty_release_root, oversize_release_root):
+        assert demand.artifact_gap_status(bad_release_root) == demand.ARTIFACT_GAP_STATUS_UNAVAILABLE
+    assert demand.artifact_gap_status(good_release_root) == demand.ARTIFACT_GAP_STATUS_OK
+
+
+def test_charter_view_is_the_charter(tmp_path: Path, monkeypatch):
+    """ADR-034 rule 2: ``demand._charter_as_loop_sees_it`` never returns the
+    operator's private priority text relabelled as the charter — the
+    #944-era bug that leaked it into the public ``derived_view.json`` under
+    ``source="goal_text_json"``."""
+    monkeypatch.delenv("RELEASE_ROOT", raising=False)
+    state_dir = tmp_path / "state"
+    _goal_text_json(state_dir, "OPERATOR PRIVATE PRIORITY TEXT")
+
+    text, source, path = demand._charter_as_loop_sees_it(state_dir, None)
+
+    assert text == ""
+    assert source == "none"
+    assert path is None
+    assert "OPERATOR PRIVATE PRIORITY TEXT" not in text
+
+    # And the published view carries the same guarantee end to end.
+    view = demand.build_derived_view(state_dir, None)
+    assert view["charter"] == {"source": "none", "merged": False, "text": ""}
+
+
+def test_missing_charter_keeps_diagnostics_running(tmp_path: Path, monkeypatch):
+    """ADR-034 rule 3: a missing charter stops choosing/proposing/executing,
+    but never diagnostics or reason-recording — goal-review's ledger row is
+    still written (the "no_goal_text" reason), and unrelated readers that
+    do not need the charter keep working."""
+    monkeypatch.setenv(goal_review.ENABLED_ENV, "1")
+    state_dir = tmp_path / "state"
+    empty_release_root = tmp_path / "empty-release"
+    empty_release_root.mkdir()
+
+    result = goal_review.maybe_goal_review(state_dir, None, release_root=empty_release_root)
+
+    assert result == []  # not None: the kill switch didn't fire, the review ran and no-opped
+    rows = _goal_review_rows(state_dir)
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "no_goal_text"
+
+    # A reader that never needed the charter (derived-priorities queue
+    # depth, used by health) is unaffected by the charter's absence.
+    from nanobot.runtime.health import read_derived_priorities_queue
+
+    queue = read_derived_priorities_queue(state_dir)
+    assert queue == {"depth": 0, "limit": goal_review._DERIVED_PRIORITIES_MAX}
+
+    # The publisher (demand.build_derived_view/publish_derived_view) keeps
+    # running too: it still produces a full, well-formed view — showing
+    # the charter as unavailable, never raising or going silent.
+    monkeypatch.setenv("RELEASE_ROOT", str(empty_release_root))
+    view = demand.build_derived_view(state_dir, None)
+    assert view["charter"] == {"source": "none", "merged": False, "text": ""}
+    assert view["schema_version"] == demand.DERIVED_VIEW_SCHEMA
+    result_dict = demand.publish_derived_view(state_dir, None)
+    assert result_dict["ok"] is True
+
+
+def test_status_surface_never_renders_priority_text(tmp_path: Path, monkeypatch):
+    """ADR-034 rule 3: the dashboard status surface
+    (``state.load_runtime_state_from_root``) shows availability for
+    ``goal_text.json``, never its text — even when the document holds
+    real, sensitive content."""
+    monkeypatch.delenv("RELEASE_ROOT", raising=False)
+    sensitive = "the operator secretly wants a mars colony by friday"
+    state_dir = tmp_path / "state"
+    (state_dir / "goals").mkdir(parents=True)
+    (state_dir / "goals" / "goal_text.json").write_text(
+        json.dumps({"goal_id": "goal-1", "text": sensitive}), encoding="utf-8"
+    )
+
+    runtime = load_runtime_state_from_root(state_dir)
+
+    assert runtime["active_goal"] == "goal-1"
+    assert runtime["goal_text"] in (PRIORITY_PRESENT, PRIORITY_ALL_COMPLETED, PRIORITY_EMPTY, PRIORITY_UNAVAILABLE)
+    assert sensitive not in json.dumps(runtime)

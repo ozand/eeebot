@@ -29,6 +29,11 @@ _MAX_JSON_BYTES = 256_000
 _MAX_LINES_FILE_BYTES = 256_000
 # Decision reason when the archive view is too empty to advise on (#1182).
 REASON_INPUTS_UNAVAILABLE = "inputs_unavailable"
+# ADR-034 rule 3: the charter is the one input whose absence alone stops the
+# strategist (strategist_inputs.should_refuse), distinct from the other four
+# inputs merely being mostly empty — recorded so a decisions.jsonl reader
+# does not have to infer the cause from empty_inputs/unavailable_inputs.
+REASON_NO_CHARTER = "no_charter"
 # Prompt budget (#1182, #1284): while the payload is over the cap, the largest
 # of these sections loses one step (goals, the tree digest, the futility
 # sidecar and inputs_status are never shrunk). Position in a dict is a proxy
@@ -355,7 +360,13 @@ def run_strategist(state_root: Path, repo_root: Path, llm: Callable[[list[dict[s
             # #1444 preserves the current refusal policy: unavailable counts
             # exactly like empty; only the recorded cause is now distinct.
             status = inputs["inputs_status"]
-            decision.update({"prompt_chars": 0, "reason": REASON_INPUTS_UNAVAILABLE,
+            # ADR-034 rule 3: the charter alone stopping the strategist is a
+            # different cause than the shared _MAX_EMPTY_INPUTS budget on the
+            # other four inputs being exceeded — record which one it was
+            # instead of the one generic REASON_INPUTS_UNAVAILABLE for both.
+            charter_status = (status.get("goals") or {}).get("status")
+            reason = REASON_NO_CHARTER if charter_status != "complete" else REASON_INPUTS_UNAVAILABLE
+            decision.update({"prompt_chars": 0, "reason": reason,
                              "empty_inputs": strategist_inputs.empty_inputs(status),
                              "unavailable_inputs": strategist_inputs.unavailable_inputs(status)})
             _record_decision(state_root, decision)
@@ -417,7 +428,7 @@ def main() -> int:
     # Refusing to advise is the input gate working, not a failure: exit 0 so
     # systemd does not mark the timer's service failed; the decisions.jsonl
     # row carries the reason.
-    return 0 if result.get("success") or result.get("reason") == REASON_INPUTS_UNAVAILABLE else 1
+    return 0 if result.get("success") or result.get("reason") in (REASON_INPUTS_UNAVAILABLE, REASON_NO_CHARTER) else 1
 
 if __name__ == "__main__":
     raise SystemExit(main())

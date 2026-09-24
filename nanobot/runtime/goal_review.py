@@ -89,6 +89,13 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.runtime.cycle_ledger import append_event
+from nanobot.runtime.operator_documents import (
+    STATE_TEXT,
+    derived_priorities_path,
+    resolve_charter,
+    resolve_derived_priorities,
+    resolve_operator_priorities_metadata,
+)
 from nanobot.runtime.role_prompt import load_role_text
 
 ENABLED_ENV = "SELFEVO_GOAL_REVIEW_ENABLED"
@@ -239,16 +246,13 @@ def read_charter_text(release_root: "Path | None") -> str:
     ``/opt/eeepc-agent/runtimes/self-evolving-agent/current``). Returns
     the charter text, or ``""`` when the file is absent, unreadable, or
     ``release_root`` is ``None`` — callers must treat empty as
-    unavailable. Fail-open: never raises."""
-    try:
-        if release_root is None:
-            return ""
-        p = Path(release_root) / _GOALS_MD_FILENAME
-        if not p.is_file():
-            return ""
-        return p.read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
+    unavailable. Fail-open: never raises.
+
+    ADR-034 rule 2: delegates to :func:`operator_documents.resolve_charter`,
+    the charter's one resolver — this wrapper exists only so the 7 existing
+    callers keep their ``str``-returning contract unchanged."""
+    res = resolve_charter(release_root)
+    return res.text.strip() if res.state == STATE_TEXT else ""
 
 
 def active_goal_id(state_dir: "Path | str") -> str:
@@ -261,15 +265,12 @@ def active_goal_id(state_dir: "Path | str") -> str:
     has carried ``goal_id`` all along, so it is the one source now. Returns
     ``""`` when the file is absent, unreadable or has no id. Fail-open:
     never raises.
-    """
-    try:
-        data = _read_json(Path(state_dir) / "goals" / "goal_text.json", None)
-    except Exception:
-        return ""
-    if not isinstance(data, dict):
-        return ""
-    goal_id = data.get("goal_id")
-    return goal_id.strip() if isinstance(goal_id, str) else ""
+
+    ADR-034 rule 2: delegates to
+    :func:`operator_documents.resolve_operator_priorities_metadata` — the
+    operator-priorities document's one resolver — instead of constructing
+    the ``goal_text.json`` path itself."""
+    return resolve_operator_priorities_metadata(state_dir).goal_id
 
 
 # ─── bounded inputs ─────────────────────────────────────────────────────────
@@ -285,68 +286,60 @@ def _load_goal_data(
     path). Derived priorities are folded in separately by
     :func:`merged_goal_text` in :func:`maybe_goal_review`.
 
-    Falls back to the pre-#944 behavior (``goal_text.json`` in state holds
-    the full text) when ``goals.md`` is absent — safe for hosts that have
-    not yet deployed a release containing ``goals.md``.
-
-    Returns ``None`` when no usable text can be assembled — the review
-    must no-op BEFORE any LLM call.
+    ADR-034 rule 2/3: charter + derived, exactly as before this migration
+    (rule 3's own table: "review runs on charter + derived" when operator
+    priorities are absent/unreadable — goal review's inputs were never
+    supposed to include them). The operator's priority text
+    (``goal_text.json``) is NEVER used as a charter SUBSTITUTE either — the
+    #944-era fallback that mislabeled it as the charter is deleted, not
+    kept. Returns ``None`` when the charter is absent/unreadable — the
+    review must no-op BEFORE any LLM call.
     """
     charter = read_charter_text(release_root)
-    if charter:
-        return {"text": charter}
-    # Legacy fallback: goal_text.json holds the full text (charter + priorities).
-    data = _read_json(Path(state_dir) / "goals" / "goal_text.json", None)
-    if not isinstance(data, dict) or not str(data.get("text") or "").strip():
+    if not charter:
         return None
-    return data
+    return {"text": charter}
 
 
 def _derived_priorities_path(state_dir: Path) -> Path:
-    return Path(state_dir) / "goals" / "derived_priorities.json"
+    """The writer's path (``_write_derived_priorities`` below) — ADR-034
+    rule 2 is about readers; this delegates to
+    :func:`operator_documents.derived_priorities_path` so reader and writer
+    never drift onto two different paths, but the resolver owns the path."""
+    return derived_priorities_path(Path(state_dir))
 
 
 def read_derived_priorities(state_dir: Path) -> list[dict[str, Any]]:
     """Loop-derived priorities accepted by past reviews, not yet folded into
-    the operator's goal_text canon (#860) — read from the harness-owned
+    the operator's goal_text canon (#860) — from the harness-owned
     ``derived_priorities.json`` sidecar deploy never touches. Each entry has
     ``label``/``body``/``vector``/``added_utc``; no priority number (numbers
     are assigned dynamically at merge time by :func:`merged_goal_text`).
-    Malformed entries are dropped individually; fail-open to ``[]``."""
-    data = _read_json(_derived_priorities_path(Path(state_dir)), None)
-    if not isinstance(data, dict):
-        return []
-    raw = data.get("priorities")
-    if not isinstance(raw, list):
+
+    ADR-034 rule 2: a thin dict-shaped adapter over
+    :func:`operator_documents.resolve_derived_priorities` — the resolver
+    locates, cap-checks and validates the file; this function never reads
+    it itself. Malformed entries are dropped individually (by the
+    resolver); fail-open to ``[]`` when absent/unreadable."""
+    res = resolve_derived_priorities(state_dir)
+    if res.state != STATE_TEXT:
         return []
     out: list[dict[str, Any]] = []
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        label = str(entry.get("label") or "").strip()
-        body = str(entry.get("body") or "").strip()
-        vector = str(entry.get("vector") or "").strip().upper()
-        try:
-            number = int(entry.get("number") or 0)
-        except (TypeError, ValueError):
-            number = 0
-        if not label or not body or vector not in ("V1", "V2") or number <= 0:
-            continue  # number is required (#860 review: stable demand ids)
+    for e in res.entries:
         item: dict[str, Any] = {
-            "label": label,
-            "body": body,
-            "vector": vector,
-            "number": number,
-            "added_utc": str(entry.get("added_utc") or ""),
+            "label": e.title,
+            "body": e.instructions,
+            "vector": e.vector,
+            "number": e.number,
+            "added_utc": e.added_utc,
         }
         # #879: which tech-tree investment direction was current at mint
         # time, when the priority's own text matched it — additive,
         # OMITTED entirely (not just "") for any entry that predates this
         # field or never matched one, so existing exact-shape comparisons
         # of older entries are unaffected.
-        direction = str(entry.get("direction") or "").strip()
-        if direction:
-            item["direction"] = direction
+        if e.direction:
+            item["direction"] = e.direction
         out.append(item)
     return out
 

@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 #: ADR-034 rule 3: over this many bytes, a document resolves ``unreadable``
@@ -85,12 +86,19 @@ class DocumentResolution:
 
 @dataclass(frozen=True)
 class PriorityEntry:
-    """One priority, structured — never the raw document."""
+    """One priority, structured — never the raw document. ``vector``/
+    ``added_utc``/``direction`` are populated for ``source="derived"``
+    entries (goal_review's existing fields); operator entries leave them
+    at their default (the inline ``(V1)``/``(V2)`` tag, if any, stays
+    embedded in ``title`` exactly as the pre-ADR-034 code rendered it)."""
 
     number: int
     source: str  # "operator" | "derived"
     title: str = field(repr=False)
     instructions: str = field(repr=False)
+    vector: str = ""
+    added_utc: str = ""
+    direction: str = ""
 
 
 @dataclass(frozen=True)
@@ -128,6 +136,20 @@ class DerivedPrioritiesResolution:
     state: str  # text | absent | unreadable
     reason: str = ""
     entries: "tuple[PriorityEntry, ...]" = field(default_factory=tuple, repr=False)
+    mtime_utc: "str | None" = None
+
+
+@dataclass(frozen=True)
+class OperatorDocumentMetadata:
+    """``goal_text.json``'s identity/freshness metadata — ``goal_id`` and the
+    file's mtime — for readers that need those, not the priority list
+    (``active_goal_id``, the proposal-artifact writer, the derived-view's
+    freshness report). Never the document's text."""
+
+    state: str  # text | absent | unreadable
+    reason: str = ""
+    goal_id: str = ""
+    mtime_utc: "str | None" = None
 
 
 def resolve_charter(release_root: "Path | str | None") -> DocumentResolution:
@@ -139,21 +161,37 @@ def resolve_charter(release_root: "Path | str | None") -> DocumentResolution:
     return _resolve_text_file(Path(release_root) / _CHARTER_FILENAME)
 
 
+def derived_priorities_path(state_dir: "Path | str") -> Path:
+    """ADR-034 rule 2: the ONE path to ``derived_priorities.json`` — owned by
+    this resolver module, not by any reader (including
+    :mod:`nanobot.runtime.goal_review`, whose own
+    ``read_derived_priorities`` delegates to :func:`resolve_derived_priorities`
+    below rather than constructing this path itself). The writer
+    (``goal_review._write_derived_priorities``) is a separate concern —
+    rule 2 is about readers — and keeps its own path for now."""
+    return Path(state_dir) / "goals" / "derived_priorities.json"
+
+
 def resolve_derived_priorities(state_dir: "Path | str") -> DerivedPrioritiesResolution:
     """ADR-034 rule 2: derived priorities' one root is
-    ``state/goals/derived_priorities.json``. Returns its priority entries,
-    labeled ``source="derived"`` (ADR-034 rule 4 provenance), never the raw
-    JSON blob."""
-    doc = _resolve_text_file(Path(state_dir) / "goals" / "derived_priorities.json")
+    ``state/goals/derived_priorities.json``, located and cap-checked ONLY
+    here. Returns its priority entries, labeled ``source="derived"``
+    (ADR-034 rule 4 provenance), never the raw JSON blob. Entry validation
+    (label/body/vector-in-{V1,V2}/number>0) lives here, not in
+    :mod:`goal_review` — its ``read_derived_priorities`` is the thin
+    dict-shaped adapter over this resolver, not the other way around."""
+    path = derived_priorities_path(state_dir)
+    doc = _resolve_text_file(path)
+    mtime = _mtime_utc(path)
     if doc.state != STATE_TEXT:
-        return DerivedPrioritiesResolution(state=doc.state, reason=doc.reason)
+        return DerivedPrioritiesResolution(state=doc.state, reason=doc.reason, mtime_utc=mtime)
 
     try:
         data = json.loads(doc.text)
     except Exception:
-        return DerivedPrioritiesResolution(state=STATE_UNREADABLE, reason="malformed_json")
+        return DerivedPrioritiesResolution(state=STATE_UNREADABLE, reason="malformed_json", mtime_utc=mtime)
     if not isinstance(data, dict):
-        return DerivedPrioritiesResolution(state=STATE_UNREADABLE, reason="malformed_json")
+        return DerivedPrioritiesResolution(state=STATE_UNREADABLE, reason="malformed_json", mtime_utc=mtime)
 
     raw_entries = data.get("priorities")
     entries: list[PriorityEntry] = []
@@ -163,16 +201,25 @@ def resolve_derived_priorities(state_dir: "Path | str") -> DerivedPrioritiesReso
                 continue
             label = str(entry.get("label") or "").strip()
             body = str(entry.get("body") or "").strip()
+            vector = str(entry.get("vector") or "").strip().upper()
             try:
                 number = int(entry.get("number") or 0)
             except (TypeError, ValueError):
                 number = 0
-            if not label or not body or number <= 0:
+            if not label or not body or vector not in ("V1", "V2") or number <= 0:
                 continue
             entries.append(
-                PriorityEntry(number=number, source=SOURCE_DERIVED, title=label, instructions=body)
+                PriorityEntry(
+                    number=number,
+                    source=SOURCE_DERIVED,
+                    title=label,
+                    instructions=body,
+                    vector=vector,
+                    added_utc=str(entry.get("added_utc") or ""),
+                    direction=str(entry.get("direction") or "").strip(),
+                )
             )
-    return DerivedPrioritiesResolution(state=STATE_TEXT, entries=tuple(entries))
+    return DerivedPrioritiesResolution(state=STATE_TEXT, entries=tuple(entries), mtime_utc=mtime)
 
 
 def resolve_operator_priorities(
@@ -191,16 +238,9 @@ def resolve_operator_priorities(
     filtering (git-log evidence); omit it to judge completion from the
     completed-demand sidecar alone.
     """
-    doc = _resolve_text_file(Path(state_dir) / "goals" / "goal_text.json")
-    if doc.state != STATE_TEXT:
+    doc, data = _resolve_operator_document(state_dir)
+    if data is None:
         return PriorityResolution(state=PRIORITY_UNAVAILABLE, reason=doc.reason)
-
-    try:
-        data = json.loads(doc.text)
-    except Exception:
-        return PriorityResolution(state=PRIORITY_UNAVAILABLE, reason="malformed_json")
-    if not isinstance(data, dict):
-        return PriorityResolution(state=PRIORITY_UNAVAILABLE, reason="malformed_json")
 
     raw_text = str(data.get("text") or "")
     marker_idx = raw_text.find(_PRIORITY_TARGETS_MARKER)
@@ -240,6 +280,55 @@ def resolve_operator_priorities(
     )
 
 
+def resolve_operator_priorities_text(state_dir: "Path | str") -> DocumentResolution:
+    """Transitional/internal: the document-level text/absent/unreadable
+    resolution of ``goal_text.json`` (ADR-034 rule 3's general states,
+    mirroring :func:`resolve_charter`), for the runtime consumers that still
+    assemble a text blob to fold derived priorities into
+    (``goal_review.merged_goal_text`` and its callers — ``demand.py``,
+    ``llm_proposer.py``) until ADR-034 A3 removes that pipeline. NOT for
+    status surfaces — those call :func:`operator_priorities_status`
+    instead, which carries no text at all."""
+    doc, data = _resolve_operator_document(state_dir)
+    if data is None:
+        return doc
+    return DocumentResolution(state=STATE_TEXT, text=str(data.get("text") or ""))
+
+
+def resolve_operator_priorities_metadata(state_dir: "Path | str") -> OperatorDocumentMetadata:
+    """``goal_id`` and the file's mtime — for readers that need the
+    document's identity/freshness, not its priority list content."""
+    path = Path(state_dir) / "goals" / "goal_text.json"
+    mtime = _mtime_utc(path)
+    doc, data = _resolve_operator_document(state_dir)
+    if data is None:
+        return OperatorDocumentMetadata(state=doc.state, reason=doc.reason, mtime_utc=mtime)
+    goal_id = data.get("goal_id")
+    return OperatorDocumentMetadata(
+        state=STATE_TEXT,
+        goal_id=goal_id.strip() if isinstance(goal_id, str) else "",
+        mtime_utc=mtime,
+    )
+
+
+def _resolve_operator_document(state_dir: "Path | str") -> "tuple[DocumentResolution, dict | None]":
+    """Shared read+parse of ``goal_text.json`` at the document level (not the
+    priority-list level) for :func:`resolve_operator_priorities_text` and
+    :func:`resolve_operator_priorities_metadata`. Returns the resolution and,
+    when it parsed as a JSON object, the parsed dict — never the priority
+    list's own four states."""
+    doc = _resolve_text_file(Path(state_dir) / "goals" / "goal_text.json")
+    if doc.state != STATE_TEXT:
+        return doc, None
+    try:
+        data = json.loads(doc.text)
+    except Exception:
+        return DocumentResolution(state=STATE_UNREADABLE, reason="malformed_json"), None
+    if not isinstance(data, dict):
+        return DocumentResolution(state=STATE_UNREADABLE, reason="malformed_json"), None
+    return doc, data
+
+
 def operator_priorities_status(
     state_dir: "Path | str",
     *,
@@ -269,6 +358,16 @@ def _parse_entries(section: str) -> list[PriorityEntry]:
             PriorityEntry(number=number, source=SOURCE_OPERATOR, title=title, instructions=instructions)
         )
     return entries
+
+
+def _mtime_utc(path: Path) -> "str | None":
+    """ISO-8601 UTC mtime of ``path``, ``None`` when absent or unstatable."""
+    try:
+        if not path.is_file():
+            return None
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+    except Exception:
+        return None
 
 
 def _resolve_text_file(path: Path) -> DocumentResolution:
