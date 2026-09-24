@@ -304,19 +304,42 @@ def test_refuses_the_llm_call_when_two_inputs_are_empty(roots, monkeypatch, caps
     llm = MagicMock(return_value=json.dumps(VALID_OUTPUT))
     result = run_strategist(state_root, repo_root, llm=llm)
     assert llm.call_count == 0
-    assert result["success"] is False and result["reason"] == "inputs_unavailable"
+    # ADR-034 rule 3: charter ("goals") is itself empty here, and
+    # should_refuse's charter gate is checked before the shared
+    # _MAX_EMPTY_INPUTS budget on the other four inputs — so this refusal's
+    # real cause is the charter, recorded as "no_charter", not the generic
+    # "inputs_unavailable" the pre-#1444 budget check alone would have given.
+    assert result["success"] is False and result["reason"] == "no_charter"
     assert result["empty_inputs"] == ["goals", "insights", "evolution_tree"]
     assert result["prompt_chars"] == 0
     assert load_watermark(state_root) == {"total_runs": 4, "last_run": "2026-09-01T00:00:00Z"}
     assert not (state_root / "hypotheses").exists()
     rows = (state_root / "strategist" / "decisions.jsonl").read_text(encoding="utf-8").splitlines()
-    assert len(rows) == 1 and json.loads(rows[0])["reason"] == "inputs_unavailable"
+    assert len(rows) == 1 and json.loads(rows[0])["reason"] == "no_charter"
     assert not (state_root / "strategist" / "errors.jsonl").exists()
     # the systemd entry point treats the refusal as a clean run
     monkeypatch.setattr(sys, "argv", ["strategist", "--state-root", str(state_root), "--repo", str(repo_root)])
     with patch("nanobot.runtime.strategist._default_llm", side_effect=AssertionError("must not be called")):
         assert strategist.main() == 0
-    assert json.loads(capsys.readouterr().out)["reason"] == "inputs_unavailable"
+    assert json.loads(capsys.readouterr().out)["reason"] == "no_charter"
+
+
+def test_refuses_with_generic_reason_when_charter_present_but_budget_exceeded(roots, monkeypatch):
+    """The generic ``inputs_unavailable`` reason is still used when the
+    charter itself is complete and the refusal comes from the shared
+    _MAX_EMPTY_INPUTS budget on the other four inputs instead (#1444)."""
+    state_root, repo_root, release_root = roots
+    (release_root / "goals.md").write_text("# Goals\n", encoding="utf-8")
+    (state_root / "scorecard.json").write_text(json.dumps({"cycles_total": 1}), encoding="utf-8")
+    _write_ledger(state_root, [{"phase": "proposed", "cycle_id": "c1", "demand_id": "d1", "ts": _iso(0)}])
+    save_watermark(state_root, {"total_runs": 4, "last_run": "2026-09-01T00:00:00Z"})
+    llm = MagicMock(return_value=json.dumps(VALID_OUTPUT))
+
+    result = run_strategist(state_root, repo_root, llm=llm)
+
+    assert llm.call_count == 0
+    assert result["success"] is False and result["reason"] == "inputs_unavailable"
+    assert result["empty_inputs"] == ["insights", "evolution_tree"]
 
 
 def test_failed_scorecard_read_is_unavailable_but_empty_scorecard_is_empty(roots):
@@ -388,7 +411,12 @@ def test_refusal_records_empty_and_unavailable_inputs(roots):
     (state_root / "scorecard" / "latest.json").write_text("{bad", encoding="utf-8")
     _write_ledger(state_root, [])
     result = run_strategist(state_root, repo_root, llm=MagicMock())
-    assert result["reason"] == "inputs_unavailable"
+    # ADR-034 rule 3: "goals" (charter) is itself empty in this fixture
+    # (roots' release_root has no goals.md) — should_refuse's charter gate
+    # fires before the other inputs' unavailable/empty status matters, so
+    # the recorded cause is "no_charter"; empty_inputs/unavailable_inputs
+    # still carry the full picture regardless of which reason won.
+    assert result["reason"] == "no_charter"
     assert "scorecard" in result["unavailable_inputs"]
     assert "goals" in result["empty_inputs"]
     row = json.loads((state_root / "strategist" / "decisions.jsonl").read_text(encoding="utf-8").splitlines()[-1])
