@@ -3698,9 +3698,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                 target_path=target_path,
                 matched_against=dup_matched,
                 evidence_commit=evidence_commit,
-                detail=rejection_feedback if reject_reason == "self_dedup" else (
-                    dup_reason if reject_reason == enhancement_gate.REASON else ""
-                ),
+                detail=dup_reason if reject_reason == enhancement_gate.REASON else "",
                 demand_id=_candidate_identity(proposal),
             )
             return None
