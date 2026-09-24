@@ -405,6 +405,8 @@ def record_planning_session(
     task_writing_path: str | None = None,
     task_writing_bytes: int | None = None,
     task_writing_sha256: str | None = None,
+    parse_mode: str | None = None,
+    format_violation: str | None = None,
 ) -> None:
     """Log one planning-session run (#1852): whether its plan reached the
     diary, how many of its 20 ticks it used, and its own forecast for the
@@ -431,6 +433,8 @@ def record_planning_session(
             **({"task_writing_path": task_writing_path} if task_writing_path else {}),
             **({"task_writing_bytes": task_writing_bytes} if isinstance(task_writing_bytes, int) else {}),
             **({"task_writing_sha256": task_writing_sha256} if task_writing_sha256 else {}),
+            **({"parse_mode": parse_mode} if parse_mode else {}),
+            **({"format_violation": format_violation} if format_violation else {}),
         },
     )
 
