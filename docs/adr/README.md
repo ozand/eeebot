@@ -50,6 +50,7 @@ Conventions:
 | [ADR-032](ADR-032-the-agent-chooses-its-own-work.md) | The agent chooses its own work; the outer contour holds the goal and judges the day | accepted |
 | [ADR-033](ADR-033-release-owned-operator-skills.md) | Operator-owned skills ship in the release tree; loop-owned skills stay in the instance workspace | proposed |
 | [ADR-034](ADR-034-two-operator-documents-one-root-each.md) | Two operator documents, one root each, one resolver per document, and the agent that chooses reads both | proposed |
+| [ADR-035](ADR-035-the-planning-session-chooses-and-closes-hadi.md) | The agent's planning session chooses the work and closes the HADI loop; the outer contour diagnoses and never assigns | proposed |
 
 ## Acceptance
 
