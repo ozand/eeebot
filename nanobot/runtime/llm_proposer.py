@@ -2373,6 +2373,41 @@ def _proposal_creates_new_file(selfevo_repo: Path | None, proposal: dict[str, An
     return not candidate.exists()
 
 
+def _latest_non_residual_commit_for_path(
+    selfevo_repo: Path | None, target_path: str,
+) -> tuple[str, str] | None:
+    """Return the latest non-residual commit touching ``target_path``."""
+    if not selfevo_repo or not target_path:
+        return None
+    import subprocess as _sp
+
+    repo = Path(selfevo_repo)
+    try:
+        raw = _sp.check_output(
+            [
+                "git", "-c", f"safe.directory={repo}", "-C", str(repo),
+                "log", "-n1", "--format=%H%x1f%s", "--invert-grep", "-i",
+                "--grep=^Selfevo-Residual: true",
+                "--grep=^selfevo: auto-commit uncommitted subagent work",
+                "--grep=^selfevo: auto-commit residual state",
+                "--", target_path,
+            ],
+            stderr=_sp.DEVNULL,
+            timeout=10,
+        ).decode(errors="replace").strip()
+        if not raw:
+            return None
+        sha, subject = raw.split("\x1f", 1)
+        if subject.lower().startswith((
+            "selfevo: auto-commit uncommitted subagent work",
+            "selfevo: auto-commit residual state",
+        )):
+            return None
+        return sha[:12], subject
+    except Exception:
+        return None
+
+
 def _subject_dedup_enabled() -> bool:
     """#903 kill switch: default ON; only "0"/"false" disable it (falls back
     to the pre-#903 lexical-only dedup)."""
@@ -3596,7 +3631,19 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
 
         dup, dup_reason, dup_matched = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
         if dup and calls_made < _MAX_LLM_CALLS:
-            proposal = _call_propose(rejection_reason=dup_reason)
+            retry_feedback = dup_reason
+            if not _proposal_creates_new_file(selfevo_repo, proposal):
+                commit = _latest_non_residual_commit_for_path(
+                    selfevo_repo, str(proposal.get("target_path") or "")
+                )
+                if commit:
+                    sha, subject = commit
+                    retry_feedback = (
+                        f"{dup_reason} Evidence only: commit {sha} '{subject}' already touched "
+                        f"{proposal.get('target_path')}; this may relate to your proposal. "
+                        "If you propose it, state how the new requirement differs from what was done."
+                    )
+            proposal = _call_propose(rejection_reason=retry_feedback)
             calls_made += 1
             _stamp_assigned_hypothesis_ref(proposal)
             # #760 follow-up (live 2026-07-15 20:42-21:02Z): a model told
@@ -3623,13 +3670,28 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             dup, dup_reason, dup_matched = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
         if dup:
             reject_reason = _dedup_reject_reason(dup_matched)
+            target_path = str(proposal.get("target_path") or "")
+            matched_record = dup_matched
+            rejection_feedback = dup_reason
+            if not _proposal_creates_new_file(selfevo_repo, proposal):
+                commit = _latest_non_residual_commit_for_path(selfevo_repo, target_path)
+                if commit:
+                    sha, subject = commit
+                    matched_record = f"{sha}:{target_path}"
+                    rejection_feedback = (
+                        f"{dup_reason} Evidence only: commit {sha} '{subject}' already touched "
+                        f"{target_path}; this may relate to your proposal. If you propose it, "
+                        "state how the new requirement differs from what was done."
+                    )
             _record_proposer_reject(
                 state_dir,
                 reject_reason,
                 task_title=str(proposal.get("task_title") or ""),
-                target_path=str(proposal.get("target_path") or ""),
-                matched_against=dup_matched,
-                detail=dup_reason if reject_reason == enhancement_gate.REASON else "",
+                target_path=target_path,
+                matched_against=matched_record,
+                detail=rejection_feedback if reject_reason == "self_dedup" else (
+                    dup_reason if reject_reason == enhancement_gate.REASON else ""
+                ),
                 demand_id=_candidate_identity(proposal),
             )
             return None
