@@ -640,6 +640,8 @@ def _loop_section(
     duplicate_failure_skips = 0
     failed_outcomes = 0
     execution_failure_task_ids: set[str] = set()
+    model_call_incomplete_task_ids: set[str] = set()
+    model_call_incomplete_outcomes = 0
     paused_supplier_task_ids: set[str] = set()
     self_dedup_task_ids: set[str] = set()
     # #1765: 'paused-supplier' cycles (the LLM gateway/model provider could
@@ -768,7 +770,12 @@ def _loop_section(
                 task_id = proposed_task_by_cycle.get(cycle_id) or str(row.get("task_id") or row.get("demand_id") or "").strip()
                 if task_id:
                     execution_failure_task_ids.add(task_id)
-            elif outcome in {"paused-supplier", "model_call_incomplete"}:
+            elif outcome == "model_call_incomplete":
+                model_call_incomplete_outcomes += 1
+                task_id = proposed_task_by_cycle.get(cycle_id) or str(row.get("task_id") or row.get("demand_id") or "").strip()
+                if task_id:
+                    model_call_incomplete_task_ids.add(task_id)
+            elif outcome == "paused-supplier":
                 # #1765: never folds into failed_outcomes/wasted_attempts —
                 # its own counter, reported as a distinct dashboard line.
                 paused_supplier_outcomes += 1
@@ -858,9 +865,9 @@ def _loop_section(
         "self_dedup_events": self_dedup_rejects if fallback_visibility else "unavailable",
         "self_dedup_tasks": len(self_dedup_task_ids) if fallback_visibility else "unavailable",
         "self_dedup_share": _ratio(self_dedup_rejects, attempts) if fallback_visibility else "unavailable",
-        "model_call_incomplete_events": "unavailable",
-        "model_call_incomplete_tasks": "unavailable",
-        "model_call_incomplete_share": "unavailable",
+        "model_call_incomplete_events": model_call_incomplete_outcomes if fallback_visibility else "unavailable",
+        "model_call_incomplete_tasks": len(model_call_incomplete_task_ids) if fallback_visibility else "unavailable",
+        "model_call_incomplete_share": _ratio(model_call_incomplete_outcomes, attempts) if fallback_visibility else "unavailable",
         "unknown_failure_cause_events": "unavailable",
         "unknown_failure_cause_tasks": "unavailable",
         "unknown_failure_cause_share": "unavailable",
