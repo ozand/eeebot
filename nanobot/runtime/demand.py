@@ -1767,6 +1767,28 @@ def _tamper_defect_items(
 
 # ─── kind: goal-gap (#765) ──────────────────────────────────────────────────
 
+ARTIFACT_GAP_STATUS_OK = "ok"
+ARTIFACT_GAP_STATUS_UNAVAILABLE = "unavailable"
+
+
+def artifact_gap_status(release_root: "Path | None" = None) -> str:
+    """ADR-034 rule 3: the ``artifact-gap`` demand kind's reader status —
+    ``"unavailable"`` when its only precondition, the charter, cannot be
+    read, ``"ok"`` otherwise. :func:`_artifact_gap_items` emitting ``[]``
+    is structurally identical whether the charter is unavailable or simply
+    doesn't name a surface; this is the separate status accessor a caller
+    checks to tell those apart, mirroring
+    :func:`operator_documents.operator_priorities_status` for the
+    analogous ``priority-*`` kind."""
+    from nanobot.runtime.llm_proposer import _release_root_from_env
+
+    root = release_root if release_root is not None else _release_root_from_env()
+    return (
+        ARTIFACT_GAP_STATUS_OK
+        if resolve_charter(root).state == STATE_TEXT
+        else ARTIFACT_GAP_STATUS_UNAVAILABLE
+    )
+
 
 def _artifact_gap_items(
     state_dir: Path, selfevo_repo: Path | None, *, limit: int | None = None
@@ -1777,7 +1799,9 @@ def _artifact_gap_items(
     instance repo — an instance ``goals.md`` never existed, so this check
     was always dead before). The ``surfaces/*.py`` check stays against the
     instance repo (``selfevo_repo``), unchanged — that part of the check is
-    genuinely about the instance's own artifacts, not the charter."""
+    genuinely about the instance's own artifacts, not the charter. ADR-034
+    rule 3: emits nothing when the charter is unavailable — see
+    :func:`artifact_gap_status` for the separate status accessor."""
     if not selfevo_repo or not Path(selfevo_repo).is_dir():
         return []
     try:
