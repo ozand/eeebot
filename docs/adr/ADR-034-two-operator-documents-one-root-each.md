@@ -162,10 +162,15 @@ chooser and on the dashboard.
   completed", the state that has held silently — every operator priority done,
   the loop working only from charter and its own derived list — becomes visible.
   Setting new priorities is the operator's decision, not this record's.
-- **Prompt cost is new and bounded.** The priority list is a few hundred
-  characters. It enters the pooled release budget ADR-032 raised; measure its
-  reach the way #1856 measures every block, and test that it cannot displace the
-  charter or the mandatory instructions.
+- **Prompt cost is new and bounded.** The priority blocks are their own section
+  with their own limit of 3,000 characters, counted inside the overall system
+  prompt limit (`MAX_SYSTEM_PROMPT_CHARS`), not inside the pooled release budget:
+  measured on 2026-09-24 that pool had about 129 characters free, and a block
+  placed there would have displaced `OPERATING.md` (#1940). The Completed list is
+  shown by titles only. Over the limit the block is `unavailable` with reason
+  `oversize`, never truncated (rule 3). Measure its reach the way #1856 measures
+  every block, and test that the overall limit holds and that it cannot displace
+  the charter or the mandatory instructions.
 - **The goal review's input changed with #1920**, before this record. Its before/after
   comparison is recorded there.
 - **`artifact-gap` becomes reachable and today still emits nothing**, for the
