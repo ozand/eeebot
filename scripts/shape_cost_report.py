@@ -66,13 +66,13 @@ def classify_resolution(
     outcome_reason = outcome_row.get("reason") or outcome_row.get("verdict_reason")
     rb_reason = rollback.get("reason")
 
-    # (2) Дубль отсечен до исполнения
+    # (2) Отсечено до исполнения (пре-спавн отсев: дубликаты / охлаждение)
     if (
         final_outcome == "skipped-duplicate"
         or outcome_reason in ("existence_index_duplicate", "recent_duplicate_failure", "demand_cooling")
         or rb_reason in ("existence_index_duplicate", "recent_duplicate_failure", "demand_cooling")
     ):
-        return "duplicate_cut", str(rb_reason or outcome_reason or "duplicate_cut")
+        return "cut_before_execution", str(rb_reason or outcome_reason or "cut_before_execution")
 
     # (1) Работа была и отвергнута гейтом (настоящий откат)
     gate_reason = None
@@ -120,7 +120,7 @@ def summarize_resolutions(recs: list[dict[str, Any]]) -> dict[str, Any]:
         return {}
     int_recs = [r for r in recs if r.get("resolution_kind") == "integrated"]
     gate_recs = [r for r in recs if r.get("resolution_kind") == "gate_rejected"]
-    dup_recs = [r for r in recs if r.get("resolution_kind") == "duplicate_cut"]
+    cut_recs = [r for r in recs if r.get("resolution_kind") == "cut_before_execution"]
     noop_recs = [r for r in recs if r.get("resolution_kind") == "empty_noop"]
 
     def count_reasons(sub_recs: list[dict[str, Any]]) -> dict[str, int]:
@@ -139,9 +139,9 @@ def summarize_resolutions(recs: list[dict[str, Any]]) -> dict[str, Any]:
         "gate_rejected_count": len(gate_recs),
         "gate_rejected_share": round(len(gate_recs) / n, 4),
         "gate_rejected_reasons": count_reasons(gate_recs),
-        "duplicate_cut_count": len(dup_recs),
-        "duplicate_cut_share": round(len(dup_recs) / n, 4),
-        "duplicate_cut_reasons": count_reasons(dup_recs),
+        "cut_before_execution_count": len(cut_recs),
+        "cut_before_execution_share": round(len(cut_recs) / n, 4),
+        "cut_before_execution_reasons": count_reasons(cut_recs),
         "empty_noop_count": len(noop_recs),
         "empty_noop_share": round(len(noop_recs) / n, 4),
         "empty_noop_reasons": count_reasons(noop_recs),
@@ -472,7 +472,7 @@ def format_sub_report(data: dict[str, Any], title_prefix: str = "") -> list[str]
 
         lines.append(f"  Доля интеграций (outcome success, bridge.py:5286): {rates['integrated_share']*100:.1f}% ({rates['integrated_count']}/{n})")
         lines.append(f"  (1) Отвергнуто гейтом (настоящий откат):            {rates['gate_rejected_share']*100:.1f}% ({rates['gate_rejected_count']}/{n}) | причины: {rates.get('gate_rejected_reasons', {})}")
-        lines.append(f"  (2) Дубль отсечен до исполнения (pre-spawn):        {rates['duplicate_cut_share']*100:.1f}% ({rates['duplicate_cut_count']}/{n}) | причины: {rates.get('duplicate_cut_reasons', {})}")
+        lines.append(f"  (2) Отсечено до исполнения (pre-spawn):             {rates['cut_before_execution_share']*100:.1f}% ({rates['cut_before_execution_count']}/{n}) | причины: {rates.get('cut_before_execution_reasons', {})}")
         lines.append(f"  (3) Исполнитель ничего не изменил (files []):       {rates['empty_noop_share']*100:.1f}% ({rates['empty_noop_count']}/{n}) | причины: {rates.get('empty_noop_reasons', {})}")
 
         ec = dists["executor_calls"]
@@ -506,7 +506,7 @@ def format_sub_report(data: dict[str, Any], title_prefix: str = "") -> list[str]
             lines.append(f"Группа: {label} (n = {k_n})")
             lines.append(f"  Доля интеграций: {k_rates['integrated_share']*100:.1f}% ({k_rates['integrated_count']}/{k_n}, 95% CI: [{ci[0]*100:.1f}%, {ci[1]*100:.1f}%])")
             lines.append(f"  (1) Отвергнуто гейтом:      {k_rates['gate_rejected_share']*100:.1f}% ({k_rates['gate_rejected_count']}/{k_n})")
-            lines.append(f"  (2) Дубль отсечен:          {k_rates['duplicate_cut_share']*100:.1f}% ({k_rates['duplicate_cut_count']}/{k_n})")
+            lines.append(f"  (2) Отсечено до запуска:    {k_rates['cut_before_execution_share']*100:.1f}% ({k_rates['cut_before_execution_count']}/{k_n})")
             lines.append(f"  (3) Ничего не изменил:      {k_rates['empty_noop_share']*100:.1f}% ({k_rates['empty_noop_count']}/{k_n})")
             ec = k_dists["executor_calls"]
             lines.append(f"  Executor-вызовы:  min={ec['min']:.0f}, p25={ec['p25']:.0f}, median={ec['median']:.0f}, p75={ec['p75']:.0f}, max={ec['max']:.0f}")

@@ -115,7 +115,7 @@ def test_shape_cost_report_sufficient_history(tmp_path: Path):
     rates = shape_info["rates"]
     assert rates["integrated_share"] == 1.0
     assert rates["gate_rejected_share"] == 0.0
-    assert rates["duplicate_cut_share"] == 0.0
+    assert rates["cut_before_execution_share"] == 0.0
     assert rates["empty_noop_share"] == 0.0
 
     ests = shape_info["estimates"]
