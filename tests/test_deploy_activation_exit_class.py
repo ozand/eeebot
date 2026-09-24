@@ -161,9 +161,12 @@ def test_failed_self_check_cleans_candidate_environment_before_rollback(tmp_path
     )
     script.chmod(0o755)
     cleanup_marker = tmp_path / "dropin-cleaned"
+    dropin_content = tmp_path / "candidate.conf"
     _write_mock(shims / "sudo", f'''
     if [ "$1" = "install" ]; then exit 0; fi
+    if [ "$1" = "tee" ]; then cat > "{dropin_content.as_posix()}"; exit 0; fi
     if [ "$1" = "systemctl" ] && [ "$2" = "daemon-reload" ]; then exit 0; fi
+    if [ "$1" = "chmod" ]; then exit 0; fi
     if [[ "$*" == *"rm -f"* ]]; then touch "{cleanup_marker.as_posix()}"; fi
     exec "$@"
     ''')
@@ -189,6 +192,41 @@ def test_failed_self_check_cleans_candidate_environment_before_rollback(tmp_path
     assert res.returncode != 0
     assert marker.exists(), f"rollback trap did not run: stdout={res.stdout!r} stderr={res.stderr!r}"
     assert cleanup_marker.exists(), "candidate unit drop-in must be removed before rollback"
+
+
+def test_self_check_dropin_printf_writes_three_valid_directives(tmp_path):
+    stanza = DEPLOY_SCRIPT.read_text(encoding="utf-8").split(
+        "# --- #1904 candidate self-check begin ---", 1
+    )[1].split("# --- #1904 candidate self-check end ---", 1)[0]
+    shims = tmp_path / "tee-shim"
+    shims.mkdir()
+    output = tmp_path / "candidate.conf"
+    _write_mock(shims / "sudo", f'''
+    if [ "$1" = "tee" ]; then cat > "{output.as_posix()}"; exit 0; fi
+    if [ "$1" = "install" ] || {{ [ "$1" = "systemctl" ] && [ "$2" = "daemon-reload" ]; }}; then exit 0; fi
+    exec "$@"
+    ''')
+    _write_mock(shims / "tee", 'cat > "$1"')
+    _write_mock(shims / "systemctl", 'exit 0')
+    release_dir = "/releases/candidate"
+    start = stanza.index("  printf '%s")
+    end = stanza.index('  sudo chmod 0644 "$ACTIVATION_DROPIN"', start)
+    script = f'''
+    set -eEuo pipefail
+    RELEASE_DIR="{release_dir}"
+    ACTIVATION_DROPIN="{output.as_posix()}"
+    ''' + stanza[start:end] + "\n"
+    result = subprocess.run(
+        ["bash", "-c", script], env={**os.environ, "PATH": f"{shims.as_posix()}:{os.environ['PATH']}"},
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = output.read_text(encoding="utf-8").splitlines()
+    assert lines == [
+        "[Service]",
+        f"Environment=ACTIVATION_CHECK_RELEASE={release_dir}",
+        "Environment=ACTIVATION_CHECK_MODE=activation",
+    ]
 
 
 def test_activation_transport_exit_keeps_the_release(tmp_path):

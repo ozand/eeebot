@@ -251,7 +251,9 @@ else
     fi
   }
   trap cleanup_activation_dropin ERR
-  printf '[Service]\\nEnvironment=ACTIVATION_CHECK_RELEASE=%s\\nEnvironment=ACTIVATION_CHECK_MODE=activation\\n' "$RELEASE_DIR" \
+  printf '%s\\n' '[Service]' \
+    "Environment=ACTIVATION_CHECK_RELEASE=$RELEASE_DIR" \
+    'Environment=ACTIVATION_CHECK_MODE=activation' \
     | sudo tee "$ACTIVATION_DROPIN" >/dev/null
   sudo chmod 0644 "$ACTIVATION_DROPIN"
   sudo systemctl daemon-reload
