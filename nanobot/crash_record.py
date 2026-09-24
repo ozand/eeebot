@@ -172,6 +172,26 @@ def set_run_metadata(metadata: Mapping[str, Any] | None = None, **values: Any) -
             _run_metadata[str(key)] = value
 
 
+def persist_run_attribution(
+    *, state_root: str | Path, cycle_id: str, request_id: str = ""
+) -> None:
+    """Persist cycle identity before risky work so systemd can recover it."""
+    marker_path = Path(state_root) / RUN_MARKER_REL
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        if not isinstance(marker, dict):
+            return
+        marker["cycle_id"] = str(cycle_id)
+        if request_id:
+            marker["request_id"] = str(request_id)
+        _write_atomic(marker_path, marker)
+        _run_metadata["cycle_id"] = str(cycle_id)
+        if request_id:
+            _run_metadata["request_id"] = str(request_id)
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+
+
 def _run_retention_days() -> int:
     raw = os.environ.get("CYCLE_LEDGER_RETENTION_DAYS", str(RUN_RETENTION_DAYS)).strip()
     try:
@@ -229,6 +249,11 @@ def _record_run_end(root: Path, *, outcome: str, exit_status: Any, source: str, 
         if started is None or finished is None:
             return
         metadata = dict(_run_metadata)
+        # The bridge process may have been killed before its in-memory metadata
+        # reached the recorder. The durable marker is the hand-off to ExecStopPost.
+        for key in ("cycle_id", "request_id"):
+            if marker.get(key) and not metadata.get(key):
+                metadata[key] = marker[key]
         if source == "systemd" and (
             service_result in {"timeout", "watchdog", "oom-kill"}
             or str(exit_status).lower() in {"timeout", "watchdog", "oom-kill"}

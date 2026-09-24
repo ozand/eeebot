@@ -354,6 +354,8 @@ def run_window(
                     if not isinstance(row, dict) or row.get("phase") != "run_end":
                         continue
                     ts = _row_ts(row)
+                    if ts is None:
+                        ts = _parse_ts(row.get("finished_at") or row.get("started_at"))
                     if ts is not None:
                         covered.append(_iso(ts))
                     if ts is None or ts >= requested:

@@ -3476,6 +3476,9 @@ async def _main_impl_body():
         try:
             from nanobot import crash_record as _run_record
             _run_record.set_run_metadata(cycle_id=_cycle_id, request_id=request_id)
+            _run_record.persist_run_attribution(
+                state_root=STATE_DIR, cycle_id=_cycle_id, request_id=request_id
+            )
         except Exception:
             pass
         # #720 piece 3: write-ahead cycle marker, appended BEFORE any dedup check
