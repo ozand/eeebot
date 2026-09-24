@@ -331,21 +331,6 @@ def resolve_operator_priorities(
     )
 
 
-def resolve_operator_priorities_text(state_dir: "Path | str") -> DocumentResolution:
-    """Transitional/internal: the document-level text/absent/unreadable
-    resolution of ``goal_text.json`` (ADR-034 rule 3's general states,
-    mirroring :func:`resolve_charter`), for the runtime consumers that still
-    assemble a text blob to fold derived priorities into
-    (``goal_review.merged_goal_text`` and its callers — ``demand.py``,
-    ``llm_proposer.py``) until ADR-034 A3 removes that pipeline. NOT for
-    status surfaces — those call :func:`operator_priorities_status`
-    instead, which carries no text at all."""
-    doc, data = _resolve_operator_document(state_dir)
-    if data is None:
-        return doc
-    return DocumentResolution(state=STATE_TEXT, text=str(data.get("text") or ""))
-
-
 def resolve_operator_priorities_metadata(state_dir: "Path | str") -> OperatorDocumentMetadata:
     """``goal_id`` and the file's mtime — for readers that need the
     document's identity/freshness, not its priority list content."""
@@ -364,10 +349,10 @@ def resolve_operator_priorities_metadata(state_dir: "Path | str") -> OperatorDoc
 
 def _resolve_operator_document(state_dir: "Path | str") -> "tuple[DocumentResolution, dict | None]":
     """Shared read+parse of ``goal_text.json`` at the document level (not the
-    priority-list level) for :func:`resolve_operator_priorities_text` and
-    :func:`resolve_operator_priorities_metadata`. Returns the resolution and,
-    when it parsed as a JSON object, the parsed dict — never the priority
-    list's own four states."""
+    priority-list level) for :func:`resolve_operator_priorities_metadata`
+    (and, until ADR-034 A3 removed it, ``resolve_operator_priorities_text``).
+    Returns the resolution and, when it parsed as a JSON object, the parsed
+    dict — never the priority list's own four states."""
     doc = _resolve_text_file(Path(state_dir) / "goals" / "goal_text.json")
     if doc.state != STATE_TEXT:
         return doc, None
