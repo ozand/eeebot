@@ -1,13 +1,18 @@
-"""ADR-034 (docs/adr/ADR-034-two-operator-documents-one-root-each.md) rules 2
-and 3: one resolver per operator document, and the operator priority list's
-four rule-3 states. Issue #1937 (A1) landed the resolver half of the
-Test Contract; issue #1938 (A2) migrates the #1699-census readers onto
-these resolvers, deletes their fallback paths, and closes the reader half
-of the contract — covered by the tests below.
+"""ADR-034 (docs/adr/ADR-034-two-operator-documents-one-root-each.md) rules 2,
+3 and 4: one resolver per operator document, the operator priority list's
+four rule-3 states, and provenance surviving every hop. Issue #1937 (A1)
+landed the resolver half of the Test Contract; issue #1938 (A2) migrates the
+#1699-census readers onto these resolvers, deletes their fallback paths, and
+closes the reader half of the contract. Issue #1939 (A3) replaces
+goal_review.merged_goal_text's single numbered list with operator and
+derived priorities resolved and completed-filtered independently, each
+keeping source through demand, ranking and the prompt — covered by the two
+rule-4 Test Contract tests at the end of this file.
 """
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 
 from nanobot.runtime import demand, goal_review, llm_proposer, strategist_inputs
@@ -485,3 +490,159 @@ def test_status_surface_never_renders_priority_text(tmp_path: Path, monkeypatch)
     assert runtime["active_goal"] == "goal-1"
     assert runtime["goal_text"] in (PRIORITY_PRESENT, PRIORITY_ALL_COMPLETED, PRIORITY_EMPTY, PRIORITY_UNAVAILABLE)
     assert sensitive not in json.dumps(runtime)
+
+
+# ─── ADR-034 rule 4 (issue #1939, A3): provenance survives every hop ───────
+
+
+def test_priority_provenance_survives_end_to_end(tmp_path: Path, monkeypatch):
+    """Test Contract: operator and derived priorities are never merged into
+    one numbered list; each item's source survives demand collection,
+    ranking, and the proposer's own prompt. Completed filtering runs on
+    each list separately and keeps the surviving item's label."""
+    state_dir = tmp_path / "state"
+    op_open_body = "do the open operator thing."
+    op_done_body = "do the done operator thing."
+    _goal_text_json(
+        state_dir,
+        "Current priority targets:\n"
+        f"(A) Priority 1 — Operator open (V2): {op_open_body}\n"
+        f"(B) Priority 2 — Operator done: {op_done_body}",
+    )
+    derived_open_body = "do the open derived thing."
+    derived_done_body = "do the done derived thing."
+    (state_dir / "goals" / "derived_priorities.json").write_text(
+        json.dumps({
+            "schema_version": "derived-v1",
+            "priorities": [
+                {"label": "Derived open", "body": derived_open_body, "number": 9, "vector": "V1"},
+                {"label": "Derived done", "body": derived_done_body, "number": 10, "vector": "V1"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    # _mark_completed writes the whole sidecar file, so both entries are
+    # marked in one call — a second call would overwrite the first.
+    op_done_item = demand._make_item("priority", "Priority 2 — Operator done", op_done_body)
+    derived_done_item = demand._make_item("priority", "Priority 10 — Derived done", derived_done_body)
+    demand_dir = state_dir / "demand"
+    demand_dir.mkdir(parents=True, exist_ok=True)
+    (demand_dir / "completed.json").write_text(
+        json.dumps({
+            "schema_version": "demand-completed-v1",
+            "entries": {
+                op_done_item["id"]: {"kind": "priority"},
+                derived_done_item["id"]: {"kind": "priority"},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    # Through demand: each list's completed entry is filtered out on its
+    # OWN text — the other list's open entry is unaffected either way —
+    # and every surviving item carries its real source, never a guess.
+    items = demand._priority_items(state_dir, None)
+    summaries = {i["summary"]: i for i in items}
+    assert set(summaries) == {"Priority 1 — Operator open (V2)", "Priority 9 — Derived open"}
+    assert summaries["Priority 1 — Operator open (V2)"]["provenance"] == demand.PROVENANCE_OPERATOR
+    assert summaries["Priority 9 — Derived open"]["provenance"] == demand.PROVENANCE_SELF_DERIVED
+
+    # Through ranking: operator outranks self-derived regardless of vector
+    # (both here are effectively V2-vs-V1, and operator still sorts first).
+    assert [i["provenance"] for i in items] == [
+        demand.PROVENANCE_OPERATOR, demand.PROVENANCE_SELF_DERIVED,
+    ]
+
+    # Through the prompt: the proposer's own context carries the derived
+    # list under its OWN, source-labeled heading — never folded into the
+    # charter's own text (goal_review.merged_goal_text, #1665, superseded).
+    release_root = tmp_path / "release"
+    release_root.mkdir()
+    (release_root / "goals.md").write_text("the charter", encoding="utf-8")
+    monkeypatch.setenv("RELEASE_ROOT", str(release_root))
+    context = llm_proposer.build_context(state_dir, None)
+    assert "## Derived priorities (source: derived" in context
+    assert "Derived open" in context
+    assert "Derived done" not in context  # completed, filtered independently here too
+    assert "Operator open" not in context  # operator priorities in this prompt are A4's job
+
+
+def test_merged_text_consumers_migrated_with_source(tmp_path: Path, monkeypatch):
+    """Test Contract: every consumer of the FORMER merged numbered text —
+    goal_review's dedup-label baseline and its next-priority-number
+    assignment — reads operator and derived priorities on their own texts
+    and still correctly dedupes/numbers across BOTH lists, never merging
+    them into one blob first (goal_review.merged_goal_text, #860/#1665,
+    superseded by this migration)."""
+    from tests.test_goal_review import (
+        GOAL_TEXT,
+        NOW,
+        VALID_PRIORITY,
+        _goal_review_rows,
+        _seed_valid_evidence,
+        _write_goal_text,
+        _write_snapshot,
+    )
+
+    monkeypatch.setenv(goal_review.ENABLED_ENV, "1")
+    state_dir = tmp_path / "state"
+    release_root = tmp_path / "release"
+    release_root.mkdir()
+    (release_root / "goals.md").write_text("a real charter", encoding="utf-8")
+
+    _write_goal_text(state_dir, GOAL_TEXT)  # operator: Priority 11, 16 open
+    _write_snapshot(state_dir, [{
+        "metric": "repeat_failure_rate", "vector": "V1", "current": 0.5, "target": 0.3,
+        "evidence": (
+            "repeat_failure_rate=0.5 is above max target 0.3 over the last "
+            "7d window (goal vector V1)"
+        ),
+    }])
+    _seed_valid_evidence(state_dir)
+    goal_review._write_derived_priorities(state_dir, [{
+        "label": "Trim proposer retry burn", "vector": "V1",
+        "body": "Already derived yesterday.", "number": 17, "added_utc": "2026-08-01T00:00:00Z",
+    }])
+
+    # A candidate duplicating the DERIVED list's label — never the
+    # operator's own text — is still rejected: the dedup baseline unions
+    # labels from both lists, each scanned on its own text.
+    captured_ctx: dict[str, str] = {}
+
+    def _capture_and_reply(ctx: str) -> dict:
+        captured_ctx["ctx"] = ctx
+        return {"priorities": [VALID_PRIORITY]}
+
+    monkeypatch.setattr(goal_review, "_call_llm", _capture_and_reply)
+    titles = goal_review.maybe_goal_review(state_dir, None, now=NOW, release_root=release_root)
+    assert titles == []
+    row = _goal_review_rows(state_dir)[-1]
+    assert row["outcome"] == "no_valid_priorities"
+    assert row["rejected"] == [{"label": "Trim proposer retry burn", "reason": "duplicate"}]
+
+    # The key structural check: goal_review's OWN LLM prompt keeps the
+    # derived list under its own heading, separate from the operator's
+    # "Current priority targets:" section — never folded into the SAME
+    # numbered list the way merged_goal_text used to (pre-A3, the derived
+    # entry's rendered "Priority 17 — Trim proposer retry burn (V1): ..."
+    # line landed INSIDE goal_text's own "Current priority targets:"
+    # section, indistinguishable from an operator-authored entry).
+    ctx = captured_ctx["ctx"]
+    goal_section = ctx.split("## Derived priorities", 1)[0]
+    assert "Trim proposer retry burn" not in goal_section
+    assert "## Derived priorities (source: derived" in ctx
+    derived_section = ctx.split("## Derived priorities (source: derived", 1)[1]
+    assert "Trim proposer retry burn" in derived_section.split("##", 1)[0]
+
+    # A genuinely new candidate is still numbered past the highest
+    # "Priority N" in EITHER list — the operator's 16 and the derived
+    # list's 17 — giving 18: the union each list's own numbers is
+    # preserved even though they are never scanned as one blob.
+    new_priority = {**VALID_PRIORITY, "label": "A brand new priority"}
+    monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [new_priority]})
+    titles2 = goal_review.maybe_goal_review(
+        state_dir, None, now=NOW + timedelta(days=2), release_root=release_root,
+    )
+    assert titles2 == ["Priority 18 — A brand new priority"]
+    derived = goal_review.read_derived_priorities(state_dir)
+    assert [d["number"] for d in derived] == [17, 18]
