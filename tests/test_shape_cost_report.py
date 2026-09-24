@@ -156,3 +156,46 @@ def test_format_report_human_readable(tmp_path: Path):
     assert "Executor-вызовы:" in text
     assert "Iterations used:" in text
     assert "Wall clock" in text
+
+
+def test_unpaired_starts_and_multi_run_pairing(tmp_path: Path):
+    """Review requirement 2: Pair each outcome with latest start before it.
+    Unpaired starts must be counted separately and not distort duration into hours.
+    """
+    state_dir = tmp_path / "state"
+    ledger_dir = state_dir / "ledger"
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+
+    cid = "cycle-multi-run"
+    p = dict(FIXTURE_PROPOSED, cycle_id=cid, ts="2026-09-24T01:00:00Z")
+    # Start 1: killed run (no outcome)
+    s1 = {"phase": "started", "cycle_id": cid, "ts": "2026-09-24T01:01:00Z"}
+    # Start 2: 5 hours later
+    s2 = {"phase": "started", "cycle_id": cid, "ts": "2026-09-24T06:00:00Z"}
+    # Outcome 2: 10 minutes later (duration 600s)
+    o2 = {"phase": "outcome", "cycle_id": cid, "outcome": "success", "ts": "2026-09-24T06:10:00Z"}
+
+    (ledger_dir / "cycles.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in (p, s1, s2, o2)) + "\n",
+        encoding="utf-8",
+    )
+
+    from datetime import datetime
+    ref_now = datetime.fromisoformat("2026-09-24T08:00:00+00:00")
+    report = analyze_shape_costs(state_dir, days=7, now=ref_now)
+
+    assert report["totals"]["multi_run_cycles"] == 1
+    assert report["totals"]["unpaired_starts"] == 1
+
+    # Duration must be 600s (from s2 to o2), NOT 5 hours (18540s from s1 to o2)!
+    recs = report["shapes"]["extend_existing_script"]
+    assert recs["n"] == 1
+    assert recs["status"] == "мало истории (n < 5)"
+
+
+def test_wilson_confidence_interval():
+    from scripts.shape_cost_report import wilson_interval
+    # 12 / 15: 80% with wide interval overlapping 60%
+    low, high = wilson_interval(12, 15)
+    assert 0.54 <= low <= 0.60
+    assert 0.90 <= high <= 0.95

@@ -10,9 +10,10 @@ import argparse
 import glob
 import gzip
 import json
+import math
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,17 @@ def parse_ts(value: Any) -> datetime | None:
     except (ValueError, TypeError):
         return None
     return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score confidence interval for a binomial proportion."""
+    if total <= 0:
+        return 0.0, 0.0
+    p = successes / total
+    denom = 1 + (z**2) / total
+    centre = (p + (z**2) / (2 * total)) / denom
+    spread = (z * math.sqrt((p * (1 - p) + (z**2) / (4 * total)) / total)) / denom
+    return round(max(0.0, centre - spread), 4), round(min(1.0, centre + spread), 4)
 
 
 def compute_distribution(values: list[float | int]) -> dict[str, float]:
@@ -53,21 +65,24 @@ def compute_distribution(values: list[float | int]) -> dict[str, float]:
     }
 
 
-def load_base_shas(state_dir: Path) -> dict[str, str]:
+def load_result_artifacts(state_dir: Path) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
     base_shas: dict[str, str] = {}
+    rollbacks: dict[str, dict[str, Any]] = {}
     pattern = str(state_dir / "subagents" / "archive" / "result-*.json")
     for p in glob.glob(pattern):
         try:
             with open(p, "rt", encoding="utf-8", errors="replace") as fh:
                 d = json.load(fh)
                 cid = d.get("cycle_id")
-                rb = d.get("rollback") or {}
-                b_sha = rb.get("main_sha_before")
-                if cid and b_sha:
-                    base_shas[str(cid)] = str(b_sha)
+                rb = d.get("rollback")
+                if cid and isinstance(rb, dict):
+                    rollbacks[str(cid)] = rb
+                    b_sha = rb.get("main_sha_before")
+                    if b_sha:
+                        base_shas[str(cid)] = str(b_sha)
         except Exception:
             pass
-    return base_shas
+    return base_shas, rollbacks
 
 
 def load_subagent_iterations(state_dir: Path) -> dict[str, int]:
@@ -89,14 +104,14 @@ def load_subagent_iterations(state_dir: Path) -> dict[str, int]:
     return dict(subagent_iters)
 
 
-def load_executor_calls(state_dir: Path, days: int = 7) -> dict[str, int]:
+def load_executor_calls(
+    state_dir: Path, window_start: datetime, window_end: datetime
+) -> dict[str, int]:
     llm_dir = state_dir / "llm_calls"
     if not llm_dir.is_dir():
         return {}
-    files = sorted(glob.glob(str(llm_dir / "*.jsonl")))
-    selected_files = files[-days:] if days > 0 else files
     calls: dict[str, int] = defaultdict(int)
-    for p in selected_files:
+    for p in glob.glob(str(llm_dir / "*.jsonl")):
         try:
             with open(p, "rt", encoding="utf-8", errors="replace") as fh:
                 for line in fh:
@@ -104,6 +119,9 @@ def load_executor_calls(state_dir: Path, days: int = 7) -> dict[str, int]:
                     if not line:
                         continue
                     row = json.loads(line)
+                    ts = parse_ts(row.get("ts"))
+                    if not ts or ts < window_start or ts > window_end:
+                        continue
                     cid = str(row.get("cycle_id") or "")
                     if cid and str(row.get("component") or "").lower() == "executor":
                         calls[cid] += 1
@@ -112,18 +130,19 @@ def load_executor_calls(state_dir: Path, days: int = 7) -> dict[str, int]:
     return dict(calls)
 
 
-def load_cycles(state_dir: Path, days: int = 7) -> dict[str, dict[str, Any]]:
+def load_cycles(
+    state_dir: Path, window_start: datetime, window_end: datetime
+) -> dict[str, dict[str, Any]]:
     ledger_dir = state_dir / "ledger"
     if not ledger_dir.is_dir():
         return {}
     all_files = sorted(
         glob.glob(str(ledger_dir / "cycles-*.jsonl.gz")) + glob.glob(str(ledger_dir / "cycles.jsonl"))
     )
-    selected_files = all_files[-days:] if days > 0 else all_files
     cycles: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"starts": [], "outcomes": [], "proposed": None}
+        lambda: {"starts": [], "outcomes": [], "proposed": None, "phases": set()}
     )
-    for p in selected_files:
+    for p in all_files:
         open_fn = gzip.open if p.endswith(".gz") else open
         try:
             with open_fn(p, "rt", encoding="utf-8", errors="replace") as fh:
@@ -135,7 +154,11 @@ def load_cycles(state_dir: Path, days: int = 7) -> dict[str, dict[str, Any]]:
                     cid = str(row.get("cycle_id") or "")
                     if not cid or not cid.startswith("cycle-"):
                         continue
+                    ts = parse_ts(row.get("ts"))
+                    if not ts or ts < window_start or ts > window_end:
+                        continue
                     phase = row.get("phase")
+                    cycles[cid]["phases"].add(phase)
                     if phase == "proposed" and not cycles[cid]["proposed"]:
                         cycles[cid]["proposed"] = row
                     elif phase == "started":
@@ -151,20 +174,29 @@ def analyze_shape_costs(
     state_dir: Path,
     repo_dir: Path | None = None,
     days: int = 7,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     state_dir = Path(state_dir)
     repo_dir = Path(repo_dir) if repo_dir else None
-    base_shas = load_base_shas(state_dir)
+    now_utc = now or datetime.now(timezone.utc)
+    cutoff_utc = now_utc - timedelta(days=days)
+
+    base_shas, result_rollbacks = load_result_artifacts(state_dir)
     subagent_iters = load_subagent_iterations(state_dir)
-    executor_calls = load_executor_calls(state_dir, days=days)
-    cycles = load_cycles(state_dir, days=days)
+    executor_calls = load_executor_calls(state_dir, cutoff_utc, now_utc)
+    cycles = load_cycles(state_dir, cutoff_utc, now_utc)
 
     records_by_shape: dict[str, list[dict[str, Any]]] = defaultdict(list)
     records_by_assignment: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
+    total_unpaired_starts = 0
+    total_multi_run_cycles = 0
+    dropped_no_proposed = 0
+
     for cid, data in cycles.items():
         p_row = data.get("proposed")
         if not p_row:
+            dropped_no_proposed += 1
             continue
         base_sha = base_shas.get(cid)
         shape = classify_task_shape(
@@ -179,20 +211,34 @@ def analyze_shape_costs(
         if iters == 0:
             iters = subagent_iters.get(cid, 0)
 
-        duration_s = 0.0
-        for s_row, o_row in zip(data.get("starts", []), data.get("outcomes", [])):
-            st = parse_ts(s_row.get("ts"))
-            ot = parse_ts(o_row.get("ts"))
-            if st and ot and ot >= st:
-                duration_s += (ot - st).total_seconds()
-        if duration_s == 0.0 and data.get("starts") and data.get("outcomes"):
-            st = parse_ts(data["starts"][0].get("ts"))
-            ot = parse_ts(data["outcomes"][-1].get("ts"))
-            if st and ot and ot >= st:
-                duration_s = (ot - st).total_seconds()
+        # Pair each outcome with latest start before it (#1926 review)
+        starts = sorted([parse_ts(s["ts"]) for s in data.get("starts", []) if parse_ts(s.get("ts"))])
+        outcomes = sorted([parse_ts(o["ts"]) for o in data.get("outcomes", []) if parse_ts(o.get("ts"))])
 
-        outcomes = [str(o.get("outcome") or "") for o in data.get("outcomes", [])]
-        final_outcome = outcomes[-1] if outcomes else "unknown"
+        if len(starts) > 1:
+            total_multi_run_cycles += 1
+
+        used_starts = set()
+        run_durations = []
+        for ot in outcomes:
+            candidates = [st for st in starts if st <= ot and st not in used_starts]
+            if candidates:
+                best_start = candidates[-1]
+                used_starts.add(best_start)
+                run_durations.append((ot - best_start).total_seconds())
+
+        unpaired = len(starts) - len(used_starts)
+        total_unpaired_starts += unpaired
+        duration_s = sum(run_durations)
+
+        outcomes_list = [str(o.get("outcome") or "") for o in data.get("outcomes", [])]
+        final_outcome = outcomes_list[-1] if outcomes_list else "unknown"
+
+        # Integration: per bridge.py:5276-5286, outcome == 'success' iff cycle integrated (_integrated)
+        is_integrated = bool(final_outcome == "success")
+        # Rollback: from explicit rollback record (rb.get("integrated") is False)
+        rb = result_rollbacks.get(cid) or {}
+        is_rolled_back = bool(rb.get("integrated") is False)
 
         est = p_row.get("estimated_size") or p_row.get("estimated_iterations") or p_row.get("iterations_planned")
 
@@ -207,12 +253,25 @@ def analyze_shape_costs(
             "iterations_used": iters,
             "wall_clock_s": duration_s,
             "outcome": final_outcome,
+            "is_integrated": is_integrated,
+            "is_rolled_back": is_rolled_back,
             "estimate": est,
         }
         records_by_shape[shape].append(rec)
         records_by_assignment[assignment].append(rec)
 
-    report: dict[str, Any] = {"shapes": {}, "provenance": "harness_measured_state"}
+    report: dict[str, Any] = {
+        "shapes": {},
+        "provenance": "harness_measured_state",
+        "window": {"start": cutoff_utc.isoformat(), "end": now_utc.isoformat(), "days": days},
+        "totals": {
+            "total_cycles_in_window": len(cycles),
+            "proposed_cycles_analyzed": len(cycles) - dropped_no_proposed,
+            "dropped_no_proposed": dropped_no_proposed,
+            "multi_run_cycles": total_multi_run_cycles,
+            "unpaired_starts": total_unpaired_starts,
+        },
+    }
 
     for shape in TASK_SHAPES:
         recs = records_by_shape.get(shape, [])
@@ -231,8 +290,10 @@ def analyze_shape_costs(
         iterations = [r["iterations_used"] for r in recs]
         wall_clocks = [r["wall_clock_s"] for r in recs]
 
-        integrated_count = sum(1 for r in recs if r["outcome"] == "success")
-        rollback_count = sum(1 for r in recs if r["outcome"] in ("failed", "partial"))
+        integrated_count = sum(1 for r in recs if r["is_integrated"])
+        rollback_count = sum(1 for r in recs if r["is_rolled_back"])
+        success_count = sum(1 for r in recs if r["outcome"] == "success")
+        failed_count = sum(1 for r in recs if r["outcome"] in ("failed", "partial"))
 
         pairs = [(r["estimate"], r["iterations_used"]) for r in recs if r["estimate"] is not None]
         missing_count = sum(1 for r in recs if r["estimate"] is None)
@@ -250,6 +311,8 @@ def analyze_shape_costs(
                 "integrated_share": round(integrated_count / n, 4),
                 "rollback_count": rollback_count,
                 "rollback_share": round(rollback_count / n, 4),
+                "success_count": success_count,
+                "failed_partial_count": failed_count,
             },
             "estimates": {
                 "pairs": pairs,
@@ -266,8 +329,9 @@ def analyze_shape_costs(
         exec_calls = [r["executor_calls"] for r in recs]
         iterations = [r["iterations_used"] for r in recs]
         wall_clocks = [r["wall_clock_s"] for r in recs]
-        int_c = sum(1 for r in recs if r["outcome"] == "success")
-        rb_c = sum(1 for r in recs if r["outcome"] in ("failed", "partial"))
+        int_c = sum(1 for r in recs if r["is_integrated"])
+        rb_c = sum(1 for r in recs if r["is_rolled_back"])
+        ci_low, ci_high = wilson_interval(int_c, n)
         report["assignment_comparison"][assignment] = {
             "n": n,
             "distributions": {
@@ -278,8 +342,10 @@ def analyze_shape_costs(
             "rates": {
                 "integrated_count": int_c,
                 "integrated_share": round(int_c / n, 4),
+                "integrated_ci95": [ci_low, ci_high],
                 "rollback_count": rb_c,
                 "rollback_share": round(rb_c / n, 4),
+                "success_count": sum(1 for r in recs if r["outcome"] == "success"),
             },
             "estimates": {
                 "pairs": [(r["estimate"], r["iterations_used"]) for r in recs if r["estimate"] is not None],
@@ -291,8 +357,14 @@ def analyze_shape_costs(
 
 
 def format_report(report: dict[str, Any], days: int = 7) -> str:
+    win = report.get("window", {})
+    tot = report.get("totals", {})
     lines = [
         f"=== Отчет о стоимости по формам задач (#1795) — окно {days} дней ===",
+        f"Окно UTC: {win.get('start')} — {win.get('end')}",
+        f"Всего циклов в окне: {tot.get('total_cycles_in_window', 0)} (пропущено без proposed: {tot.get('dropped_no_proposed', 0)})",
+        f"Циклов с задачей (proposed) проанализировано: {tot.get('proposed_cycles_analyzed', 0)}",
+        f"Циклов с >1 прогоном: {tot.get('multi_run_cycles', 0)}, непарных стартов: {tot.get('unpaired_starts', 0)}",
         f"Provenance: {report.get('provenance', 'unknown')} (ADR-023/ADR-027)",
         "",
     ]
@@ -310,8 +382,9 @@ def format_report(report: dict[str, Any], days: int = 7) -> str:
         dists = info["distributions"]
         ests = info["estimates"]
 
-        lines.append(f"  Доля интеграций: {rates['integrated_share']*100:.1f}% ({rates['integrated_count']}/{n})")
-        lines.append(f"  Доля откатов:     {rates['rollback_share']*100:.1f}% ({rates['rollback_count']}/{n})")
+        lines.append(f"  Доля интеграций (outcome success, bridge.py:5286): {rates['integrated_share']*100:.1f}% ({rates['integrated_count']}/{n})")
+        lines.append(f"  Доля откатов (rollback в subagents/ledger):       {rates['rollback_share']*100:.1f}% ({rates['rollback_count']}/{n})")
+        lines.append(f"  Исходы ledger: success={rates['success_count']}/{n}, failed/partial={rates['failed_partial_count']}/{n}")
 
         ec = dists["executor_calls"]
         lines.append(
@@ -349,8 +422,12 @@ def format_report(report: dict[str, Any], days: int = 7) -> str:
             k_n = data["n"]
             k_rates = data["rates"]
             k_dists = data["distributions"]
+            ci = k_rates.get("integrated_ci95", [0.0, 0.0])
             lines.append(f"Группа: {label} (n = {k_n})")
-            lines.append(f"  Доля интеграций: {k_rates['integrated_share']*100:.1f}% ({k_rates['integrated_count']}/{k_n})")
+            lines.append(
+                f"  Доля интеграций: {k_rates['integrated_share']*100:.1f}% ({k_rates['integrated_count']}/{k_n}, "
+                f"95% CI: [{ci[0]*100:.1f}%, {ci[1]*100:.1f}%])"
+            )
             lines.append(f"  Доля откатов:     {k_rates['rollback_share']*100:.1f}% ({k_rates['rollback_count']}/{k_n})")
             ec = k_dists["executor_calls"]
             lines.append(f"  Executor-вызовы:  min={ec['min']:.0f}, p25={ec['p25']:.0f}, median={ec['median']:.0f}, p75={ec['p75']:.0f}, max={ec['max']:.0f}")
@@ -359,6 +436,14 @@ def format_report(report: dict[str, Any], days: int = 7) -> str:
             wc = k_dists["wall_clock_s"]
             lines.append(f"  Wall clock (сек): min={wc['min']:.1f}, p25={wc['p25']:.1f}, median={wc['median']:.1f}, p75={wc['p75']:.1f}, max={wc['max']:.1f}")
             lines.append("")
+        assigned_data = ac.get("assigned", {})
+        assigned_n = assigned_data.get("n", 0)
+        lines.append(
+            f"  Примечание по неопределенности: доверительные интервалы интеграций (assigned vs self_proposed) "
+            f"перекрываются из-за малого размера выборки оператора (n={assigned_n}); различие является "
+            f"описательным наблюдением выборки, а не статистически значимым выводом."
+        )
+        lines.append("")
 
     return "\n".join(lines)
 
