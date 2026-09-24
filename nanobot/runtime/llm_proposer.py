@@ -2340,14 +2340,26 @@ def _all_built_subjects(selfevo_repo: Path | None) -> str:
 
     repo = Path(selfevo_repo)
     try:
-        return _sp_hist.check_output(
+        raw = _sp_hist.check_output(
             [
                 "git", "-c", f"safe.directory={repo}", "-C", str(repo),
-                "log", "--format=%s", f"-n{_PERMANENT_DEDUP_MAX_COMMITS}",
+                "log",
+                "--invert-grep", "-i",
+                "--grep=^Selfevo-Residual: true",
+                "--grep=^selfevo: auto-commit uncommitted subagent work",
+                "--grep=^selfevo: auto-commit residual state",
+                "--format=%s", f"-n{_PERMANENT_DEDUP_MAX_COMMITS}",
             ],
             stderr=_sp_hist.DEVNULL,
             timeout=15,
         ).decode(errors="replace")
+        return "\n".join(
+            line for line in raw.splitlines()
+            if not line.strip().lower().startswith((
+                "selfevo: auto-commit residual state",
+                "selfevo: auto-commit uncommitted subagent work",
+            ))
+        )
     except Exception:
         return ""
 
