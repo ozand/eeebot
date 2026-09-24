@@ -775,6 +775,7 @@ def _loop_section(
                 task_id = proposed_task_by_cycle.get(cycle_id) or str(row.get("task_id") or row.get("demand_id") or "").strip()
                 if task_id:
                     model_call_incomplete_task_ids.add(task_id)
+                    execution_failure_task_ids.add(task_id)
             elif outcome == "paused-supplier":
                 # #1765: never folds into failed_outcomes/wasted_attempts —
                 # its own counter, reported as a distinct dashboard line.
@@ -854,6 +855,9 @@ def _loop_section(
         "repeat_failures": repeat_failures,
         "repeat_failure_rate": _ratio(repeat_failures, attempts),
         "repeat_failure_rate_new": _ratio(duplicate_failure_skips + failed_outcomes, attempts),
+        "execution_failure_and_incomplete_events": (failed_outcomes + model_call_incomplete_outcomes) if fallback_visibility else "unavailable",
+        "execution_failure_and_incomplete_tasks": len(execution_failure_task_ids | model_call_incomplete_task_ids) if fallback_visibility else "unavailable",
+        "execution_failure_and_incomplete_share": _ratio(failed_outcomes + model_call_incomplete_outcomes, attempts) if fallback_visibility else "unavailable",
         # #1765 decomposition. Shares use the existing attempt denominator;
         # task counts deduplicate only canonical task_id/demand_id values.
         "execution_failure_events": failed_outcomes if fallback_visibility else "unavailable",

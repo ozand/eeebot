@@ -152,6 +152,8 @@ def evaluate_daily_movement(
             f"demonstrated code/functional delivery ({progressive_cycles} progressive cycles, "
             f"productive_ratio={productive_ratio})"
         )
+    if model_call_incomplete_cycles:
+        reason += f"; {model_call_incomplete_cycles} model_call_incomplete cycle(s) counted separately"
     if unattributed_kills:
         verdict = "incomplete"
         reason += f"; incomplete evidence: {len(unattributed_kills)} killed run(s) unattributed"
