@@ -379,10 +379,14 @@ class TestAutoCommitUncommittedWork:
         status = _run(work, "status", "--porcelain").stdout
         assert status.strip() == ""
         log = _run(work, "log", "-1", "--pretty=%s").stdout
-        assert log.startswith("selfevo: auto-commit uncommitted subagent work")
-        assert "Wire host_metrics into dashboard" in log
+        assert log.startswith("selfevo: auto-commit residual state —")
+        assert "mod.py" in log
+        assert "Wire host_metrics into dashboard" not in log
         body = _run(work, "log", "-1", "--pretty=%b").stdout
         assert "#666" in body
+        assert "attempted: Wire host_metrics into dashboard" in body
+        assert "outcome: incomplete" in body
+        assert "Selfevo-Residual: true" in body
 
     def test_clean_tree_is_a_noop(self, tmp_path):
         origin, work = _init_repo(tmp_path)
@@ -558,7 +562,7 @@ class TestFullCycleFlowWithAutoCommit:
         branches = _run(work, "branch", "--list", setup["branch"]).stdout
         assert setup["branch"] in branches
         log = _run(work, "log", setup["branch"], "--oneline").stdout
-        assert "auto-commit uncommitted subagent work" in log
+        assert "auto-commit residual state" in log
 
     def test_clean_tree_no_commits_stays_a_noop(self, tmp_path):
         origin, work = _init_repo(tmp_path)

@@ -1850,7 +1850,7 @@ def _auto_commit_uncommitted_work(
 
     git = _git_cmd(repo_root)
     try:
-        status = _sp_auto.run(git + ['status', '--porcelain'], capture_output=True, text=True)
+        status = _sp_auto.run(git + ['status', '--porcelain', '-uall'], capture_output=True, text=True)
     except Exception:
         return {'committed': False, 'excluded': [], 'files_committed': 0}
     if status.returncode != 0 or not status.stdout.strip():
@@ -1890,11 +1890,19 @@ def _auto_commit_uncommitted_work(
             pass
 
     title = (backlog_title or task_snippet or 'subagent task').strip()
-    title = _re_auto.sub(r'\s+', ' ', title)[:80]
-    subject = f'selfevo: auto-commit uncommitted subagent work — {title}'
+    title = _re_auto.sub(r'\s+', ' ', title)[:120]
+    if len(included) == 1:
+        paths_desc = included[0]
+    else:
+        joined = ", ".join(included)
+        paths_desc = joined if len(joined) <= 60 and len(included) <= 3 else f"{len(included)} paths"
+    subject = f'selfevo: auto-commit residual state — {paths_desc}'
     body = (
         f'Subagent finished on {branch} without running git commit; the bridge\n'
-        'committed its working-tree changes so the smoke gate can evaluate them (#666).'
+        'committed its working-tree changes so the smoke gate can evaluate them (#666, #1906).\n\n'
+        f'attempted: {title}\n'
+        'outcome: incomplete\n\n'
+        'Selfevo-Residual: true'
     )
     try:
         commit = _sp_auto.run(
@@ -2020,7 +2028,12 @@ def _recent_commits_with_paths(repo_root: 'Path', since: str) -> 'list[tuple[str
 
     git_cmd = [
         'git', '-c', f'safe.directory={repo_root}', '-C', str(repo_root),
-        'log', '--pretty=format:%x00%h %s', '--name-only', f'--since={since}',
+        'log',
+        '--invert-grep', '-i',
+        '--grep=^Selfevo-Residual: true',
+        '--grep=^selfevo: auto-commit uncommitted subagent work',
+        '--grep=^selfevo: auto-commit residual state',
+        '--pretty=format:%x00%h %s', '--name-only', f'--since={since}',
     ]
     try:
         raw = _sp.check_output(git_cmd, stderr=_sp.DEVNULL, timeout=10).decode(errors='replace')
@@ -2034,6 +2047,12 @@ def _recent_commits_with_paths(repo_root: 'Path', since: str) -> 'list[tuple[str
         header = block_lines[0]
         sha, _, subject = header.partition(' ')
         if not sha:
+            continue
+        subj_lower = subject.strip().lower()
+        if subj_lower.startswith((
+            'selfevo: auto-commit residual state',
+            'selfevo: auto-commit uncommitted subagent work',
+        )):
             continue
         paths = [ln for ln in block_lines[1:] if ln.strip()]
         commits.append((sha, subject, paths))
@@ -2086,7 +2105,12 @@ def _recent_activity_context(
             # covered by adding its path prefix, not a new special case.
             subjects: list[str] = []
             for sha, subject, paths in commits:
-                if subject.strip().lower().startswith('merge:'):
+                subj_lower = subject.strip().lower()
+                if subj_lower.startswith((
+                    'merge:',
+                    'selfevo: auto-commit residual state',
+                    'selfevo: auto-commit uncommitted subagent work',
+                )):
                     continue
                 if _recent_commit_is_bookkeeping_only(paths):
                     continue
