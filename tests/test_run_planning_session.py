@@ -349,6 +349,28 @@ def test_malformed_final_response_degrades_without_touching_the_diary(tmp_path: 
     assert rows[0]["iterations_planned"] is None
 
 
+def test_planning_ablation_disabled_skips_session_and_records_reason(tmp_path: Path, monkeypatch):
+    state = tmp_path / "state"
+    monkeypatch.setenv("SELFEVO_PLANNING_SESSION_ENABLED", "0")
+    monkeypatch.setattr(
+        bridge, "_run_planning_session",
+        lambda **_kwargs: pytest.fail("disabled planning session must not run"),
+    )
+    result = bridge._planning_session_disabled_result(state, "cycle-disabled")
+    assert result == {
+        "ran": False, "iterations_used": None, "iterations_planned": None,
+        "tampered_files": [], "reason": "disabled",
+    }
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["outcome"] == "disabled"
+    assert row["reason"] == "disabled"
+
+
+def test_planning_ablation_unset_defaults_enabled(monkeypatch):
+    monkeypatch.delenv("SELFEVO_PLANNING_SESSION_ENABLED", raising=False)
+    assert bridge._planning_session_enabled() is True
+
+
 def test_spawn_failure_degrades_to_the_ranked_queue(tmp_path: Path, monkeypatch):
     """AC: a failed planning session degrades to the ranked queue (the
     caller proceeds unaffected) and says so in the journal."""

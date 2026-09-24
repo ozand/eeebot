@@ -3083,6 +3083,24 @@ def _regenerate_skills_index_if_needed(repo_root: 'Path', files_changed: 'list[s
         return {'outcome': 'commit_failed', 'commit_sha': None, 'reason': f'unexpected error: {exc}'}
 
 
+def _planning_session_enabled() -> bool:
+    return os.environ.get('SELFEVO_PLANNING_SESSION_ENABLED', '1').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _planning_session_disabled_result(state_dir: 'Path', cycle_id: str) -> dict:
+    """Record an intentional planning ablation distinctly from planner failure."""
+    from nanobot.runtime.cycle_ledger import record_planning_session
+
+    record_planning_session(
+        state_dir, cycle_id, 'disabled', iterations_used=None,
+        iterations_planned=None, reason='disabled',
+    )
+    return {
+        'ran': False, 'iterations_used': None, 'iterations_planned': None,
+        'tampered_files': [], 'reason': 'disabled',
+    }
+
+
 async def _run_planning_session(
     *, provider, bus, config, model: str, state_dir: 'Path', selfevo_repo: 'Path',
     denied_paths: set, cycle_id: str,
@@ -5085,15 +5103,18 @@ async def _main_impl_body():
     # diary.
     _planning_selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
     _planning_denied_paths = {(STATE_DIR / rel).resolve() for rel in _FITNESS_SIDECARS}
-    try:
-        _planning_result = await _run_planning_session(
-            provider=provider, bus=bus, config=config, model=bridge_model,
-            state_dir=STATE_DIR, selfevo_repo=_planning_selfevo_repo,
-            denied_paths=_planning_denied_paths, cycle_id=_cycle_id,
-        )
-    except Exception as _planning_exc:
-        print(f'planning-session: unexpected error ({_planning_exc})')
-        _planning_result = {'ran': False, 'iterations_used': None, 'iterations_planned': None, 'tampered_files': []}
+    if not _planning_session_enabled():
+        _planning_result = _planning_session_disabled_result(STATE_DIR, _cycle_id)
+    else:
+        try:
+            _planning_result = await _run_planning_session(
+                provider=provider, bus=bus, config=config, model=bridge_model,
+                state_dir=STATE_DIR, selfevo_repo=_planning_selfevo_repo,
+                denied_paths=_planning_denied_paths, cycle_id=_cycle_id,
+            )
+        except Exception as _planning_exc:
+            print(f'planning-session: unexpected error ({_planning_exc})')
+            _planning_result = {'ran': False, 'iterations_used': None, 'iterations_planned': None, 'tampered_files': []}
 
     _explore_n, _explore_metric = _parse_explore_mode(req)
     if _explore_n > 1:
