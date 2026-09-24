@@ -98,6 +98,7 @@ def _drive_activation(tmp_path: Path, *, restart_rc: int, result: str, status: s
     shims = tmp_path / "shims"
     shims.mkdir(exist_ok=True)
     _write_mock(shims / "sudo", f'''
+    if [ "$1" = "install" ]; then exit 0; fi
     if [ "$1" = "systemctl" ] && [ "$2" = "restart" ]; then exit {restart_rc}; fi
     if [ "$1" = "-u" ] && [ "$2" = "eeepc-agent" ]; then
       if [[ "$*" == *"ACTIVATION_CHECK_MODE=record-behavior-timeout"* ]]; then
@@ -160,7 +161,12 @@ def test_failed_self_check_cleans_candidate_environment_before_rollback(tmp_path
     )
     script.chmod(0o755)
     cleanup_marker = tmp_path / "dropin-cleaned"
-    _write_mock(shims / "sudo", f'if [[ "$*" == *"rm -f"* ]]; then touch "{cleanup_marker.as_posix()}"; fi; exec "$@"')
+    _write_mock(shims / "sudo", f'''
+    if [ "$1" = "install" ]; then exit 0; fi
+    if [ "$1" = "systemctl" ] && [ "$2" = "daemon-reload" ]; then exit 0; fi
+    if [[ "$*" == *"rm -f"* ]]; then touch "{cleanup_marker.as_posix()}"; fi
+    exec "$@"
+    ''')
     _write_mock(shims / "tee", 'cat > "$1"')
     (shims / "systemctl").write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
     (shims / "systemctl").chmod(0o755)
