@@ -139,11 +139,16 @@ def _drive_activation(tmp_path: Path, *, restart_rc: int, result: str, status: s
     self_check = DEPLOY_SCRIPT.read_text(encoding="utf-8").split(
         "# --- #1904 candidate self-check begin ---", 1
     )[1].split("# --- #1904 candidate self-check end ---", 1)[0]
-    res = _bash(prelude + self_check + _activation_stanza() + "\necho STANZA-COMPLETED\n", env=env)
+    # The real script re-arms rollback_remote after the self-check block.
+    res = _bash(
+        prelude + self_check + "\ntrap rollback_remote ERR\n" + _activation_stanza()
+        + "\necho STANZA-COMPLETED\n",
+        env=env,
+    )
     return res, marker.exists()
 
 
-def test_failed_self_check_cleans_candidate_environment_before_rollback(tmp_path):
+def test_failed_self_check_cleans_candidate_environment_and_exits(tmp_path):
     stanza = DEPLOY_SCRIPT.read_text(encoding="utf-8").split(
         "# --- #1904 candidate self-check begin ---", 1
     )[1].split("# --- #1904 candidate self-check end ---", 1)[0]
@@ -173,25 +178,42 @@ def test_failed_self_check_cleans_candidate_environment_before_rollback(tmp_path
     _write_mock(shims / "tee", 'cat > "$1"')
     (shims / "systemctl").write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
     (shims / "systemctl").chmod(0o755)
-    marker = tmp_path / "rollback-fired"
     release_dir = str(DEPLOY_SCRIPT.parents[3]).replace("\\\\", "/")
     temp_dropin_dir = (tmp_path / "systemd" / "activation-check.service.d").as_posix()
+    # As in the real script: no ERR trap and no rollback_remote exist yet when
+    # the self-check runs (both are defined after it) -- nothing is flipped.
     prelude = f"""
     set -eEuo pipefail
     die() {{ echo \\\"CRITICAL: $*\\\" >&2; return 1; }}
     ACTIVATION_CHECK_UNIT=eeepc-self-evolving-activation-check.service
     ACTIVATION_CHECK_DROPIN_DIR=\\\"{temp_dropin_dir}\\\"
     RELEASE_DIR=\\\"{release_dir}\\\"
-    PREV_RELEASE_PATH=/old
-    CURRENT_SYMLINK=/current
-    rollback_remote() {{ touch {marker.as_posix()}; }}
-    trap rollback_remote ERR
     PATH=\\\"{shims.as_posix()}:$PATH\\\"
     """
     res = _bash(prelude + stanza + "\\n", env={"PATH": f"{shims.as_posix()}:{os.environ['PATH']}"})
     assert res.returncode != 0
-    assert marker.exists(), f"rollback trap did not run: stdout={res.stdout!r} stderr={res.stderr!r}"
-    assert cleanup_marker.exists(), "candidate unit drop-in must be removed before rollback"
+    assert "command not found" not in res.stderr, res.stderr
+    assert "self-check failed" in res.stderr, res.stderr
+    assert cleanup_marker.exists(), "candidate unit drop-in must be removed on failure"
+
+
+def test_self_check_block_precedes_rollback_and_does_not_reference_it():
+    # First deploy 2026-09-24: the block armed `trap rollback_remote ERR`
+    # before rollback_remote was defined -> "rollback_remote: command not found".
+    text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    begin = text.index("# --- #1904 candidate self-check begin ---")
+    end = text.index("# --- #1904 candidate self-check end ---")
+    code = [line for line in text[begin:end].splitlines() if not line.lstrip().startswith("#")]
+    assert not any("rollback_remote" in line for line in code)
+    assert begin < text.index("rollback_remote() {")
+
+
+def test_activation_unit_runs_from_the_candidate_directory():
+    # `python -m` puts the cwd ahead of PYTHONPATH; WorkingDirectory is the
+    # current release, so the unit must cd into the candidate first.
+    unit = (DEPLOY_SCRIPT.parents[1] / "systemd" / "eeepc-self-evolving-activation-check.service").read_text(encoding="utf-8")
+    exec_start = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
+    assert exec_start.index('cd "$ACTIVATION_CHECK_RELEASE"') < exec_start.index("python -m nanobot.runtime.activation_check")
 
 
 def test_self_check_dropin_printf_writes_three_valid_directives(tmp_path):

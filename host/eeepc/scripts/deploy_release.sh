@@ -257,13 +257,16 @@ else
     | sudo tee "$ACTIVATION_DROPIN" >/dev/null
   sudo chmod 0644 "$ACTIVATION_DROPIN"
   sudo systemctl daemon-reload
+  # Nothing has been flipped yet, so a failed check has nothing to roll back:
+  # clear the cleanup trap and exit non-zero. rollback_remote is defined (and
+  # armed) only after this block.
   if sudo systemctl start eeepc-self-evolving-activation-check.service; then
     cleanup_activation_dropin
-    trap rollback_remote ERR
+    trap - ERR
   else
     ACTIVATION_CHECK_RC=$?
     cleanup_activation_dropin
-    trap rollback_remote ERR
+    trap - ERR
     die "model-free bridge activation self-check failed (rc=$ACTIVATION_CHECK_RC)"
   fi
   echo "[remote] model-free bridge activation self-check passed; no model was called"
