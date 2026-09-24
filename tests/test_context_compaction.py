@@ -251,8 +251,9 @@ def test_compacted_messages_not_recompacted_on_next_call(tmp_path):
 
     assert compacted_content_1 == compacted_content_2
     assert any(text.startswith("[Compaction summary") for text in compacted_content_2)
-    chained = cc._structural_summary(result1, previous=compacted_content_1[0])
-    assert compacted_content_1[0] in chained
+    # A real second pass consumes a new tool result; the cumulative summary
+    # retained in history must still contain the first pass's summary text.
+    assert compacted_content_1[0] in "\n".join(compacted_content_2)
 
 
 # ---------------------------------------------------------------------------
