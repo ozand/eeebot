@@ -14,15 +14,13 @@ conservative (actual token counts are often 20-30 % lower for English prose),
 which means compaction fires slightly early rather than late, keeping a
 safety margin.
 
-#1776 scope: the observable half only
---------------------------------------
-#1776 summary half: replace the dropped span with a deterministic structural
-summary. No model call is made: model summarization would add latency and
-queue cost to every compaction, while heuristic extraction can be honest if it
-quotes observed messages and never infers unstated intent. The summary carries
-the original task, recent assistant progress, explicitly marked decisions,
-and paths evidenced by file tools/commands; unknown fields stay empty. Earlier
-compaction summaries are retained verbatim so repeated compaction is cumulative.
+#1776 scope: token-span compaction plus deterministic structural summary
+--------------------------------------------------------------------------
+The dropped span is replaced with an evidence-only summary: task, explicit
+assistant progress/decisions, and paths observed in file calls/results. No
+summarization model call is made: that would add latency and queue cost, while
+heuristic extraction must not infer unstated intent. Each later compaction
+re-derives from the newly dropped span and retains the earlier summary verbatim.
 
 
 - The cut point is a token span walked back from the newest message, not a
@@ -46,8 +44,9 @@ compaction summaries are retained verbatim so repeated compaction is cumulative.
   (was 98,000) and is this module's one authoritative definition; a test
   greps the tree for a second hardcoded copy of the literal.
 
-Still true (item 3, deferred with items 1-2's summary question): assistant
-messages are never compacted.
+Assistant messages before the cut are compactable too. Tool-call metadata
+and tool results remain in the history in place; compaction replaces message
+content only, preserving call/result pairing.
 
 Environment knobs (all optional, applied once at import time)
 -------------------------------------------------------------
@@ -187,20 +186,28 @@ def _compactable_indices(messages: list[dict[str, Any]], keep_tokens: int) -> se
     COUNT can never compact an oversized recent result no matter how large
     it is; a token span can, because the span itself has a size.
 
-    Messages of every role in the unprotected (older) span are candidates,
-    except system and the initial user task. Tool-call metadata is retained
-    when assistant content is compacted, preserving call/result pairing.
-    Message order and count never change.
+    Tool results in the unprotected (older) span are eligible, except system
+    and the initial user task. Assistant tool-call turns remain untouched to
+    preserve their original prose and pairing metadata.
     """
     cumulative = 0
     keep_from = len(messages)
-    for i in range(len(messages) - 1, -1, -1):
+    for i in range(len(messages) - 1, 1, -1):
         tokens = _message_tokens(messages[i])
         if cumulative + tokens > keep_tokens:
+            keep_from = i
             break
         cumulative += tokens
         keep_from = i
-    return {i for i in range(keep_from) if i >= 2 and _is_tool_result(messages[i])}
+    candidates = {
+        i for i in range(2, keep_from)
+        if _is_tool_result(messages[i]) and not _is_system_or_user_task(messages[i])
+    }
+    # An oversized newest result is outside the keep span, but is still eligible.
+    last = len(messages) - 1
+    if last >= 2 and _is_tool_result(messages[last]) and _message_tokens(messages[last]) > keep_tokens:
+        candidates.add(last)
+    return candidates
 
 
 def _message_text(msg: dict[str, Any]) -> str:
@@ -214,9 +221,10 @@ def _message_text(msg: dict[str, Any]) -> str:
     return str(content)
 
 
-def _structural_summary(messages: list[dict[str, Any]], previous: str = "") -> str:
-    """Summarize only explicit evidence; never invent unstated intent."""
-    goal = _message_text(messages[1]) if len(messages) > 1 else ""
+def _structural_summary(
+    messages: list[dict[str, Any]], *, goal: str = "", previous: str = "",
+) -> str:
+    """Summarize explicit evidence from the dropped span; infer no intent."""
     progress: list[str] = []
     decisions: list[str] = []
     read_files: set[str] = set()
@@ -242,7 +250,8 @@ def _structural_summary(messages: list[dict[str, Any]], previous: str = "") -> s
                         (modified_files if any(w in str(fn.get("name", "")).lower() for w in ("write", "edit", "patch")) else read_files).add(path)
         elif role == "tool":
             name = str(msg.get("name") or "").lower()
-            for path in path_re.findall(text):
+            paths = path_re.findall(text)
+            for path in paths:
                 (modified_files if any(w in name for w in ("write", "edit", "patch")) else read_files).add(path)
     lines = ["[Compaction summary — deterministic, evidence-only]", f"Goal: {goal[:1000] or 'not available'}"]
     if previous:
@@ -459,44 +468,34 @@ def compact_messages(
         compactable = _compactable_indices(messages, _keep_tokens)
 
         if not compactable:
-            oversized = next((i for i in range(len(messages) - 1, 1, -1)
-                              if _is_tool_result(messages[i])
-                              and _message_tokens(messages[i]) > _keep_tokens), None)
-            if oversized is not None:
-                compactable = {oversized}
-            else:
-                _write_journal(
-                    state_root, cycle_id, iteration, trigger_signal, trigger_signal, 0,
-                    reason="nothing_older_than_cut", real_prev_prompt=real_prompt,
-                )
-                return messages
+            reason = "nothing_older_than_cut"
+            _write_journal(
+                state_root, cycle_id, iteration, trigger_signal, trigger_signal, 0,
+                reason=reason, real_prev_prompt=real_prompt,
+            )
+            return messages
 
         dropped_messages = [messages[i] for i in sorted(compactable)]
         previous = "\n".join(
             _message_text(m) for m in messages
             if _message_text(m).startswith("[Compaction summary")
         )
-        summary = previous or _structural_summary(messages, previous=previous)
+        goal = _message_text(messages[1]) if len(messages) > 1 else ""
+        summary = _structural_summary(dropped_messages, goal=goal, previous=previous)
         new_messages: list[dict[str, Any]] = []
         results_compacted = 0
         compacted_details: list[dict[str, Any]] = []
         summary_inserted = False
         for i, msg in enumerate(messages):
             if i in compactable:
+                old_text = _message_text(msg)
                 if not summary_inserted:
-                    if _message_text(msg).startswith("[Compaction summary"):
-                        compacted, detail = msg, None
-                    elif len(_message_text(msg)) <= EXCERPT_HEAD + len(_OMIT_MARKER) + EXCERPT_TAIL:
-                        compacted, detail = _compact_message(msg)
-                        if detail is None:
-                            compacted, detail = dict(msg, content=summary), _drop_detail(
-                                str(msg.get("name") or "tool"), _message_text(msg),
-                            )
-                    else:
-                        compacted, detail = _compact_message(msg, summary)
-                    summary_inserted = True
+                    compacted = dict(msg, content=summary)
+                    detail = _drop_detail(str(msg.get("name") or "tool"), old_text)
                 else:
-                    compacted, detail = _compact_message(msg)
+                    compacted = dict(msg, content=_OMIT_MARKER)
+                    detail = _drop_detail(str(msg.get("name") or "tool"), old_text)
+                summary_inserted = True
                 new_messages.append(compacted)
                 if detail is not None:
                     results_compacted += 1
@@ -507,7 +506,7 @@ def compact_messages(
         if all(
             len(_message_text(m)) <= EXCERPT_HEAD + len(_OMIT_MARKER) + EXCERPT_TAIL
             for m in dropped_messages
-        ):
+        ) and not previous:
             _write_journal(
                 state_root, cycle_id, iteration, trigger_signal, trigger_signal, 0,
                 reason="already_compact", real_prev_prompt=real_prompt,
