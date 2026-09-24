@@ -419,38 +419,56 @@ PRIORITY_INTENT_LINE = (
     "repeating work, never a source of new work."
 )
 
-#: ADR-034 rule 5 (architect decision, 2026-09-24, issue #1940): the combined
-#: operator+derived priorities section every A4 reader renders under its own
-#: heading(s) -- entirely OUTSIDE the release pool / any per-role charter
-#: cap, counted only in the caller's own overall prompt budget (e.g.
-#: :data:`nanobot.agent.context.ContextBuilder.MAX_SYSTEM_PROMPT_CHARS`).
-#: Over this many characters the section renders ``unavailable``/``oversize``
-#: WHOLE -- never truncated, the same "never silently cut" rule ADR-034
-#: rule 3 states for the underlying document, extended here to the rendered
-#: prompt block by the same architect decision.
+#: ADR-034 rule 5 (architect decision, 2026-09-24, issue #1940): the
+#: operator-priorities section's own budget -- entirely OUTSIDE the release
+#: pool / any per-role charter cap, counted only in the caller's own overall
+#: prompt budget (e.g. :data:`nanobot.agent.context.ContextBuilder.
+#: MAX_SYSTEM_PROMPT_CHARS`). Over this many characters the section renders
+#: ``unavailable``/``oversize`` WHOLE -- never truncated, the same "never
+#: silently cut" rule ADR-034 rule 3 states for the underlying document,
+#: extended here to the rendered prompt block by the same architect
+#: decision. Independent of :data:`DERIVED_PRIORITIES_BLOCK_CAP` below --
+#: reviewer finding (#1952, 2026-09-25): a single shared cap meant a large
+#: derived list (10 entries measured ~5,060 chars on the host) pushed the
+#: OPERATOR's own section into ``oversize`` too, even when the operator's
+#: own content was one line. Each document's section now has its own root
+#: cause for going oversize.
 PRIORITIES_BLOCK_CAP = 3000
 
-_PRIORITIES_BLOCK_OVERSIZE_TEXT = (
+#: Placeholder pending the architect's answer (#1952 review, 2026-09-25:
+#: "бюджет derived — решение архитектора, я спросил; до ответа обрезку не
+#: выбирай") -- NOT a considered decision the way :data:`PRIORITIES_BLOCK_CAP`
+#: is. Kept the same magnitude only because it is the last agreed number in
+#: this area, not because it is known to fit the derived list (it measured
+#: larger than this on the host, so today's derived section commonly renders
+#: ``unavailable``/``oversize`` until the real cap is set) -- every caller
+#: passes its own ``cap=`` explicitly rather than relying on this default
+#: silently, so raising it later is a one-place change.
+DERIVED_PRIORITIES_BLOCK_CAP = 3000
+
+_OPERATOR_PRIORITIES_OVERSIZE_TEXT = (
     "## Operator priorities\n\n"
-    "Operator and derived priorities could not be shown here (unavailable, "
-    "reason: oversize) -- this is NOT the same as the operator having no "
-    "priorities."
+    "Operator priorities could not be shown here (unavailable, reason: "
+    "oversize) -- this is NOT the same as the operator having no priorities."
+)
+
+_DERIVED_PRIORITIES_OVERSIZE_TEXT = (
+    "## Derived priorities (source: derived)\n\n"
+    "Derived priorities could not be shown here (unavailable, reason: "
+    "oversize)."
 )
 
 
-def render_priorities_block(
+def render_operator_priorities_block(
     operator_res: PriorityResolution,
-    derived_entries: "tuple[PriorityEntry, ...]" = (),
     *,
     cap: int = PRIORITIES_BLOCK_CAP,
 ) -> str:
-    """ADR-034 rule 5: render the operator-priorities section (four rule-3
-    states) and, when *derived_entries* is non-empty, a second ``## Derived
-    priorities`` section after it -- ``operator first``, one string, one
-    shared budget. A caller that already shows derived priorities elsewhere
-    in its own prompt (the proposer's existing context) passes
-    ``derived_entries=()`` to get the operator section alone rather than a
-    duplicate.
+    """ADR-034 rule 5: render the operator-priorities section alone (four
+    rule-3 states) -- its own heading, its own budget, independent of
+    whatever the derived list's own section does (see
+    :func:`render_derived_priorities_block`; the two must never share a cap
+    -- #1952 review).
 
     Completed entries are rendered as HEADERS ONLY (number + title, never
     the instructions body) -- architect decision, 2026-09-24: a constraint
@@ -483,13 +501,34 @@ def render_priorities_block(
             "Operator priorities could not be read (unavailable) -- this is "
             "NOT the same as the operator having no priorities."
         )
-    if derived_entries:
-        body += "\n\n## Derived priorities (source: derived)\n\n" + "\n".join(
-            f"{e.number}. {e.title}: {e.instructions}" for e in derived_entries
-        )
     text = heading + body
     if len(text) > cap:
-        return _PRIORITIES_BLOCK_OVERSIZE_TEXT
+        return _OPERATOR_PRIORITIES_OVERSIZE_TEXT
+    return text
+
+
+def render_derived_priorities_block(
+    entries: "tuple[PriorityEntry, ...]",
+    *,
+    cap: int = DERIVED_PRIORITIES_BLOCK_CAP,
+) -> str:
+    """ADR-034 rule 4/5: render the derived-priorities section alone -- its
+    own heading, its own budget, independent of the operator section's cap
+    (see :func:`render_operator_priorities_block`). Empty *entries* renders
+    ``(none)``, never omitted -- the section is always present so its
+    absence is never mistaken for "not shown".
+
+    Never truncates: over *cap* the whole section is replaced by a fixed
+    ``unavailable``/``oversize`` marker, same convention as the operator
+    section.
+    """
+    heading = "## Derived priorities (source: derived)\n\n"
+    body = "(none)" if not entries else "\n".join(
+        f"{e.number}. {e.title}: {e.instructions}" for e in entries
+    )
+    text = heading + body
+    if len(text) > cap:
+        return _DERIVED_PRIORITIES_OVERSIZE_TEXT
     return text
 
 

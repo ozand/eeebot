@@ -78,7 +78,7 @@ from nanobot.runtime.operator_documents import (
     PRIORITY_UNAVAILABLE,
     STATE_TEXT,
     PriorityResolution,
-    render_priorities_block,
+    render_operator_priorities_block,
     resolve_charter,
     resolve_derived_priorities_split,
     resolve_operator_priorities,
@@ -1662,14 +1662,15 @@ def build_context(
         # ADR-034 rule 5 (#1940, A4): the operator's OWN priority list (with
         # its Completed headers), which nothing in this context previously
         # showed -- "## Goal" above is the release charter, not this
-        # document. derived_entries=() here: this context already renders
-        # derived priorities in its own section right below, so the shared
-        # renderer's optional second heading would only duplicate it.
+        # document. This context already renders derived priorities in its
+        # own section right below (derived_text above); the operator
+        # section here is independent of it -- own heading, own budget,
+        # never sharing a cap (#1952 review).
         try:
             _operator_priorities_res = resolve_operator_priorities(state_dir, selfevo_repo_root=selfevo_repo)
         except Exception:
             _operator_priorities_res = PriorityResolution(state=PRIORITY_UNAVAILABLE, reason="resolve_failed")
-        operator_priorities_block = render_priorities_block(_operator_priorities_res, ())
+        operator_priorities_block = render_operator_priorities_block(_operator_priorities_res)
         ledger_rows = _load_ledger_rows(state_dir)
         digest_lines = _digest_ledger(ledger_rows)
         recent_proposed_titles = _recent_proposed_titles(ledger_rows)

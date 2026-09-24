@@ -280,6 +280,7 @@ def test_all_empty_sections_are_zero_except_identity(tmp_path):
     # implementation -- stubbed to true empty for the same reason as
     # scorecard/position above.
     builder._load_priorities_block = lambda: ""
+    builder._load_derived_priorities_block = lambda: ""
 
     prompt = builder.build_system_prompt(loop_profile=True)
     fit = builder.last_fit
@@ -311,8 +312,8 @@ HEALTHY_SECTIONS["agents"] = (
 )
 OVERFLOW_SECTIONS = {
     "identity": 1_446, "soul": 1_200, "goals": 2_800, "user": 3_500, "operating": 4_800,
-    "agents": 0, "priorities": 137, "skills_catalogue": 6_951, "memory": 4_030, "runtime": 320,
-    "scorecard": 21, "position": 478,
+    "agents": 0, "priorities": 137, "derived_priorities": 145, "skills_catalogue": 6_951,
+    "memory": 4_030, "runtime": 320, "scorecard": 21, "position": 478,
 }
 OVERFLOW_SECTIONS["agents"] = (
     _OVERFLOW_TOTAL - sum(OVERFLOW_SECTIONS.values()) - len(ContextBuilder.SECTION_SEPARATOR) * (len(OVERFLOW_SECTIONS) - 1)

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from nanobot.runtime import demand, goal_review, llm_proposer, strategist_inputs
 from nanobot.runtime.operator_documents import (
+    DERIVED_PRIORITIES_BLOCK_CAP,
     DOCUMENT_SIZE_CAP_BYTES,
     PRIORITIES_BLOCK_CAP,
     PRIORITY_ALL_COMPLETED,
@@ -29,9 +30,11 @@ from nanobot.runtime.operator_documents import (
     STATE_TEXT,
     STATE_UNREADABLE,
     operator_priorities_status,
-    render_priorities_block,
+    render_derived_priorities_block,
+    render_operator_priorities_block,
     resolve_charter,
     resolve_derived_priorities,
+    resolve_derived_priorities_split,
     resolve_operator_priorities,
 )
 from nanobot.runtime.state import load_runtime_state_from_root
@@ -175,10 +178,10 @@ def test_four_priority_states_are_distinct(tmp_path: Path):
     # The four states stay distinguishable once rendered into the prompt
     # block every A4 reader shows — `unavailable` in particular is worded so
     # it is never mistaken for "the operator has no priorities" (rule 3).
-    block_present = render_priorities_block(result_present, ())
-    block_done = render_priorities_block(result_done, ())
-    block_empty = render_priorities_block(result_empty, ())
-    block_missing = render_priorities_block(result_missing, ())
+    block_present = render_operator_priorities_block(result_present)
+    block_done = render_operator_priorities_block(result_done)
+    block_empty = render_operator_priorities_block(result_empty)
+    block_missing = render_operator_priorities_block(result_missing)
 
     assert "Do a thing" in block_present
     assert "Open:" in block_present
@@ -738,7 +741,15 @@ def test_prompt_blocks_present_and_bounded(tmp_path: Path, monkeypatch):
     prompt cap -- never displacing the charter or the release ontology's
     OPERATING.md floor (ADR-034 rule 5, architect decision 2026-09-24).
     Over the block's own cap it renders whole as ``unavailable``/
-    ``oversize``, never a partial, silently-truncated render."""
+    ``oversize``, never a partial, silently-truncated render.
+
+    #1952 review (blocker): the operator section's cap is INDEPENDENT of
+    the derived section's -- a derived list sized like the real one on the
+    host (10 entries, ~5,060 chars measured, well over either section's
+    cap) must still let the operator's own (small) content render, and must
+    not silently vanish itself -- it renders its own ``unavailable``/
+    ``oversize``, never taking the operator section down with it.
+    """
     from nanobot.agent.context import ContextBuilder
 
     release_root = tmp_path / "release"
@@ -749,38 +760,97 @@ def test_prompt_blocks_present_and_bounded(tmp_path: Path, monkeypatch):
     (release_root / "USER.md").write_text("# USER\n\nOperator profile.", encoding="utf-8")
     (release_root / "OPERATING.md").write_text("# OPERATING\n\n" + ("cycle rule. " * 50), encoding="utf-8")
 
+    # A derived list the same shape/size as the real one measured on the
+    # host (#1940 pG baseline: 10 entries, ~5,060 chars) -- large enough to
+    # exceed BOTH sections' caps on its own, so it is the case that would
+    # have tripped the pre-review shared-cap bug.
     state_dir = tmp_path / "state"
     _goal_text_json(
         state_dir,
         "Current priority targets:\n(A) Priority 1 — Do a thing: write scripts/x.py.",
+    )
+    (state_dir / "goals" / "derived_priorities.json").write_text(
+        json.dumps({
+            "schema_version": "derived-v1",
+            "priorities": [
+                {
+                    "label": f"Derived thing {n}",
+                    "body": "word " * 80,
+                    "number": 100 + n,
+                    "vector": "V1",
+                }
+                for n in range(1, 11)
+            ],
+        }),
+        encoding="utf-8",
+    )
+    derived_res_sized = resolve_derived_priorities(state_dir)
+    assert derived_res_sized.state == STATE_TEXT and len(derived_res_sized.entries) == 10
+    # Full (uncapped) length -- what the section would be if nothing capped
+    # it -- computed with a cap high enough to never trigger the oversize
+    # marker, so this measures the fixture's real size, not the marker's.
+    _rendered_derived_len = len(render_derived_priorities_block(derived_res_sized.entries, cap=1_000_000))
+    assert _rendered_derived_len > PRIORITIES_BLOCK_CAP, (
+        "fixture must exceed the OPERATOR cap too, or it never exercises the bug this test guards"
     )
 
     builder = ContextBuilder(tmp_path / "workspace", release_root=release_root, state_dir=state_dir)
     prompt = builder.build_system_prompt(loop_profile=True)
 
     assert len(prompt) <= ContextBuilder.MAX_SYSTEM_PROMPT_CHARS
+    # The operator's own (small) section renders its real content --
+    # unaffected by the oversized derived list sitting right next to it.
     assert "## Operator priorities" in prompt
+    assert "Do a thing" in prompt
+    assert "This order conveys the operator's intent" in prompt
+    # The derived section is present too, and independently reports its
+    # OWN oversize state -- it does not vanish silently, and it does not
+    # take the operator section's text down with it.
+    assert "## Derived priorities (source: derived)" in prompt
+    assert "Derived thing 1" not in prompt  # too big for its own cap
+    derived_section = prompt.split("## Derived priorities (source: derived)", 1)[1].split("---", 1)[0]
+    assert "unavailable" in derived_section.lower()
+    assert "reason: oversize" in derived_section.lower()
     assert "## goals.md" in prompt  # the charter, never displaced
     assert "# OPERATING" in prompt  # the release floor, never displaced
     operating_chars = builder.last_fit["sections"].get("operating", 0)
     assert operating_chars >= len("# OPERATING\n\n" + "cycle rule. " * 50) - 1
 
-    # Over the block's own cap: unavailable/oversize whole, never a partial
-    # render silently cut down to fit.
+    # The operator section's OWN oversize path, independent of the above:
+    # a large OPERATOR list (not derived) exceeds ITS cap and degrades to
+    # unavailable/oversize whole, never a partial, silently-truncated
+    # render, and never because of anything the derived section is doing.
     huge_state = tmp_path / "state-huge"
     lines = "\n".join(
         f"(A) Priority {n} — Do thing {n}: " + ("word " * 80) for n in range(1, 20)
     )
     _goal_text_json(huge_state, f"Current priority targets:\n{lines}")
     huge_builder = ContextBuilder(tmp_path / "workspace2", release_root=release_root, state_dir=huge_state)
-    huge_block = huge_builder._load_priorities_block()
-    assert len(huge_block) <= PRIORITIES_BLOCK_CAP + len("## Operator priorities\n\n")
-    assert "unavailable" in huge_block.lower()
-    assert "reason: oversize" in huge_block.lower()
-    assert "Do thing 1" not in huge_block  # no partial content, ever
+    huge_operator_block = huge_builder._load_priorities_block()
+    assert len(huge_operator_block) <= PRIORITIES_BLOCK_CAP + len("## Operator priorities\n\n")
+    assert "unavailable" in huge_operator_block.lower()
+    assert "reason: oversize" in huge_operator_block.lower()
+    assert "Do thing 1" not in huge_operator_block  # no partial content, ever
+    # No derived priorities seeded for huge_state -- its own section still
+    # renders (present, empty), unaffected by the operator section's size.
+    huge_derived_block = huge_builder._load_derived_priorities_block()
+    assert "(none)" in huge_derived_block
 
-    # Planner: same renderer, same shared budget, end to end through
-    # bridge._run_planning_session's own task message.
+    # A derived cap the caller chooses explicitly (#1952: "тест с параметром
+    # лимита derived" -- the real number is the architect's, pending;
+    # independence from the operator cap must hold for ANY value, not one
+    # hardcoded guess) -- parametrized over two very different caps proves
+    # the derived section's oversize/fits behavior is driven by ITS OWN cap
+    # argument alone.
+    for _derived_cap in (200, DERIVED_PRIORITIES_BLOCK_CAP, 50_000):
+        block = render_derived_priorities_block(derived_res_sized.entries, cap=_derived_cap)
+        if _rendered_derived_len <= _derived_cap:
+            assert "Derived thing 1" in block
+        else:
+            assert "unavailable" in block.lower() and "reason: oversize" in block.lower()
+
+    # Planner: same renderers, same two independent budgets, end to end
+    # through bridge._run_planning_session's own task message.
     import asyncio
 
     from nanobot.runtime import bridge
@@ -803,7 +873,12 @@ def test_prompt_blocks_present_and_bounded(tmp_path: Path, monkeypatch):
     planner_task = manager_factory.last_task or ""
     assert "## Operator priorities" in planner_task
     assert "Do a thing" in planner_task  # the one open entry seeded above
-    assert len(planner_task) <= 20_000  # generously bounded; not swamped by the priorities block
+    # Same oversized derived fixture as above (state_dir is shared): the
+    # planner sees the operator's real content and the derived section's
+    # own oversize state, never a blanked-out operator section.
+    assert "## Derived priorities (source: derived)" in planner_task
+    assert "Derived thing 1" not in planner_task
+    assert len(planner_task) <= 20_000  # generously bounded; not swamped by either section
 
 
 def test_prompt_never_picks_a_priority_for_the_executor(tmp_path: Path):
@@ -824,7 +899,7 @@ def test_prompt_never_picks_a_priority_for_the_executor(tmp_path: Path):
         "(B) Priority 2 — Second thing: do it too.",
     )
     res = resolve_operator_priorities(state_dir)
-    block = render_priorities_block(res, ())
+    block = render_operator_priorities_block(res)
     assert PRIORITY_INTENT_LINE in block
     assert "you must work on priority 1" not in block.lower()
     assert "start with priority" not in block.lower()
