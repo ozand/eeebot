@@ -25,6 +25,16 @@ requested window):
       get an entry there at all, so ANDing it under-counts. ``demand_linked``
       below reports the completed.json cross-reference anyway, as a
       separate informational column, never folded into (b).
+  (b, rule C) -- amendment recorded in #1903 on 2026-09-25, before the
+      window closed and before (b) was computed: a (b) cycle is NOT a
+      confirmed result when every file its branch changed
+      (``git diff --name-only <merge>^1 <merge>^2`` of its
+      ``merge: integrate selfevo/cycle-<id>`` commit on the instance
+      repo's first-parent history) is a service path -- see
+      :data:`SERVICE_PATH_PREFIXES` / :data:`SERVICE_PATH_EXACT`. Commit
+      subjects, trailers and bodies are not used. Excluded cycles stay in
+      the denominator. Needs ``--repo``; without it rule C is reported as
+      not applied rather than silently equal to (b).
   usage-confirmed -- a ``completed.json`` entry for the same cycle_id has
       ``confirmed: true`` -- a separate, stricter, mix-sensitive signal;
       never substituted for (b).
@@ -68,10 +78,69 @@ import argparse
 import gzip
 import json
 import statistics
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
+
+
+#: Rule C service paths (#1903 amendment, 2026-09-25), taken from the code
+#: of their writers, not from observed commits: ``diary/**`` (harness,
+#: ``day_diary`` via the bridge's open-entry and plan-block writers);
+#: ``memory/MEMORY.md`` and ``memory/HISTORY.md`` (harness,
+#: ``nanobot.agent.memory.MemoryStore`` and the bridge's backlog [Done]
+#: safety-net); the three JSON files are the instance repo's own
+#: ``TRACKED_MEMORY_FILES`` in ``scripts/run_all_tests.py`` -- default
+#: outputs of ``check_confirmation_ratio.py`` / ``analyze_repeat_failures.py``
+#: that a residual auto-commit sweeps in.
+SERVICE_PATH_PREFIXES = ("diary/",)
+SERVICE_PATH_EXACT = frozenset({
+    "memory/MEMORY.md",
+    "memory/HISTORY.md",
+    "memory/confirmation_status.json",
+    "memory/prevent_repeats.json",
+    "memory/repeat_failures.json",
+})
+
+_MERGE_SUBJECT_PREFIX = "merge: integrate selfevo/cycle-"
+
+
+def is_service_path(path: str) -> bool:
+    p = path.replace("\\", "/")
+    return p in SERVICE_PATH_EXACT or p.startswith(SERVICE_PATH_PREFIXES)
+
+
+def is_service_only(files: "list[str] | None") -> bool:
+    """True when *files* is non-empty and every path is a service path."""
+    return bool(files) and all(is_service_path(f) for f in files)
+
+
+def load_branch_files(repo: Path, cycle_ids, ref: str = "origin/main") -> dict[str, list[str]]:
+    """cycle_id -> files its branch changed, from the newest
+    ``merge: integrate selfevo/cycle-<cycle_id>`` commit on *ref*'s
+    first-parent history. Cycle ids with no such merge are absent."""
+    wanted = set(cycle_ids)
+    if not wanted:
+        return {}
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True,
+        ).stdout
+
+    merges: dict[str, str] = {}
+    for line in git("log", ref, "--first-parent", "--format=%H%x09%s").splitlines():
+        sha, _, subject = line.partition("\t")
+        if not subject.startswith(_MERGE_SUBJECT_PREFIX):
+            continue
+        cid = subject[len(_MERGE_SUBJECT_PREFIX):].strip()
+        if cid in wanted and cid not in merges:
+            merges[cid] = sha
+    return {
+        cid: [f for f in git("diff", "--name-only", f"{sha}^1", f"{sha}^2").splitlines() if f.strip()]
+        for cid, sha in merges.items()
+    }
 
 
 def _parse_ts(ts: str) -> datetime:
@@ -146,7 +215,7 @@ class CycleRecord:
         "cycle_id", "first_start", "first_executor_call", "n_runs",
         "last_outcome", "last_verdict", "planning_session_outcome",
         "executor_calls", "planner_calls", "total_wall_ms",
-        "demand_linked", "usage_confirmed",
+        "demand_linked", "usage_confirmed", "branch_files",
     )
 
     def __init__(self, cycle_id: str) -> None:
@@ -162,10 +231,20 @@ class CycleRecord:
         self.total_wall_ms = 0.0
         self.demand_linked = False
         self.usage_confirmed = False
+        #: None = not looked up, or no merge commit found for this cycle.
+        self.branch_files: "list[str] | None" = None
 
     @property
     def condition_b(self) -> bool:
         return self.last_outcome == "success" and self.last_verdict == "accept"
+
+    @property
+    def excluded_by_rule_c(self) -> bool:
+        return self.condition_b and is_service_only(self.branch_files)
+
+    @property
+    def condition_b_rule_c(self) -> bool:
+        return self.condition_b and not self.excluded_by_rule_c
 
     @property
     def cause(self) -> str:
@@ -286,12 +365,28 @@ def select_window(
     return candidates
 
 
-def summarize(selected: list[CycleRecord]) -> dict:
+def apply_rule_c(selected: list[CycleRecord], repo: Path, ref: str = "origin/main") -> None:
+    """Fill ``branch_files`` for the (b) cycles in *selected* (rule C only
+    ever removes (b) cycles, so the others need no lookup)."""
+    files = load_branch_files(repo, [r.cycle_id for r in selected if r.condition_b], ref=ref)
+    for r in selected:
+        r.branch_files = files.get(r.cycle_id)
+
+
+def summarize(selected: list[CycleRecord], rule_c_applied: bool = False) -> dict:
     n = len(selected)
     exec_counts = [r.executor_calls for r in selected]
     n_b = sum(1 for r in selected if r.condition_b)
     n_usage = sum(1 for r in selected if r.usage_confirmed)
+    n_excluded = sum(1 for r in selected if r.excluded_by_rule_c)
     return {
+        "rule_c_applied": rule_c_applied,
+        "rule_c_excluded_count": n_excluded if rule_c_applied else None,
+        "condition_b_rule_c_count": (n_b - n_excluded) if rule_c_applied else None,
+        "condition_b_rule_c_share": ((n_b - n_excluded) / n) if (rule_c_applied and n) else None,
+        "b_without_merge_count": (
+            sum(1 for r in selected if r.condition_b and r.branch_files is None) if rule_c_applied else None
+        ),
         "n": n,
         "executor_calls_median": statistics.median(exec_counts) if exec_counts else None,
         "executor_calls_mean": statistics.fmean(exec_counts) if exec_counts else None,
@@ -309,6 +404,7 @@ def print_report(selected: list[CycleRecord], summary: dict) -> None:
         "cycle_id", "first_start", "n_runs", "executor_calls", "planner_calls",
         "total_wall_ms", "last_outcome", "last_verdict", "condition_b",
         "demand_linked", "usage_confirmed", "planning_session_outcome",
+        "excluded_by_rule_c",
     )
     print("\t".join(header))
     for r in selected:
@@ -318,6 +414,7 @@ def print_report(selected: list[CycleRecord], summary: dict) -> None:
             r.n_runs, r.executor_calls, r.planner_calls, round(r.total_wall_ms, 1),
             r.last_outcome, r.last_verdict, r.condition_b, r.demand_linked,
             r.usage_confirmed, r.planning_session_outcome,
+            r.excluded_by_rule_c if summary["rule_c_applied"] else "n/a",
         )))
     print()
     print(f"n = {summary['n']}")
@@ -330,6 +427,16 @@ def print_report(selected: list[CycleRecord], summary: dict) -> None:
         f"(b) outcome=success + verdict=accept: {summary['condition_b_count']}/{summary['n']} "
         f"({summary['condition_b_share'] * 100:.1f}%)" if summary["n"] else "(b): n=0"
     )
+    if not summary["rule_c_applied"]:
+        print("(b, rule C): not applied -- pass --repo <instance repo>")
+    elif summary["n"]:
+        print(
+            f"(b, rule C) excluding service-path-only branches: "
+            f"{summary['condition_b_rule_c_count']}/{summary['n']} "
+            f"({summary['condition_b_rule_c_share'] * 100:.1f}%); "
+            f"excluded by rule C: {summary['rule_c_excluded_count']}; "
+            f"(b) cycles with no merge commit found: {summary['b_without_merge_count']}"
+        )
     print(
         f"usage-confirmed (completed.json confirmed=true): "
         f"{summary['usage_confirmed_count']}/{summary['n']} "
@@ -349,6 +456,8 @@ def main(argv=None) -> int:
         "--order-by", choices=("first_start", "first_executor_call"), default="first_start",
         help="ordering for --first-n; first_executor_call only to reproduce ADR-031's historical cut",
     )
+    ap.add_argument("--repo", type=Path, help="instance repo checkout; enables (b, rule C)")
+    ap.add_argument("--ref", default="origin/main", help="ref whose first-parent history holds the cycle merges")
     args = ap.parse_args(argv)
 
     if bool(args.start) == bool(args.after):
@@ -365,7 +474,9 @@ def main(argv=None) -> int:
             records, after=_parse_ts(args.after), first_n=args.first_n, order_by=args.order_by,
         )
 
-    summary = summarize(selected)
+    if args.repo:
+        apply_rule_c(selected, args.repo, ref=args.ref)
+    summary = summarize(selected, rule_c_applied=bool(args.repo))
     print_report(selected, summary)
     return 0
 

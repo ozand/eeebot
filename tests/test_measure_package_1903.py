@@ -126,3 +126,87 @@ def test_summary_matches_manual_count(tmp_path):
     assert summary["executor_calls_median"] == 1  # [0, 1, 5] -> median 1
     assert summary["condition_b_count"] == 1
     assert summary["usage_confirmed_count"] == 1
+
+
+def test_service_paths_follow_the_published_rule_c_set():
+    assert m.is_service_path("diary/2026-09-24.md")
+    assert m.is_service_path("memory/HISTORY.md")
+    assert m.is_service_path("memory/repeat_failures.json")
+    assert not m.is_service_path("memory/facts/decay_archival_policy.md")
+    assert not m.is_service_path("lessons/scaffold_first_reasoning_limits.md")
+    assert not m.is_service_path("scripts/diary/tool.py")
+    assert m.is_service_only(["diary/2026-09-24.md", "memory/MEMORY.md"])
+    assert not m.is_service_only(["diary/2026-09-24.md", "lessons/x.md"])
+    assert not m.is_service_only([])
+    assert not m.is_service_only(None)
+
+
+def _git(repo: Path, *args: str) -> str:
+    import subprocess
+
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+
+def _merge_cycle(repo: Path, cycle_id: str, files: dict[str, str], subject: str) -> None:
+    _git(repo, "checkout", "-q", "-b", f"selfevo/cycle-{cycle_id}")
+    for rel, text in files.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text(text, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", subject)
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "-q", "--no-ff", "-m", f"merge: integrate selfevo/cycle-{cycle_id}", f"selfevo/cycle-{cycle_id}")
+
+
+def test_rule_c_excludes_service_only_branches_by_content_not_subject(tmp_path):
+    """Rule C looks only at the files the branch changed: a diary-only
+    branch is excluded even with an ordinary subject, and a residual
+    auto-commit that carries real work is kept."""
+    state = tmp_path / "state"
+    rows = []
+    for i, cid in enumerate(("cycle-diary", "cycle-work-residual", "cycle-nomerge", "cycle-partial")):
+        rows.append({"phase": "started", "cycle_id": cid, "ts": f"2026-09-21T0{i}:00:00Z"})
+        outcome = ("partial", "reject") if cid == "cycle-partial" else ("success", "accept")
+        rows.append({"phase": "outcome", "cycle_id": cid, "outcome": outcome[0], "verdict": outcome[1],
+                     "ts": f"2026-09-21T0{i}:30:00Z"})
+    _write_jsonl(state / "ledger" / "cycles.jsonl", rows)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "README.md").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    _merge_cycle(repo, "cycle-diary", {"diary/2026-09-21.md": "- note\n", "memory/HISTORY.md": "h\n"},
+                 "docs: ordinary-looking subject")
+    _merge_cycle(repo, "cycle-work-residual", {"diary/2026-09-21.md": "- more\n", "scripts/tool.py": "x = 1\n"},
+                 "selfevo: auto-commit uncommitted subagent work — tool")
+
+    records = m.build_cycle_records(state)
+    selected = m.select_window(records, start=m._parse_ts("2026-09-21T00:00:00Z"))
+    m.apply_rule_c(selected, repo, ref="main")
+    by_id = {r.cycle_id: r for r in selected}
+
+    assert by_id["cycle-diary"].excluded_by_rule_c is True
+    assert by_id["cycle-work-residual"].excluded_by_rule_c is False
+    assert by_id["cycle-nomerge"].branch_files is None
+    assert by_id["cycle-nomerge"].excluded_by_rule_c is False
+    assert by_id["cycle-partial"].excluded_by_rule_c is False
+
+    summary = m.summarize(selected, rule_c_applied=True)
+    assert summary["n"] == 4
+    assert summary["condition_b_count"] == 3
+    assert summary["rule_c_excluded_count"] == 1
+    assert summary["condition_b_rule_c_count"] == 2
+    assert summary["b_without_merge_count"] == 1
+
+
+def test_rule_c_not_applied_is_reported_not_silently_equal(tmp_path):
+    records = m.build_cycle_records(_state_dir(tmp_path))
+    selected = m.select_window(records, start=m._parse_ts("2026-09-21T00:00:00Z"), end=m._parse_ts("2026-09-22T00:00:00Z"))
+    summary = m.summarize(selected)
+    assert summary["rule_c_applied"] is False
+    assert summary["condition_b_rule_c_count"] is None
