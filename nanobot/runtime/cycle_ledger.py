@@ -460,6 +460,7 @@ def record_cycle_outcome(
     iterations_used: int | None = None,
     iterations_limit: int | None = None,
     iterations_predicted: int | None = None,
+    max_call_gap_s: float | None = None,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
 
@@ -584,6 +585,11 @@ def record_cycle_outcome(
             row["iteration_fraction"] = round(iterations_used / iterations_limit, 4)
         if iterations_predicted is not None and isinstance(iterations_predicted, int):
             row["iterations_predicted"] = iterations_predicted
+    if max_call_gap_s is not None:
+        try:
+            row["max_call_gap_s"] = round(float(max_call_gap_s), 1)
+        except (ValueError, TypeError):
+            pass
     if files_changed is not None:
         try:
             from nanobot.runtime.demand import classify_change_tier

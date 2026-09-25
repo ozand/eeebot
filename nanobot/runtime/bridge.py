@@ -3522,6 +3522,9 @@ async def _main_impl_body():
         return 0
 
     BRIDGE_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _bridge_start_mono = time.monotonic()
+    from nanobot.runtime.session_clock import get_bridge_wall_secs
+    _bridge_wall_deadline = _bridge_start_mono + get_bridge_wall_secs()
 
     # #733: bulk-skip pre-spawn duplicates in one run. Each iteration pulls
     # the next pending request; a pre-spawn duplicate (tag-first match or
@@ -4137,6 +4140,7 @@ async def _main_impl_body():
             # #939 Part E: suppress loop-irrelevant builtin skills.
             excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
             telemetry_component="executor",
+            wall_deadline=_bridge_wall_deadline,
         )
 
         # Capture HEAD SHA before spawn so we can count subagent commits correctly,
@@ -4283,15 +4287,15 @@ async def _main_impl_body():
             _subagent_task_id = next(iter(mgr._running_tasks), None)
             if mgr._running_tasks:
                 try:
-                    # Limit subagent execution time to 3000s (50 minutes).
-                    # Coordinator stale threshold is 3600s (60 minutes).
-                    # This ensures the subagent terminates gracefully before coordinator marks it stale.
+                    # Limit subagent execution time to remaining bridge wall allocation.
+                    # #1899: anchored to bridge start time so planning does not displace the deadline.
+                    _remaining_wall = max(60.0, _bridge_wall_deadline - time.monotonic())
                     await asyncio.wait_for(
                         asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True),
-                        timeout=3000.0
+                        timeout=_remaining_wall,
                     )
                 except asyncio.TimeoutError:
-                    print("Subagent execution timed out (limit: 3000s). Cancelling running tasks...")
+                    print("Subagent execution timed out (wall-clock limit). Cancelling running tasks...")
                     for task_obj in list(mgr._running_tasks.values()):
                         task_obj.cancel()
                     # Allow tasks to process CancelledError and write telemetry
@@ -4306,6 +4310,9 @@ async def _main_impl_body():
                     _run_record.set_run_metadata(classification='loop_breaker_abort', reason=_run_stop_reason)
                 elif _run_stop_reason == 'wall_clock_deadline':
                     _run_record.set_run_metadata(classification='wall_clock_abort', reason=_run_stop_reason)
+                elif _run_stop_reason == 'progress_watchdog_timeout':
+                    _run_record.set_run_metadata(classification='progress_watchdog_abort', reason=_run_stop_reason)
+                    _rollback_reason = 'progress_watchdog_timeout'
             except Exception:
                 pass
             # #1280: the handled_ marker is no longer written here unconditionally
@@ -5537,6 +5544,18 @@ async def _main_impl_body():
                     _iterations_used = len(_iters_list)
         except Exception:
             _iterations_used = None
+    _max_call_gap_s: float | None = None
+    try:
+        from nanobot.runtime.session_clock import compute_cycle_max_call_gap
+        _mgr = locals().get("mgr")
+        _fallback = getattr(_mgr, "last_max_call_gap_s", None) if _mgr else None
+        _max_call_gap_s = compute_cycle_max_call_gap(
+            STATE_DIR,
+            _cycle_id,
+            fallback_gap=_fallback,
+        )
+    except Exception:
+        pass
     record_cycle_outcome(
         STATE_DIR, _cycle_id, _cycle_outcome, _rollback_reason, files_changed, cycle_branch,
         lesson_candidate=_lesson_candidate,
@@ -5551,6 +5570,7 @@ async def _main_impl_body():
         iterations_limit=resolved_iterations,
         # iterations_predicted remains None until forecast is implemented
         iterations_predicted=None,
+        max_call_gap_s=_max_call_gap_s,
         # #1709 increment 2: only a push_pending row needs the base it
         # merged against — _finish_pending_pushes reads this back to tell
         # "origin/main unchanged" (safe to redo) from "moved" (superseded).
