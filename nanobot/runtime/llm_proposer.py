@@ -2539,36 +2539,101 @@ def _proposal_creates_new_file(selfevo_repo: Path | None, proposal: dict[str, An
 
 def _latest_non_residual_commit_for_path(
     selfevo_repo: Path | None, target_path: str,
-) -> tuple[str, str] | None:
-    """Return the latest non-residual commit touching ``target_path``."""
+) -> "tuple[str, str] | None | str":
+    """Return the latest INTEGRATION touching ``target_path`` as evidence
+    for self_dedup.
+
+    ADR-035 keep-work architect resolution (#1942 B2): reads
+    ``--first-parent main`` -- a ``--no-ff`` merge is compared against its
+    first parent, so one integration is one log entry carrying the whole
+    cycle branch's diff; a cycle branch's own checkpoint/residual commits
+    (second-parent side) are structurally invisible to this traversal, so
+    no subject-pattern exclusion is needed here anymore.
+
+    The latest first-parent commit touching the path is either a
+    direct-to-main commit (bridge-memory/curator writers -- use its own
+    subject) or a merge commit. A merge's own subject is the fixed
+    ``"merge: integrate <cycle_branch>"`` (never changed -- several
+    readers match it verbatim), so real evidence comes from its
+    ``Selfevo-Task`` trailer when present (new-format merges), falling
+    back to ``merge^2`` (the cycle branch tip)'s own latest non-artificial
+    commit for an OLD merge that predates the trailer.
+
+    Returns ``(sha, subject)`` on evidence, ``None`` when genuinely
+    nothing is found (a real, checked answer), or
+    :data:`commit_markers.GIT_UNAVAILABLE` on a git error/timeout -- the
+    caller must not treat that the same as "no evidence".
+    """
     if not selfevo_repo or not target_path:
         return None
     import subprocess as _sp
 
     from nanobot.runtime.commit_markers import (
-        ARTIFICIAL_COMMIT_GREP_PATTERNS, is_artificial_commit_subject,
+        ARTIFICIAL_COMMIT_GREP_PATTERNS, GIT_UNAVAILABLE, is_artificial_commit_subject,
     )
 
     repo = Path(selfevo_repo)
     try:
-        raw = _sp.check_output(
+        raw = _sp.run(
+            [
+                "git", "-c", f"safe.directory={repo}", "-C", str(repo),
+                "log", "--first-parent", "main", "-n1", "--format=%H%x1f%s",
+                "--", target_path,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        return GIT_UNAVAILABLE
+    if raw.returncode != 0:
+        return GIT_UNAVAILABLE
+    line = raw.stdout.strip()
+    if not line:
+        return None
+    sha, _sep, subject = line.partition("\x1f")
+    if not sha:
+        return None
+    if not subject.lower().startswith("merge:"):
+        return sha[:12], subject
+
+    try:
+        trailer = _sp.run(
+            [
+                "git", "-c", f"safe.directory={repo}", "-C", str(repo),
+                "log", "-n1", "--format=%(trailers:key=Selfevo-Task,valueonly)", sha,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        return GIT_UNAVAILABLE
+    if trailer.returncode != 0:
+        return GIT_UNAVAILABLE
+    trailer_value = trailer.stdout.strip()
+    if trailer_value:
+        return sha[:12], trailer_value
+
+    # Old-format merge, no Selfevo-Task trailer yet: fall back to the
+    # cycle branch tip's own latest non-artificial commit.
+    try:
+        branch_raw = _sp.run(
             [
                 "git", "-c", f"safe.directory={repo}", "-C", str(repo),
                 "log", "-n1", "--format=%H%x1f%s", "--invert-grep", "-i",
                 *(f"--grep={p}" for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
-                "--", target_path,
+                f"{sha}^2",
             ],
-            stderr=_sp.DEVNULL,
-            timeout=10,
-        ).decode(errors="replace").strip()
-        if not raw:
-            return None
-        sha, subject = raw.split("\x1f", 1)
-        if is_artificial_commit_subject(subject):
-            return None
-        return sha[:12], subject
+            capture_output=True, text=True, timeout=10,
+        )
     except Exception:
+        return GIT_UNAVAILABLE
+    if branch_raw.returncode != 0:
+        return GIT_UNAVAILABLE
+    branch_line = branch_raw.stdout.strip()
+    if not branch_line:
         return None
+    b_sha, _sep2, b_subject = branch_line.partition("\x1f")
+    if not b_sha or is_artificial_commit_subject(b_subject):
+        return None
+    return b_sha[:12], b_subject
 
 
 def _dedup_evidence_context(
@@ -2578,11 +2643,20 @@ def _dedup_evidence_context(
     matched_against: str,
 ) -> tuple[str, str | None]:
     """Add non-verdict evidence for existing-path dedup rejections."""
+    from nanobot.runtime.commit_markers import GIT_UNAVAILABLE
+
     reason = _dedup_reject_reason(matched_against)
     if reason != "self_dedup" or _proposal_creates_new_file(selfevo_repo, proposal):
         return feedback, None
     target = str(proposal.get("target_path") or "").strip()
     commit = _latest_non_residual_commit_for_path(selfevo_repo, target)
+    # ADR-035 keep-work architect resolution (#1942 B2), point 4: a git
+    # error/timeout is explicitly NOT the same as "no evidence found" --
+    # this evidence enrichment is best-effort either way (the caller's own
+    # self_dedup verdict already stands), so both degrade the same way
+    # here, but as an explicit branch, not a silent fall-through.
+    if commit == GIT_UNAVAILABLE:
+        return feedback, None
     if commit is None:
         return feedback, None
     sha, subject = commit
@@ -2735,36 +2809,39 @@ def _edit_budget_m() -> int:
         return _DEFAULT_EDIT_BUDGET_M
 
 
-def _git_commit_count_for_path(repo_root: Path, rel_path: str, since_iso: str | None) -> int:
-    """#903: count commits touching ``rel_path`` in ``repo_root``, since
-    ``since_iso`` (``None`` -> full history). Matches the subprocess style of
-    :func:`goal_text_utils._recent_git_log` (10s timeout, stderr discarded).
-    Fail-open: ``0`` (never blocks a cycle) on any subprocess error/timeout.
+def _git_commit_count_for_path(repo_root: Path, rel_path: str, since_iso: str | None) -> "int | None":
+    """#903: count INTEGRATIONS (not raw commits) touching ``rel_path`` in
+    ``repo_root``, since ``since_iso`` (``None`` -> full history).
 
-    ADR-035 keep-work architect addendum (#1942 B2): excludes residual
-    auto-commits and per-step checkpoint commits (`commit_markers.
-    ARTIFICIAL_COMMIT_GREP_PATTERNS`) -- one logical edit spread across
-    several checkpointed steps must count as ONE commit against this
-    edit-budget churn counter, not one per checkpoint.
+    ADR-035 keep-work architect resolution (#1942 B2): reads
+    ``--first-parent main`` -- a ``--no-ff`` merge is one log entry per
+    integration, and a cycle branch's own checkpoint/residual commits
+    (second-parent side) are structurally invisible to this traversal, so
+    no subject-pattern exclusion is needed here anymore: one logical edit
+    spread across several checkpointed steps counts as one commit (the
+    integration), not several.
+
+    Returns ``None`` (never ``0``) on a git error/timeout -- ``0`` must
+    mean "confirmed zero integrations since the window started", not
+    "couldn't tell". Callers must treat ``None`` as unknown: never as
+    "under budget" or "over budget".
     """
     import subprocess as _sp
 
-    from nanobot.runtime.commit_markers import ARTIFICIAL_COMMIT_GREP_PATTERNS
-
     git_cmd = [
         "git", "-c", f"safe.directory={repo_root}", "-C", str(repo_root),
-        "log", "--oneline",
-        "--invert-grep", "-i",
-        *(f"--grep={p}" for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
+        "log", "--first-parent", "main", "--oneline",
     ]
     if since_iso:
         git_cmd.append(f"--since={since_iso}")
     git_cmd += ["--", rel_path]
     try:
-        out = _sp.check_output(git_cmd, stderr=_sp.DEVNULL, timeout=10).decode(errors="replace")
+        result = _sp.run(git_cmd, capture_output=True, text=True, timeout=10)
     except Exception:
-        return 0
-    return sum(1 for line in out.splitlines() if line.strip())
+        return None
+    if result.returncode != 0:
+        return None
+    return sum(1 for line in result.stdout.splitlines() if line.strip())
 
 
 def _edit_budget_match(
@@ -2810,6 +2887,12 @@ def _edit_budget_match(
         last_used_ts = _parse_inventory_ts(last_used_raw) if last_used_raw else None
         since_iso = last_used_ts.isoformat() if last_used_ts else None
         count = _git_commit_count_for_path(Path(selfevo_repo), target, since_iso)
+        # ADR-035 keep-work architect resolution (#1942 B2), point 4: a git
+        # error/timeout is unknown, not zero -- never block on it, and say
+        # so (the caller decides explicitly, per the architect's wording).
+        if count is None:
+            print(f"edit-budget: git unavailable for {target}; treating as unknown, not blocking (#903)")
+            return "", 0, ""
         if since_iso is None:
             count = max(0, count - 1)  # exclude the creation commit itself
         if count >= m:

@@ -362,6 +362,79 @@ def test_checkpoint_and_residual_commits_never_mark_a_priority_done(tmp_path: Pa
     assert "Priority 11" in rewritten
 
 
+def test_verbatim_label_survives_checkpoints_via_the_closing_commit(tmp_path: Path):
+    """ADR-035 keep-work: a cycle whose real work happened entirely inside
+    checkpoints still gets recognized as done, because
+    ``_all_commits_are_artificial_since``'s invariant fix (bridge.py) adds
+    a closing marker commit whose OWN subject carries the task title --
+    checkpoints are excluded by pattern, the closing commit is not.
+    """
+    import subprocess
+
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    repo = tmp_path / "eeebot-self-evolving"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("0", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+
+    label = "Priority 12 — Loop health in dashboard: extend scripts/eeebot_dashboard.py"
+    subprocess.run(["git", "checkout", "-q", "-b", "selfevo/cycle-p12"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("1", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", f"selfevo: checkpoint — {label}", "-m", CHECKPOINT_TRAILER],
+        cwd=repo, check=True,
+    )
+    # The invariant-fix closing commit bridge.py writes when a cycle's
+    # entire history is checkpoints: subject is "selfevo: <task_title>",
+    # not checkpoint-shaped, so it is NOT excluded.
+    subprocess.run(
+        ["git", "commit", "-q", "--allow-empty", "-m", f"selfevo: {label}",
+         "-m", "Selfevo-Cycle: cycle-p12"],
+        cwd=repo, check=True,
+    )
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+    merge_result = subprocess.run(
+        ["git", "merge", "-q", "--no-ff", "selfevo/cycle-p12",
+         "-m", "merge: integrate selfevo/cycle-p12"],
+        cwd=repo, capture_output=True, text=True,
+    )
+    assert merge_result.returncode == 0, merge_result.stderr
+
+    text = (
+        "mission statement\n\n"
+        "Current priority targets:\n"
+        f"(A) {label}.\n"
+    )
+    rewritten = filter_completed_priorities_from_goal_text(text, repo)
+
+    assert "Completed (do not repeat):" in rewritten
+    assert "Priority 12" not in rewritten.split("Completed (do not repeat):")[0]
+    assert "Priority 12" not in rewritten.split("Completed (do not repeat):")[0]
+
+
+def test_recent_git_log_git_error_returns_none_not_empty_string(tmp_path: Path, monkeypatch):
+    """ADR-035 keep-work architect resolution (#1942 B2), point 4: a git
+    error/timeout must be distinguishable from "confirmed no commits in
+    the window" -- both are falsy to existing callers (the safe default
+    either way), but the reader itself must not silently equate them."""
+    from nanobot.runtime.goal_text_utils import _recent_git_log
+
+    import subprocess as _sp
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("git not found")
+
+    monkeypatch.setattr(_sp, "run", _boom)
+    result = _recent_git_log(tmp_path)
+    assert result is None, f"expected None on git error, got {result!r}"
+
+
 def test_no_target_file_falls_back_to_word_heuristic(tmp_path: Path):
     """A priority entry naming NO target file path has no artifact signal, so
     `_priority_done_by_artifact` returns None and the old word-overlap

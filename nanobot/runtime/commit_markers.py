@@ -76,3 +76,47 @@ def is_blocked_checkpoint_filename(path: str) -> bool:
     only the matching algorithm around it differs."""
     lowered = (path or "").lower()
     return any(pat in lowered for pat in BLOCKED_FILE_PATTERNS)
+
+
+#: ADR-035 keep-work, architect resolution on merge-commit provenance
+#: (#1942 B2): the merge commit's SUBJECT stays exactly
+#: ``"merge: integrate <cycle_branch>"`` -- unchanged, since
+#: ``scripts/revert_cycles.py``'s ``MERGE_SUBJECT_RX``, ``bridge.py``'s own
+#: ``merge:``-prefix novelty filter, ``scripts/measure_package_1903.py``,
+#: and both dashboard generators all match it verbatim. Provenance data
+#: goes in the merge commit's BODY as trailers instead. This key (the
+#: cycle id) is settled; a second trailer (task text or demand id) is
+#: still pending an architect privacy decision and is NOT written yet.
+MERGE_TRAILER_CYCLE_KEY = "Selfevo-Cycle"
+
+#: A trailer value's own hard cap -- generous enough for any real title,
+#: small enough that a merge commit body never grows unbounded.
+_TRAILER_VALUE_MAX_LEN = 120
+
+
+def sanitize_trailer_value(value: str, max_len: int = _TRAILER_VALUE_MAX_LEN) -> str:
+    """Collapse *value* into a single git-trailer-safe line.
+
+    A trailer's value must never contain a literal newline -- ``git
+    interpret-trailers`` (and every plain-text reader of a commit body)
+    treats a blank/non-"Key: Value" line as the end of the trailer block,
+    so an embedded newline would silently truncate or corrupt the value.
+    Collapses ALL whitespace runs (including newlines) to a single space,
+    strips the result, and truncates to *max_len*. A colon inside the
+    value is safe once there is no newline around it -- it can no longer
+    be mistaken for the start of a new trailer line.
+    """
+    import re as _re
+
+    collapsed = _re.sub(r"\s+", " ", str(value or "")).strip()
+    return collapsed[:max_len]
+
+
+#: Sentinel distinguishing "git errored/timed out" from "ran cleanly and
+#: found nothing" -- ADR-035 keep-work architect resolution (#1942 B2),
+#: point 4: 0/False/None must never mean "unknown", or a transient git
+#: failure would read as "confirmed zero" (edit-budget: falsely under
+#: budget) or "confirmed not done" (self_dedup: silently loses evidence).
+#: Callers must check for this exact object before treating a falsy
+#: result as a real answer.
+GIT_UNAVAILABLE = "git-unavailable"

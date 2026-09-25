@@ -238,8 +238,9 @@ def filter_completed_priorities_from_goal_text(
         return raw_text
 
 
-def _recent_git_log(repo_root: Path, since: str = "14 days ago") -> str:
-    """Return `git log --oneline --since=<since>` output for repo_root, or "" on any failure.
+def _recent_git_log(repo_root: Path, since: str = "14 days ago") -> "str | None":
+    """Return `git log --oneline --since=<since>` output for repo_root, or
+    ``None`` on any failure.
 
     Shared helper: both `_curriculum_level` (MEMORY.md backlog) and
     `_parse_backlog_task_from_goal_text` (goal_text.json priorities) need
@@ -249,7 +250,24 @@ def _recent_git_log(repo_root: Path, since: str = "14 days ago") -> str:
     auto-commits and per-step checkpoint commits (`commit_markers.
     ARTIFICIAL_COMMIT_GREP_PATTERNS`) -- this IS a "is this already done"
     reader, and a checkpoint's own path-naming subject, or a residual
-    commit's, must never satisfy it.
+    commit's, must never satisfy it. NOT switched to ``--first-parent``
+    (unlike the two llm_proposer #903/self_dedup readers): this reader
+    matches on commit SUBJECT text only (``--oneline``), and the
+    keep-work merge commit's own subject is the fixed, generic "merge:
+    integrate <cycle_branch>" (point 2) -- a real work commit's subject
+    (the one this heuristic is designed to match) lives on the cycle
+    branch itself, which ``--first-parent`` would hide entirely. Plain
+    history (every commit, branch-internal included) is still what makes
+    the verbatim-label match work; the invert-grep above is what keeps
+    checkpoint/residual noise out of it.
+
+    ADR-035 keep-work architect resolution, point 4: returns ``None``
+    (never ``""``) on a git error/timeout -- an empty result string must
+    mean "confirmed no matching commits in the window", not "couldn't
+    tell". ``""`` (genuinely empty) and ``None`` (unavailable) both read
+    as falsy to every existing caller here, which already treats "no
+    evidence" as "not done" (the safe default either way) -- but the two
+    cases are no longer conflated at the source.
     """
     import subprocess as _sp
 
@@ -263,9 +281,12 @@ def _recent_git_log(repo_root: Path, since: str = "14 days ago") -> str:
         *(f"--grep={p}" for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
     ]
     try:
-        return _sp.check_output(git_cmd, stderr=_sp.DEVNULL, timeout=10).decode(errors="replace")
+        result = _sp.run(git_cmd, capture_output=True, text=True, timeout=10)
     except Exception:
-        return ""
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
 
 
 def _title_already_done_in_git_log(title: str, git_log: str) -> bool:

@@ -3325,6 +3325,96 @@ class TestTargetPathState:
         assert len(sha) == 12
         assert subject == "feat: latest real target change"
 
+    def test_checkpoint_only_cycle_merged_is_visible_exactly_once(self, tmp_path):
+        """ADR-035 keep-work architect resolution (#1942 B2), point 1: a
+        cycle whose entire work happened inside checkpoints, once merged
+        via --no-ff, is visible to self_dedup evidence exactly once --
+        via the Selfevo-Task trailer on the merge commit itself."""
+        import subprocess as _sp
+
+        repo = _init_instance_repo(
+            tmp_path, subject="init", script_rel="scripts/existing_target.py",
+        )
+        _sp.run(["git", "-C", str(repo), "checkout", "-b", "selfevo/cycle-ckpt-02"],
+                check=True, capture_output=True)
+        for i in range(3):
+            (repo / "scripts" / "existing_target.py").write_text(f"# rev {i}\n")
+            _sp.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+            _sp.run(
+                ["git", "-C", str(repo), "commit", "-m",
+                 f"selfevo: checkpoint — scripts/existing_target.py ({i})",
+                 "-m", "Selfevo-Checkpoint: true"],
+                check=True, capture_output=True,
+            )
+        _sp.run(["git", "-C", str(repo), "checkout", "main"], check=True, capture_output=True)
+        _sp.run(
+            ["git", "-C", str(repo), "merge", "--no-ff", "selfevo/cycle-ckpt-02",
+             "-m", "merge: integrate selfevo/cycle-ckpt-02",
+             "-m", "close the checkpoint-only increment\n\n"
+                   "Selfevo-Cycle: ckpt-02\nSelfevo-Task: close the checkpoint-only increment"],
+            check=True, capture_output=True,
+        )
+
+        result = llm_proposer._latest_non_residual_commit_for_path(
+            repo, "scripts/existing_target.py",
+        )
+        assert result is not None
+        sha, subject = result
+        assert subject == "close the checkpoint-only increment"
+
+        count = llm_proposer._git_commit_count_for_path(repo, "scripts/existing_target.py", None)
+        # init (creation) + 1 integration = 2 first-parent commits touching
+        # the path, never 4 (init + 3 checkpoints).
+        assert count == 2, f"expected 2 first-parent commits, got {count}"
+
+    def test_old_format_merge_falls_back_to_branch_tip(self, tmp_path):
+        """A merge predating the Selfevo-Task trailer (no trailer in its
+        body) falls back to merge^2's own latest non-artificial commit."""
+        import subprocess as _sp
+
+        repo = _init_instance_repo(
+            tmp_path, subject="init", script_rel="scripts/existing_target.py",
+        )
+        _sp.run(["git", "-C", str(repo), "checkout", "-b", "selfevo/cycle-old-01"],
+                check=True, capture_output=True)
+        (repo / "scripts" / "existing_target.py").write_text("# real work\n")
+        _sp.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+        _sp.run(["git", "-C", str(repo), "commit", "-m", "feat: old-format real work"],
+                check=True, capture_output=True)
+        _sp.run(["git", "-C", str(repo), "checkout", "main"], check=True, capture_output=True)
+        _sp.run(
+            ["git", "-C", str(repo), "merge", "--no-ff", "selfevo/cycle-old-01",
+             "-m", "merge: integrate selfevo/cycle-old-01"],
+            check=True, capture_output=True,
+        )
+
+        result = llm_proposer._latest_non_residual_commit_for_path(
+            repo, "scripts/existing_target.py",
+        )
+        assert result is not None
+        _sha, subject = result
+        assert subject == "feat: old-format real work"
+
+    def test_git_error_returns_sentinel_not_none(self, tmp_path, monkeypatch):
+        """ADR-035 keep-work architect resolution (#1942 B2), point 4: a
+        git error/timeout must be distinguishable from "genuinely no
+        evidence" -- None already means the latter."""
+        from nanobot.runtime.commit_markers import GIT_UNAVAILABLE
+
+        repo = _init_instance_repo(
+            tmp_path, subject="feat: x", script_rel="scripts/existing_target.py",
+        )
+
+        import subprocess as _sp
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("git not found")
+
+        monkeypatch.setattr(_sp, "run", _boom)
+        result = llm_proposer._latest_non_residual_commit_for_path(repo, "scripts/existing_target.py")
+        assert result == GIT_UNAVAILABLE
+        assert result is not None
+
     def test_existing_path_dedup_passes_commit_as_evidence(self, tmp_path, monkeypatch):
         repo = _init_instance_repo(
             tmp_path, subject="feat: latest real target change",

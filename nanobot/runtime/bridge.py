@@ -987,6 +987,9 @@ def _setup_cycle_branch(
 def _integrate_cycle_to_main(
     repo_root: 'Path', cycle_branch: str, main_sha_before: str,
     expected_origin_main: 'str | None' = None,
+    cycle_id: 'str | None' = None,
+    task_title: 'str | None' = None,
+    demand_id: 'str | None' = None,
 ) -> dict:
     """Merge a green cycle branch into ``main`` and push — the ONLY way ``origin/main`` advances.
 
@@ -1011,6 +1014,15 @@ def _integrate_cycle_to_main(
     movement (out-of-band race safety, #846 — see ``_detect_out_of_band_main``,
     which the caller must also point at ``expected_origin_main``, not
     ``main_sha_before``, for the same reason).
+
+    ADR-035 keep-work architect resolution (#1942 B2): ``cycle_id``, when
+    given, is written into the merge commit's BODY as a
+    ``Selfevo-Cycle: <id>`` trailer (:data:`commit_markers.
+    MERGE_TRAILER_CYCLE_KEY`) -- the SUBJECT stays exactly
+    ``"merge: integrate <cycle_branch>"``, unchanged, since several
+    readers (``scripts/revert_cycles.py``'s ``MERGE_SUBJECT_RX``, this
+    file's own novelty-pressure filter, ``scripts/measure_package_1903.py``,
+    both dashboard generators) match it verbatim.
 
     Returns ``{"ok": bool, "main_sha_after": str, "reason": str | None}``.
     """
@@ -1039,8 +1051,37 @@ def _integrate_cycle_to_main(
     if checkout_main.returncode != 0:
         return {'ok': False, 'main_sha_after': main_sha_before, 'reason': 'checkout_main_failed'}
 
+    # ADR-035 keep-work architect resolution (#1942 B2): the merge commit
+    # describes itself. SUBJECT stays exactly "merge: integrate
+    # <cycle_branch>" -- unchanged, since scripts/revert_cycles.py's
+    # MERGE_SUBJECT_RX, this file's own novelty-pressure filter,
+    # scripts/measure_package_1903.py, and both dashboard generators all
+    # match it verbatim. BODY carries the task title as a human-readable
+    # paragraph plus three trailers (Selfevo-Cycle, Selfevo-Task,
+    # Selfevo-Demand) for automated readers -- self_dedup evidence
+    # (llm_proposer._latest_non_residual_commit_for_path) reads the
+    # Selfevo-Task trailer for a NEW merge, falling back to merge^2 (the
+    # cycle branch tip's own last non-checkpoint commit) only for an OLD
+    # merge that predates this trailer.
+    from nanobot.runtime.commit_markers import (
+        MERGE_TRAILER_CYCLE_KEY, sanitize_trailer_value,
+    )
+    _merge_body_lines: 'list[str]' = []
+    _clean_title = sanitize_trailer_value(task_title, max_len=500) if task_title else ''
+    if _clean_title:
+        _merge_body_lines.append(_clean_title)
+        _merge_body_lines.append('')
+    if cycle_id:
+        _merge_body_lines.append(f'{MERGE_TRAILER_CYCLE_KEY}: {sanitize_trailer_value(cycle_id)}')
+    if _clean_title:
+        _merge_body_lines.append(f'Selfevo-Task: {_clean_title}')
+    if demand_id:
+        _merge_body_lines.append(f'Selfevo-Demand: {sanitize_trailer_value(demand_id)}')
+    _merge_cmd = git + ['merge', '--no-ff', cycle_branch, '-m', f'merge: integrate {cycle_branch}']
+    if _merge_body_lines:
+        _merge_cmd += ['-m', '\n'.join(_merge_body_lines)]
     merge = _sp_int.run(
-        git + ['merge', '--no-ff', cycle_branch, '-m', f'merge: integrate {cycle_branch}'],
+        _merge_cmd,
         capture_output=True, text=True,
     )
     if merge.returncode != 0:
@@ -4646,9 +4687,19 @@ async def _main_impl_body():
                     # checkpoints themselves; this commit is a marker, not a
                     # second copy of the diff.
                     if _all_commits_are_artificial_since(_selfevo_repo, _pre_spawn_sha):
-                        _closing_subject = f"selfevo: {(req.get('task_title') or 'increment').strip()}"[:120]
+                        from nanobot.runtime.commit_markers import (
+                            MERGE_TRAILER_CYCLE_KEY, sanitize_trailer_value,
+                        )
+                        _closing_title = sanitize_trailer_value(req.get('task_title') or 'increment')
+                        _closing_subject = f"selfevo: {_closing_title}"[:120]
+                        _closing_trailers = [f'{MERGE_TRAILER_CYCLE_KEY}: {sanitize_trailer_value(_cycle_id)}']
+                        if req.get('candidate_id'):
+                            _closing_trailers.append(f"Selfevo-Demand: {sanitize_trailer_value(req.get('candidate_id'))}")
                         _closing = _sp.run(
-                            _git_se + ['commit', '--allow-empty', '-m', _closing_subject],
+                            _git_se + [
+                                'commit', '--allow-empty', '-m', _closing_subject,
+                                '-m', '\n'.join(_closing_trailers),
+                            ],
                             capture_output=True, text=True,
                         )
                         if _closing.returncode == 0:
@@ -5239,6 +5290,9 @@ async def _main_impl_body():
                                 _integ = _integrate_cycle_to_main(
                                     _selfevo_repo, cycle_branch, main_sha_before,
                                     expected_origin_main=_origin_main_observed,
+                                    cycle_id=_cycle_id,
+                                    task_title=req.get('task_title') or None,
+                                    demand_id=req.get('candidate_id') or None,
                                 )
                             else:
                                 _integ = {'ok': False, 'reason': 'explore_candidate_deferred'}
@@ -5592,7 +5646,10 @@ async def _main_impl_body():
                         STATE_DIR.parent / 'eeebot-self-evolving',
                         _winner['cycle_branch'],
                         _winner['main_sha_before'],
-                        expected_origin_main=_winner['origin_main_observed']
+                        expected_origin_main=_winner['origin_main_observed'],
+                        cycle_id=_cycle_id,
+                        task_title=req.get('task_title') or None,
+                        demand_id=req.get('candidate_id') or None,
                     )
                     if _integ['ok']:
                         _winner['integrated'] = True

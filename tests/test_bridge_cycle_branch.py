@@ -133,6 +133,87 @@ class TestIntegrateCycleToMain:
         assert current_branch == "main"
         assert (work / "feature.py").exists()
 
+    def test_merge_subject_unchanged_with_trailers(self, tmp_path):
+        """ADR-035 keep-work architect resolution (#1942 B2), point 2: the
+        merge commit's SUBJECT stays exactly "merge: integrate
+        <cycle_branch>" -- several readers (scripts/revert_cycles.py's
+        MERGE_SUBJECT_RX, this file's own novelty-pressure filter,
+        scripts/measure_package_1903.py, both dashboard generators) match
+        it verbatim. Provenance goes in the BODY as trailers instead.
+        """
+        import re
+        import subprocess
+
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "abc123def456")
+        assert setup["ok"]
+        _commit_file(work, "feature.py", "def feature():\n    return 42\n", "feat: add feature")
+
+        integ = bridge._integrate_cycle_to_main(
+            work, setup["branch"], setup["main_sha"],
+            cycle_id="abc123def456", task_title="finish the wip feature", demand_id="demand-42",
+        )
+        assert integ["ok"] is True, integ
+
+        subject = subprocess.run(
+            ["git", "-C", str(work), "log", "-1", "--format=%s"], capture_output=True, text=True,
+        ).stdout.strip()
+        assert subject == f"merge: integrate {setup['branch']}"
+
+        # scripts/revert_cycles.py's own regex, reproduced here so this test
+        # fails if the two ever drift apart.
+        merge_subject_rx = re.compile(r"^merge: integrate (selfevo/(?:cycle|fallback)-[a-f0-9]+)$")
+        assert merge_subject_rx.match(subject), subject
+
+        body = subprocess.run(
+            ["git", "-C", str(work), "log", "-1", "--format=%b"], capture_output=True, text=True,
+        ).stdout
+        assert "Selfevo-Cycle: abc123def456" in body
+        assert "Selfevo-Task: finish the wip feature" in body
+        assert "Selfevo-Demand: demand-42" in body
+
+        cycle_trailer = subprocess.run(
+            ["git", "-C", str(work), "log", "-1",
+             "--format=%(trailers:key=Selfevo-Task,valueonly)"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        assert cycle_trailer == "finish the wip feature"
+
+    def test_merge_trailer_value_survives_newline_and_colon(self, tmp_path):
+        """Point 1 of the architect's trailer-format resolution: a task
+        title containing a newline and a colon must round-trip through
+        git's own trailer parser as ONE collapsed, single-line value."""
+        import subprocess
+
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "multiline")
+        assert setup["ok"]
+        _commit_file(work, "feature.py", "def feature():\n    return 42\n", "feat: add feature")
+
+        messy_title = "Fix: handle the edge case\nwhen input is empty (see notes: important)"
+        integ = bridge._integrate_cycle_to_main(
+            work, setup["branch"], setup["main_sha"],
+            cycle_id="multiline", task_title=messy_title,
+        )
+        assert integ["ok"] is True, integ
+
+        parsed = subprocess.run(
+            ["git", "-C", str(work), "log", "-1",
+             "--format=%(trailers:key=Selfevo-Task,valueonly)"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        assert "\n" not in parsed
+        assert parsed == "Fix: handle the edge case when input is empty (see notes: important)"
+
+        # The embedded newline did not spill into a SECOND trailer or
+        # corrupt --first-parent traversal: exactly one first-parent
+        # commit (this merge) sits ahead of the init commit.
+        first_parent_count = subprocess.run(
+            ["git", "-C", str(work), "log", "--first-parent", "--oneline", "main"],
+            capture_output=True, text=True,
+        ).stdout.strip().splitlines()
+        assert len([l for l in first_parent_count if l.strip()]) == 2  # init + this merge
+
     def test_dirty_tree_at_integration_still_integrates(self, tmp_path):
         """#828: a subagent may leave the shared checkout's working tree dirty
         at integration time (stray uncommitted edits / untracked files — some
