@@ -1076,6 +1076,14 @@ def test_supply_hold_uses_rest_snapshot_with_backoff(tmp_path: Path, monkeypatch
         return object()
 
     monkeypatch.setattr(bridge, "_make_provider", _tracking_provider)
+    proposer_calls: list[int] = []
+    real_maybe_propose = bridge.llm_proposer.maybe_propose
+
+    def _tracking_maybe_propose(*a, **k):
+        proposer_calls.append(1)
+        return real_maybe_propose(*a, **k)
+
+    monkeypatch.setattr(bridge.llm_proposer, "maybe_propose", _tracking_maybe_propose)
 
     open_increment.record_supply_interruption(
         integration_state, "cycle-prior",
@@ -1095,6 +1103,7 @@ def test_supply_hold_uses_rest_snapshot_with_backoff(tmp_path: Path, monkeypatch
     assert repo_prep_calls == []
     assert provider_calls == []
     assert planning_calls == []
+    assert proposer_calls == []
 
     # Force the deadline into the past (simulates cooldown elapsed).
     oi_state = open_increment.load_state(integration_state)
