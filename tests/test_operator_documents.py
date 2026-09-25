@@ -19,6 +19,7 @@ from nanobot.runtime import demand, goal_review, llm_proposer, strategist_inputs
 from nanobot.runtime.operator_documents import (
     CHARTER_MAX_CHARS,
     DOCUMENT_SIZE_CAP_BYTES,
+    PRIORITIES_BLOCK_CAP,
     PRIORITY_ALL_COMPLETED,
     PRIORITY_EMPTY,
     PRIORITY_PRESENT,
@@ -29,8 +30,10 @@ from nanobot.runtime.operator_documents import (
     STATE_TEXT,
     STATE_UNREADABLE,
     operator_priorities_status,
+    render_priorities_block,
     resolve_charter,
     resolve_derived_priorities,
+    resolve_derived_priorities_split,
     resolve_operator_priorities,
 )
 from nanobot.runtime.state import load_runtime_state_from_root
@@ -169,6 +172,36 @@ def test_four_priority_states_are_distinct(tmp_path: Path):
         result_empty.state,
         result_missing.state,
     } == {PRIORITY_PRESENT, PRIORITY_ALL_COMPLETED, PRIORITY_EMPTY, PRIORITY_UNAVAILABLE}
+
+    # ─── prompt half (ADR-034 rule 5, #1940/A4) ────────────────────────────
+    # The four states stay distinguishable once rendered into the prompt
+    # block every A4 reader shows — `unavailable` in particular is worded so
+    # it is never mistaken for "the operator has no priorities" (rule 3).
+    block_present = render_priorities_block(result_present, ())
+    block_done = render_priorities_block(result_done, ())
+    block_empty = render_priorities_block(result_empty, ())
+    block_missing = render_priorities_block(result_missing, ())
+
+    assert "Do a thing" in block_present
+    assert "Open:" in block_present
+
+    assert "completed" in block_done.lower()
+    # Architect decision (2026-09-25): all_completed shows the Completed
+    # HEADERS (number + title), not just the summary count -- plus the
+    # summary/state line.
+    assert "Completed (do not repeat):" in block_done
+    assert "- 1. Do a thing" in block_done
+    assert "write scripts/x.py and commit." not in block_done  # instructions never shown, headers only
+
+    assert "no priorities" in block_empty.lower()
+
+    assert "unavailable" in block_missing.lower()
+    # Worded as a negation ("NOT the same as ... no priorities"), never as
+    # a bare claim that none exist.
+    assert "not the same as" in block_missing.lower()
+
+    # Pairwise distinct as rendered text too.
+    assert len({block_present, block_done, block_empty, block_missing}) == 4
 
 
 def test_whitespace_only_goal_text_json_is_unavailable_not_empty(tmp_path: Path):
@@ -571,7 +604,15 @@ def test_priority_provenance_survives_end_to_end(tmp_path: Path, monkeypatch):
     assert "## Derived priorities (source: derived" in context
     assert "Derived open" in context
     assert "Derived done" not in context  # completed, filtered independently here too
-    assert "Operator open" not in context  # operator priorities in this prompt are A4's job
+    # ADR-034 rule 5 (A4): the operator's OWN list now reaches this prompt
+    # too, under its own heading, distinct from the charter and from the
+    # derived section above.
+    assert "## Operator priorities" in context
+    assert "Operator open" in context
+    # Completed is headers only (architect decision): the title survives as
+    # a do-not-repeat marker, its instructions body does not.
+    assert "- 2. Operator done" in context
+    assert op_done_body not in context
 
     # Through demand-driven mode's own "## Demand" section: when the
     # collected items themselves are what the model sees (demand_items),
@@ -662,3 +703,216 @@ def test_merged_text_consumers_migrated_with_source(tmp_path: Path, monkeypatch)
     assert titles2 == ["Priority 18 — A brand new priority"]
     derived = goal_review.read_derived_priorities(state_dir)
     assert [d["number"] for d in derived] == [17, 18]
+
+
+# ─── ADR-034 rule 5 (issue #1940, A4): executor, proposer and planner see
+# the operator priorities ──────────────────────────────────────────────────
+
+
+def test_proposer_sees_operator_priorities_end_to_end(tmp_path: Path, monkeypatch):
+    """Test Contract: with operator priorities present and not completed,
+    the proposer's own context carries the entry (number, title and
+    instructions) under its own heading so a proposal can cite it; with
+    every listed priority completed, the context shows the rule-3
+    one-line notice instead — Completed headers only, never the
+    instructions body (architect decision, 2026-09-24)."""
+    monkeypatch.delenv("RELEASE_ROOT", raising=False)
+    release_root = tmp_path / "release"
+    release_root.mkdir()
+    (release_root / "goals.md").write_text("the charter", encoding="utf-8")
+    monkeypatch.setenv("RELEASE_ROOT", str(release_root))
+
+    state_present = tmp_path / "present"
+    _goal_text_json(
+        state_present,
+        "Current priority targets:\n(A) Priority 4 — Trim the retry loop: cut wasted calls.",
+    )
+    context_present = llm_proposer.build_context(state_present, None)
+    assert "## Operator priorities" in context_present
+    assert "4. Trim the retry loop: cut wasted calls." in context_present
+
+    state_done = tmp_path / "done"
+    instructions = "cut wasted calls."
+    _goal_text_json(
+        state_done,
+        f"Current priority targets:\n(A) Priority 4 — Trim the retry loop: {instructions}",
+    )
+    _mark_completed(state_done, "4", "Trim the retry loop", instructions)
+    context_done = llm_proposer.build_context(state_done, None)
+    assert "## Operator priorities" in context_done
+    assert "completed" in context_done.lower()
+    assert "4. Trim the retry loop: cut wasted calls." not in context_done  # headers only
+
+
+def test_prompt_blocks_present_and_bounded(tmp_path: Path, monkeypatch):
+    """Test Contract: executor and planner prompts carry the operator-
+    priorities block under its own heading, within its own fixed budget
+    (:data:`PRIORITIES_BLOCK_CAP`), counted only in the caller's overall
+    prompt cap -- never displacing the charter or the release ontology's
+    OPERATING.md floor (ADR-034 rule 5, architect decision 2026-09-24).
+    Over the block's own cap the WHOLE combined block renders
+    ``unavailable``/``oversize``, never a partial, silently-truncated
+    render.
+
+    Architect decision (2026-09-25, #1952 review): ONE shared cap for
+    operator + derived together; derived is rendered COMPACTLY (number,
+    label, vector, source -- never the instructions body), which is what
+    keeps a real-sized derived list inside that one cap alongside the
+    operator section. A derived fixture with LONG bodies (~5K total raw)
+    proves the compact render, not the raw one, is what actually ships.
+    """
+    from nanobot.agent.context import ContextBuilder
+
+    release_root = tmp_path / "release"
+    release_root.mkdir()
+    (release_root / "goals.md").write_text("the charter", encoding="utf-8")
+    (release_root / "IDENTITY.md").write_text("# IDENTITY\n\nWho I am.", encoding="utf-8")
+    (release_root / "SOUL.md").write_text("# SOUL\n\nWhat I value.", encoding="utf-8")
+    (release_root / "USER.md").write_text("# USER\n\nOperator profile.", encoding="utf-8")
+    (release_root / "OPERATING.md").write_text("# OPERATING\n\n" + ("cycle rule. " * 50), encoding="utf-8")
+
+    # A derived list the same shape/size as the real one measured on the
+    # host (#1940 pG baseline: 10 entries, ~5,060 chars RAW, i.e. with full
+    # instructions bodies) -- large enough that the pre-compact rendering
+    # would have blown the shared cap on its own.
+    state_dir = tmp_path / "state"
+    _goal_text_json(
+        state_dir,
+        "Current priority targets:\n(A) Priority 1 — Do a thing: write scripts/x.py.",
+    )
+    _derived_body = "word " * 80  # ~400 chars -- never shown, compact form only
+    (state_dir / "goals" / "derived_priorities.json").write_text(
+        json.dumps({
+            "schema_version": "derived-v1",
+            "priorities": [
+                {
+                    "label": f"Derived thing {n}",
+                    "body": _derived_body,
+                    "number": 100 + n,
+                    "vector": "V1",
+                }
+                for n in range(1, 11)
+            ],
+        }),
+        encoding="utf-8",
+    )
+    derived_res_sized = resolve_derived_priorities(state_dir)
+    assert derived_res_sized.state == STATE_TEXT and len(derived_res_sized.entries) == 10
+    raw_derived_len = sum(len(e.instructions) for e in derived_res_sized.entries)
+    assert raw_derived_len > PRIORITIES_BLOCK_CAP, (
+        "fixture's raw bodies must exceed the shared cap alone, or this test "
+        "cannot tell a compact render from a raw one that happened to fit"
+    )
+
+    builder = ContextBuilder(tmp_path / "workspace", release_root=release_root, state_dir=state_dir)
+    prompt = builder.build_system_prompt(loop_profile=True)
+
+    assert len(prompt) <= ContextBuilder.MAX_SYSTEM_PROMPT_CHARS
+    # The operator's own content renders in full, and the derived section
+    # renders too -- but COMPACT: number/label/vector/source, never the
+    # long instructions body -- so together they fit the one shared cap.
+    assert "## Operator priorities" in prompt
+    assert "Do a thing" in prompt
+    assert "This order conveys the operator's intent" in prompt
+    assert "## Derived priorities (source: derived)" in prompt
+    assert "Derived thing 1" in prompt  # compact label IS shown
+    assert "vector: V1" in prompt and "source: derived" in prompt
+    assert _derived_body not in prompt  # the instructions body is NEVER shown
+    priorities_section = prompt.split("## Operator priorities", 1)[1].split("---", 1)[0]
+    assert len(priorities_section) < PRIORITIES_BLOCK_CAP + 100  # sanity: nowhere near the raw ~5K
+    assert "## goals.md" in prompt  # the charter, never displaced
+    assert "# OPERATING" in prompt  # the release floor, never displaced
+    operating_chars = builder.last_fit["sections"].get("operating", 0)
+    assert operating_chars >= len("# OPERATING\n\n" + "cycle rule. " * 50) - 1
+
+    # Oversize of the COMBINED block: an operator list alone big enough to
+    # exceed the shared cap degrades the WHOLE section to unavailable/
+    # oversize, never a partial, silently-truncated render.
+    huge_state = tmp_path / "state-huge"
+    lines = "\n".join(
+        f"(A) Priority {n} — Do thing {n}: " + ("word " * 80) for n in range(1, 20)
+    )
+    _goal_text_json(huge_state, f"Current priority targets:\n{lines}")
+    huge_builder = ContextBuilder(tmp_path / "workspace2", release_root=release_root, state_dir=huge_state)
+    huge_block = huge_builder._load_priorities_block()
+    assert len(huge_block) <= PRIORITIES_BLOCK_CAP + len("## Operator priorities\n\n")
+    assert "unavailable" in huge_block.lower()
+    assert "reason: oversize" in huge_block.lower()
+    assert "Do thing 1" not in huge_block  # no partial content, ever
+
+    # all_completed: Completed HEADERS (number + title) are shown, plus the
+    # state-summary line -- not just the summary alone (architect decision,
+    # 2026-09-25).
+    done_state = tmp_path / "state-done"
+    done_instructions = "write scripts/x.py."
+    _goal_text_json(
+        done_state,
+        f"Current priority targets:\n(A) Priority 1 — Do a thing: {done_instructions}",
+    )
+    _mark_completed(done_state, "1", "Do a thing", done_instructions)
+    done_res = resolve_operator_priorities(done_state)
+    assert done_res.state == PRIORITY_ALL_COMPLETED
+    done_block = render_priorities_block(done_res, ())
+    assert "completed" in done_block.lower()  # the state-summary line
+    assert "Completed (do not repeat):" in done_block
+    assert "- 1. Do a thing" in done_block
+    assert done_instructions not in done_block  # headers only, never the body
+
+    # Planner: same renderer, same shared budget, end to end through
+    # bridge._run_planning_session's own task message.
+    import asyncio
+
+    from nanobot.runtime import bridge
+    from tests.test_run_planning_session import _fake_config, _init_repo_with_origin, _make_fake_mgr_factory
+
+    repo = _init_repo_with_origin(tmp_path)
+    skill = release_root / "nanobot" / "skills" / "task-writing" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# task-writing contract\n", encoding="utf-8")
+    manager_factory = _make_fake_mgr_factory(state_dir, {"insight": "x", "plan": "y", "iterations_planned": 10})
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release_root)
+
+    outcome = asyncio.run(bridge._run_planning_session(
+        provider=object(), bus=object(), config=_fake_config(), model="test-model",
+        state_dir=state_dir, selfevo_repo=repo, denied_paths=set(), cycle_id="cycle-1",
+    ))
+
+    assert outcome["ran"] is True
+    planner_task = manager_factory.last_task or ""
+    assert "## Operator priorities" in planner_task
+    assert "Do a thing" in planner_task  # the one open entry seeded above
+    # Same real-sized derived fixture as above (state_dir is shared): the
+    # planner sees the operator's content and the derived list's COMPACT
+    # form -- never its instructions body.
+    assert "## Derived priorities (source: derived)" in planner_task
+    assert "Derived thing 1" in planner_task
+    assert _derived_body not in planner_task
+    assert len(planner_task) <= 20_000  # generously bounded; not swamped by the priorities block
+
+
+def test_prompt_never_picks_a_priority_for_the_executor(tmp_path: Path):
+    """Test Contract: nothing in prompt assembly selects an item for the
+    executor. The operator-priorities block states the order is intent,
+    not instruction (ADR-034 rule 5); and the executor's own task message
+    (``bridge.build_task``) still reads generically -- "priorities are
+    handled by the proposer" -- when the request carries no
+    ``curriculum_level``, unaffected by the new block's presence."""
+    from nanobot.runtime.bridge import build_task
+    from nanobot.runtime.operator_documents import PRIORITY_INTENT_LINE
+
+    state_dir = tmp_path / "state"
+    _goal_text_json(
+        state_dir,
+        "Current priority targets:\n"
+        "(A) Priority 1 — First thing: do it.\n"
+        "(B) Priority 2 — Second thing: do it too.",
+    )
+    res = resolve_operator_priorities(state_dir)
+    block = render_priorities_block(res, ())
+    assert PRIORITY_INTENT_LINE in block
+    assert "you must work on priority 1" not in block.lower()
+    assert "start with priority" not in block.lower()
+
+    task = build_task({}, "goal text", "")
+    assert "This task is not an operator priority; priorities are handled by the proposer." in task

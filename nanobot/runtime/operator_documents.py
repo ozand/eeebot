@@ -416,6 +416,125 @@ def operator_priorities_status(
     )
 
 
+#: ADR-034 rule 5: the line every A4 prompt (executor, proposer, planner)
+#: carries next to the operator's list -- order is the operator's INTENT,
+#: not an instruction to execute the first item; Completed is a constraint
+#: against repeating work, never a source of new work. One literal so the
+#: wording cannot drift between the three readers.
+PRIORITY_INTENT_LINE = (
+    "This order conveys the operator's intent, not an instruction to execute "
+    "the first item. The Completed list below is a constraint against "
+    "repeating work, never a source of new work."
+)
+
+#: ADR-034 rule 5 (architect decision, 2026-09-24 and 2026-09-25, issue
+#: #1940/#1952): ONE combined budget for the operator-priorities section
+#: AND the compact derived-priorities section together -- entirely OUTSIDE
+#: the release pool / any per-role charter cap, counted only in the
+#: caller's own overall prompt budget (e.g. :data:`nanobot.agent.context.
+#: ContextBuilder.MAX_SYSTEM_PROMPT_CHARS`). Over this many characters the
+#: WHOLE combined block renders ``unavailable``/``oversize`` -- never
+#: truncated, the same "never silently cut" rule ADR-034 rule 3 states for
+#: the underlying document, extended here to the rendered prompt block.
+#:
+#: #1952 review history: an earlier revision of this PR split operator and
+#: derived into two independently-capped sections, because a naive combined
+#: render put the DERIVED list's full instructions text in the same budget
+#: as the operator's, and the derived list alone (10 entries, ~5,060 chars
+#: measured on the host) always went over -- taking the operator's own
+#: (often one-line) content down with it. The architect's actual fix
+#: (2026-09-25) is not two budgets: it is rendering derived COMPACTLY
+#: (number, label, vector, source -- never the instructions body), which
+#: measures ~400-600 chars for 10 entries and fits this one shared cap
+#: comfortably alongside the operator section.
+PRIORITIES_BLOCK_CAP = 3000
+
+_PRIORITIES_BLOCK_OVERSIZE_TEXT = (
+    "## Operator priorities\n\n"
+    "Operator and derived priorities could not be shown here (unavailable, "
+    "reason: oversize) -- this is NOT the same as the operator having no "
+    "priorities."
+)
+
+
+def format_derived_priority_line(entry: "PriorityEntry") -> str:
+    """ADR-034 (Consequences, #1951): "Derived priorities are shown in
+    compact form — number, label, vector and source; their bodies are not
+    rendered" -- for EVERY rule-5 reader (executor, proposer, planner), not
+    only the ones that happen to call :func:`render_priorities_block`
+    directly. One formatter, imported by every caller that renders a
+    derived entry (:mod:`nanobot.runtime.llm_proposer`'s own derived
+    section included), so the three roles cannot drift onto different
+    shapes -- the #1952 review finding this closes."""
+    return f"{entry.number}. {entry.title} (vector: {entry.vector}, source: derived)"
+
+
+def render_priorities_block(
+    operator_res: PriorityResolution,
+    derived_entries: "tuple[PriorityEntry, ...]" = (),
+    *,
+    cap: int = PRIORITIES_BLOCK_CAP,
+) -> str:
+    """ADR-034 rule 5: render the operator-priorities section (four rule-3
+    states) and, when *derived_entries* is non-empty, a second ``## Derived
+    priorities`` section after it -- ``operator first``, one string, ONE
+    shared budget (architect decision, 2026-09-25). A caller that already
+    shows derived priorities elsewhere in its own prompt (the proposer's
+    existing context) passes ``derived_entries=()`` to get the operator
+    section alone rather than a duplicate.
+
+    The operator's own entries are rendered in full (number, title,
+    instructions). Completed entries are HEADERS ONLY (number + title,
+    never the instructions body) -- architect decision, 2026-09-24: a
+    constraint to check off against, not content to reread. ``all_completed``
+    renders the SAME Completed headers, plus its one-line state summary
+    (architect decision, 2026-09-25) -- not just the summary alone.
+
+    The derived list is rendered COMPACTLY -- number, label, vector, source
+    only, never the instructions body (architect decision, 2026-09-25: this
+    is what keeps a real-sized derived list, e.g. 10 entries with long
+    bodies, inside the ONE shared cap alongside the operator section).
+
+    Never truncates: over *cap* the whole combined section is replaced by a
+    fixed ``unavailable``/``oversize`` marker (never a partial render) so a
+    reader can never mistake "too long to show" for "the operator has
+    none".
+    """
+    heading = "## Operator priorities\n\n"
+    if operator_res.state == PRIORITY_PRESENT:
+        lines = [PRIORITY_INTENT_LINE, "", "Open:"]
+        lines += [f"{e.number}. {e.title}: {e.instructions}" for e in operator_res.open_entries]
+        if operator_res.completed_entries:
+            lines += ["", "Completed (do not repeat):"]
+            lines += [f"- {e.number}. {e.title}" for e in operator_res.completed_entries]
+        body = "\n".join(lines)
+    elif operator_res.state == PRIORITY_ALL_COMPLETED:
+        plural = "y is" if operator_res.completed_count == 1 else "ies are"
+        lines = [
+            f"All {operator_res.completed_count} operator priorit{plural} completed "
+            "(do not repeat). The operator has not set a new one.",
+            "",
+            "Completed (do not repeat):",
+        ]
+        lines += [f"- {e.number}. {e.title}" for e in operator_res.completed_entries]
+        body = "\n".join(lines)
+    elif operator_res.state == PRIORITY_EMPTY:
+        body = "The operator's document is present and lists no priorities."
+    else:
+        body = (
+            "Operator priorities could not be read (unavailable) -- this is "
+            "NOT the same as the operator having no priorities."
+        )
+    if derived_entries:
+        body += "\n\n## Derived priorities (source: derived)\n\n" + "\n".join(
+            format_derived_priority_line(e) for e in derived_entries
+        )
+    text = heading + body
+    if len(text) > cap:
+        return _PRIORITIES_BLOCK_OVERSIZE_TEXT
+    return text
+
+
 def _parse_entries(section: str) -> list[PriorityEntry]:
     entries: list[PriorityEntry] = []
     for m in _PRIORITY_ENTRY_PATTERN.finditer(section):
