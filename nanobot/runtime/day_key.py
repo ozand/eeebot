@@ -152,19 +152,36 @@ def local_offset(now: "datetime | None" = None) -> timedelta:
     return offset if offset is not None else timedelta(0)
 
 
-def day_key(now: "datetime | None" = None) -> str:
-    """Host-local calendar day key, e.g. ``"2026-09-22"``.
+def day_key(now: "datetime | None" = None, *, local_tz: Any = None) -> str:
+    """Host-local calendar day key, e.g. "2026-09-22".
 
     *now* defaults to the system's local clock
-    (``datetime.now().astimezone()``, aware). Pass an aware *now* in
+    (datetime.now().astimezone(local_tz), aware). Pass an aware *now* in
     tests to pin a specific host timezone, e.g.
-    ``datetime(2026, 1, 1, 23, 30, tzinfo=ZoneInfo("Europe/Moscow"))`` --
+    datetime(2026, 1, 1, 23, 30, tzinfo=ZoneInfo("Europe/Moscow")) --
     this is the one parameter every migrated writer/reader must thread
     through so its own tests can do the same without depending on the
     machine running them. A naive *now* is used as-is (Python's own
     convention: a naive datetime is already "local").
+
+    Timezone offset rule (decided by offset value, never object identity):
+    - Zero-offset datetimes (UTC, regardless of whether represented by
+      timezone.utc, ZoneInfo("UTC"), or timezone(timedelta(0))):
+      converted to *local_tz* if specified, otherwise converted to host-local
+      via astimezone().
+    - Non-zero-offset datetimes: converted to *local_tz* if specified;
+      otherwise formatted as-is (treated as an already-localized moment).
     """
-    moment = now if now is not None else datetime.now().astimezone()
+    if now is None:
+        moment = datetime.now().astimezone(local_tz)
+    elif now.tzinfo is None:
+        moment = now
+    elif local_tz is not None:
+        moment = now.astimezone(local_tz)
+    elif now.utcoffset() == timedelta(0):
+        moment = now.astimezone()
+    else:
+        moment = now
     return moment.strftime(DAY_KEY_FORMAT)
 
 
@@ -249,13 +266,17 @@ def archive_day_bounds(
     naive = datetime.strptime(day, DAY_KEY_FORMAT)
     utc_start = naive.replace(tzinfo=timezone.utc)
     utc_end = utc_start + timedelta(hours=24)
-    if cutover_utc is None or utc_end <= cutover_utc:
+    if cutover_utc is None and local_tz is None:
+        return utc_start, utc_end
+    if cutover_utc is not None and utc_end <= cutover_utc:
         return utc_start, utc_end
     tz = local_tz if local_tz is not None else datetime.now().astimezone().tzinfo
     local_start = naive.replace(tzinfo=tz)
-    hours = (
-        transition_day_hours(local_offset(local_start), cutover_utc=cutover_utc)
-        if is_transition_day(day, local_tz=tz, cutover_utc=cutover_utc)
-        else 24.0
-    )
-    return local_start, local_start + timedelta(hours=hours)
+    if is_transition_day(day, local_tz=tz, cutover_utc=cutover_utc):
+        local_next_midnight = local_start + timedelta(days=1)
+        offset = local_offset(local_next_midnight)
+        if offset >= timedelta(0):
+            return utc_start, local_next_midnight
+        else:
+            return local_start, local_start + timedelta(hours=transition_day_hours(offset, cutover_utc=cutover_utc))
+    return local_start, local_start + timedelta(days=1)
