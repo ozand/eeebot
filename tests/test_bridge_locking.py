@@ -115,8 +115,9 @@ class TestAcquireBridgeLock:
 
 class TestMainHonoursLockContention:
     """End-to-end: main() must exit cleanly (code 0) without touching the
-    repo when the lock is already held — it should never reach
-    find_pending_request()/the git helpers.
+    repo when the lock is already held — it should never reach the
+    provider/planning-session machinery (ADR-035 rule 1, #1942: the
+    rotation-queue find_pending_request() this used to pin is retired).
     """
 
     def test_main_exits_cleanly_when_lock_held(self, tmp_path, monkeypatch):
@@ -126,19 +127,19 @@ class TestMainHonoursLockContention:
         held = bridge._acquire_bridge_lock(tmp_path)
         assert held is not None
         try:
-            called = {"find_pending_request": False}
+            called = {"_make_provider": False}
 
-            def _boom():
-                called["find_pending_request"] = True
+            def _boom(_config):
+                called["_make_provider"] = True
                 raise AssertionError("must not be reached while lock is held")
 
-            monkeypatch.setattr(bridge, "find_pending_request", _boom)
+            monkeypatch.setattr(bridge, "_make_provider", _boom)
 
             import asyncio
             result = asyncio.run(bridge.main())
 
             assert result == 0
-            assert called["find_pending_request"] is False
+            assert called["_make_provider"] is False
         finally:
             held.close()
 

@@ -184,17 +184,6 @@ except ValueError:
 # window reaches — the age cutoff is FAILURE_SUPPRESS_HOURS and stays separate.
 _FAILURE_SCAN_CANDIDATES = 256
 
-try:
-    # #733: bounded cap on how many pre-spawn duplicate requests _main_impl
-    # will bulk-skip (each a cheap, zero-LLM git check) in a single bridge
-    # run before returning — a stale queue must never turn one timer
-    # invocation into an unbounded loop on the weak host.
-    MAX_SKIPS_PER_RUN = int(os.environ.get('SUBAGENT_BRIDGE_MAX_SKIPS_PER_RUN', '10').strip() or '10')
-    if MAX_SKIPS_PER_RUN < 1:
-        MAX_SKIPS_PER_RUN = 10
-except ValueError:
-    MAX_SKIPS_PER_RUN = 10
-
 # #721: bounded cap on how many local pre-cycle-*/cycle-* tags _prune_cycle_tags
 # inspects per bridge run — a pathologically large tag namespace (e.g. a stuck
 # retention env) must never turn pruning into an unbounded git operation.
@@ -373,54 +362,6 @@ def _iter_archive_entries(archive_dir: 'Path', limit: int) -> list[tuple['Path',
     except Exception:
         return []
     return records
-
-
-def find_pending_request() -> tuple[Path | None, dict]:
-    """Find the oldest queued subagent request not yet handled by a real executor."""
-    req_dir = STATE_DIR / 'subagents' / 'requests'
-    if not req_dir.exists():
-        return None, {}
-
-    # Collect request_ids/paths that have REAL results (not blocked stubs)
-    real_handled: set[str] = set()
-    result_dir = STATE_DIR / 'subagents' / 'results'
-    for _rp, rd, _mtime in _iter_result_entries(result_dir):
-        if not _is_real_result(rd):
-            continue  # skip blocked stubs — still eligible for bridge
-        if rid := rd.get('request_id') or rd.get('verification_task_id'):
-            real_handled.add(rid)
-        if rpath := rd.get('request_path'):
-            real_handled.add(str(rpath))
-
-    # Also check bridge's own handled markers (those ARE real LLM runs)
-    if BRIDGE_STATE_DIR.exists():
-        for m in BRIDGE_STATE_DIR.glob('handled_*.txt'):
-            content = m.read_text(encoding='utf-8').strip()
-            real_handled.add(content)
-            # marker name encodes request_id
-            stem = m.stem[len('handled_'):]
-            real_handled.add(stem)
-
-    candidates = sorted(
-        [p for p in req_dir.glob('*.json') if p.is_file()],
-        key=lambda p: p.stat().st_mtime,
-    )
-    for path in candidates:
-        req = load_json(path) or {}
-        status = str(req.get('request_status') or req.get('status') or 'queued').lower()
-        if status not in ('queued', 'pending'):
-            continue
-        rid = req.get('request_id') or req.get('verification_task_id') or str(path)
-        # Bridge handled markers are filed under the SANITIZED id (see
-        # `safe_id = request_id.replace('/', '_')[:120]` below); compare that
-        # form too, or a raw id containing sanitized characters (e.g. '/')
-        # slips this filter and gets returned forever (#733 wedge).
-        safe_rid = rid.replace('/', '_')[:120]
-        if rid in real_handled or safe_rid in real_handled or str(path) in real_handled:
-            continue
-        return path, req
-    return None, {}
-
 
 
 def _get_previous_attempts(
@@ -1192,26 +1133,6 @@ def _tag_cycle_pre(repo_root: 'Path', cycle_id: str, main_sha: str) -> None:
         )
     except Exception:
         pass
-
-
-def _maybe_propose_after_skip(selfevo_repo: 'Path') -> None:
-    """Invoke the #707 LLM proposer after a pre-spawn duplicate skip.
-
-    First canary finding: the deterministic planner mints stale duplicate
-    requests faster than the bridge consumes them, so the queue never empties
-    and the no-pending-request hook in ``_main_impl`` (near the top, guarded
-    by ``if not req_path``) never runs — a queue full of duplicates IS
-    novelty exhaustion. Called from the exact-tag and
-    ``_recent_failure_match`` pre-spawn skip branches, after their terminal
-    ledger/result bookkeeping, right before their ``return 0``. Fails open
-    (``maybe_propose`` never raises), so this is safe to call unconditionally.
-    The written request (if any) queues behind whatever stale requests remain
-    and is picked up oldest-first over the next few cycles as the queue
-    drains — no reordering logic needed.
-    """
-    _proposer_title = llm_proposer.maybe_propose(STATE_DIR, selfevo_repo)
-    if _proposer_title:
-        print(f'llm-proposer: queued {_proposer_title}')
 
 
 def _tag_cycle_post(repo_root: 'Path', cycle_id: str, outcome: str, sha: str | None = None, *, tag_suffix: str | None = None) -> None:
@@ -3701,7 +3622,7 @@ async def _main_impl_body():
     # "print the reason, return 0, no bookkeeping" shape as the
     # no_active_goal/already_handled/bridge_disabled siblings: no request
     # has been dequeued yet, so there is nothing to mark handled — the
-    # next run's find_pending_request() sees the same queue unchanged.
+    # next run's planning session starts from the same unresolved state.
     if read_charter_text(RELEASE_ROOT) == '':
         print(
             f'bridge: charter unavailable at {RELEASE_ROOT}; '
