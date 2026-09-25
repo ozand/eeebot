@@ -3258,7 +3258,21 @@ async def _run_planning_session(
     except Exception:
         _dedup_evidence_block = ''
 
+    # Architect resolution 2026-09-25 (ADR-035 rule 3 / ADR-031 rule 2): a
+    # plan interrupted by a supplier-side executor failure is this
+    # session's FIRST item -- surfaced ahead of priorities/candidates, and
+    # the session must resolve it (keep/edit/delete) via
+    # `open_increment_decision` in its final plan JSON before anything else.
+    from nanobot.runtime import open_increment as _open_increment_mod
+
+    _pending_open_increment = _open_increment_mod.pending_open_increment(state_dir)
+    _open_increment_block = _open_increment_mod.render_open_increment_block(
+        _pending_open_increment,
+        _open_increment_mod.load_state(state_dir).consecutive_supply_interrupts,
+    )
+
     _planner_task = (
+        f'{_open_increment_block}\n\n'
         'The harness pre-read the mandatory release-owned task-writing contract '
         'before this model turn. Apply it to the next increment.\n\n'
         '--- task-writing contract ---\n'
@@ -3505,6 +3519,20 @@ async def _run_planning_session(
                     plan_lines.append(f'Declined: {_defect_id} — {_reason}{_tag}')
             except Exception:
                 pass
+    # Architect resolution 2026-09-25 (ADR-035 rule 3, "I"): the session
+    # must resolve a pending open increment (keep/edit/delete) before this
+    # plan is treated as produced. Fail-open bookkeeping, same shape as the
+    # declined-defect handling above -- never turns an otherwise-integrated
+    # plan into a degraded outcome.
+    if _pending_open_increment:
+        _oi_decision = str(parsed.get('open_increment_decision') or '').strip().lower()
+        if _oi_decision in ('keep', 'edit', 'delete'):
+            try:
+                _open_increment_mod.resolve(state_dir, cycle_id, _oi_decision)
+                plan_lines.append(f'Open increment: {_oi_decision}')
+            except Exception:
+                pass
+
     plan_text = '\n'.join(plan_lines)
 
     write_result = _write_diary_plan_block(
@@ -3664,6 +3692,21 @@ async def _main_impl_body():
         )
         _planner_rest_toplevel.record_held_tick(STATE_DIR, '')
         print(f'bridge: rest pre-check held ({_precheck_reason}); no session, no repository preparation')
+        return 0
+
+    # Architect resolution 2026-09-25 (ADR-035 rule 3 / ADR-031 rule 2): a
+    # plan interrupted by a supplier-side executor error holds sessions on
+    # its OWN pre-check, same slot, separate state from planner_rest above
+    # -- never counted as a rest or a no_plan.
+    from nanobot.runtime import open_increment as _open_increment_toplevel
+
+    _oi_precheck_run, _oi_precheck_reason = _open_increment_toplevel.precheck(STATE_DIR, _selfevo_repo_toplevel)
+    if not _oi_precheck_run:
+        _open_increment_toplevel.record_held_tick(STATE_DIR, '')
+        print(
+            f'bridge: open-increment pre-check held ({_oi_precheck_reason}); '
+            'no session, no repository preparation'
+        )
         return 0
 
     # #680 defense-in-depth (ADR-035 rest amendment, #1964): repository
@@ -4535,8 +4578,27 @@ async def _main_impl_body():
                 handled_marker, req_path,
                 llm_error=bool(_executor_llm_error_text and cycle_commit_count == 0),
                 supplier_paused=(_llm_error_class == 'paused-supplier'),
-                state_dir=STATE_DIR, cycle_id=_cycle_id,
+                state_dir=STATE_DIR, retry_key=req.get('retry_key'),
             )
+            # Architect resolution 2026-09-25 (ADR-035 rule 3 / ADR-031 rule
+            # 2): a supplier-side interruption is not retried or requeued --
+            # it becomes the pending open increment the next planning
+            # session must resolve (keep/edit/delete), and holds further
+            # sessions on a doubling backoff. Any OTHER outcome here (our
+            # own defect, or no error at all) is a completed model call and
+            # resets that backoff -- proof the supplier is reachable.
+            from nanobot.runtime import open_increment as _open_increment_exec
+
+            if _llm_error_class == 'paused-supplier':
+                _open_increment_exec.record_supply_interruption(
+                    STATE_DIR, _cycle_id,
+                    retry_key=req.get('retry_key') or '',
+                    plan_text=req.get('task') or '',
+                    candidate_id=req.get('candidate_id') or None,
+                    selfevo_repo=_selfevo_repo,
+                )
+            else:
+                _open_increment_exec.record_model_call_completed(STATE_DIR)
 
             # ── Closed-loop repair cycle (issue #526) ────────────────────────────
             # After the first commit, run smoke tests. If they fail, spawn a repair
@@ -5650,6 +5712,7 @@ async def _main_impl_body():
         lane=req.get('lane') or None,
         prompt_fit_rung=_res.get('prompt_fit_rung'),
         change_shape=change_shape,
+        retry_key=req.get('retry_key') or None,
         iterations_used=_iterations_used,
         iterations_limit=resolved_iterations,
         # ADR-035 rule 1: "the plan carries its own size ... the harness
@@ -6371,17 +6434,23 @@ def _llm_error_retries_exhausted(request_id: 'str | None') -> bool:
         return True
 
 
-def _recorded_llm_error_attempts(state_dir: 'Path | str', cycle_id: 'str | None') -> int:
-    """#1280 review: the durable witness that a request was previously live.
-    Counts this cycle's ``outcome`` rows with ``reason == executor_llm_error``
-    in the ledger (live + archives, via ``state_access.ledger_window``). The
+def _recorded_llm_error_attempts(state_dir: 'Path | str', retry_key: 'str | None') -> int:
+    """#1280 review: the durable witness that THIS candidate was previously
+    live. Counts ``outcome`` rows carrying this ``retry_key`` (see
+    :func:`_retry_key_for`) with ``reason == executor_llm_error`` in the
+    ledger (live + archives, via ``state_access.ledger_window``). The
     ledger is append-only and rotated, never pruned inside the retention
     window — unlike ``subagents/results``, which the archiver migrates and
     prunes within a cycle, and unlike the ``retry_<id>.json`` counter, which
     is one file. Fail-open to 0 (reads as "first attempt"): a ledger-read
     failure must not retire a request that nothing says was offered before.
+
+    ADR-035 rule 1 (#1942): keyed on ``retry_key``, not ``cycle_id`` — a
+    fresh cycle_id every cycle would make this always read 0 (no row can
+    exist yet for an id that was just minted this same run), silently
+    disabling the state-lost fallback below it.
     """
-    if not cycle_id:
+    if not retry_key:
         return 0
     try:
         from nanobot.runtime.state_access import ledger_window
@@ -6390,7 +6459,7 @@ def _recorded_llm_error_attempts(state_dir: 'Path | str', cycle_id: 'str | None'
         return sum(
             1 for row in window.rows
             if isinstance(row, dict)
-            and str(row.get('cycle_id') or '') == str(cycle_id)
+            and str(row.get('retry_key') or '') == str(retry_key)
             and str(row.get('reason') or '') == 'executor_llm_error'
         )
     except Exception:
@@ -6400,7 +6469,7 @@ def _recorded_llm_error_attempts(state_dir: 'Path | str', cycle_id: 'str | None'
 def _decide_handled_marker(
     handled_marker: Path, req_path: 'Path | str', *, llm_error: bool,
     supplier_paused: bool = False,
-    state_dir: 'Path | str | None' = None, cycle_id: 'str | None' = None,
+    state_dir: 'Path | str | None' = None, retry_key: 'str | None' = None,
 ) -> str:
     """#1280: write the ``handled_`` marker — retiring the request forever —
     unless the subagent died on its LLM call without producing anything, in
@@ -6459,7 +6528,7 @@ def _decide_handled_marker(
             except Exception:
                 state_lost = 'unreadable'
         else:
-            prior = _recorded_llm_error_attempts(state_dir, cycle_id) if state_dir is not None else 0
+            prior = _recorded_llm_error_attempts(state_dir, retry_key) if state_dir is not None else 0
             if prior >= 1:
                 state_lost = f'missing after {prior} recorded attempt(s)'
         if state_lost:

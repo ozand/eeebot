@@ -935,3 +935,179 @@ def test_executor_never_receives_assigned_title(tmp_path: Path, monkeypatch):
 
     outcome_rows = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"]
     assert outcome_rows[-1]["outcome"] == "success"
+
+
+# --- test_supply_interruption_carries_open_increment -----------------------
+# --- test_supply_hold_uses_rest_snapshot_with_backoff ----------------------
+#
+# Architect resolution 2026-09-25 (ADR-035 rule 3 / ADR-031 rule 2): a plan
+# interrupted by a supplier-side executor failure is not retried or
+# requeued -- it becomes the pending open increment the next planning
+# session must resolve (keep/edit/delete), and holds further sessions on a
+# doubling backoff (15 -> 30 -> 60 minutes, capped), reset by any model call
+# that completes without a supply classification.
+
+def test_supply_interruption_carries_open_increment(tmp_path: Path):
+    from nanobot.runtime import open_increment
+    from nanobot.runtime.planner_rest import WakeCondition
+
+    state = tmp_path / "state"
+    state.mkdir()
+    # A readable, stable input to snapshot -- main_commit needs a real repo,
+    # which this test has no reason to set up.
+    marker = state / "supply_marker.txt"
+    marker.write_text("unchanged", encoding="utf-8")
+    open_increment.record_supply_interruption(
+        state, "cycle-1",
+        retry_key="self-abc123", plan_text="Refine the caching layer", candidate_id=None,
+        wake_condition=WakeCondition(kind="file", ref=str(marker)),
+    )
+
+    pending = open_increment.pending_open_increment(state)
+    assert pending is not None
+    assert pending["reason"] == "interrupted_supply"
+    assert pending["retry_key"] == "self-abc123"
+    assert pending["plan_text"] == "Refine the caching layer"
+
+    # Held immediately after interruption -- the deadline is in the future.
+    run, reason = open_increment.precheck(state, None)
+    assert run is False
+    assert reason == "unchanged"
+
+    # The next session resolves it (keep/edit/delete) -- clears pending and
+    # the hold, resets the streak.
+    open_increment.resolve(state, "cycle-2", "keep")
+    assert open_increment.pending_open_increment(state) is None
+    run, reason = open_increment.precheck(state, None)
+    assert run is True
+    assert reason == "no_active_hold"
+
+    events = read_events(state)
+    phases = [e["phase"] for e in events]
+    assert "open_increment" in phases
+    assert "open_increment_resolved" in phases
+    resolved = [e for e in events if e["phase"] == "open_increment_resolved"][0]
+    assert resolved["decision"] == "keep"
+
+
+def test_supply_hold_uses_rest_snapshot_with_backoff(tmp_path: Path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from nanobot.runtime import open_increment
+
+    state = tmp_path / "state"
+
+    # Doubling, capped: 1st/2nd/3rd/4th consecutive interruption of the
+    # SAME retry_key, small base/cap so the test runs on real wall-clock
+    # without waiting minutes.
+    expected_seconds = [2, 4, 8, 8]  # base=2, cap=8 -> 2, 4, 8, 8 (capped)
+    for expected in expected_seconds:
+        state_obj = open_increment.record_supply_interruption(
+            state, "cycle-x",
+            retry_key="self-same", plan_text="same increment", candidate_id=None,
+            cooldown_base_seconds=2, cooldown_cap_seconds=8,
+        )
+        deadline = datetime.strptime(state_obj.hold["deadline"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        delta = (deadline - datetime.now(timezone.utc)).total_seconds()
+        assert abs(delta - expected) <= 2, (expected, delta)
+
+    assert open_increment.load_state(state).consecutive_supply_interrupts == 4
+
+    # A completed model call (no supply classification) resets the streak.
+    open_increment.record_model_call_completed(state)
+    assert open_increment.load_state(state).consecutive_supply_interrupts == 0
+
+    # The NEXT interruption of the same retry_key starts the backoff over.
+    state_obj = open_increment.record_supply_interruption(
+        state, "cycle-y",
+        retry_key="self-same", plan_text="same increment", candidate_id=None,
+        cooldown_base_seconds=2, cooldown_cap_seconds=8,
+    )
+    deadline = datetime.strptime(state_obj.hold["deadline"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    delta = (deadline - datetime.now(timezone.utc)).total_seconds()
+    assert abs(delta - 2) <= 2
+
+    # Three consecutive interruptions raise the non-auto-clearing operator
+    # flag; record_model_call_completed above did NOT touch it (only the
+    # streak), and resolve() never clears it either -- only
+    # operator_clear_flag does.
+    open_increment.resolve(state, "cycle-y", "delete")
+    assert open_increment.load_state(state).operator_flagged is True
+    open_increment.operator_clear_flag(state, "cycle-z")
+    assert open_increment.load_state(state).operator_flagged is False
+
+    # The rendered block itself: the open increment's plan text is first,
+    # and the session is told to decide keep/edit/delete before anything
+    # else -- what the planning session's prompt actually surfaces.
+    pending = {"plan_text": "Refine the caching layer", "interrupted_at": "2026-09-25T00:00:00Z"}
+    block = open_increment.render_open_increment_block(pending, 2)
+    assert block.startswith("## Open increment")
+    assert "Refine the caching layer" in block
+    assert "before planning anything else" in block
+    assert "open_increment_decision" in block
+    assert open_increment.render_open_increment_block(None, 0) == ""
+
+    # Integration: before the deadline the bridge holds -- no session, no
+    # repository preparation, no provider call at all. After the deadline
+    # a session runs and the open increment is what pending_open_increment
+    # (the exact input _run_planning_session renders first) still returns.
+    import asyncio
+
+    from nanobot.runtime import bridge
+    from tests.test_cycle_ledger import _init_selfevo_repo
+
+    base = tmp_path / "integration"
+    base.mkdir()
+    integration_state = _setup_planner_chooses_harness(base, monkeypatch)
+    _init_selfevo_repo(base)
+
+    repo_prep_calls: list[int] = []
+    real_prep = bridge._prepare_repository_for_cycle
+
+    def _tracking_prep(*a, **k):
+        repo_prep_calls.append(1)
+        return real_prep(*a, **k)
+
+    monkeypatch.setattr(bridge, "_prepare_repository_for_cycle", _tracking_prep)
+    provider_calls: list[int] = []
+
+    def _tracking_provider(_config):
+        provider_calls.append(1)
+        return object()
+
+    monkeypatch.setattr(bridge, "_make_provider", _tracking_provider)
+
+    open_increment.record_supply_interruption(
+        integration_state, "cycle-prior",
+        retry_key="self-integration", plan_text="Refine the caching layer", candidate_id=None,
+        # Same selfevo_repo the bridge itself will snapshot at precheck
+        # time -- otherwise the main_commit wake condition reads as
+        # "changed" (None at record time vs a real sha at precheck time)
+        # and the hold never actually engages.
+        selfevo_repo=base / "eeebot-self-evolving",
+        cooldown_base_seconds=9999, cooldown_cap_seconds=9999,
+    )
+    planning_calls = _stub_planning_session(monkeypatch, "irrelevant -- session must not run while held")
+    monkeypatch.setattr(bridge, "SubagentManager", _make_capturing_subagent_manager([]))
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+    assert repo_prep_calls == []
+    assert provider_calls == []
+    assert planning_calls == []
+
+    # Force the deadline into the past (simulates cooldown elapsed).
+    oi_state = open_increment.load_state(integration_state)
+    oi_state.hold["deadline"] = "2000-01-01T00:00:00Z"
+    open_increment._save_state(integration_state, oi_state)
+
+    # The pending open increment is still there -- exactly what
+    # _run_planning_session's own pending_open_increment() call would see
+    # and render first, right as this next session starts.
+    assert open_increment.pending_open_increment(integration_state) is not None
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+    assert len(repo_prep_calls) == 1
+    assert len(provider_calls) == 1
+    assert len(planning_calls) == 1

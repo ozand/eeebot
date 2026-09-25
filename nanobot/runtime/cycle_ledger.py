@@ -567,6 +567,7 @@ def record_cycle_outcome(
     iterations_used: int | None = None,
     iterations_limit: int | None = None,
     iterations_predicted: int | None = None,
+    retry_key: str | None = None,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
 
@@ -682,6 +683,13 @@ def record_cycle_outcome(
             "class": str(llm_error_classification.get("class") or ""),
             "raw_error": str(llm_error_classification.get("raw_error") or "")[:400],
         }
+    if retry_key:
+        # ADR-035 rule 1 (#1942): the executor LLM-error retry-then-retire
+        # bound's cross-cycle-stable key (bridge._retry_key_for) -- cycle_id
+        # is a fresh uuid every cycle now, so bridge._recorded_llm_error_
+        # attempts's ledger witness needs this instead to recognize a prior
+        # attempt for the SAME candidate. Additive, omitted otherwise.
+        row["retry_key"] = str(retry_key)
     if iterations_used is not None and isinstance(iterations_used, int):
         # #1850: record the cycle's actual iteration consumption against the limit
         # active in this cycle, plus the fraction consumed and forecast placeholder.

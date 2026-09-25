@@ -17,7 +17,12 @@ import json
 import pytest
 
 from nanobot.runtime import bridge, cycle_ledger
-from tests.test_bridge_executor_llm_error import TRANSPORT_ERROR, _result_for, _wire
+from tests.test_bridge_executor_llm_error import (
+    TRANSPORT_ERROR,
+    _result_for,
+    _stub_planning_session,
+    _wire,
+)
 from tests.test_cycle_ledger import _read_ledger, _seed_bridge_request
 
 
@@ -65,13 +70,16 @@ def _core_smoke_set_matches_fixture_repo(monkeypatch, tmp_path):
 
 
 def test_edit_then_dead_llm_still_integrates_via_auto_commit_and_is_countable(tmp_path, monkeypatch):
+    title = "Add feature helper"
     state_dir = _wire(tmp_path, monkeypatch, _EditedThenDiedSubagentManager)
-    _seed_bridge_request(state_dir, "req-edited", "cycle-edited", task_title="Add feature helper")
+    _seed_bridge_request(state_dir, "req-edited", "cycle-edited", task_title=title)
+    _stub_planning_session(monkeypatch, title)
+    key = bridge._retry_key_for(None, title)
 
     rc = asyncio.run(bridge._main_impl())
 
     # The kept behaviour (#1281 decision): the net fired, the gate passed, the cycle integrated.
-    res = _result_for(state_dir, "req-edited")
+    res = _result_for(state_dir)
     assert res["rollback"]["auto_committed"] is True
     assert res["rollback"]["integrated"] is True
     assert res["rollback"]["reason"] is None
@@ -81,8 +89,8 @@ def test_edit_then_dead_llm_still_integrates_via_auto_commit_and_is_countable(tm
     assert any("EXECUTOR LLM ERROR (#1280)" in s for s in res.get("key_learnings") or [])
     # Not the #1280 failure path: exit 0, request retired, no retry counter.
     assert rc == 0
-    assert (state_dir / "subagent_bridge" / "handled_req-edited.txt").exists()
-    assert not (state_dir / "subagent_bridge" / "retry_req-edited.json").exists()
+    assert (state_dir / "subagent_bridge" / f"handled_{key}.txt").exists()
+    assert not (state_dir / "subagent_bridge" / f"retry_{key}.json").exists()
 
     # The countable part (#1281): the ledger row says the executor died even though the cycle succeeded.
     outcome = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"][-1]
