@@ -162,6 +162,9 @@ def test_happy_path_writes_the_diary_and_journals_success(tmp_path: Path, monkey
 
     assert outcome == {
         "ran": True, "iterations_used": 3, "iterations_planned": 35, "tampered_files": [], "plan": result_obj,
+        # ADR-035 keep-work (#1942 B2): non-None only on a `keep` decision --
+        # this fixture has no pending open_increment, so all three are unset.
+        "resume_branch": None, "resume_cycle_id": None, "resume_skip_opening_entry": False,
     }
 
     _git(repo, "fetch", "origin", "main")
