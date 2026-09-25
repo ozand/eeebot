@@ -535,6 +535,98 @@ def _queue_effectively_empty(state_dir: Path) -> bool:
     return True
 
 
+#: ADR-035 rule 2 ("the proposer offers, it does not assign") + the rest
+#: amendment's drain rule. Distinct from #745's invariant (a request's
+#: ``request_status`` is never rewritten to reflect EXECUTION handledness --
+#: marker files own that): this is a new, one-time, terminal label the ADR
+#: itself names, applied exactly once per file, never toggled back.
+_SUPERSEDED_STATUS = "superseded (ADR-035)"
+
+
+def proposer_candidate_items(state_dir: Path) -> list[dict[str, str]]:
+    """Every still-live proposer-authored request as a
+    :func:`nanobot.runtime.demand`-shaped candidate item (``kind="proposer"``).
+
+    "Still live" = a proposer-written file (:func:`_is_proposer_request`)
+    that is not yet handled (:func:`_is_request_handled`) -- regardless of
+    its ``request_status`` (queued, pending, or already drained to
+    :data:`_SUPERSEDED_STATUS`). This is why the drain rule
+    (:func:`drain_queued_proposer_requests`) can flip a file's status
+    without the candidate it represents disappearing from the ranked list
+    the planner reads: "its candidate re-enters the ranked list."
+
+    Read-only, no LLM call -- this is the harness rendering an EXISTING
+    proposal, never inventing or refining one (that remains
+    :func:`maybe_propose`'s job, unchanged).
+    """
+    from nanobot.runtime.demand import _make_item
+
+    req_dir = _requests_dir(state_dir)
+    if not req_dir.is_dir():
+        return []
+    items: list[dict[str, str]] = []
+    for path in sorted(req_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
+        try:
+            req = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(req, dict) or not _is_proposer_request(req):
+            continue
+        try:
+            if _is_request_handled(state_dir, req, path):
+                continue
+        except Exception:
+            continue
+        title = str(req.get("task_title") or req.get("recommended_next_action") or "").strip()
+        if not title:
+            continue
+        items.append(_make_item(
+            "proposer", title, str(req.get("task") or ""),
+            affected_path=str(req.get("target_path") or ""),
+            provenance="proposer",
+        ))
+    return items
+
+
+def drain_queued_proposer_requests(state_dir: Path) -> int:
+    """ADR-035 rest amendment's drain rule: every currently queued/pending
+    proposer-authored request is marked :data:`_SUPERSEDED_STATUS` -- never
+    executed via the old rotation path (:func:`find_pending_request`'s own
+    status filter then skips it) -- while :func:`proposer_candidate_items`
+    keeps surfacing it as a candidate regardless.
+
+    Idempotent: a file already at :data:`_SUPERSEDED_STATUS`, or already
+    handled, is left untouched. Returns the number of files drained this
+    call (0 on every call after the first, in steady state).
+    """
+    req_dir = _requests_dir(state_dir)
+    if not req_dir.is_dir():
+        return 0
+    drained = 0
+    for path in req_dir.glob("*.json"):
+        try:
+            req = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(req, dict) or not _is_proposer_request(req):
+            continue
+        status = str(req.get("request_status") or req.get("status") or "").strip().lower()
+        if status not in ("queued", "pending"):
+            continue
+        try:
+            if _is_request_handled(state_dir, req, path):
+                continue
+        except Exception:
+            pass
+        req["request_status"] = _SUPERSEDED_STATUS
+        try:
+            path.write_text(json.dumps(req, indent=2, ensure_ascii=False), encoding="utf-8")
+            drained += 1
+        except Exception:
+            continue
+    return drained
+
+
 def _release_root_from_env() -> Path:
     """Resolve the immutable release tree, independently of writable workspace."""
     configured = os.environ.get("RELEASE_ROOT", "").strip()

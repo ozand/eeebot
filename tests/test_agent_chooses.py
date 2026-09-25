@@ -12,6 +12,7 @@ deferred -- see this PR's body for why each is out of scope this session.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -688,6 +689,83 @@ def test_repo_preparation_preserves_staged_and_pending(tmp_path: Path):
     # Pending push survived and was resolved, not lost.
     assert result["pending_pushed"] == 1
     assert _origin_main_sha(origin) != setup["main_sha"]
+
+
+# --- test_queued_proposer_requests_drained_at_switchover -------------------
+
+def _write_proposer_request(state: Path, request_id: str, title: str, status: str = "queued") -> Path:
+    req_dir = state / "subagents" / "requests"
+    req_dir.mkdir(parents=True, exist_ok=True)
+    path = req_dir / f"{request_id}.json"
+    path.write_text(json.dumps({
+        "request_id": request_id,
+        "task_title": title,
+        "task": f"do {title}",
+        "target_path": "scripts/example.py",
+        "request_status": status,
+    }), encoding="utf-8")
+    return path
+
+
+def test_queued_proposer_requests_drained_at_switchover(tmp_path: Path):
+    from nanobot.runtime.llm_proposer import (
+        _SUPERSEDED_STATUS, drain_queued_proposer_requests, proposer_candidate_items,
+    )
+
+    state = tmp_path / "state"
+    _write_proposer_request(state, "llm-proposer-cycle-1", "fix the flaky retry loop")
+
+    # Before drain: a live candidate, status still queued.
+    before = proposer_candidate_items(state)
+    assert len(before) == 1
+    assert before[0]["kind"] == "proposer"
+    assert "fix the flaky retry loop" in before[0]["summary"]
+
+    drained = drain_queued_proposer_requests(state)
+    assert drained == 1
+
+    req_path = state / "subagents" / "requests" / "llm-proposer-cycle-1.json"
+    on_disk = json.loads(req_path.read_text(encoding="utf-8"))
+    assert on_disk["request_status"] == _SUPERSEDED_STATUS
+
+    # The old rotation path (find_pending_request's own status filter) would
+    # now skip it -- status is no longer queued/pending.
+    assert on_disk["request_status"].lower() not in ("queued", "pending")
+
+    # But its candidate re-enters the ranked list, unaffected by the drain.
+    after = proposer_candidate_items(state)
+    assert len(after) == 1
+    assert after[0]["kind"] == "proposer"
+
+    # Idempotent: draining an already-drained queue changes nothing further.
+    assert drain_queued_proposer_requests(state) == 0
+
+
+def test_proposer_candidate_items_excludes_handled_requests(tmp_path: Path):
+    from nanobot.runtime.llm_proposer import _bridge_state_dir, proposer_candidate_items
+
+    state = tmp_path / "state"
+    _write_proposer_request(state, "llm-proposer-cycle-2", "add a retry guard")
+
+    bridge_state = _bridge_state_dir(state)
+    bridge_state.mkdir(parents=True, exist_ok=True)
+    (bridge_state / "handled_llm-proposer-cycle-2.txt").write_text("handled", encoding="utf-8")
+
+    assert proposer_candidate_items(state) == []
+
+
+def test_proposer_candidate_items_excludes_non_proposer_requests(tmp_path: Path):
+    from nanobot.runtime.llm_proposer import proposer_candidate_items
+
+    state = tmp_path / "state"
+    req_dir = state / "subagents" / "requests"
+    req_dir.mkdir(parents=True)
+    (req_dir / "request-human.json").write_text(json.dumps({
+        "request_id": "human-request-1", "task_title": "operator-submitted task",
+        "request_status": "queued",
+    }), encoding="utf-8")
+
+    assert proposer_candidate_items(state) == []
 
 
 def test_record_plan_amendment_ledger(tmp_path: Path):
