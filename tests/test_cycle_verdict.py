@@ -18,6 +18,7 @@ import json
 import pytest
 
 from nanobot.runtime import bridge
+from tests.test_bridge_executor_llm_error import _stub_planning_session
 from tests.test_cycle_ledger import (
     _FakeSubagentManager,
     _init_selfevo_repo,
@@ -187,6 +188,7 @@ class TestBridgeIntegrationVerdict:
         monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
 
         _seed_bridge_request(state_dir, "req-green-verdict", "cycle-green-verdict")
+        _stub_planning_session(monkeypatch, "add feature")
 
         result = asyncio.run(bridge._main_impl())
         assert result == 0
