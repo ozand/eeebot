@@ -17,13 +17,11 @@ from nanobot.agent.skills import SkillsLoader
 from nanobot.runtime import day_clock
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
 from nanobot.runtime.operator_documents import (
-    DERIVED_PRIORITIES_BLOCK_CAP,
     PRIORITIES_BLOCK_CAP,
     PRIORITY_UNAVAILABLE,
     STATE_TEXT,
     PriorityResolution,
-    render_derived_priorities_block,
-    render_operator_priorities_block,
+    render_priorities_block,
     resolve_charter,
     resolve_derived_priorities_split,
     resolve_operator_priorities,
@@ -634,8 +632,9 @@ Skills with available="false" need dependencies installed first - you can try in
         return self._trim_lines(text, self._POSITION_BLOCK_CAP)
 
     def _load_priorities_block(self) -> str:
-        """ADR-034 rule 5 (issue #1940, A4; architect decision 2026-09-24):
-        the executor's own operator-priorities section.
+        """ADR-034 rule 5 (issue #1940, A4; architect decision 2026-09-24
+        and 2026-09-25): the executor's own operator-priorities + compact
+        derived-priorities section.
 
         Entirely OUTSIDE :data:`_RELEASE_POOL_CHARS` and its floors -- the
         release pool's own measured headroom (129 chars, #1940 pG baseline
@@ -644,46 +643,35 @@ Skills with available="false" need dependencies installed first - you can try in
         from nothing that block already competes for. It is still counted
         in :data:`MAX_SYSTEM_PROMPT_CHARS` like every other section (the
         architect's decision, not a second, uncounted budget), bounded at
-        :data:`operator_documents.PRIORITIES_BLOCK_CAP` chars -- past that
-        the renderer replaces it whole with an ``unavailable``/``oversize``
-        marker rather than truncating (ADR-034 rule 3, extended to this
-        rendered block).
-
-        Reviewer finding (#1952, 2026-09-25): this section's cap is its OWN
-        -- never shared with :meth:`_load_derived_priorities_block`, so a
-        large derived list can never push the operator's own (often
-        one-line) content into ``oversize``.
+        :data:`operator_documents.PRIORITIES_BLOCK_CAP` chars for BOTH the
+        operator and the (compact) derived content together -- past that
+        the renderer replaces the whole thing with an ``unavailable``/
+        ``oversize`` marker rather than truncating (ADR-034 rule 3,
+        extended to this rendered block). #1952 review history: derived is
+        rendered compactly (number/label/vector/source, never the
+        instructions body) specifically so a real-sized derived list still
+        fits this one shared cap alongside the operator section -- see
+        :func:`operator_documents.render_priorities_block`.
 
         ``None`` state_dir (every caller but the self-evolving bridge, same
         convention as :meth:`_load_scorecard_block`) renders the section
         ``unavailable`` rather than resolving anything.
         """
-        operator_res = self._resolve_operator_priorities_fail_open()
-        return render_operator_priorities_block(operator_res, cap=PRIORITIES_BLOCK_CAP)
-
-    def _load_derived_priorities_block(self) -> str:
-        """ADR-034 rule 4/5 (issue #1940, A4): the executor's own derived-
-        priorities section, right after :meth:`_load_priorities_block` --
-        its OWN cap (:data:`operator_documents.DERIVED_PRIORITIES_BLOCK_CAP`),
-        independent of the operator section's (#1952 review)."""
         if self.state_dir is None:
+            operator_res = PriorityResolution(state=PRIORITY_UNAVAILABLE, reason="no_state_dir")
             derived_entries: "tuple[Any, ...]" = ()
         else:
+            try:
+                operator_res = resolve_operator_priorities(self.state_dir, selfevo_repo_root=self.workspace)
+            except Exception:
+                operator_res = PriorityResolution(state=PRIORITY_UNAVAILABLE, reason="resolve_failed")
             try:
                 derived_entries, _completed = resolve_derived_priorities_split(
                     self.state_dir, selfevo_repo_root=self.workspace,
                 )
             except Exception:
                 derived_entries = ()
-        return render_derived_priorities_block(derived_entries, cap=DERIVED_PRIORITIES_BLOCK_CAP)
-
-    def _resolve_operator_priorities_fail_open(self) -> PriorityResolution:
-        if self.state_dir is None:
-            return PriorityResolution(state=PRIORITY_UNAVAILABLE, reason="no_state_dir")
-        try:
-            return resolve_operator_priorities(self.state_dir, selfevo_repo_root=self.workspace)
-        except Exception:
-            return PriorityResolution(state=PRIORITY_UNAVAILABLE, reason="resolve_failed")
+        return render_priorities_block(operator_res, derived_entries, cap=PRIORITIES_BLOCK_CAP)
 
     def _build_loop_system_prompt(
         self,
@@ -707,13 +695,12 @@ Skills with available="false" need dependencies installed first - you can try in
         profile."""
         sections, missing, truncated = self._load_ontology_blocks()
 
-        # ADR-034 rule 5 (#1940, A4): operator priorities, then derived --
-        # right after the charter ("operator first"), entirely outside the
-        # release pool those ontology blocks just drew from. Two sections,
-        # two independent budgets (#1952 review): a large derived list must
-        # never push the operator's own section into ``oversize``.
+        # ADR-034 rule 5 (#1940, A4): operator priorities (with compact
+        # derived after it) -- right after the charter ("operator first"),
+        # entirely outside the release pool those ontology blocks just drew
+        # from. ONE section, one shared cap (architect decision, 2026-09-25):
+        # see :meth:`_load_priorities_block`.
         sections.append(("priorities", self._load_priorities_block()))
-        sections.append(("derived_priorities", self._load_derived_priorities_block()))
 
         # #1857: the resident catalogue is retired -- 1 cycle of 24 ever
         # read it (#1805), at ~4,048 chars every cycle paid whether or not

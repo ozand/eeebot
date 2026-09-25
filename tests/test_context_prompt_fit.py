@@ -16,7 +16,7 @@ import pytest
 
 from nanobot.agent import context as context_module
 from nanobot.agent.context import ContextBuilder, SystemPromptOverflowError
-from nanobot.runtime.operator_documents import DERIVED_PRIORITIES_BLOCK_CAP, PRIORITIES_BLOCK_CAP
+from nanobot.runtime.operator_documents import PRIORITIES_BLOCK_CAP
 
 MARK = ContextBuilder.DROPPABLE_MARKER
 
@@ -58,7 +58,7 @@ def _builder(tmp_path, bootstrap_body: str, *, catalogue_lines: int = 40, memory
 #: current time is always available), which the generic fit/strict/
 #: droppable ladder tests below have no reason to depend on.
 LOOP_FIXED_SECTION_NAMES = ("identity", "soul", "goals", "user", "operating", "memory", "runtime", "scorecard", "position")
-LOOP_SECTION_NAMES = ("identity", "soul", "goals", "user", "operating", "agents", "priorities", "derived_priorities", "skills_catalogue", "memory", "runtime", "scorecard", "position")
+LOOP_SECTION_NAMES = ("identity", "soul", "goals", "user", "operating", "agents", "priorities", "skills_catalogue", "memory", "runtime", "scorecard", "position")
 
 
 def _loop_builder(tmp_path, agents_md_body: str, *, catalogue_lines: int = 40, memory_lines: int = 20) -> ContextBuilder:
@@ -279,12 +279,6 @@ def _loop_builder_at_declared_caps(tmp_path, *, catalogue_lines: int = 40) -> Co
     # above, so it must be modeled here for the combined worst case to mean
     # anything.
     builder._load_priorities_block = lambda: _sized("Operator priorities", PRIORITIES_BLOCK_CAP)
-    # #1952 review: the derived-priorities section has its OWN cap,
-    # independent of the operator section's -- modeled here too so the
-    # combined worst case reflects both budgets, not just one.
-    builder._load_derived_priorities_block = lambda: _sized(
-        "Derived priorities (source: derived)", DERIVED_PRIORITIES_BLOCK_CAP,
-    )
     # Trimmed to _RUNTIME_BLOCK_CAP by build_system_prompt itself (_trim_lines
     # call) regardless of what this returns -- feeding something at least that
     # long models the worst case without duplicating the cap value here.

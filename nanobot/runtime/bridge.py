@@ -71,8 +71,7 @@ from nanobot.runtime.lesson_v2 import (  # noqa: E402
 from nanobot.runtime.operator_documents import (  # noqa: E402
     PRIORITY_UNAVAILABLE,
     PriorityResolution,
-    render_derived_priorities_block,
-    render_operator_priorities_block,
+    render_priorities_block,
     resolve_derived_priorities_split,
     resolve_operator_priorities,
 )
@@ -3187,11 +3186,11 @@ async def _run_planning_session(
         return _fail('refused', f'task-writing pre-read failed: {exc}')
 
     # ADR-034 rule 5 (issue #1940, A4): the planning session sees the
-    # operator's priorities (with Completed) and the derived list --
+    # operator's priorities (with Completed) and the derived list (compact:
+    # number/label/vector/source, never the derived instructions body) --
     # read-only context, never a selection made on the planner's behalf.
-    # Two independent sections, two independent caps (#1952 review): a
-    # large derived list must never push the operator's own section into
-    # oversize, so they are never rendered through a shared budget.
+    # One combined section, one shared cap (architect decision, 2026-09-25),
+    # same renderer as the executor's own section.
     try:
         _planner_operator_res = resolve_operator_priorities(state_dir, selfevo_repo_root=selfevo_repo)
     except Exception:
@@ -3200,11 +3199,7 @@ async def _run_planning_session(
         _planner_derived_entries, _ = resolve_derived_priorities_split(state_dir, selfevo_repo_root=selfevo_repo)
     except Exception:
         _planner_derived_entries = ()
-    _priorities_block = (
-        render_operator_priorities_block(_planner_operator_res)
-        + "\n\n"
-        + render_derived_priorities_block(_planner_derived_entries)
-    )
+    _priorities_block = render_priorities_block(_planner_operator_res, _planner_derived_entries)
 
     _planner_task = (
         'The harness pre-read the mandatory release-owned task-writing contract '

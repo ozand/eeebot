@@ -78,7 +78,7 @@ from nanobot.runtime.operator_documents import (
     PRIORITY_UNAVAILABLE,
     STATE_TEXT,
     PriorityResolution,
-    render_operator_priorities_block,
+    render_priorities_block,
     resolve_charter,
     resolve_derived_priorities_split,
     resolve_operator_priorities,
@@ -1670,7 +1670,7 @@ def build_context(
             _operator_priorities_res = resolve_operator_priorities(state_dir, selfevo_repo_root=selfevo_repo)
         except Exception:
             _operator_priorities_res = PriorityResolution(state=PRIORITY_UNAVAILABLE, reason="resolve_failed")
-        operator_priorities_block = render_operator_priorities_block(_operator_priorities_res)
+        operator_priorities_block = render_priorities_block(_operator_priorities_res, ())
         ledger_rows = _load_ledger_rows(state_dir)
         digest_lines = _digest_ledger(ledger_rows)
         recent_proposed_titles = _recent_proposed_titles(ledger_rows)

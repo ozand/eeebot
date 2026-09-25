@@ -68,7 +68,7 @@ def test_block_order_identity_to_runtime_each_with_its_own_heading(tmp_path):
 
     assert list(builder.last_fit["sections"]) == [
         "identity", "soul", "goals", "user", "operating", "agents",
-        "priorities", "derived_priorities",
+        "priorities",
         "skills_catalogue", "memory", "runtime", "scorecard", "position",
     ]
 
