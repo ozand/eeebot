@@ -3266,6 +3266,27 @@ async def _run_planning_session(
         _planner_derived_entries = ()
     _priorities_block = render_priorities_block(_planner_operator_res, _planner_derived_entries)
 
+    # ADR-035 rule 1: "the ranked candidates (ADR-027 ranking; the
+    # proposer's ideas are candidates)" -- demand.collect_demand already
+    # assembles them in the trust order rule 1 keeps ("exactly as today");
+    # this only renders that same list and marks new/changed operator
+    # priorities, never reorders it. Fail-open: candidates are read-only
+    # context, never a selection made on the planner's behalf -- a failure
+    # here must not stop the session, only leave it without this block.
+    try:
+        from nanobot.runtime import demand as _demand_mod
+        from nanobot.runtime import planner_candidates as _planner_candidates_mod
+
+        _planner_candidate_items = _demand_mod.collect_demand(state_dir, selfevo_repo)
+        _planner_new_priority_ids = _planner_candidates_mod.mark_new_priority_items(
+            state_dir, _planner_candidate_items,
+        )
+        _candidates_block = _planner_candidates_mod.render_candidates_block(
+            _planner_candidate_items, _planner_new_priority_ids,
+        )
+    except Exception:
+        _candidates_block = ''
+
     _planner_task = (
         'The harness pre-read the mandatory release-owned task-writing contract '
         'before this model turn. Apply it to the next increment.\n\n'
@@ -3273,6 +3294,7 @@ async def _run_planning_session(
         f'{_task_writing_contract}\n'
         '--- end task-writing contract ---\n\n'
         f'{_priorities_block}\n\n'
+        f'{_candidates_block}\n\n'
         'Plan the next cycle.'
     )
 

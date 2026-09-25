@@ -15,8 +15,9 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import day_diary, no_plan_recovery, planner_hypothesis
+from nanobot.runtime import day_diary, no_plan_recovery, planner_candidates, planner_hypothesis
 from nanobot.runtime.cycle_ledger import read_events
+from nanobot.runtime.demand import _make_item
 
 
 def _valid_hypothesis(**overrides) -> dict:
@@ -370,6 +371,92 @@ def test_plan_amendment_requires_a_reason():
     with_plan = day_diary.append_plan_entry(content, "connect the validator", cycle_id="cycle-1")
     with pytest.raises(ValueError):
         day_diary.append_plan_amendment(with_plan, "cycle-1", "")
+
+
+# --- test_trust_order_new_priority_then_defect ------------------------------
+
+def test_trust_order_new_priority_then_defect():
+    """render_candidates_block never re-sorts collect_demand's own order --
+    it just renders whatever order it was given, preserving the demand
+    trust order (priority > defect > goal-gap > rest)."""
+    items = [
+        _make_item("priority", "Priority 3 — ship the cache", "op text"),
+        _make_item("defect", "recurring test failure in X", "3 cycles"),
+        _make_item("goal-gap", "coverage gap in Y", "scorecard"),
+    ]
+    block = planner_candidates.render_candidates_block(items)
+    assert block.index("Priority 3") < block.index("recurring test failure") < block.index("coverage gap")
+
+
+# --- test_new_operator_priority_wakes_the_planner ---------------------------
+
+def test_new_operator_priority_wakes_the_planner(tmp_path: Path):
+    state = tmp_path / "state"
+    priority_item = _make_item("priority", "Priority 7 — reduce latency", "op text")
+
+    new_ids = planner_candidates.mark_new_priority_items(state, [priority_item])
+    assert new_ids == {priority_item["id"]}
+    block = planner_candidates.render_candidates_block([priority_item], new_ids)
+    assert "(new)" in block
+
+    # The next cycle: same priority, already seen -- no longer marked new.
+    new_ids_again = planner_candidates.mark_new_priority_items(state, [priority_item])
+    assert new_ids_again == set()
+    block_again = planner_candidates.render_candidates_block([priority_item], new_ids_again)
+    assert "(new)" not in block_again
+
+
+def test_changed_priority_reads_as_new_again(tmp_path: Path):
+    state = tmp_path / "state"
+    v1 = _make_item("priority", "Priority 7 — reduce latency", "op text")
+    planner_candidates.mark_new_priority_items(state, [v1])
+
+    v2 = _make_item("priority", "Priority 7 — reduce latency by 20%", "op text edited")
+    new_ids = planner_candidates.mark_new_priority_items(state, [v2])
+    assert new_ids == {v2["id"]}
+
+
+# --- test_defect_urgency_survives_and_declines_are_visible (backend only) --
+
+def test_defect_urgency_survives_and_declines_are_visible(tmp_path: Path):
+    state = tmp_path / "state"
+    defect = _make_item("defect", "flaky test in module Z", "3 failures")
+    defect_id = defect["id"]
+
+    for cycle in ("cycle-1", "cycle-2"):
+        result = planner_candidates.record_defect_declines(
+            state, cycle, {defect_id: "not reproducible locally yet"},
+        )
+        assert result[defect_id]["escalated"] is False
+
+    third = planner_candidates.record_defect_declines(
+        state, "cycle-3", {defect_id: "still investigating"},
+    )
+    assert third[defect_id]["consecutive"] == 3
+    assert third[defect_id]["escalated"] is True
+
+    events = read_events(state)
+    escalations = [e for e in events if e.get("phase") == "defect_decline_escalated"]
+    assert len(escalations) == 1
+    assert escalations[0]["defect_id"] == defect_id
+
+
+def test_defect_decline_streak_resets_on_a_gap(tmp_path: Path):
+    state = tmp_path / "state"
+    defect_id = "defect-x"
+    planner_candidates.record_defect_declines(state, "cycle-1", {defect_id: "reason one"})
+    planner_candidates.record_defect_declines(state, "cycle-2", {defect_id: "reason two"})
+    # cycle-3: this defect is NOT declined again (accepted, or just not named) -- resets.
+    planner_candidates.record_defect_declines(state, "cycle-3", {})
+    result = planner_candidates.record_defect_declines(state, "cycle-4", {defect_id: "reason again"})
+    assert result[defect_id]["consecutive"] == 1
+    assert result[defect_id]["escalated"] is False
+
+
+def test_defect_decline_requires_a_reason(tmp_path: Path):
+    state = tmp_path / "state"
+    with pytest.raises(ValueError):
+        planner_candidates.record_defect_declines(state, "cycle-1", {"defect-x": ""})
 
 
 def test_record_plan_amendment_ledger(tmp_path: Path):
