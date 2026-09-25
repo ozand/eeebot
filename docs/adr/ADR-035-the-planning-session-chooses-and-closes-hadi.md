@@ -322,8 +322,8 @@ actor that has both.
 
 | Decision claim | Test | Currently |
 |---|---|---|
-| The planning session runs before selection and its plan is the executor's task | `tests/test_agent_chooses.py::test_planner_runs_first_and_its_plan_is_the_task` | not written |
-| The executor prompt never contains a proposer-authored task or "priorities are handled by the proposer" | `tests/test_agent_chooses.py::test_executor_never_receives_assigned_title` | not written |
+| The planning session runs before selection and its plan is the executor's task | `tests/test_agent_chooses.py::test_planner_runs_first_and_its_plan_is_the_task` | passing (#1942 B2) |
+| The executor prompt never contains a proposer-authored task or "priorities are handled by the proposer" | `tests/test_agent_chooses.py::test_executor_never_receives_assigned_title` | passing (#1942 B2): required two fixes -- `build_task`'s non-priority mission line no longer names "the proposer", and `task_title` now always derives from the plan's own text instead of a matched candidate's summary |
 | No plan → `no_plan` recorded, no fallback to the proposer's task | `tests/test_agent_chooses.py::test_no_plan_does_not_fall_back_to_assignment` | passing (#1942 B2) |
 | Each plan carries one hypothesis with measure and refutation condition, stored with a stable id | `tests/test_agent_chooses.py::test_plan_hypothesis_is_stored_with_refutation` | passing (#1942 B2) |
 | The next session records continue/revise/drop for every hypothesis with a new verdict, and keep/edit/delete for its previous plan | `tests/test_agent_chooses.py::test_insight_decision_required_for_new_verdicts` | partial (#1942 B2): hypothesis continue/revise/drop passing; keep/edit/delete for the previous plan not implemented |
