@@ -5824,6 +5824,7 @@ async def _main_impl_body():
                         violated_check=_rollback_reason,
                         budget_used={},
                         backlog_title=backlog_title,
+                        retry_key=req.get('retry_key'),
                     )
                     _rec_write_status = _write_result.get("status")
                     if _rec_write_status == "already_recorded":
@@ -5891,12 +5892,14 @@ async def _main_impl_body():
             pass  # fail-open
 
         # #1710: name the attempt (e.g. "2/3") when this rollback is an
-        # executor-LLM-error retry of the same cycle_id -- the same counter
+        # executor-LLM-error retry of the same retry_key (ADR-035 rule 1,
+        # #1942: cycle_id is a fresh uuid every cycle, retry_key is the
+        # cross-cycle-stable id -- see _retry_key_for) -- the same counter
         # `_decide_handled_marker` above just wrote/read. Absent for every
         # other rollback reason, which has no retry structure to name.
         _rec_attempt: str | None = None
         try:
-            _retry_path = _llm_error_retry_path(request_id)
+            _retry_path = _llm_error_retry_path(req.get('retry_key'))
             if _retry_path is not None and _retry_path.exists():
                 _retry_data = json.loads(_retry_path.read_text(encoding='utf-8'))
                 _retry_count = int(_retry_data.get('count') or 0)
@@ -7091,6 +7094,7 @@ def _write_structured_error(
     violated_check: str = "",
     budget_used: dict | None = None,
     backlog_title: str = "",
+    retry_key: 'str | None' = None,
 ) -> dict:
     """Record a failed cycle / gate rejection into lessons/errors.yaml and rotate (#1041).
 
@@ -7158,11 +7162,16 @@ def _write_structured_error(
             wrapper_key = None
 
     date_str = _dt.date.today().isoformat()
-    short_cycle = (cycle_id or '')[-12:].replace('cycle-', '')
+    # ADR-035 rule 1 (#1942): cycle_id is a fresh uuid every cycle now, so
+    # the dedup id keys on retry_key (bridge._retry_key_for) instead --
+    # cycle_id alone can never repeat across an executor-LLM-error retry
+    # any more. Falls back to cycle_id when no retry_key is given (older
+    # call sites, e.g. gate rejections outside the executor retry path).
+    short_cycle = (retry_key or cycle_id or '')[-12:].replace('cycle-', '')
     error_id = f'ERR-{date_str.replace("-", "")}-{short_cycle[:8]}'
 
     if any(e.get('id') == error_id for e in existing_list):
-        # #1710: an executor retry re-running the same cycle_id finds the
+        # #1710: an executor retry re-running the same retry_key finds the
         # prior attempt's card already committed and pushed to origin/main
         # (this isolated checkout is fresh off that ref) -- this is not a
         # failed write, it is proof the retry ran and found the card.

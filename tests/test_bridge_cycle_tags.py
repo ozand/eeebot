@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from nanobot.runtime import bridge
+from tests.test_bridge_executor_llm_error import _stub_planning_session
 from tests.test_cycle_ledger import (
     _FakeSubagentManager,
     _git,
@@ -236,20 +237,25 @@ class TestBridgeCycleTagIntegration:
         monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
 
         _seed_bridge_request(state_dir, "req-tags", "cycle-tags")
+        _stub_planning_session(monkeypatch, "add feature")
 
         result = asyncio.run(bridge._main_impl())
         assert result == 0
 
+        # ADR-035 rule 1 (#1942): cycle_id is a fresh uuid every cycle now,
+        # not the retired queue's literal id -- read it from THIS run's own
+        # outcome row instead of a hardcoded value.
+        cycle_id = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"][-1]["cycle_id"]
         tags = _run(work, "tag", "--list").stdout.split()
-        assert "pre-cycle-cycle-tags" in tags
-        assert "cycle-cycle-tags-success" in tags
+        assert f"pre-cycle-{cycle_id}" in tags
+        assert f"cycle-{cycle_id}-success" in tags
 
         # #1811 (ADR-028): the diary's opening entry is committed and pushed
         # to main BEFORE the cycle branch is cut, so the pre-cycle tag now
         # anchors to that (later) tip rather than the pre-test sha -- assert
         # ancestry (the original base is still in the pre-cycle tag's
         # history) rather than exact equality.
-        pre_tag_sha = _run(work, "rev-parse", "pre-cycle-cycle-tags").stdout.strip()
+        pre_tag_sha = _run(work, "rev-parse", f"pre-cycle-{cycle_id}").stdout.strip()
         base_ancestor = subprocess.run(
             _git(work) + ["merge-base", "--is-ancestor", main_sha_before, pre_tag_sha], capture_output=True,
         )
@@ -259,7 +265,7 @@ class TestBridgeCycleTagIntegration:
         # the (separate, best-effort) structured-lesson commit that may land
         # on main afterward — so assert ancestry rather than exact equality
         # with the final origin/main tip.
-        post_sha = _run(work, "rev-parse", "cycle-cycle-tags-success").stdout.strip()
+        post_sha = _run(work, "rev-parse", f"cycle-{cycle_id}-success").stdout.strip()
         assert post_sha != main_sha_before
         ancestor = subprocess.run(
             _git(work) + ["merge-base", "--is-ancestor", post_sha, "main"], capture_output=True,
@@ -271,15 +277,25 @@ class TestBridgeCycleTagIntegration:
         state_dir = base / "state"
         state_dir.mkdir()
         origin, work = _init_selfevo_repo(base)
-        # Pre-seed a success tag for this exact cycle_id, simulating a retried/
-        # replayed request whose cycle already completed successfully.
-        _run(work, "tag", "cycle-cycle-dup-success")
 
         monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
         monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
         monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
         monkeypatch.setattr(bridge, "SubagentManager", _ExplodingSubagentManager)
         monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        _stub_planning_session(monkeypatch, "add feature")
+
+        # ADR-035 rule 1 (#1942): cycle_id is a fresh uuid every cycle now,
+        # so the pre-existing success tag has to be seeded for whatever id
+        # THIS run will mint -- pin uuid4() to a known value to predict it.
+        import uuid as _uuid_mod
+
+        fixed_uuid = _uuid_mod.uuid4()
+        monkeypatch.setattr(bridge.uuid, "uuid4", lambda: fixed_uuid)
+        cycle_id = f"cycle-{fixed_uuid.hex[:12]}"
+        # Pre-seed a success tag for this exact cycle_id, simulating a retried/
+        # replayed request whose cycle already completed successfully.
+        _run(work, "tag", f"cycle-{cycle_id}-success")
 
         _seed_bridge_request(state_dir, "req-dup-tag", "cycle-dup")
 
@@ -290,9 +306,12 @@ class TestBridgeCycleTagIntegration:
         phases = [r["phase"] for r in rows]
         # #1811 (ADR-028): the diary's opening entry is written at the
         # cycle-start boundary, before the tag-first dedup check runs.
-        assert phases == ["started", "diary_open_entry", "dedup", "outcome"]
+        # ADR-035 rest amendment (#1964): a dedup match also feeds
+        # planner_dedup_evidence.record_rejected_duplicate -- one extra
+        # trailing row, same as tests/test_cycle_ledger.py's equivalent.
+        assert phases == ["started", "diary_open_entry", "dedup", "outcome", "rejected_duplicate"]
         assert rows[2]["decision"] == "skipped_duplicate"
-        assert rows[2]["matched_against"] == "tag:cycle-cycle-dup-success"
+        assert rows[2]["matched_against"] == f"tag:cycle-{cycle_id}-success"
         assert rows[3]["outcome"] == "skipped-duplicate"
 
     @pytest.mark.skipif(sys.platform == "win32", reason="NTFS ignores chmod 0o500 directory permissions")
