@@ -167,7 +167,9 @@ chooser and on the dashboard.
   prompt limit (`MAX_SYSTEM_PROMPT_CHARS`), not inside the pooled release budget:
   measured on 2026-09-24 that pool had about 129 characters free, and a block
   placed there would have displaced `OPERATING.md` (#1940). The Completed list is
-  shown by titles only. Over the limit the block is `unavailable` with reason
+  shown by titles only, including when every operator priority is completed.
+  Derived priorities are shown in compact form — number, label, vector and
+  source; their bodies are not rendered. Over the limit the block is `unavailable` with reason
   `oversize`, never truncated (rule 3). Measure its reach the way #1856 measures
   every block, and test that the overall limit holds and that it cannot displace
   the charter or the mandatory instructions.
