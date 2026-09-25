@@ -41,12 +41,13 @@ Return this JSON only -- either `plan` or `rest`, never both:
 {
   "insight": "<what happened>",
   "plan": "<next increment, or omit if resting>",
+  "candidate_id": "<optional, id of the served candidate>",
   "iterations_planned": <integer, or omit if resting>,
-  "dor": "<optional, DoR: pre-conditions/baseline before starting>",
-  "dod": "<optional, DoD: falsifiable criterion verified externally>",
-  "hypotheses": ["<optional, 0-3 short falsifiable claims worth testing>"],
-  "futility_advisories": ["<optional, 0-2 directions already shown futile>"],
-  "declined": [{"defect_id": "<id from candidates>", "reason": "<why>"}],
-  "rest": {"wake_condition": {"kind": "<see 7>", "ref": "<omit for main_commit>"}, "deadline": "<ISO 8601>"}
+  "dor": "<optional DoR: baseline before starting>",
+  "dod": "<optional DoD: falsifiable, externally verified>",
+  "hypotheses": ["<optional, 0-3 falsifiable claims>"],
+  "futility_advisories": ["<optional, 0-2 directions already futile>"],
+  "declined": [{"defect_id": "<candidate id>", "reason": "<why>"}],
+  "rest": {"wake_condition": {"kind": "<see 7>", "ref": "<omit if main_commit>"}, "deadline": "<ISO 8601>"}
 }
 ```

@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import uuid
 import time
 from pathlib import Path
 
@@ -50,6 +51,7 @@ from nanobot.runtime.promoted_overlay import install_promoted_overlay
 install_promoted_overlay()
 
 from nanobot.runtime import llm_proposer, demand  # noqa: E402
+from nanobot.runtime import planner_candidates, planner_dedup_evidence  # noqa: E402
 from nanobot.agent.tools.toolsets import EXECUTOR_TOOL_NAMES  # noqa: E402
 from nanobot.runtime.cycle_ledger import (  # noqa: E402
     VALID_OUTCOMES,
@@ -3770,73 +3772,84 @@ async def _main_impl_body():
     # (a glob + per-file read), safe to call unconditionally every cycle.
     llm_proposer.drain_queued_proposer_requests(STATE_DIR)
 
-    # #733: bulk-skip pre-spawn duplicates in one run. Each iteration pulls
-    # the next pending request; a pre-spawn duplicate (tag-first match or
-    # _recent_failure_match) does its full bookkeeping
-    # then `continue`s to the next request instead of returning — bounded by
-    # MAX_SKIPS_PER_RUN so a stale queue can't turn one timer invocation into
-    # an unbounded loop. A non-duplicate request `break`s out to the
-    # unchanged single-spawn path below. At most one _setup_cycle_branch/
-    # spawn happens per run either way (S6 invariant) — the loop only ever
-    # iterates on pre-spawn skips.
-    _skips = 0
-    # #733 follow-up: a request whose handled marker exists under the
-    # SANITIZED request_id can still slip find_pending_request's real_handled
-    # filter (which compares the RAW request_id/marker stem) and keep being
-    # returned every iteration — wedging the bulk-skip loop at one skip per
-    # run. Track paths already returned this run; if the same path comes back
-    # we cannot make progress, so end the run cleanly instead of looping
-    # forever (defense-in-depth alongside turning the marker-exists branch
-    # below into a `continue`).
-    _seen_req_paths: set[str] = set()
-    # #1411: fallback lane — at most ONE same-cycle fallback proposal per
-    # bridge run, attempted only at a point that would otherwise end the run
-    # without ever spawning an executor (see the four call sites below).
-    # ``_pending_fallback``, when set, is consumed by the very next loop
-    # iteration in place of a fresh ``find_pending_request()`` disk read —
-    # the synthetic request still runs through every unchanged tag/
-    # recent-failure/existence-index gate below before it can spawn.
-    _fallback_attempted = False
-    _pending_fallback: 'tuple[Path, dict] | None' = None
-    while True:
-        if _pending_fallback is not None:
-            req_path, req = _pending_fallback
-            _pending_fallback = None
-        else:
-            req_path, req = find_pending_request()
-        if req_path is not None:
-            if str(req_path) in _seen_req_paths:
-                print('bridge: find_pending_request returned the same request twice this run; ending run')
-                return 0
-            _seen_req_paths.add(str(req_path))
-        if not req_path:
-            # #707: state-light LLM proposer — only fires on proven novelty
-            # exhaustion (see llm_proposer.should_propose), behind the
-            # SELFEVO_LLM_PROPOSER_ENABLED kill-switch (default OFF). Fails open
-            # (never raises), so this is safe to call unconditionally here. If it
-            # writes a request, the NEXT bridge invocation (next timer cycle)
-            # picks it up through the normal find_pending_request/dedup/gate path
-            # above — untouched by this change.
-            _selfevo_repo_for_proposer = STATE_DIR.parent / 'eeebot-self-evolving'
-            _proposer_title = llm_proposer.maybe_propose(STATE_DIR, _selfevo_repo_for_proposer)
-            if _proposer_title:
-                print(f'llm-proposer: queued {_proposer_title}')
-            # #1411 fallback lane trigger route: no_demand (should_propose was
-            # False, zero LLM calls) AND proposer_reject (should_propose was
-            # True but maybe_propose's own sizing/self-dedup/futile-surface
-            # gates rejected the proposal) both land here as `not
-            # _proposer_title` — this bridge run is about to end without ever
-            # spawning an executor. One fallback attempt, consumed by the
-            # very next loop iteration in place of a fresh disk read.
-            if not _proposer_title and not _fallback_attempted:
-                _fallback_attempted = True
-                _fallback_result = llm_proposer.propose_fallback(STATE_DIR, _selfevo_repo_for_proposer)
-                if _fallback_result is not None:
-                    _pending_fallback = _fallback_result
-                    continue
-            print('already_handled')
-            return 0
+    # #707: the proposer's own candidate authoring keeps running, unconditional
+    # every cycle per its own docstring (system-map freshness rides along) --
+    # so a freshly-authored proposal is visible to THIS SAME planning session
+    # via llm_proposer.proposer_candidate_items below.
+    _selfevo_repo_for_proposer = STATE_DIR.parent / 'eeebot-self-evolving'
+    _proposer_title = llm_proposer.maybe_propose(STATE_DIR, _selfevo_repo_for_proposer)
+    if _proposer_title:
+        print(f'llm-proposer: queued {_proposer_title}')
 
+    # ADR-035 rule 1 (#1942): the planning session runs here, before any
+    # task exists for the cycle. provider/bus never depended on a specific
+    # request -- moved up from their old post-selection position.
+    provider = _make_provider(config)
+    bus = MessageBus()
+    _planning_cycle_id = f'cycle-{uuid.uuid4().hex[:12]}'
+    _planner_model = resolve_model('executor', config_fallback=config.tools.subagent.model)
+    _planning_denied_paths = {(STATE_DIR / rel).resolve() for rel in _FITNESS_SIDECARS}
+    try:
+        _planning_result = await _run_planning_session(
+            provider=provider, bus=bus, config=config, model=_planner_model,
+            state_dir=STATE_DIR, selfevo_repo=_selfevo_repo_for_proposer,
+            denied_paths=_planning_denied_paths, cycle_id=_planning_cycle_id,
+        )
+    except Exception as _planning_exc:
+        print(f'planning-session: unexpected error ({_planning_exc})')
+        _planning_result = {
+            'ran': False, 'iterations_used': None, 'iterations_planned': None,
+            'tampered_files': [], 'plan': None,
+        }
+
+    _plan = _planning_result.get('plan')
+    if not _plan:
+        # Rule 1: "no plan is a recorded outcome, never an assignment" -- no
+        # fallback lane, no rotation pickup. _run_planning_session already
+        # journalled why (no_plan/malformed/refused/rest/rest_unchanged).
+        print('bridge: no plan produced this cycle; no task chosen, no subagent spawned')
+        return 0
+
+    # "The executor receives this plan as its task" -- req/task are built
+    # FROM the plan, never from a rotation-picked queue file. `candidate_id`
+    # (optional) links to one of the ranked candidates the planner was
+    # shown; its absence means a self-directed increment.
+    _candidate_id = _plan.get('candidate_id') if isinstance(_plan.get('candidate_id'), str) else None
+    _matched_candidate = None
+    if _candidate_id:
+        try:
+            _all_candidates = demand.collect_demand(STATE_DIR, _selfevo_repo_for_proposer)
+            _all_candidates = planner_candidates.merge_proposer_candidates(
+                _all_candidates, llm_proposer.proposer_candidate_items(STATE_DIR),
+            )
+            _matched_candidate = next(
+                (c for c in _all_candidates if c.get('id') == _candidate_id), None,
+            )
+        except Exception:
+            _matched_candidate = None
+
+    _plan_text = str(_plan.get('plan') or '').strip()
+    if _matched_candidate:
+        _task_title = (_matched_candidate.get('summary') or _plan_text[:120]).strip()
+        _plan_target_path = _matched_candidate.get('affected_path') or ''
+    else:
+        _task_title = (_plan_text.splitlines()[0] if _plan_text else 'planner increment')[:120].strip()
+        _plan_target_path = ''
+
+    req_path = None
+    req = {
+        'request_id': _planning_cycle_id,
+        'cycle_id': _planning_cycle_id,
+        'task_title': _task_title or 'planner increment',
+        'semantic_task_id': _task_title or 'planner increment',
+        'task': _plan_text,
+        'target_path': _plan_target_path,
+        'profile': FORCE_PROFILE or 'bounded_execution',
+        'budget': FORCE_BUDGET or 'standard',
+        'candidate_id': _candidate_id or '',
+    }
+
+    while True:
         request_id = req.get('request_id') or req.get('verification_task_id') or str(req_path)
         # Issue #675: attribute every LLM call this cycle makes to this bridge
         # invocation. This process runs once per cycle (asyncio.run(main()) via
@@ -3845,13 +3858,9 @@ async def _main_impl_body():
         set_call_context(req.get('cycle_id') or request_id, "bridge")
         safe_id = request_id.replace('/', '_')[:120]
         handled_marker = BRIDGE_STATE_DIR / f'handled_{safe_id}.txt'
-        if handled_marker.exists():
-            print('already_handled')
-            # #733 follow-up: don't cap the whole run on one already-marked
-            # request — the _seen_req_paths guard above now protects against
-            # find_pending_request re-returning the same request forever, so
-            # it's safe to step over this one and keep bulk-skipping.
-            continue
+        # A freshly-minted cycle id can never already be handled -- there is
+        # no rotation delivering the same planner-built request twice, so
+        # this marker is created here for the FIRST time, not checked.
 
         # #720: cycle_id resolved once, up front, so every ledger row for this
         # cycle (write-ahead start, dedup, gate, terminal outcome) joins on the
@@ -3979,23 +3988,17 @@ async def _main_impl_body():
             )
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-already-done')
             _record_diary_fitness_marker(STATE_DIR, _cycle_id)
-            # #733: bulk-skip — bookkeeping done for this duplicate; move on to
-            # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
-            _skips += 1
-            if _skips >= MAX_SKIPS_PER_RUN:
-                _maybe_propose_after_skip(_selfevo_repo_check)
-                # #1411 fallback lane trigger routes: already_done_tag /
-                # recent_duplicate_failure / existence_index_duplicate —
-                # the skip cap ends this run without ever spawning an
-                # executor. One fallback attempt, consumed next iteration.
-                if not _fallback_attempted:
-                    _fallback_attempted = True
-                    _fallback_result = llm_proposer.propose_fallback(STATE_DIR, _selfevo_repo_check)
-                    if _fallback_result is not None:
-                        _pending_fallback = _fallback_result
-                        continue
-                return 0
-            continue
+            # ADR-035 rest amendment (#1964): a duplicate is a recorded
+            # outcome, never a reason to substitute another item -- there is
+            # exactly one candidate per cycle now (the plan's own choice),
+            # so a dup match ends the run. The evidence reaches exactly the
+            # next planning session.
+            planner_dedup_evidence.record_rejected_duplicate(
+                STATE_DIR, _cycle_id, req.get('task_title') or '',
+                _safe_rev_parse(_selfevo_repo_check, 'HEAD'),
+                f'already_done_tag:{_cycle_success_tag}',
+            )
+            return 0
 
         # #713/#736: resolve the duplicate-check title and target path used by
         # the _recent_failure_match and existence-index gates below.
@@ -4063,23 +4066,13 @@ async def _main_impl_body():
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-recent-failure')
             _record_diary_fitness_marker(STATE_DIR, _cycle_id)
-            # #733: bulk-skip — bookkeeping done for this duplicate; move on to
-            # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
-            _skips += 1
-            if _skips >= MAX_SKIPS_PER_RUN:
-                _maybe_propose_after_skip(_selfevo_repo_check)
-                # #1411 fallback lane trigger routes: already_done_tag /
-                # recent_duplicate_failure / existence_index_duplicate —
-                # the skip cap ends this run without ever spawning an
-                # executor. One fallback attempt, consumed next iteration.
-                if not _fallback_attempted:
-                    _fallback_attempted = True
-                    _fallback_result = llm_proposer.propose_fallback(STATE_DIR, _selfevo_repo_check)
-                    if _fallback_result is not None:
-                        _pending_fallback = _fallback_result
-                        continue
-                return 0
-            continue
+            # ADR-035 rest amendment (#1964): recorded outcome, no substitute.
+            planner_dedup_evidence.record_rejected_duplicate(
+                STATE_DIR, _cycle_id, _dup_check_title,
+                _safe_rev_parse(_selfevo_repo_check, 'HEAD'),
+                f'recent_duplicate_failure:{_recent_failure_title}',
+            )
+            return 0
         # #750: the two checks above are exact/keyword title matching — they
         # miss SEMANTIC near-duplicates whose title shares no literal words
         # with the past commit/failure (e.g. "monitor RAM and memory usage"
@@ -4135,23 +4128,13 @@ async def _main_impl_body():
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-existence-duplicate')
             _record_diary_fitness_marker(STATE_DIR, _cycle_id)
-            # #733: bulk-skip — bookkeeping done for this duplicate; move on to
-            # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
-            _skips += 1
-            if _skips >= MAX_SKIPS_PER_RUN:
-                _maybe_propose_after_skip(_selfevo_repo_check)
-                # #1411 fallback lane trigger routes: already_done_tag /
-                # recent_duplicate_failure / existence_index_duplicate —
-                # the skip cap ends this run without ever spawning an
-                # executor. One fallback attempt, consumed next iteration.
-                if not _fallback_attempted:
-                    _fallback_attempted = True
-                    _fallback_result = llm_proposer.propose_fallback(STATE_DIR, _selfevo_repo_check)
-                    if _fallback_result is not None:
-                        _pending_fallback = _fallback_result
-                        continue
-                return 0
-            continue
+            # ADR-035 rest amendment (#1964): recorded outcome, no substitute.
+            planner_dedup_evidence.record_rejected_duplicate(
+                STATE_DIR, _cycle_id, _dup_check_title,
+                _safe_rev_parse(_selfevo_repo_check, 'HEAD'),
+                f'existence_index_duplicate:{_existence_match}',
+            )
+            return 0
 
         else:
             _record_guard_key_event(
@@ -4187,12 +4170,12 @@ async def _main_impl_body():
     except Exception:
         pass
 
-    bridge_model = _executor_model_for_request(
-        req, request_id, resolve_model('executor', config_fallback=config.tools.subagent.model), STATE_DIR,
-    )
+    # provider/bus were already created above, before the planning session --
+    # the executor reuses them; only its MODEL can still be a per-request/lane
+    # override (the planner used the plain default, since no request existed
+    # yet when it ran).
+    bridge_model = _executor_model_for_request(req, request_id, _planner_model, STATE_DIR)
     config.agents.defaults.model = bridge_model
-    provider = _make_provider(config)
-    bus = MessageBus()
     TARGET_WORKSPACE.mkdir(parents=True, exist_ok=True)
     (TARGET_WORKSPACE / '.nanobot' / 'subagents').mkdir(parents=True, exist_ok=True)
 
@@ -5372,27 +5355,12 @@ async def _main_impl_body():
         }
 
 
-    # #1852 (ADR-031 rule 5, ADR-032 rule 2): the planning session runs once
-    # per bridge invocation, between cycles -- after this cycle's own
-    # opening diary anchor and demand selection (both already settled by
-    # this point) and before the executor spawns below, so its plan is
-    # written to the SAME diary the executor is about to read as its own
-    # first action. Fail-open: any outcome here (including "did not run")
-    # leaves the rest of this cycle completely unaffected -- this PR does
-    # not yet change how a cycle's task is chosen (ADR-032 rule 1, #1857/
-    # #1859's scope), only that the session runs and its plan reaches the
-    # diary.
-    _planning_selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
-    _planning_denied_paths = {(STATE_DIR / rel).resolve() for rel in _FITNESS_SIDECARS}
-    try:
-        _planning_result = await _run_planning_session(
-            provider=provider, bus=bus, config=config, model=bridge_model,
-            state_dir=STATE_DIR, selfevo_repo=_planning_selfevo_repo,
-            denied_paths=_planning_denied_paths, cycle_id=_cycle_id,
-        )
-    except Exception as _planning_exc:
-        print(f'planning-session: unexpected error ({_planning_exc})')
-        _planning_result = {'ran': False, 'iterations_used': None, 'iterations_planned': None, 'tampered_files': []}
+    # ADR-035 rule 1 (#1942): the planning session already ran, before
+    # selection, above -- `_planning_result` (and the plan this whole cycle
+    # was built from) is already in scope. This used to be a second call
+    # site, positioned here per ADR-031 rule 5's original ("after selection,
+    # before the executor spawns") ordering; rule 1 supersedes that ordering
+    # entirely, so this is no longer a second planning session.
 
     _explore_n, _explore_metric = _parse_explore_mode(req)
     if _explore_n > 1:
