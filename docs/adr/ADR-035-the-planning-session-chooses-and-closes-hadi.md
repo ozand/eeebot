@@ -174,6 +174,27 @@ three times running is flagged to the operator (#1765) and is never dropped
 automatically. A failure that is not supply — code, gate — is an ordinary outcome
 and reaches the next session as data, unmarked.
 
+**The work of an interrupted attempt is kept, not only its plan.** Carrying the
+plan is not enough if the work is thrown away. `cycle-77ca3cf3580c` (2026-09-25)
+ran four attempts; the first three were killed by the unit timeout after 27–36
+executor calls each, and every retry began with `checkout … to main` and
+`reset: moving to HEAD`, a new opening entry and a new plan: no commit from the
+killed attempts survived, about two and a half hours of work.
+
+- **Checkpoint commits.** The executor's work is committed to the cycle branch as
+  it goes, at least at every completed step that changed files (ADR-017's
+  checkpointing, applied inside a cycle). A kill loses minutes, not the attempt.
+- **A retry resumes the branch.** When the next session keeps an interrupted
+  `open_increment`, the executor continues on the existing cycle branch with its
+  checkpoints; the branch is never reset to `main` for a kept increment. Only
+  *edit* or *delete* may start from `main`, and *delete* leaves the branch in
+  place, named, for inspection.
+- **One opening, one plan chain.** A resumed increment appends to its existing
+  diary entry and plan instead of writing a new opening entry per attempt.
+- **Checkpoints are not results.** A checkpoint commit is never an integration;
+  the gate judges only the finished branch, and rule C of #1903 already excludes
+  diary-only and bookkeeping-only changes from counting as a result.
+
 **A duplicate is a recorded outcome too.** When the chosen increment is refused by
 the duplicate check, the cycle records `rejected_duplicate` with the evidence sha
 and reason, runs nothing in its place, and does not count toward `no_plan`. The
@@ -356,6 +377,10 @@ actor that has both.
 | `rejected_duplicate` records the evidence sha, substitutes nothing, stays outside `no_plan`, and reaches the next session | `tests/test_agent_chooses.py::test_rejected_duplicate_is_recorded_and_fed_forward` | not written |
 | A supply interruption carries the plan as `open_increment`, first and marked, to the next session; the harness never re-runs it by itself | `tests/test_agent_chooses.py::test_supply_interruption_carries_open_increment` | not written |
 | The supply hold: before the deadline no session, no repo preparation, no provider call; cooldown doubles to a 60-minute cap and resets on a completed call; after the deadline the session sees the open increment first | `tests/test_agent_chooses.py::test_supply_hold_uses_rest_snapshot_with_backoff` | not written |
+| The executor's file-changing steps are checkpoint-committed to the cycle branch; a killed attempt keeps them | `tests/test_agent_chooses.py::test_killed_attempt_keeps_checkpoint_commits` | not written |
+| A kept `open_increment` resumes on its existing cycle branch and is never reset to `main` | `tests/test_agent_chooses.py::test_kept_increment_resumes_branch_without_reset` | not written |
+| A resumed increment appends to its opening entry and plan chain instead of writing new ones | `tests/test_agent_chooses.py::test_resumed_increment_keeps_one_opening` | not written |
+| A checkpoint commit never integrates on its own | `tests/test_agent_chooses.py::test_checkpoint_is_not_an_integration` | not written |
 | Staged promotions and pending pushes survive repository preparation that now runs on every started cycle | `tests/test_agent_chooses.py::test_repo_preparation_preserves_staged_and_pending` | not written |
 
 # References
