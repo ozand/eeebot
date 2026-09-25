@@ -94,6 +94,8 @@ can read the private pages of rule 3. "All interfaces" includes the tailnet, not
 only the home LAN; which networks actually reach the port is a fact of the host's
 network rules, checked and recorded when this ships and whenever they change. The
 decision is revisited if any reachable network stops being trusted.
+Checked 2026-09-26: `:8080` is reachable from the LAN, the tailnet and loopback.
+The operator accepted the LAN and the tailnet as trusted (#1969).
 
 The interface of `scripts/eeebot_dashboard.py` is retired (rule 6).
 
