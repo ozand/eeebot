@@ -324,28 +324,28 @@ actor that has both.
 |---|---|---|
 | The planning session runs before selection and its plan is the executor's task | `tests/test_agent_chooses.py::test_planner_runs_first_and_its_plan_is_the_task` | not written |
 | The executor prompt never contains a proposer-authored task or "priorities are handled by the proposer" | `tests/test_agent_chooses.py::test_executor_never_receives_assigned_title` | not written |
-| No plan → `no_plan` recorded, no fallback to the proposer's task | `tests/test_agent_chooses.py::test_no_plan_does_not_fall_back_to_assignment` | not written |
-| Each plan carries one hypothesis with measure and refutation condition, stored with a stable id | `tests/test_agent_chooses.py::test_plan_hypothesis_is_stored_with_refutation` | not written |
-| The next session records continue/revise/drop for every hypothesis with a new verdict, and keep/edit/delete for its previous plan | `tests/test_agent_chooses.py::test_insight_decision_required_for_new_verdicts` | not written |
-| Verdicts are still computed only from harness sidecars; nothing the planner writes changes a verdict | `tests/test_agent_chooses.py::test_planner_cannot_write_verdicts` | not written |
+| No plan → `no_plan` recorded, no fallback to the proposer's task | `tests/test_agent_chooses.py::test_no_plan_does_not_fall_back_to_assignment` | passing (#1942 B2) |
+| Each plan carries one hypothesis with measure and refutation condition, stored with a stable id | `tests/test_agent_chooses.py::test_plan_hypothesis_is_stored_with_refutation` | passing (#1942 B2) |
+| The next session records continue/revise/drop for every hypothesis with a new verdict, and keep/edit/delete for its previous plan | `tests/test_agent_chooses.py::test_insight_decision_required_for_new_verdicts` | partial (#1942 B2): hypothesis continue/revise/drop passing; keep/edit/delete for the previous plan not implemented |
+| Verdicts are still computed only from harness sidecars; nothing the planner writes changes a verdict | `tests/test_agent_chooses.py::test_planner_cannot_write_verdicts` | passing (#1942 B2) |
 | The daily diagnosis writes to the diary and never to `derived_priorities.json` or demand | `tests/test_agent_chooses.py::test_daily_diagnosis_never_assigns` | not written |
 | Reflector findings reach lessons/diary and create no demand items | `tests/test_agent_chooses.py::test_reflector_findings_do_not_enter_demand` | not written |
 | Every started cycle — including `no_plan` — records chooser, hypothesis id and insight decision | `tests/test_agent_chooses.py::test_cycle_attribution_recorded_for_every_started_cycle` | not written |
 | A new operator priority is shown to the planner, marked new, in the next cycle | `tests/test_agent_chooses.py::test_new_operator_priority_wakes_the_planner` | not written |
 | A confirmed defect after a failed cycle reaches the planner first and a decline is named; three declines raise to the operator | `tests/test_agent_chooses.py::test_defect_urgency_survives_and_declines_are_visible` | not written |
-| `no_plan` creates no task; 3 planner-family in a row → `planner_degraded` + minimal mode; 6 → cycles stop, dashboard loud | `tests/test_agent_chooses.py::test_no_plan_recovery_is_bounded_and_visible` | not written |
-| Six supply-family `no_plan` (model timeouts) never enter minimal mode and raise `model_supply_degraded`; six planner-family ones do | `tests/test_agent_chooses.py::test_supply_and_planner_no_plan_are_counted_apart` | not written |
-| A produced plan resets both counters; after a stop, resume works and diagnostics kept running | `tests/test_agent_chooses.py::test_reset_and_resume_after_stop` | not written |
-| Minimal mode with pending verdicts defers them with a visible count; the next full session handles them first | `tests/test_agent_chooses.py::test_minimal_mode_defers_verdicts_visibly` | not written |
-| No path — minimal mode included — selects the first candidate when there is no plan | `tests/test_agent_chooses.py::test_no_automatic_candidate_selection` | not written |
+| `no_plan` creates no task; 3 planner-family in a row → `planner_degraded` + minimal mode; 6 → cycles stop, dashboard loud | `tests/test_agent_chooses.py::test_no_plan_recovery_is_bounded_and_visible` | passing (#1942 B2); "dashboard loud" not wired — no dashboard reader of this state yet |
+| Six supply-family `no_plan` (model timeouts) never enter minimal mode and raise `model_supply_degraded`; six planner-family ones do | `tests/test_agent_chooses.py::test_supply_and_planner_no_plan_are_counted_apart` | passing (#1942 B2) |
+| A produced plan resets both counters; after a stop, resume works and diagnostics kept running | `tests/test_agent_chooses.py::test_reset_and_resume_after_stop` | passing (#1942 B2); `resume()` implemented as a plain function — no operator-facing trigger (CLI/dashboard button) wired yet |
+| Minimal mode with pending verdicts defers them with a visible count; the next full session handles them first | `tests/test_agent_chooses.py::test_minimal_mode_defers_verdicts_visibly` | passing (#1942 B2) |
+| No path — minimal mode included — selects the first candidate when there is no plan | `tests/test_agent_chooses.py::test_no_automatic_candidate_selection` | passing (#1942 B2) |
 | The planner's list keeps the demand trust order: new operator priority, then confirmed defect | `tests/test_agent_chooses.py::test_trust_order_new_priority_then_defect` | not written |
-| Several new verdicts are handled oldest first up to five, the rest counted and shown | `tests/test_agent_chooses.py::test_verdict_backlog_bounded_and_counted` | not written |
-| Revise creates a linked version; the original measure and verdict are unchanged; drop keeps the refutation | `tests/test_agent_chooses.py::test_revise_and_drop_preserve_evidence` | not written |
-| The executor may amend the plan with a recorded reason; the amendment is attributed | `tests/test_agent_chooses.py::test_executor_plan_amendment_is_attributed` | not written |
+| Several new verdicts are handled oldest first up to five, the rest counted and shown | `tests/test_agent_chooses.py::test_verdict_backlog_bounded_and_counted` | passing (#1942 B2) |
+| Revise creates a linked version; the original measure and verdict are unchanged; drop keeps the refutation | `tests/test_agent_chooses.py::test_revise_and_drop_preserve_evidence` | passing (#1942 B2) |
+| The executor may amend the plan with a recorded reason; the amendment is attributed | `tests/test_agent_chooses.py::test_executor_plan_amendment_is_attributed` | partial (#1942 B2): diary/ledger primitive passing; no tool affordance for the executor to actually invoke it yet |
 | Every decommissioned output leaves its readers reporting the change, not an empty healthy input | `tests/test_agent_chooses.py::test_decommissioned_outputs_leave_no_healthy_void` | not written |
-| Each plan is a new dated diary entry; earlier plans survive | `tests/test_agent_chooses.py::test_plans_are_appended_not_overwritten` | not written |
-| The plan's forecast iterations and the actual count are both recorded | `tests/test_agent_chooses.py::test_plan_forecast_and_actual_recorded` | not written |
-| A hypothesis without measure and refutation condition is rejected at parse time | `tests/test_agent_chooses.py::test_hypothesis_without_refutation_is_rejected` | not written |
+| Each plan is a new dated diary entry; earlier plans survive | `tests/test_agent_chooses.py::test_plans_are_appended_not_overwritten` | passing (#1942 B2) |
+| The plan's forecast iterations and the actual count are both recorded | `tests/test_agent_chooses.py::test_plan_forecast_and_actual_recorded` | passing (#1942 B2): diary + ledger both carry forecast; ledger carries actual. Diary-side "actual" annotation not wired (would need a second commit at cycle end) |
+| A hypothesis without measure and refutation condition is rejected at parse time | `tests/test_agent_chooses.py::test_hypothesis_without_refutation_is_rejected` | passing (#1942 B2) |
 | At switch-over queued proposer requests are marked superseded and never executed | `tests/test_agent_chooses.py::test_queued_proposer_requests_drained_at_switchover` | not written |
 | Frozen derived priorities show as `frozen` in health and both dashboards | `tests/test_agent_chooses.py::test_frozen_derived_is_labelled_everywhere` | not written |
 | Rate readers carry a version boundary at the switch-over | `tests/test_agent_chooses.py::test_rate_readers_carry_switchover_boundary` | not written |

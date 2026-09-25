@@ -2926,12 +2926,17 @@ def _write_diary_open_entry(repo_root: 'Path', state_dir: 'Path', cycle_id: str,
         return {'outcome': 'commit_failed', 'commit_sha': None}
 
 
-def _write_diary_plan_block(repo_root: 'Path', state_dir: 'Path', cycle_id: str, plan_text: str) -> dict:
-    """#1852 (ADR-031 rule 5): write the planning session's plan into today's
-    diary, replacing whatever plan block is already there, and integrate it
-    on its own verdict -- the same carve-out :func:`_write_diary_open_entry`
-    already established for ADR-028 rule 3, applied to the plan block
-    instead of the entries list.
+def _write_diary_plan_block(
+    repo_root: 'Path', state_dir: 'Path', cycle_id: str, plan_text: str,
+    *, iterations_planned: 'int | None' = None,
+) -> dict:
+    """#1852 (ADR-031 rule 5), ADR-035 rule 1: write the planning session's
+    plan into today's diary as a new dated entry above the previous ones
+    (never replacing the block wholesale -- see
+    :func:`day_diary.append_plan_entry`), and integrate it on its own
+    verdict -- the same carve-out :func:`_write_diary_open_entry` already
+    established for ADR-028 rule 3, applied to the plan block instead of
+    the entries list.
 
     Mirrors :func:`_write_diary_open_entry`'s subprocess shape exactly
     (commit on main, push immediately, roll back on push failure); the two
@@ -2954,7 +2959,9 @@ def _write_diary_plan_block(repo_root: 'Path', state_dir: 'Path', cycle_id: str,
     try:
         existing = target.read_text(encoding='utf-8') if target.is_file() else None
         base_content = existing if existing is not None else day_diary.new_day_file()
-        new_content = day_diary.set_plan_block(base_content, plan_text)
+        new_content = day_diary.append_plan_entry(
+            base_content, plan_text, cycle_id=cycle_id, iterations_planned=iterations_planned,
+        )
     except ValueError as exc:
         return {'outcome': 'malformed', 'commit_sha': None, 'reason': str(exc)}
     except Exception as exc:
@@ -3175,7 +3182,7 @@ async def _run_planning_session(
     import asyncio as _asyncio
     import subprocess as _sp_run
 
-    from nanobot.runtime import day_diary, role_prompt
+    from nanobot.runtime import day_diary, no_plan_recovery, role_prompt
     from nanobot.runtime.cycle_ledger import record_planning_session
 
     _task_writing_read = False
@@ -3193,6 +3200,7 @@ async def _run_planning_session(
             task_writing_bytes=_task_writing_bytes_count,
             task_writing_sha256=_task_writing_sha256 or None,
         )
+        no_plan_recovery.record_outcome(state_dir, cycle_id, outcome)
         print(f'planning-session: {outcome} ({reason[:200]})')
         return {
             'ran': False, 'iterations_used': None, 'iterations_planned': None,
@@ -3380,6 +3388,7 @@ async def _run_planning_session(
             task_writing_bytes=_task_writing_bytes_count,
             task_writing_sha256=_task_writing_sha256 or None,
         )
+        no_plan_recovery.record_outcome(state_dir, cycle_id, 'no_plan')
         print(f'planning-session: no_plan ({reason})')
         return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
     # #1903/#1925: keep the role's no-wrapping instruction, but accept one
@@ -3411,6 +3420,7 @@ async def _run_planning_session(
             task_writing_bytes=_task_writing_bytes_count,
             task_writing_sha256=_task_writing_sha256 or None,
         )
+        no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
         print(f'planning-session: malformed final response ({exc})')
         return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
 
@@ -3429,7 +3439,9 @@ async def _run_planning_session(
             plan_lines.append(f'Futility: {f.strip()}')
     plan_text = '\n'.join(plan_lines)
 
-    write_result = _write_diary_plan_block(selfevo_repo, state_dir, cycle_id, plan_text)
+    write_result = _write_diary_plan_block(
+        selfevo_repo, state_dir, cycle_id, plan_text, iterations_planned=iterations_planned,
+    )
     record_planning_session(
         state_dir, cycle_id, write_result['outcome'],
         iterations_used=iterations_used, iterations_planned=iterations_planned,
@@ -3442,6 +3454,7 @@ async def _run_planning_session(
         task_writing_bytes=_task_writing_bytes_count,
         task_writing_sha256=_task_writing_sha256,
     )
+    no_plan_recovery.record_outcome(state_dir, cycle_id, write_result['outcome'])
     return {
         'ran': True, 'iterations_used': iterations_used,
         'iterations_planned': iterations_planned if write_result['outcome'] == 'integrated' else None,
@@ -5549,8 +5562,12 @@ async def _main_impl_body():
         change_shape=change_shape,
         iterations_used=_iterations_used,
         iterations_limit=resolved_iterations,
-        # iterations_predicted remains None until forecast is implemented
-        iterations_predicted=None,
+        # ADR-035 rule 1: "the plan carries its own size ... the harness
+        # records the actual count [iterations_used, above] beside it."
+        # `_planning_result` is this same cycle's planning-session output,
+        # set unconditionally earlier in this function before the explore-
+        # mode branch.
+        iterations_predicted=_planning_result.get('iterations_planned'),
         # #1709 increment 2: only a push_pending row needs the base it
         # merged against — _finish_pending_pushes reads this back to tell
         # "origin/main unchanged" (safe to redo) from "moved" (superseded).

@@ -439,6 +439,98 @@ def record_planning_session(
     )
 
 
+#: ADR-035 rule 3: the next planning session's decision for every open
+#: hypothesis with a new verdict. "continue"/"revise"/"drop" are the only
+#: three the ADR names; an unrecognized value is coerced to "continue" so a
+#: malformed write is visible as an odd decision on a real hypothesis rather
+#: than a dropped/absent ledger row.
+VALID_INSIGHT_DECISIONS = frozenset({"continue", "revise", "drop"})
+
+
+def record_insight_decision(
+    state_dir: Path,
+    cycle_id: str,
+    hypothesis_id: str,
+    decision: str,
+    *,
+    note: str = "",
+) -> None:
+    """Log the planning session's insight decision for one hypothesis
+    (ADR-035 rule 3): continue the line, revise it, or drop it. Distinct
+    from the harness-computed verdict (#878) this decision interprets --
+    this row records what the AGENT decided the verdict means, never the
+    verdict itself.
+    """
+    if decision not in VALID_INSIGHT_DECISIONS:
+        decision = "continue"
+    append_event(
+        state_dir,
+        {
+            "phase": "insight_decision",
+            "cycle_id": cycle_id or "",
+            "hypothesis_id": hypothesis_id,
+            "decision": decision,
+            "note": (note or "")[:500] or None,
+        },
+    )
+
+
+#: ADR-035 rule 1: the two no_plan cause families and the state labels the
+#: bounded-recovery transitions carry. Kept here, beside the planning outcomes
+#: they classify, so a reader of one ledger phase can find the other.
+VALID_NO_PLAN_FAMILIES = frozenset({"supply", "planner"})
+VALID_RECOVERY_STATES = frozenset({
+    "normal", "planner_degraded", "stopped", "model_supply_degraded", "reset",
+})
+
+
+def record_plan_amendment(state_dir: Path, cycle_id: str, amended_by: str, reason: str) -> None:
+    """Log the executor's amendment of the planning session's plan
+    (ADR-035 rule 1 + Attribution: "an amendment is attributed
+    (``amended_by: executor``) and is data for the next session, not a
+    failure").
+    """
+    append_event(
+        state_dir,
+        {
+            "phase": "plan_amendment",
+            "cycle_id": cycle_id or "",
+            "amended_by": amended_by or "executor",
+            "reason": (reason or "")[:500] or None,
+        },
+    )
+
+
+def record_no_plan_recovery_transition(
+    state_dir: Path,
+    cycle_id: str,
+    family: str,
+    consecutive_count: int,
+    state_label: str,
+) -> None:
+    """Log a no_plan-recovery state transition (ADR-035 rule 1, point 5:
+    "the ledger records every transition"). Called only when the state
+    actually changes -- not on every no_plan cycle -- so this phase's rows
+    are the transitions themselves, not a per-cycle repeat of the same
+    state. ``consecutive_count`` is the count that caused (or reset) the
+    transition, for later threshold-tuning analysis.
+    """
+    if family not in VALID_NO_PLAN_FAMILIES:
+        family = "planner"
+    if state_label not in VALID_RECOVERY_STATES:
+        state_label = "normal"
+    append_event(
+        state_dir,
+        {
+            "phase": "no_plan_recovery",
+            "cycle_id": cycle_id or "",
+            "family": family,
+            "consecutive_count": int(consecutive_count),
+            "state": state_label,
+        },
+    )
+
+
 def record_cycle_outcome(
     state_dir: Path,
     cycle_id: str,
