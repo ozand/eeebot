@@ -6053,7 +6053,13 @@ from nanobot.runtime.gate import _git_cmd, _is_runtime_deny
 
 # Compatibility mirrors retained for AST/external callers. The mutation policy
 # itself is authoritative; these mirrors are projections only.
-_BLOCKED_FILE_PATTERNS = ('.env', '.git', '.npmrc', 'package-lock', 'yarn.lock', 'id_rsa', 'private_key')
+# ADR-035 keep-work (#1942 B2): _BLOCKED_FILE_PATTERNS now imported from
+# commit_markers.py, the single source shared with the checkpoint commit
+# writer (nanobot.agent.subagent) -- kept as a plain name here (not a
+# re-export alias) so tests/test_mutation_surfaces.py's AST scan, which
+# looks for a module-level assignment mentioning this name, still needs its
+# own fix (see that file); a bare `from ... import X` is not an Assign node.
+from nanobot.runtime.commit_markers import BLOCKED_FILE_PATTERNS as _BLOCKED_FILE_PATTERNS
 _BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token'})
 _SENSITIVE_WORDS = _BLOCKED_WORD_PATTERNS
 _ALLOWED_SENSITIVE_BASENAMES = frozenset({'token_report.py', 'summarize_token_costs.py', 'token_budget_check.py', 'analyze_token_usage.py', 'check_token_budget.py', 'validate_no_secrets.py', 'count_tokens.py'})

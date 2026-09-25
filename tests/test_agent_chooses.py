@@ -1292,6 +1292,11 @@ def test_killed_attempt_keeps_checkpoint_commits(tmp_path: Path):
     base = tmp_path / "base"
     base.mkdir()
     _origin, work = _init_selfevo_repo(base)
+    # The checkpoint writer only fires on a selfevo/cycle-* branch (pG
+    # review: never on whatever happens to be checked out) -- this test is
+    # about granularity within a real cycle, so put the workspace where a
+    # real one always is.
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", "selfevo/cycle-checkpoint-test"], check=True, capture_output=True)
 
     class FakeResponse:
         def __init__(self, content="", finish_reason="stop", has_tool_calls=False, tool_calls=None, usage=None):
@@ -1362,6 +1367,90 @@ def test_killed_attempt_keeps_checkpoint_commits(tmp_path: Path):
         capture_output=True, text=True,
     ).stdout
     assert "step_two.py" not in first_checkpoint_files
+
+
+def test_checkpoint_commit_never_lands_on_main(tmp_path: Path):
+    """pG review: `_maybe_checkpoint_commit` must never fire on whatever
+    branch happens to be checked out -- only on a `selfevo/cycle-*` cycle
+    branch. `bridge._setup_cycle_branch` can fail open and leave the
+    checkout on `main` while the executor still spawns; committing a
+    checkpoint there would land it on the SHARED local `main` (the
+    "workspace main diverges" defect class), not a harmless checkpoint.
+    Drives the same real ``SubagentManager._run_subagent`` loop as
+    ``test_killed_attempt_keeps_checkpoint_commits``, but on a workspace
+    left checked out on `main` -- the loop must complete with a real file
+    change and NO new commit at all.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.providers.base import ToolCallRequest
+
+    base = tmp_path / "base"
+    base.mkdir()
+    _origin, work = _init_selfevo_repo(base)
+
+    head_before = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "HEAD"], capture_output=True, text=True,
+    ).stdout.strip()
+    branch_before = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True,
+    ).stdout.strip()
+    assert branch_before == "main"
+
+    class FakeResponse:
+        def __init__(self, content="", has_tool_calls=False, tool_calls=None):
+            self.content = content
+            self.finish_reason = "stop"
+            self.has_tool_calls = has_tool_calls
+            self.tool_calls = tool_calls or []
+            self.usage = {}
+            self.reasoning_content = None
+            self.thinking_blocks = None
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat_with_retry(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse(
+                    has_tool_calls=True,
+                    tool_calls=[ToolCallRequest(
+                        id="call-1", name="write_file",
+                        arguments={"path": "scripts/on_main.py", "content": "X = 1\n"},
+                    )],
+                )
+            return FakeResponse(content="done")
+
+    from unittest.mock import AsyncMock
+
+    manager = SubagentManager(
+        provider=FakeProvider(),
+        workspace=work,
+        bus=AsyncMock(),
+        model="fake/model",
+        max_iterations=5,
+        checkpoint_commits=True,
+    )
+
+    asyncio.run(manager._run_subagent("t1", "task on main", "label", {"channel": "cli", "chat_id": "direct"}))
+
+    # The tool call really ran (file exists, uncommitted) -- this isn't
+    # passing because nothing happened.
+    assert (work / "scripts" / "on_main.py").is_file()
+    status = subprocess.run(
+        ["git", "-C", str(work), "status", "--porcelain", "-uall"], capture_output=True, text=True,
+    ).stdout
+    assert "on_main.py" in status
+
+    head_after = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "HEAD"], capture_output=True, text=True,
+    ).stdout.strip()
+    assert head_after == head_before, "checkpoint committed on main -- the branch guard did not fire"
 
 
 # --- keep-work: a resumed increment keeps one opening entry (ADR-035,
@@ -1503,7 +1592,7 @@ def test_checkpoint_commit_excluded_from_self_dedup_and_recent_activity(tmp_path
     assert not any(s.lower().startswith("selfevo: checkpoint") for s in subjects)
 
 
-def test_checkpoint_commit_is_not_an_integration(tmp_path: Path):
+def test_checkpoint_is_not_an_integration(tmp_path: Path):
     """A checkpoint commit is never itself an integration (ADR-035
     keep-work): integration only ever happens through the bridge's own
     explicit, smoke-gated call to ``_integrate_cycle_to_main`` -- never as a

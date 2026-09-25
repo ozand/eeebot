@@ -43,13 +43,16 @@ ARTIFICIAL_COMMIT_SUBJECT_PREFIXES: tuple[str, ...] = (
 CHECKPOINT_SUBJECT_PREFIX = "selfevo: checkpoint"
 CHECKPOINT_TRAILER = "Selfevo-Checkpoint: true"
 
-#: Secret-shaped/lockfile filenames a checkpoint commit must never stage --
-#: mirrors ``nanobot.runtime.bridge._BLOCKED_FILE_PATTERNS`` (duplicated, not
-#: imported: that name is AST-scanned by ``tests/test_mutation_surfaces.py``
-#: as a bridge.py module-level constant, and ``nanobot.agent.subagent`` --
-#: which bridge.py itself imports -- cannot import back from
-#: ``nanobot.runtime.bridge`` without a cycle).
-CHECKPOINT_BLOCKED_FILE_PATTERNS: tuple[str, ...] = (
+#: Secret-shaped/lockfile filenames no self-authored commit may ever stage.
+#: The single source: ``nanobot.runtime.bridge`` imports this as
+#: ``_BLOCKED_FILE_PATTERNS`` (its residual auto-commit and
+#: ``_is_blocked_filename``'s mutation-surface gate both read it),
+#: ``nanobot.agent.subagent``'s checkpoint writer reads it directly. Living
+#: here rather than in bridge.py is what makes the import safe in both
+#: directions: bridge.py already imports ``nanobot.agent.subagent``
+#: (``SubagentManager``), so subagent.py importing bridge.py back would be a
+#: cycle -- this module has no imports of either, so both can import IT.
+BLOCKED_FILE_PATTERNS: tuple[str, ...] = (
     ".env", ".git", ".npmrc", "package-lock", "yarn.lock", "id_rsa", "private_key",
 )
 
@@ -62,11 +65,14 @@ def is_artificial_commit_subject(subject: str) -> bool:
 
 
 def is_blocked_checkpoint_filename(path: str) -> bool:
-    """True if *path* matches a secret-shaped/lockfile pattern that a
-    checkpoint commit must exclude. A simplified substring check, not
-    ``bridge._is_blocked_filename``'s full basename/stem logic -- this is a
-    defense-in-depth net for the checkpoint writer only; ``denied_paths`` at
-    the tool level (``WriteFileTool``/``EditFileTool``) is the primary
-    defense against writing fitness sidecars at all."""
+    """True if *path* matches a secret-shaped/lockfile pattern
+    (:data:`BLOCKED_FILE_PATTERNS`) that a checkpoint commit must exclude.
+    A simplified substring check, not ``bridge._is_blocked_filename``'s
+    full basename/stem logic -- this is a defense-in-depth net for the
+    checkpoint writer only; ``denied_paths`` at the tool level
+    (``WriteFileTool``/``EditFileTool``) is the primary defense against
+    writing fitness sidecars at all. The PATTERN LIST is shared with
+    ``bridge._is_blocked_filename`` (see :data:`BLOCKED_FILE_PATTERNS`);
+    only the matching algorithm around it differs."""
     lowered = (path or "").lower()
-    return any(pat in lowered for pat in CHECKPOINT_BLOCKED_FILE_PATTERNS)
+    return any(pat in lowered for pat in BLOCKED_FILE_PATTERNS)

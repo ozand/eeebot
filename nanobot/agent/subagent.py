@@ -815,10 +815,19 @@ class SubagentManager:
 
     def _maybe_checkpoint_commit(self) -> None:
         """ADR-035 keep-work (#1942 B2): commit the workspace's dirty tree
-        to whatever branch is currently checked out, after a completed
-        tool-execution step. "The executor's work is committed to the cycle
-        branch as it goes, at least at every completed step that changed
-        files ... a kill loses minutes, not the attempt."
+        to the current branch after a completed tool-execution step --
+        ONLY when that branch is a ``selfevo/cycle-*`` cycle branch. "The
+        executor's work is committed to the cycle branch as it goes, at
+        least at every completed step that changed files ... a kill loses
+        minutes, not the attempt."
+
+        The branch guard matters because ``bridge._setup_cycle_branch`` can
+        fail open and leave the checkout on ``main`` (dirty_tree/
+        checkout_failed) while the executor still spawns -- committing a
+        checkpoint straight to the SHARED local ``main`` there would be the
+        "workspace main diverges" defect class, not a harmless checkpoint.
+        A branch this loose check cannot see (renamed, detached HEAD) is
+        treated the same as ``main``: skip, never guess.
 
         Never pushed here -- push happens once, at integration or gate
         time, the same as every other cycle-branch commit; a checkpoint's
@@ -826,7 +835,9 @@ class SubagentManager:
         and silent: only called when ``self._checkpoint_commits`` is True
         (the eeebot executor spawn only), and a checkpoint failure must
         never abort or even flag the loop turn it rides along on -- the
-        end-of-turn commit/gate path is unaffected either way.
+        end-of-turn commit/gate path is unaffected either way. Every git
+        call is timeout-bounded so a stuck index.lock cannot hang the
+        executor's own loop.
         """
         import subprocess as _sp_ckpt
 
@@ -837,7 +848,15 @@ class SubagentManager:
         repo_root = self.workspace
         try:
             git = ["git", "-c", f"safe.directory={repo_root}", "-C", str(repo_root)]
-            status = _sp_ckpt.run(git + ["status", "--porcelain", "-uall"], capture_output=True, text=True)
+            branch = _sp_ckpt.run(
+                git + ["rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if branch.returncode != 0 or not branch.stdout.strip().startswith("selfevo/cycle-"):
+                return
+            status = _sp_ckpt.run(
+                git + ["status", "--porcelain", "-uall"], capture_output=True, text=True, timeout=10,
+            )
             if status.returncode != 0 or not status.stdout.strip():
                 return
             changed: list[str] = []
@@ -853,7 +872,7 @@ class SubagentManager:
             if not changed:
                 return
             for path in changed:
-                _sp_ckpt.run(git + ["add", "--", path], capture_output=True, text=True)
+                _sp_ckpt.run(git + ["add", "--", path], capture_output=True, text=True, timeout=10)
             if len(changed) == 1:
                 paths_desc = changed[0]
             else:
@@ -862,7 +881,7 @@ class SubagentManager:
             subject = f"{CHECKPOINT_SUBJECT_PREFIX} — {paths_desc}"
             _sp_ckpt.run(
                 git + ["commit", "-m", subject, "-m", CHECKPOINT_TRAILER],
-                capture_output=True, text=True,
+                capture_output=True, text=True, timeout=10,
             )
         except Exception:
             pass
