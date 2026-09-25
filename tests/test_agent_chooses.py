@@ -815,7 +815,11 @@ def _setup_planner_chooses_harness(base, monkeypatch):
     return state_dir
 
 
-def _stub_planning_session(monkeypatch, plan_text: str, candidate_id: "str | None" = None):
+def _stub_planning_session(
+    monkeypatch, plan_text: str, candidate_id: "str | None" = None,
+    *, resume_branch: "str | None" = None, resume_cycle_id: "str | None" = None,
+    resume_skip_opening_entry: bool = False,
+):
     from nanobot.runtime import bridge
 
     calls: list[dict] = []
@@ -825,6 +829,11 @@ def _stub_planning_session(monkeypatch, plan_text: str, candidate_id: "str | Non
         return {
             'ran': True, 'iterations_used': 1, 'iterations_planned': 1,
             'tampered_files': [], 'plan': {'plan': plan_text, 'candidate_id': candidate_id},
+            # ADR-035 keep-work (#1942 B2): non-None only when the test
+            # simulates a `keep` decision on a pending open increment.
+            'resume_branch': resume_branch,
+            'resume_cycle_id': resume_cycle_id,
+            'resume_skip_opening_entry': resume_skip_opening_entry,
         }
 
     monkeypatch.setattr(bridge, "_run_planning_session", _fake_planning_session)
@@ -1120,6 +1129,322 @@ def test_supply_hold_uses_rest_snapshot_with_backoff(tmp_path: Path, monkeypatch
     assert len(repo_prep_calls) == 1
     assert len(provider_calls) == 1
     assert len(planning_calls) == 1
+
+
+# --- keep-work: a kept open_increment resumes its branch without reset
+# (ADR-035, #1942 B2) ----------------------------------------------------------
+
+def test_kept_increment_resumes_branch_without_reset(tmp_path: Path, monkeypatch):
+    """"A retry resumes the branch. When the next session keeps an
+    interrupted open_increment, the executor continues on the existing
+    cycle branch with its checkpoints; the branch is never reset to main
+    for a kept increment." (ADR-035 keep-work). Drives a real
+    `bridge._main_impl()` run with `_run_planning_session` stubbed to
+    simulate an already-resolved `keep` decision (`resume_branch`/
+    `resume_cycle_id` set, mirroring what a real planning session's
+    `open_increment_decision: "keep"` produces) and asserts the resumed
+    branch's git history still contains the interrupted attempt's
+    checkpoint commit -- a `_setup_cycle_branch` that fell back to its
+    ordinary `-B origin/main` reset would have thrown it away.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _FakeSubagentManager, _init_selfevo_repo, _run
+
+    from nanobot.runtime import bridge, open_increment
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    old_cycle_id = "cycle-interrupted-01"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    _run(work, "checkout", "-b", old_branch)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "wip.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
+    _run(work, "add", "scripts/wip.py")
+    commit = subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/wip.py", "-m", CHECKPOINT_TRAILER],
+        capture_output=True, text=True,
+    )
+    assert commit.returncode == 0, commit.stderr
+    checkpoint_sha = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "HEAD"], capture_output=True, text=True,
+    ).stdout.strip()
+    _run(work, "checkout", "main")
+
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id,
+        retry_key="self-resume-test", plan_text="finish the wip feature", candidate_id=None,
+        selfevo_repo=work, branch=old_branch,
+    )
+    # Force the hold's deadline into the past -- this test drives the
+    # session that runs AFTER the cooldown elapses (the `keep` decision
+    # itself), not the held tick (already covered by
+    # test_supply_hold_uses_rest_snapshot_with_backoff).
+    _oi_state = open_increment.load_state(state_dir)
+    _oi_state.hold["deadline"] = "2000-01-01T00:00:00Z"
+    open_increment._save_state(state_dir, _oi_state)
+
+    planning_calls = _stub_planning_session(
+        monkeypatch, "finish the wip feature",
+        resume_branch=old_branch, resume_cycle_id=old_cycle_id, resume_skip_opening_entry=True,
+    )
+    monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+    assert len(planning_calls) == 1
+
+    # The cycle branch integrates and is deleted on success -- checking it
+    # by name after the run is not meaningful. Instead: the checkpoint
+    # commit must be an ancestor of the now-updated `main` (proof its work
+    # survived into the integration), and the full log must show both the
+    # checkpoint and the executor's own commit -- never a re-branched
+    # history that silently dropped the checkpoint and only kept the new one.
+    ancestor_check = subprocess.run(
+        ["git", "-C", str(work), "merge-base", "--is-ancestor", checkpoint_sha, "main"],
+    )
+    assert ancestor_check.returncode == 0, (
+        "resumed branch lost its checkpoint commit -- it never reached integrated main "
+        "(_setup_cycle_branch must have reset to origin/main instead of reusing the branch)"
+    )
+    log = subprocess.run(
+        ["git", "-C", str(work), "log", "--oneline", "main"], capture_output=True, text=True,
+    ).stdout
+    assert "feat: add feature" in log
+
+
+def test_setup_cycle_branch_reuse_keeps_existing_commits(tmp_path: Path):
+    """Narrower unit-level proof, directly on `_setup_cycle_branch`: with
+    `reuse_existing_branch=True` and a same-named local branch already
+    present, checkout reuses it (`resumed: True`, HEAD unchanged) instead of
+    force-resetting it to `origin/main` -- the `-B` default's exact opposite.
+    """
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo, _run
+
+    from nanobot.runtime import bridge
+
+    base = tmp_path / "base"
+    base.mkdir()
+    _origin, work = _init_selfevo_repo(base)
+
+    cycle_id = "cycle-reuse-01"
+    branch = f"selfevo/cycle-{cycle_id}"
+    _run(work, "checkout", "-b", branch)
+    (work / "extra.py").write_text("x = 1\n", encoding="utf-8")
+    _run(work, "add", "extra.py")
+    _run(work, "commit", "-m", "wip commit on the branch")
+    branch_head = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", branch], capture_output=True, text=True,
+    ).stdout.strip()
+    _run(work, "checkout", "main")
+
+    result = bridge._setup_cycle_branch(work, cycle_id, reuse_existing_branch=True)
+    assert result['ok'] is True
+    assert result['branch'] == branch
+    assert result.get('resumed') is True
+
+    head_after = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "HEAD"], capture_output=True, text=True,
+    ).stdout.strip()
+    assert head_after == branch_head, "reuse path must not move the branch pointer"
+
+    # A fresh (non-resume) setup on a DIFFERENT cycle_id still force-resets
+    # from origin/main, unaffected by the reuse path existing.
+    fresh = bridge._setup_cycle_branch(work, "cycle-fresh-01", reuse_existing_branch=False)
+    assert fresh['ok'] is True
+    assert fresh.get('resumed') is False
+    fresh_head = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "HEAD"], capture_output=True, text=True,
+    ).stdout.strip()
+    assert fresh_head == fresh['main_sha']
+
+
+# --- keep-work: a killed attempt keeps its checkpoint commits (ADR-035,
+# #1942 B2) --------------------------------------------------------------------
+
+def test_killed_attempt_keeps_checkpoint_commits(tmp_path: Path):
+    """"The executor's work is committed to the cycle branch as it goes, at
+    least at every completed step that changed files ... a kill loses
+    minutes, not the attempt." (ADR-035 keep-work). Drives a real
+    ``SubagentManager._run_subagent`` loop (not the bridge-level
+    ``_FakeSubagentManager`` shortcut other tests use, which bypasses the
+    loop entirely) against a fake multi-turn provider, so the per-iteration
+    checkpoint hook in ``nanobot.agent.subagent`` actually fires. Two
+    completed tool-executing steps must each leave their OWN commit,
+    proving granularity (not one commit at the very end) -- a kill after
+    step 1 but before step 2 would keep step 1's file, which a single
+    end-of-run commit could not guarantee.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.providers.base import ToolCallRequest
+
+    base = tmp_path / "base"
+    base.mkdir()
+    _origin, work = _init_selfevo_repo(base)
+
+    class FakeResponse:
+        def __init__(self, content="", finish_reason="stop", has_tool_calls=False, tool_calls=None, usage=None):
+            self.content = content
+            self.finish_reason = finish_reason
+            self.has_tool_calls = has_tool_calls
+            self.tool_calls = tool_calls or []
+            self.usage = usage or {}
+            self.reasoning_content = None
+            self.thinking_blocks = None
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat_with_retry(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse(
+                    has_tool_calls=True,
+                    tool_calls=[ToolCallRequest(
+                        id="call-1", name="write_file",
+                        arguments={"path": "scripts/step_one.py", "content": "STEP = 1\n"},
+                    )],
+                )
+            if self.calls == 2:
+                return FakeResponse(
+                    has_tool_calls=True,
+                    tool_calls=[ToolCallRequest(
+                        id="call-2", name="write_file",
+                        arguments={"path": "scripts/step_two.py", "content": "STEP = 2\n"},
+                    )],
+                )
+            return FakeResponse(content="done, two steps completed")
+
+    from unittest.mock import AsyncMock
+
+    manager = SubagentManager(
+        provider=FakeProvider(),
+        workspace=work,
+        bus=AsyncMock(),
+        model="fake/model",
+        max_iterations=5,
+        checkpoint_commits=True,
+    )
+
+    asyncio.run(manager._run_subagent("t1", "finish the wip feature", "label", {"channel": "cli", "chat_id": "direct"}))
+
+    log = subprocess.run(
+        ["git", "-C", str(work), "log", "--format=%s%x1f%b%x1e"], capture_output=True, text=True,
+    ).stdout
+    records = [r.strip("\n") for r in log.split("\x1e") if r.strip()]
+    checkpoint_records = [r for r in records if r.split("\x1f", 1)[0].startswith("selfevo: checkpoint")]
+    assert len(checkpoint_records) == 2, f"expected 2 checkpoint commits, got {len(checkpoint_records)}:\n{records}"
+
+    subjects = [r.split("\x1f", 1)[0] for r in checkpoint_records]
+    assert any("step_one.py" in s for s in subjects)
+    assert any("step_two.py" in s for s in subjects)
+    for record in checkpoint_records:
+        subject, _sep, body = record.partition("\x1f")
+        assert "Selfevo-Checkpoint: true" in body
+
+    # Granularity: the FIRST checkpoint (oldest commit touching step_one.py)
+    # must not already contain step_two.py -- a kill right after step 1
+    # would resume with only step_one.py's work, not both.
+    first_checkpoint_files = subprocess.run(
+        ["git", "-C", str(work), "log", "--diff-filter=A", "--name-only", "--format=", "--", "scripts/step_one.py"],
+        capture_output=True, text=True,
+    ).stdout
+    assert "step_two.py" not in first_checkpoint_files
+
+
+# --- keep-work: a resumed increment keeps one opening entry (ADR-035,
+# #1942 B2) --------------------------------------------------------------------
+
+def test_resumed_increment_keeps_one_opening(tmp_path: Path, monkeypatch):
+    """"One opening, one plan chain. A resumed increment appends to its
+    existing diary entry and plan instead of writing a new opening entry
+    per attempt." (ADR-035 keep-work). Simulates the interrupted attempt's
+    own opening entry (written before it started, ADR-028 rule 2) directly
+    via ``_write_diary_open_entry``, then drives a `keep`-resumed
+    ``_main_impl()`` cycle and asserts the diary gained NO second opening
+    entry for the same task title -- only ``resume_skip_opening_entry``
+    (wired from ``open_increment.pending["opening_entry_written"]``)
+    stands between this and a duplicate per ADR-028 rule 2's own
+    unconditional write.
+    """
+    import asyncio
+
+    from tests.test_cycle_ledger import _FakeSubagentManager, _init_selfevo_repo
+
+    from nanobot.runtime import bridge, open_increment
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    task_title = "finish the wip feature (resume test)"
+    old_cycle_id = "cycle-interrupted-02"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+
+    # The interrupted attempt's own opening entry, written before it began
+    # executing -- exactly what ADR-028 rule 2 already does today, simulated
+    # directly rather than by running a doomed-to-fail first cycle.
+    write_result = bridge._write_diary_open_entry(work, state_dir, old_cycle_id, task_title)
+    assert write_result['outcome'] == 'integrated', write_result
+
+    diary_files_before = sorted((work / "diary").glob("*.md"))
+    assert len(diary_files_before) == 1
+    diary_text_before = diary_files_before[0].read_text(encoding="utf-8")
+    assert diary_text_before.count(task_title) == 1
+
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id,
+        retry_key="self-resume-opening-test", plan_text=task_title, candidate_id=None,
+        selfevo_repo=work, branch=old_branch,
+    )
+    _oi_state = open_increment.load_state(state_dir)
+    _oi_state.hold["deadline"] = "2000-01-01T00:00:00Z"
+    open_increment._save_state(state_dir, _oi_state)
+
+    # The interrupted attempt's own branch, with a checkpoint commit, so the
+    # resume path's branch-reuse setup succeeds (not the focus of this test,
+    # but required for the cycle to run to completion).
+    import subprocess
+
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", old_branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "wip.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/wip.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/wip.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    _stub_planning_session(
+        monkeypatch, task_title,
+        resume_branch=old_branch, resume_cycle_id=old_cycle_id, resume_skip_opening_entry=True,
+    )
+    monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    diary_files_after = sorted((work / "diary").glob("*.md"))
+    assert len(diary_files_after) == 1, "resume must not create a second day file for this"
+    diary_text_after = diary_files_after[0].read_text(encoding="utf-8")
+    assert diary_text_after.count(task_title) == 1, (
+        f"resume wrote a second opening entry for the same task title:\n{diary_text_after}"
+    )
 
 
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,

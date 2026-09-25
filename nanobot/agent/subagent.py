@@ -173,6 +173,14 @@ class SubagentManager:
         denied_paths: "set[Path] | None" = None,
         release_root: "Path | None" = None,
         role_system_prompt: "str | None" = None,
+        # ADR-035 keep-work (#1942 B2): commit the workspace's dirty tree to
+        # the current branch after every completed tool-execution step, so a
+        # kill between steps loses only the in-flight one, not every
+        # checkpoint before it. Opt-in (default False, matching every other
+        # instrumentation param here) -- only the eeebot executor spawn site
+        # passes True; the planner spawn and every other caller are
+        # unaffected.
+        checkpoint_commits: bool = False,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -243,6 +251,7 @@ class SubagentManager:
         self._excluded_skill_names: list[str] = list(excluded_skill_names or [])
         self._telemetry_component = str(telemetry_component or "").strip()
         self.web_tools_enabled = bool(web_tools_enabled)
+        self._checkpoint_commits = bool(checkpoint_commits)
 
     async def spawn(
         self,
@@ -637,6 +646,12 @@ class SubagentManager:
                             "name": tool_call.name,
                             "content": result,
                         })
+                    # ADR-035 keep-work (#1942 B2): this iteration's tool
+                    # calls just finished -- checkpoint now, before whatever
+                    # comes next (another provider call, a break) can be the
+                    # thing that gets killed.
+                    if self._checkpoint_commits:
+                        self._maybe_checkpoint_commit()
                     if memory_unavailable_reason:
                         stop_reason = "memory_search_unavailable"
                         break
@@ -797,6 +812,60 @@ class SubagentManager:
             )
             logger.error("Subagent [{}] failed: {}", task_id, e)
             await self._announce_result(task_id, label, task, error_msg, origin, "error")
+
+    def _maybe_checkpoint_commit(self) -> None:
+        """ADR-035 keep-work (#1942 B2): commit the workspace's dirty tree
+        to whatever branch is currently checked out, after a completed
+        tool-execution step. "The executor's work is committed to the cycle
+        branch as it goes, at least at every completed step that changed
+        files ... a kill loses minutes, not the attempt."
+
+        Never pushed here -- push happens once, at integration or gate
+        time, the same as every other cycle-branch commit; a checkpoint's
+        only job is to exist locally so a kill doesn't lose it. Fail-open
+        and silent: only called when ``self._checkpoint_commits`` is True
+        (the eeebot executor spawn only), and a checkpoint failure must
+        never abort or even flag the loop turn it rides along on -- the
+        end-of-turn commit/gate path is unaffected either way.
+        """
+        import subprocess as _sp_ckpt
+
+        from nanobot.runtime.commit_markers import (
+            CHECKPOINT_SUBJECT_PREFIX, CHECKPOINT_TRAILER, is_blocked_checkpoint_filename,
+        )
+
+        repo_root = self.workspace
+        try:
+            git = ["git", "-c", f"safe.directory={repo_root}", "-C", str(repo_root)]
+            status = _sp_ckpt.run(git + ["status", "--porcelain", "-uall"], capture_output=True, text=True)
+            if status.returncode != 0 or not status.stdout.strip():
+                return
+            changed: list[str] = []
+            for line in status.stdout.splitlines():
+                if not line.strip():
+                    continue
+                path = line[3:].strip()
+                if " -> " in path:
+                    path = path.split(" -> ", 1)[1]
+                path = path.strip('"')
+                if path and not is_blocked_checkpoint_filename(path):
+                    changed.append(path)
+            if not changed:
+                return
+            for path in changed:
+                _sp_ckpt.run(git + ["add", "--", path], capture_output=True, text=True)
+            if len(changed) == 1:
+                paths_desc = changed[0]
+            else:
+                joined = ", ".join(changed)
+                paths_desc = joined if len(joined) <= 60 and len(changed) <= 3 else f"{len(changed)} paths"
+            subject = f"{CHECKPOINT_SUBJECT_PREFIX} — {paths_desc}"
+            _sp_ckpt.run(
+                git + ["commit", "-m", subject, "-m", CHECKPOINT_TRAILER],
+                capture_output=True, text=True,
+            )
+        except Exception:
+            pass
 
     async def _announce_result(
         self,

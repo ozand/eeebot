@@ -156,6 +156,7 @@ def record_supply_interruption(
     wake_condition: "WakeCondition | None" = None,
     cooldown_base_seconds: int = SUPPLY_RETRY_COOLDOWN_BASE_SECONDS,
     cooldown_cap_seconds: int = SUPPLY_RETRY_COOLDOWN_CAP_SECONDS,
+    branch: str = "",
 ) -> OpenIncrementState:
     """The executor's LLM call died on a supplier-side classification
     (``paused-supplier``) mid-plan. Records the interrupted plan as the
@@ -167,6 +168,18 @@ def record_supply_interruption(
     increment together (see ``bridge._retry_key_for``); a different
     retry_key restarts the streak at 1, matching the bounded-retry
     mechanism's own per-candidate keying.
+
+    ``branch`` (ADR-035 keep-work, #1942 B2) is the cycle branch
+    (``selfevo/cycle-<cycle_id>``) the interrupted attempt's checkpoint
+    commits live on -- the caller already computed it via
+    ``bridge._setup_cycle_branch`` and passes it straight through, so this
+    module never needs its own branch-naming logic. A *keep* decision
+    (:func:`resolve`) reads it back before clearing ``pending`` so the next
+    executor spawn can resume the SAME branch instead of branching a fresh
+    one off ``origin/main``. ``opening_entry_written`` is always set True
+    here: the interrupted attempt's own opening diary entry was already
+    written before it started executing (ADR-028 rule 2), so a *keep*
+    resume must never write a second one for the same increment.
     """
     from nanobot.runtime.cycle_ledger import append_event
 
@@ -181,6 +194,8 @@ def record_supply_interruption(
         "candidate_id": candidate_id or None,
         "reason": "interrupted_supply",
         "interrupted_at": _now_iso(),
+        "branch": branch or "",
+        "opening_entry_written": True,
     }
     state.consecutive_supply_interrupts = consecutive
 

@@ -853,13 +853,32 @@ def _safe_ref_id(cycle_id: str) -> str:
     return _re_ref.sub(r'[^A-Za-z0-9._-]', '-', str(cycle_id or 'unknown'))[:80]
 
 
-def _setup_cycle_branch(repo_root: 'Path', cycle_id: str, state_dir: 'Path | None' = None) -> dict:
-    """Isolate the upcoming subagent run on a fresh branch off ``origin/main``.
+def _setup_cycle_branch(
+    repo_root: 'Path', cycle_id: str, state_dir: 'Path | None' = None,
+    reuse_existing_branch: bool = False,
+) -> dict:
+    """Isolate the upcoming subagent run on a branch off ``origin/main`` --
+    or, when ``reuse_existing_branch`` is True, on its OWN already-existing
+    ``selfevo/cycle-<cycle_id>`` branch, keeping whatever commits are
+    already on it.
 
     Implements R8/R9 of docs/specs/subagent-bridge/spec.md: the subagent commits
     against ``selfevo/cycle-<cycle_id>``, never directly against ``main``, so a
     self-push (or a bridge crash mid-run) can only ever publish the cycle
     branch — never ``origin/main``.
+
+    ADR-035 keep-work (#1942 B2): a *kept* ``open_increment`` is resumed by
+    calling this with the SAME ``cycle_id`` the interrupted attempt used
+    (bridge.py routes it in via ``_run_planning_session``'s
+    ``resume_cycle_id``) and ``reuse_existing_branch=True``. The branch this
+    computes is then already checked out with its checkpoint commits still
+    on it; ``git checkout <branch>`` reuses that ref as-is. Only *edit* and
+    *delete* (and every ordinary, non-resumed cycle) take the ``-B`` path
+    below, which force-resets the branch pointer to ``origin/main`` -- ADR
+    text: "the branch is never reset to main for a kept increment. Only
+    edit or delete may start from main". A reuse that finds no local branch
+    (pruned, fresh clone) falls back to the ordinary ``-B`` path rather than
+    failing the cycle -- there is nothing left to resume.
 
     The #877 line switch that used to live here (branch the cycle off a
     stronger dormant sha when ``CycleArchive.stalled()`` said the line had
@@ -914,9 +933,19 @@ def _setup_cycle_branch(repo_root: 'Path', cycle_id: str, state_dir: 'Path | Non
     base = main_sha
     _sd = state_dir if state_dir is not None else STATE_DIR
 
-    checkout = _sp_setup.run(git + ['checkout', '-B', branch, base], capture_output=True, text=True)
-    if checkout.returncode != 0:
-        return {'ok': False, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha, 'reason': 'checkout_failed'}
+    resumed = False
+    if reuse_existing_branch:
+        exists = _sp_setup.run(
+            git + ['rev-parse', '--verify', '--quiet', branch], capture_output=True, text=True,
+        ).returncode == 0
+        if exists:
+            reuse_checkout = _sp_setup.run(git + ['checkout', branch], capture_output=True, text=True)
+            resumed = reuse_checkout.returncode == 0
+
+    if not resumed:
+        checkout = _sp_setup.run(git + ['checkout', '-B', branch, base], capture_output=True, text=True)
+        if checkout.returncode != 0:
+            return {'ok': False, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha, 'reason': 'checkout_failed'}
 
     # #830: bound leaked cycle branches. Integrated ones are removed by
     # _cleanup_cycle_branch, but forensic (gate-failed/blocked) branches were
@@ -924,7 +953,10 @@ def _setup_cycle_branch(repo_root: 'Path', cycle_id: str, state_dir: 'Path | Non
     # fresh branch; best-effort so a prune failure never blocks the cycle.
     _prune_stale_cycle_branches(repo_root, state_dir=_sd)
 
-    return {'ok': True, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha, 'reason': None}
+    return {
+        'ok': True, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha, 'reason': None,
+        'resumed': resumed,
+    }
 
 
 def _integrate_cycle_to_main(
@@ -1431,6 +1463,19 @@ def _prune_stale_cycle_branches(
     except Exception:
         _indexed_shas = set()
 
+    # ADR-035 keep-work (#1942 B2): never prune the branch a PENDING open
+    # increment still points at -- its checkpoint commits are the whole
+    # point of a future `keep` decision. Every killed cycle now leaves an
+    # unmerged forensic branch (checkpointing means there is always at
+    # least one commit), so this exemption is load-bearing, not
+    # belt-and-suspenders: without it, a busy supply-hold backoff could
+    # outlive the `keep` forensic-branch window and silently lose the work.
+    try:
+        from nanobot.runtime.open_increment import pending_open_increment as _pending_oi_branch
+        _pending_branch = (_pending_oi_branch(_sd) or {}).get('branch') or ''
+    except Exception:
+        _pending_branch = ''
+
     try:
         current = _run(['rev-parse', '--abbrev-ref', 'HEAD']).stdout.strip()
 
@@ -1454,6 +1499,7 @@ def _prune_stale_cycle_branches(
         to_delete.update(unmerged[keep:])
         to_delete.discard(current)  # never delete the branch we are on
         to_delete.discard('')
+        to_delete.discard(_pending_branch)  # ADR-035 keep-work: see above
 
         # #877: never delete a branch whose tip sha the evolution tree still
         # indexes (e.g. a forensic branch that also happens to be a
@@ -3520,10 +3566,22 @@ async def _run_planning_session(
     # plan is treated as produced. Fail-open bookkeeping, same shape as the
     # declined-defect handling above -- never turns an otherwise-integrated
     # plan into a degraded outcome.
+    # ADR-035 keep-work (#1942 B2): a `keep` decision resumes the interrupted
+    # attempt's OWN cycle branch and skips a second opening diary entry --
+    # captured from `_pending_open_increment` BEFORE `resolve()` clears it,
+    # and returned below for `_main_impl_body` to route into
+    # `_setup_cycle_branch`/`_write_diary_open_entry`.
+    _resume_branch: 'str | None' = None
+    _resume_cycle_id: 'str | None' = None
+    _resume_skip_opening_entry = False
     if _pending_open_increment:
         _oi_decision = str(parsed.get('open_increment_decision') or '').strip().lower()
         if _oi_decision in ('keep', 'edit', 'delete'):
             try:
+                if _oi_decision == 'keep':
+                    _resume_branch = _pending_open_increment.get('branch') or None
+                    _resume_cycle_id = _pending_open_increment.get('cycle_id') or None
+                    _resume_skip_opening_entry = bool(_pending_open_increment.get('opening_entry_written'))
                 _open_increment_mod.resolve(state_dir, cycle_id, _oi_decision)
                 plan_lines.append(f'Open increment: {_oi_decision}')
             except Exception:
@@ -3559,6 +3617,10 @@ async def _run_planning_session(
         # built on -- only when the diary write itself also succeeded
         # (never hand the caller a plan that never reached the diary).
         'plan': parsed if write_result['outcome'] == 'integrated' else None,
+        # ADR-035 keep-work (#1942 B2): non-None only on a `keep` decision.
+        'resume_branch': _resume_branch,
+        'resume_cycle_id': _resume_cycle_id,
+        'resume_skip_opening_entry': _resume_skip_opening_entry,
     }
 
 
@@ -3808,10 +3870,19 @@ async def _main_impl_body():
     _task_title = (_plan_text.splitlines()[0] if _plan_text else 'planner increment')[:120].strip()
     _plan_target_path = _matched_candidate.get('affected_path') or '' if _matched_candidate else ''
 
+    # ADR-035 keep-work (#1942 B2): a `keep` decision on the pending open
+    # increment resumes ITS cycle_id (so `_setup_cycle_branch` computes the
+    # SAME branch name its checkpoint commits are already on), never a fresh
+    # one -- `request_id` stays this session's own id for handled-marker/
+    # telemetry bookkeeping, only `cycle_id` (branch-determining) changes.
+    _resume_branch = _planning_result.get('resume_branch')
+    _resume_cycle_id = _planning_result.get('resume_cycle_id')
+    _resume_skip_opening_entry = bool(_planning_result.get('resume_skip_opening_entry'))
+
     req_path = None
     req = {
         'request_id': _planning_cycle_id,
-        'cycle_id': _planning_cycle_id,
+        'cycle_id': _resume_cycle_id or _planning_cycle_id,
         'task_title': _task_title or 'planner increment',
         'semantic_task_id': _task_title or 'planner increment',
         'task': _plan_text,
@@ -3872,7 +3943,11 @@ async def _main_impl_body():
         # resets curator outputs" defect class that ordering exists to
         # keep closed (test_repo_preparation_preserves_staged_and_pending).
         _selfevo_repo_check = STATE_DIR.parent / 'eeebot-self-evolving'
-        if _selfevo_repo_check.is_dir():
+        # ADR-035 keep-work (#1942 B2): "one opening ... instead of writing a
+        # new opening entry per attempt" -- a `keep` resume's opening entry
+        # was already written before the interrupted attempt started
+        # (ADR-028 rule 2), so this cycle writes no second one.
+        if _selfevo_repo_check.is_dir() and not _resume_skip_opening_entry:
             # ADR-028 rules 2-3 (#1811): this cycle's opening diary entry,
             # written and pushed to origin/main HERE — before the cycle
             # branch is even cut — so it needs no protection from the gate
@@ -4183,7 +4258,15 @@ async def _main_impl_body():
         _restore_to_main(_selfevo_repo, STATE_DIR)
         # _cycle_id was already resolved up front (right after request_id, before
         # the write-ahead ledger marker) — reused here unchanged.
-        _cycle_setup = _setup_cycle_branch(_selfevo_repo, _cycle_id, STATE_DIR)
+        # ADR-035 keep-work (#1942 B2): a `keep` decision resumes its OWN
+        # cycle branch with checkpoint commits intact -- `_cycle_id` was
+        # already routed to `_resume_cycle_id` above, so a match here means
+        # this IS that resumed cycle, never a coincidence with an unrelated
+        # fresh cycle_id.
+        _reuse_branch = bool(_resume_branch and _resume_cycle_id and _cycle_id == _resume_cycle_id)
+        _cycle_setup = _setup_cycle_branch(
+            _selfevo_repo, _cycle_id, STATE_DIR, reuse_existing_branch=_reuse_branch,
+        )
         cycle_branch = _cycle_setup['branch']
         main_sha_before = _cycle_setup['main_sha']
         # #877: the real, unswitched origin/main sha observed at setup time —
@@ -4294,6 +4377,10 @@ async def _main_impl_body():
             # #939 Part E: suppress loop-irrelevant builtin skills.
             excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
             telemetry_component="executor",
+            # ADR-035 keep-work (#1942 B2): commit checkpoints to the cycle
+            # branch as the executor goes, so a kill loses minutes, not the
+            # whole attempt.
+            checkpoint_commits=True,
         )
 
         # Capture HEAD SHA before spawn so we can count subagent commits correctly,
@@ -4592,6 +4679,10 @@ async def _main_impl_body():
                     plan_text=req.get('task') or '',
                     candidate_id=req.get('candidate_id') or None,
                     selfevo_repo=_selfevo_repo,
+                    # ADR-035 keep-work (#1942 B2): the branch this cycle's
+                    # checkpoint commits live on, so a later `keep` decision
+                    # can resume it instead of branching fresh off main.
+                    branch=cycle_branch,
                 )
             else:
                 _open_increment_exec.record_model_call_completed(STATE_DIR)
@@ -4650,6 +4741,10 @@ async def _main_impl_body():
                         skill_fitness_cycle_base_sha=main_sha_before,
                         excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
                         telemetry_component="executor",
+                        # ADR-035 keep-work (#1942 B2): the repair turn also
+                        # writes to the committed cycle-branch repo -- same
+                        # per-step checkpointing as the main executor spawn.
+                        checkpoint_commits=True,
                     )
                     await _repair_mgr.spawn(
                         task=_repair_prompt,
