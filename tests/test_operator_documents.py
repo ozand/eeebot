@@ -895,9 +895,10 @@ def test_prompt_never_picks_a_priority_for_the_executor(tmp_path: Path):
     """Test Contract: nothing in prompt assembly selects an item for the
     executor. The operator-priorities block states the order is intent,
     not instruction (ADR-034 rule 5); and the executor's own task message
-    (``bridge.build_task``) still reads generically -- "priorities are
-    handled by the proposer" -- when the request carries no
-    ``curriculum_level``, unaffected by the new block's presence."""
+    (``bridge.build_task``) still reads generically -- attributing the
+    choice to the planning session (ADR-035 rule 1, #1942), never a
+    proposer -- when the request carries no ``curriculum_level``,
+    unaffected by the new block's presence."""
     from nanobot.runtime.bridge import build_task
     from nanobot.runtime.operator_documents import PRIORITY_INTENT_LINE
 
@@ -915,4 +916,5 @@ def test_prompt_never_picks_a_priority_for_the_executor(tmp_path: Path):
     assert "start with priority" not in block.lower()
 
     task = build_task({}, "goal text", "")
-    assert "This task is not an operator priority; priorities are handled by the proposer." in task
+    assert "This task is not an operator priority; the planning session chose it." in task
+    assert "the proposer" not in task.lower()

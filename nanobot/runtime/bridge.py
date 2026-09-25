@@ -2214,7 +2214,11 @@ def build_task(req: dict, goal_text: str, report_source: str,
     if curriculum_level:
         _mission_line = f'This task is operator priority P{curriculum_level}.'
     else:
-        _mission_line = 'This task is not an operator priority; priorities are handled by the proposer.'
+        # ADR-035 rule 1 (#1942): the planning session chooses every task
+        # now, including self-directed increments with no matched candidate
+        # -- there is no proposer-authored assignment left to attribute this
+        # line to.
+        _mission_line = 'This task is not an operator priority; the planning session chose it.'
     # #954: charter is already in system_context when charter_in_system=True;
     # emit a single pointer line so the combined prompt has the charter text
     # exactly once.
