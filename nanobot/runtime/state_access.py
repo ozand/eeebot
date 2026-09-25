@@ -164,7 +164,7 @@ def _read_ledger_file(
     try:
         opener = gzip.open if path.name.endswith(".gz") else open
         with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
+            for line_no, line in enumerate(handle, start=1):
                 line_bytes = len(line.encode("utf-8", errors="replace"))
                 if used + line_bytes > remaining:
                     capped = True
@@ -186,6 +186,10 @@ def _read_ledger_file(
                     continue
                 if phases and row.get("phase") not in phases:
                     continue
+                if "_source_file" not in row:
+                    row["_source_file"] = path.name
+                if "_source_line" not in row:
+                    row["_source_line"] = line_no
                 rows.append(row)
         return rows, used, _iso(earliest) if earliest else None, _iso(latest) if latest else None, capped, None
     except PermissionError:
