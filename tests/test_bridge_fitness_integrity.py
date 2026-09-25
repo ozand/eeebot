@@ -52,6 +52,19 @@ def _setup(base, monkeypatch):
     monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
     monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
     monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+
+    # ADR-035 rule 1 (#1942): req/task now come from the planning session's
+    # own plan, never from a rotation-picked queue file -- these tests care
+    # about the spawn-boundary hash window around the EXECUTOR spawn, not
+    # planner decision-making, so stub a plan that survives the pre-spawn
+    # dedup gates untouched (no prior result to collide with).
+    async def _fake_planning_session(**_kwargs):
+        return {
+            'ran': True, 'iterations_used': 1, 'iterations_planned': 1,
+            'tampered_files': [], 'plan': {'plan': 'a novel bounded increment', 'candidate_id': None},
+        }
+
+    monkeypatch.setattr(bridge, "_run_planning_session", _fake_planning_session)
     return state_dir
 
 
@@ -128,15 +141,18 @@ class TestSpawnBoundaryTamperDetection:
         assert len(integrity) == 1
         assert integrity[0]["reason"] == "sidecar_write_during_spawn"
         assert integrity[0]["files"] == ["demand/completed.json"]
-        assert integrity[0]["cycle_id"] == "cycle-tamper"
 
         outcome_rows = [r for r in rows if r["phase"] == "outcome"]
         assert outcome_rows[-1]["outcome"] == "failed"
+        # ADR-035 rule 1 (#1942): the cycle_id is now minted by the planning
+        # session, not the (retired) seeded request -- the integrity row
+        # must still be attributed to the SAME cycle as the outcome row.
+        assert integrity[0]["cycle_id"] == outcome_rows[-1]["cycle_id"]
         assert outcome_rows[-1]["reason"] == "fitness_sidecar_tamper"
         assert not (base / "target_workspace" / ".nanobot" / "subagents" / "latest.json").exists()
 
         # The incident is surfaced in the cycle's own key_learnings.
-        result_path = state_dir / "subagents" / "results" / "result-req-tamper.json"
+        result_path = state_dir / "subagents" / "results" / f"result-{integrity[0]['cycle_id']}.json"
         payload = json.loads(result_path.read_text(encoding="utf-8"))
         learnings = "\n".join(payload["key_learnings"])
         assert "INTEGRITY WARNING" in learnings
