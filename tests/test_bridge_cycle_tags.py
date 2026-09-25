@@ -335,6 +335,7 @@ class TestBridgeCycleTagIntegration:
             monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
             monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
             monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+            _stub_planning_session(monkeypatch, "add feature")
 
             _seed_bridge_request(state_dir, "req-tagfail", "cycle-tagfail")
 
