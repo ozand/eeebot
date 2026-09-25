@@ -4,11 +4,12 @@ hypothesis is stored in ADR-030's form, and no_plan recovery is bounded and
 visible. Also covers the rest amendment (docs PR #1964): a structured
 `rest` outcome, the change-only harness pre-check, and `rejected_duplicate`.
 
-Only the rows this increment closes are exercised here. Rows requiring the
-live task-selection wiring in ``bridge.py`` (rule 1's "its plan IS the
-executor's task"), the goal-review/reflector/proposer decommission, and the
-planner-prompt-schema work for trust-order/new-priority/defect-decline are
-deferred -- see this PR's body for why each is out of scope this session.
+Rule 1's live task-selection wiring in ``bridge.py`` ("its plan IS the
+executor's task", and the executor never receives an assigned title) is
+exercised at the bottom of this file. The goal-review/reflector/proposer
+decommission and the planner-prompt-schema work for trust-order/
+new-priority/defect-decline remain deferred -- see this PR's body for why
+each is out of scope this session.
 """
 from __future__ import annotations
 
@@ -778,3 +779,159 @@ def test_record_plan_amendment_ledger(tmp_path: Path):
     assert len(amendments) == 1
     assert amendments[0]["amended_by"] == "executor"
     assert amendments[0]["cycle_id"] == "cycle-1"
+
+
+# --- test_planner_runs_first_and_its_plan_is_the_task ----------------------
+# --- test_executor_never_receives_assigned_title ---------------------------
+#
+# ADR-035 rule 1 (#1942), live task-selection wiring in bridge.py. Uses the
+# bridge-integration harness from tests/test_cycle_ledger.py: STATE_DIR/
+# BRIDGE_STATE_DIR/TARGET_WORKSPACE/RELEASE_ROOT monkeypatched onto a
+# tmp_path, a real bare-origin selfevo checkout, and a SubagentManager fake
+# that captures the executor spawn's kwargs (never the planner's own,
+# telemetry_component="planner") so the actual content delivered to the
+# executor can be inspected directly.
+
+def _setup_planner_chooses_harness(base, monkeypatch):
+    from nanobot.runtime import bridge
+
+    state_dir = base / "state"
+    state_dir.mkdir()
+    monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+    monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+    monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+    monkeypatch.setattr(bridge, "_CORE_SMOKE_TESTS", ("tests/test_smoke.py",))
+    release_root = base / "_adr034_release_root"
+    release_root.mkdir(exist_ok=True)
+    (release_root / "goals.md").write_text("test charter", encoding="utf-8")
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release_root)
+    monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+
+    (state_dir / "goals").mkdir(parents=True, exist_ok=True)
+    (state_dir / "goals" / "goal_text.json").write_text(
+        json.dumps({"schema_version": "goal-text-v1", "goal_id": "goal-1", "text": "test goal"}),
+        encoding="utf-8",
+    )
+    return state_dir
+
+
+def _stub_planning_session(monkeypatch, plan_text: str, candidate_id: "str | None" = None):
+    from nanobot.runtime import bridge
+
+    calls: list[dict] = []
+
+    async def _fake_planning_session(**kwargs):
+        calls.append(kwargs)
+        return {
+            'ran': True, 'iterations_used': 1, 'iterations_planned': 1,
+            'tampered_files': [], 'plan': {'plan': plan_text, 'candidate_id': candidate_id},
+        }
+
+    monkeypatch.setattr(bridge, "_run_planning_session", _fake_planning_session)
+    return calls
+
+
+def _make_capturing_subagent_manager(captured: list):
+    from tests.test_cycle_ledger import _FakeSubagentManager
+
+    class _CapturingSubagentManager(_FakeSubagentManager):
+        async def spawn(self, **kwargs):
+            if self._telemetry_component != "planner":
+                captured.append(kwargs)
+            return await super().spawn(**kwargs)
+
+    return _CapturingSubagentManager
+
+
+def test_planner_runs_first_and_its_plan_is_the_task(tmp_path: Path, monkeypatch):
+    """The planning session runs before any request is selected, and its
+    plan -- not a rotation-picked queue file -- is the executor's task."""
+    import asyncio
+
+    from nanobot.runtime import bridge
+    from tests.test_cycle_ledger import _init_selfevo_repo, _read_ledger
+
+    base = tmp_path
+    _init_selfevo_repo(base)
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+
+    # A stale rotation-queue-shaped file with a DIFFERENT title -- proves
+    # selection never reads it; only the planner's own plan is used.
+    req_dir = state_dir / "subagents" / "requests"
+    req_dir.mkdir(parents=True)
+    (req_dir / "stale.json").write_text(
+        json.dumps({"request_id": "stale-req", "task_title": "STALE TITLE should never spawn"}),
+        encoding="utf-8",
+    )
+
+    plan_text = "Implement the bounded widget cache exactly as planned"
+    planning_calls = _stub_planning_session(monkeypatch, plan_text)
+
+    captured: list[dict] = []
+    monkeypatch.setattr(bridge, "SubagentManager", _make_capturing_subagent_manager(captured))
+
+    result = asyncio.run(bridge._main_impl())
+    assert result == 0
+
+    # Rule 1: the planner ran -- there is no other place a task could have
+    # come from now that the rotation reader is retired.
+    assert len(planning_calls) == 1
+
+    # Its plan reached the executor as the task, verbatim -- never the
+    # stale queued file's title.
+    assert len(captured) == 1
+    assert plan_text in captured[0]["task"]
+    assert "STALE TITLE" not in captured[0]["task"]
+
+    outcome_rows = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"]
+    assert outcome_rows[-1]["outcome"] == "success"
+
+
+def test_executor_never_receives_assigned_title(tmp_path: Path, monkeypatch):
+    """The executor prompt never contains a proposer-authored task or
+    "priorities are handled by the proposer" -- even when the plan resolves
+    to a matched, proposer-authored candidate via candidate_id, only the
+    plan's OWN wording reaches the executor's task/title."""
+    import asyncio
+
+    from nanobot.runtime import bridge
+    from nanobot.runtime.demand import item_id
+    from tests.test_cycle_ledger import _init_selfevo_repo, _read_ledger
+
+    base = tmp_path
+    _init_selfevo_repo(base)
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+
+    # A live proposer-authored candidate the planner is shown and chooses to
+    # work (candidate_id set) -- its own raw title/task text must never
+    # reach the executor; only the plan's own wording does.
+    proposer_title = "Add a proposer-authored helper script"
+    proposer_task_text = "PROPOSER RAW TASK TEXT SHOULD NEVER REACH THE EXECUTOR"
+    req_dir = state_dir / "subagents" / "requests"
+    req_dir.mkdir(parents=True)
+    (req_dir / "llm-proposer-cand.json").write_text(json.dumps({
+        "request_id": "llm-proposer-cand-1",
+        "task_title": proposer_title,
+        "task": proposer_task_text,
+        "request_status": "queued",
+    }), encoding="utf-8")
+
+    candidate_id = item_id("proposer", proposer_title)
+    plan_text = "Refine the caching layer per the planner's own reasoning"
+    _stub_planning_session(monkeypatch, plan_text, candidate_id=candidate_id)
+
+    captured: list[dict] = []
+    monkeypatch.setattr(bridge, "SubagentManager", _make_capturing_subagent_manager(captured))
+
+    result = asyncio.run(bridge._main_impl())
+    assert result == 0
+
+    assert len(captured) == 1
+    task = captured[0]["task"]
+    assert plan_text in task
+    assert proposer_task_text not in task
+    assert proposer_title not in task
+    assert "handled by the proposer" not in task.lower()
+
+    outcome_rows = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"]
+    assert outcome_rows[-1]["outcome"] == "success"
