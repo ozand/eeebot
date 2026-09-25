@@ -2059,9 +2059,16 @@ def _recent_activity_context(
                 status = data.get('result_status')
                 if not reason and status not in ('blocked', 'no_commit'):
                     continue
+                # ADR-035 rule 1 (#1942): req/task come from the planning
+                # session's own plan now, never a proposer-written request
+                # -- result rows carry the plan's title only in
+                # semantic_task_id, never backlog_title/task_title (both
+                # sourced from a source_artifact/queue file that no longer
+                # exists).
                 title = (
                     data.get('backlog_title')
                     or data.get('task_title')
+                    or data.get('semantic_task_id')
                     or data.get('cycle_id')
                     or '(untitled)'
                 )
@@ -3773,6 +3780,11 @@ async def _main_impl_body():
         'profile': FORCE_PROFILE or 'bounded_execution',
         'budget': FORCE_BUDGET or 'standard',
         'candidate_id': _candidate_id or '',
+        # #1280/#1765 (ADR-035 rule 1, #1942): the executor LLM-error
+        # retry-then-retire bound and the supplier-paused bypass both need
+        # a key that survives across cycles -- request_id/cycle_id no
+        # longer do (see _retry_key_for's docstring).
+        'retry_key': _retry_key_for(_candidate_id, _task_title),
     }
 
     while True:
@@ -3782,7 +3794,10 @@ async def _main_impl_body():
         # cli_main()) and exits afterward, so there is no need to reset the
         # context — it never outlives this process.
         set_call_context(req.get('cycle_id') or request_id, "bridge")
-        safe_id = request_id.replace('/', '_')[:120]
+        # #1280/#1765: the handled/retry bookkeeping keys on retry_key, not
+        # request_id -- see _retry_key_for.
+        _retry_key = req.get('retry_key') or request_id
+        safe_id = _retry_key.replace('/', '_')[:120]
         handled_marker = BRIDGE_STATE_DIR / f'handled_{safe_id}.txt'
         # A freshly-minted cycle id can never already be handled -- there is
         # no rotation delivering the same planner-built request twice, so
@@ -6299,6 +6314,30 @@ def _executor_llm_error(state_dir: Path, task_id: 'str | None') -> str:
         return ''
 
 
+def _retry_key_for(candidate_id: 'str | None', task_title: str) -> str:
+    """Stable key for the executor LLM-error retry/handled bookkeeping and
+    the #1765 supplier-paused bypass, surviving across cycles even though
+    ``request_id``/``cycle_id`` are freshly minted every cycle now (ADR-035
+    rule 1, #1942: req/task come from the planning session's own plan, not
+    a rotation-picked queue file — the old stable-by-construction queue
+    filename this bookkeeping used to key on is gone). ``candidate_id``
+    when the plan resolved one against ``demand.collect_demand``/the
+    proposer's ranked list; otherwise a stable hash of the plan's own
+    title, so a self-directed increment the planner keeps re-proposing is
+    still recognized as the same underlying attempt. Fail-open by
+    construction: never raises, worst case collapses two different titles
+    onto the same key (indistinguishable from #1280's pre-#1765 behavior of
+    treating every LLM-dead request the same way).
+    """
+    if candidate_id:
+        return str(candidate_id)
+    import hashlib as _hashlib
+    digest = _hashlib.sha256(
+        (task_title or '').strip().encode('utf-8', errors='replace')
+    ).hexdigest()
+    return f'self-{digest[:16]}'
+
+
 def _llm_error_retry_path(request_id: 'str | None') -> 'Path | None':
     """The retry counter `_decide_handled_marker` keeps for a request whose
     subagent died on the LLM call (#1280): ``retry_<safe_id>.json`` beside
@@ -6385,9 +6424,15 @@ def _decide_handled_marker(
     defect) bypasses all of the above unconditionally — no marker, no retry
     counter touched at all. A supplier outage must not spend the request's
     bounded retry budget (that budget exists for OUR bugs, not the
-    supplier's uptime) and must not retire the request either: every later
-    cycle's ``find_pending_request`` finds this exact request again,
-    unchanged, for as long as the outage lasts, with zero bookkeeping cost.
+    supplier's uptime) and must not retire the request either. ADR-035 rule
+    1 (#1942) retired the rotation queue this docstring used to describe
+    ("every later cycle's find_pending_request finds this exact request
+    again, unchanged") — every cycle now mints its own plan/request_id, so
+    "unchanged" is enforced by keying ``handled_marker`` on the caller's
+    stable ``retry_key`` (see :func:`_retry_key_for`) instead: an outage
+    leaves that key's marker/counter untouched, so the same underlying
+    candidate is neither retired nor charged retry budget, for as long as
+    the outage lasts.
 
     Returns ``"handled"``, ``"retry"``, ``"retired_after_retries"``,
     ``"retired_state_lost"`` or ``"supplier_paused"`` for the journal, and
@@ -6714,7 +6759,12 @@ def _recent_failure_match(
                 continue
             if not reason and status not in ('blocked', 'no_commit'):
                 continue
-            if reason == 'executor_llm_error' and not _llm_error_retries_exhausted(data.get('request_id')):
+            # #1280/#1765: retry_key is the cross-cycle-stable key (ADR-035
+            # rule 1, #1942 broke request_id's stability); request_id stays
+            # as a fallback for result rows written before this field existed.
+            if reason == 'executor_llm_error' and not _llm_error_retries_exhausted(
+                data.get('retry_key') or data.get('request_id')
+            ):
                 # #1280: a cycle that died on the LLM call says nothing about
                 # the proposal, so while its request still has retry budget
                 # the row must not feed suppression — otherwise this branch
@@ -6729,7 +6779,10 @@ def _recent_failure_match(
                 break
 
         for data in failures:
-            title = data.get('backlog_title') or data.get('task_title') or ''
+            # ADR-035 rule 1 (#1942): semantic_task_id is the only title
+            # field a plan-driven result row carries -- see the identical
+            # fallback added to _recent_activity_context above.
+            title = data.get('backlog_title') or data.get('task_title') or data.get('semantic_task_id') or ''
             if not title:
                 continue
             # #798: the entry's own recorded target path (written since #798
@@ -7385,6 +7438,10 @@ def _write_bridge_completed_result(
         # _extract_target_path is fail-open by construction.
         'target_path': _extract_target_path(req),
         'rollback': rollback,
+        # #1280/#1765 (ADR-035 rule 1, #1942): the stable cross-cycle key
+        # _recent_failure_match's executor_llm_error exemption reads,
+        # since request_id no longer survives across cycles.
+        'retry_key': req.get('retry_key') or '',
     }
 
     try:
