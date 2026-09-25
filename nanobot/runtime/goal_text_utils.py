@@ -244,13 +244,23 @@ def _recent_git_log(repo_root: Path, since: str = "14 days ago") -> str:
     Shared helper: both `_curriculum_level` (MEMORY.md backlog) and
     `_parse_backlog_task_from_goal_text` (goal_text.json priorities) need
     "recent git log text for a repo" to feed the done-detection heuristic (#575).
+
+    ADR-035 keep-work architect addendum (#1942 B2): excludes residual
+    auto-commits and per-step checkpoint commits (`commit_markers.
+    ARTIFICIAL_COMMIT_GREP_PATTERNS`) -- this IS a "is this already done"
+    reader, and a checkpoint's own path-naming subject, or a residual
+    commit's, must never satisfy it.
     """
     import subprocess as _sp
+
+    from nanobot.runtime.commit_markers import ARTIFICIAL_COMMIT_GREP_PATTERNS
 
     git_cmd = [
         "git", "-c", f"safe.directory={repo_root}",
         "-C", str(repo_root),
         "log", "--oneline", f"--since={since}",
+        "--invert-grep", "-i",
+        *(f"--grep={p}" for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
     ]
     try:
         return _sp.check_output(git_cmd, stderr=_sp.DEVNULL, timeout=10).decode(errors="replace")

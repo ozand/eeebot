@@ -483,6 +483,31 @@ def _capture_pre_spawn_sha(selfevo_repo: 'Path', sha_file: 'Path') -> str:
     return ''
 
 
+def _all_commits_are_artificial_since(selfevo_repo: 'Path', pre_spawn_sha: str) -> bool:
+    """ADR-035 keep-work architect addendum (#1942 B2): True iff every
+    commit in ``pre_spawn_sha..HEAD`` is a residual auto-commit or a
+    per-step checkpoint (``commit_markers.is_artificial_commit_subject``).
+    False (never a false "yes") on an empty range, an unreadable sha, or
+    any git error -- the caller only acts on a confirmed positive.
+    """
+    if not pre_spawn_sha:
+        return False
+    import subprocess as _sp_art
+    from nanobot.runtime.commit_markers import is_artificial_commit_subject
+    try:
+        r = _sp_art.run(
+            ['git', '-c', f'safe.directory={selfevo_repo}', '-C', str(selfevo_repo),
+             'log', '--format=%s', f'{pre_spawn_sha}..HEAD'],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return False
+        subjects = [ln for ln in r.stdout.splitlines() if ln.strip()]
+        return bool(subjects) and all(is_artificial_commit_subject(s) for s in subjects)
+    except Exception:
+        return False
+
+
 def _count_commits_since(selfevo_repo: 'Path', pre_spawn_sha: str) -> int:
     """Count commits in selfevo_repo made since pre_spawn_sha.
 
@@ -4604,6 +4629,31 @@ async def _main_impl_body():
                     )
                 if _new_commits > 0:
                     cycle_commit_count = _new_commits
+                    # ADR-035 keep-work architect addendum (#1942 B2): a cycle
+                    # entirely made of checkpoint (and/or residual) commits --
+                    # killed and fully resumed inside checkpoints, with no
+                    # separate closing commit -- has no real-work evidence for
+                    # self_dedup, the edit-budget counter, change_shape
+                    # telemetry, or the health activity metric: all four now
+                    # exclude artificial commits by pattern, so an
+                    # entirely-artificial branch would otherwise vanish from
+                    # every one of them once integrated. One empty,
+                    # task-titled closing commit maintains the invariant
+                    # those readers rely on: an integrated cycle branch
+                    # always carries at least one non-artificial commit.
+                    # `--allow-empty` because the tree is already clean --
+                    # every real file change is already captured by the
+                    # checkpoints themselves; this commit is a marker, not a
+                    # second copy of the diff.
+                    if _all_commits_are_artificial_since(_selfevo_repo, _pre_spawn_sha):
+                        _closing_subject = f"selfevo: {(req.get('task_title') or 'increment').strip()}"[:120]
+                        _closing = _sp.run(
+                            _git_se + ['commit', '--allow-empty', '-m', _closing_subject],
+                            capture_output=True, text=True,
+                        )
+                        if _closing.returncode == 0:
+                            cycle_commit_count = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+                            print(f'cycle-branch: checkpoint-only branch closed with 1 marker commit ({_closing_subject!r})')
                     # #678 F1/F3: initial changed-file set + violation split, for
                     # logging. This is RECOMPUTED after the repair loop (just before
                     # the gate decision) so the enforced lists reflect every commit,
@@ -5772,14 +5822,51 @@ async def _main_impl_body():
     change_shape = None
     if _integrated and _selfevo_repo.is_dir():
         try:
+            # ADR-035 keep-work architect addendum (#1942 B2): two bugs fixed
+            # together here.
+            #
+            # (1) `cycle_branch` is ALREADY DELETED by `_cleanup_cycle_branch`
+            # (called right after a successful integration, well before this
+            # point) -- querying it by name always failed and silently fell
+            # to the `except` branch below, REGARDLESS of checkpoints. The
+            # commits are not gone (the `--no-ff` merge keeps full history,
+            # never a squash), only the branch NAME is; querying
+            # `main_sha_before..HEAD` (HEAD sits on `main`, post-merge, at
+            # this point) reads the same commits by their now-current
+            # reachability instead.
+            #
+            # (2) The branch's raw HEAD may itself be a checkpoint commit
+            # (the executor's own last action, with no separate wrap-up
+            # commit) -- classify the latest NON-artificial, non-merge
+            # commit's subject instead, or telemetry would read "selfevo:
+            # checkpoint -- ..." as the cycle's shape. `^merge:` is excluded
+            # too (bridge's own mechanical integration subject), matching
+            # `_recent_activity_context`'s existing `merge:` filter.
+            #
+            # A cycle whose ONLY commits are checkpoints (killed and resumed
+            # entirely inside checkpoints, no real closing commit) has
+            # nothing left to classify here -- `change_shape` is explicitly
+            # "unknown" rather than "unclassified", which `record_cycle_outcome`
+            # drops from the row entirely (not in its known-values set) rather
+            # than persisting a wrong-but-plausible-looking classification.
+            from nanobot.runtime.commit_markers import ARTIFICIAL_COMMIT_GREP_PATTERNS
             subject_result = _sp.run(
-                _git_cmd(_selfevo_repo) + ["log", "-1", "--format=%s", cycle_branch],
+                _git_cmd(_selfevo_repo) + [
+                    "log", "-1", "--format=%s", "--invert-grep", "-i",
+                    "--grep=^merge:",
+                    # #1857: the post-integration skills/index.md regeneration
+                    # commit -- bridge-mechanical bookkeeping, same category
+                    # as the merge commit, not this cycle's own work.
+                    "--grep=^chore: regenerate skills/index.md",
+                    *(f"--grep={p}" for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
+                    f"{main_sha_before}..HEAD",
+                ],
                 capture_output=True, text=True, check=True,
             )
             change_subject = subject_result.stdout.strip()
-            change_shape = classify_subject(change_subject)
+            change_shape = classify_subject(change_subject) if change_subject else "unknown"
         except Exception:
-            change_shape = "unclassified"
+            change_shape = "unknown"
     # #1850: capture iterations consumed by the executor subagent against the
     # cycle's active limit.
     _iterations_used: int | None = None

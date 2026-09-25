@@ -1266,6 +1266,144 @@ def test_setup_cycle_branch_reuse_keeps_existing_commits(tmp_path: Path):
     assert fresh_head == fresh['main_sha']
 
 
+def test_change_shape_reads_last_non_checkpoint_commit(tmp_path: Path, monkeypatch):
+    """ADR-035 keep-work architect addendum (#1942 B2): the branch's raw
+    HEAD may itself be a checkpoint commit -- ``change_shape`` telemetry
+    must classify the latest NON-artificial commit's subject instead, or a
+    cycle whose last action was a checkpoint would read as
+    ``unclassified`` instead of its real shape.
+    """
+    import asyncio
+
+    from tests.test_cycle_ledger import _init_selfevo_repo, _run
+
+    from nanobot.runtime import bridge
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+    from nanobot.runtime.cycle_ledger import read_events
+
+    class _FakeManagerRealThenCheckpoint:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            if self._telemetry_component == "planner":
+                return "fake planner spawned (noop)"
+            (self.workspace / "scripts").mkdir(exist_ok=True)
+            (self.workspace / "scripts" / "feature.py").write_text("def feature():\n    return 42\n")
+            _run(self.workspace, "add", "scripts/feature.py")
+            _run(self.workspace, "commit", "-m", "feat: add feature")
+            # The executor's last action before finishing is itself a
+            # checkpoint -- no separate wrap-up commit follows it.
+            (self.workspace / "scripts" / "feature.py").write_text(
+                "def feature():\n    return 42\n\n# tweak\n",
+            )
+            _run(self.workspace, "add", "scripts/feature.py")
+            import subprocess as _sp
+            _sp.run(
+                ["git", "-C", str(self.workspace), "commit",
+                 "-m", "selfevo: checkpoint — scripts/feature.py", "-m", CHECKPOINT_TRAILER],
+                check=True, capture_output=True,
+            )
+            return "fake subagent spawned"
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _init_selfevo_repo(base)
+
+    _stub_planning_session(monkeypatch, "a novel bounded increment")
+    monkeypatch.setattr(bridge, "SubagentManager", _FakeManagerRealThenCheckpoint)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    outcome_rows = [e for e in read_events(state_dir) if e.get("phase") == "outcome"]
+    assert outcome_rows, "no outcome row recorded"
+    assert outcome_rows[-1].get("change_shape") == "feature", (
+        f"change_shape read the checkpoint's own subject instead of the real commit: {outcome_rows[-1]}"
+    )
+
+
+def test_integrated_branch_has_non_checkpoint_commit(tmp_path: Path, monkeypatch):
+    """Architect invariant (ADR-035 keep-work addendum, #1942 B2): an
+    integrated cycle branch always carries at least one non-artificial
+    commit describing work -- otherwise self_dedup, the edit-budget
+    counter, change_shape telemetry and the health activity metric (all
+    four now excluding checkpoint/residual commits by pattern) would see
+    NOTHING for a cycle whose entire work happened inside checkpoints
+    (the typical killed-and-resumed shape).
+
+    Simplest enforcement, chosen and explained in the PR: when every
+    commit on the branch since pre-spawn is artificial,
+    ``_main_impl_body`` adds one empty, task-titled closing commit before
+    the gate/integration decision -- a marker, not a second copy of the
+    diff (the checkpoints already carry the real file changes).
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo, _run
+
+    from nanobot.runtime import bridge
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER, is_artificial_commit_subject
+    from nanobot.runtime.cycle_ledger import read_events
+
+    class _CheckpointOnlyManager:
+        """Simulates a cycle whose ENTIRE work happened inside checkpoints
+        -- no separate closing commit, unlike _FakeSubagentManager."""
+
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            if self._telemetry_component == "planner":
+                return "fake planner spawned (noop)"
+            import subprocess as _sp
+            (self.workspace / "scripts").mkdir(exist_ok=True)
+            (self.workspace / "scripts" / "feature.py").write_text("def feature():\n    return 42\n")
+            _run(self.workspace, "add", "scripts/feature.py")
+            _sp.run(
+                ["git", "-C", str(self.workspace), "commit",
+                 "-m", "selfevo: checkpoint — scripts/feature.py", "-m", CHECKPOINT_TRAILER],
+                check=True, capture_output=True,
+            )
+            return "fake subagent spawned"
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _init_selfevo_repo(base)
+
+    _stub_planning_session(monkeypatch, "finish the checkpoint-only feature")
+    monkeypatch.setattr(bridge, "SubagentManager", _CheckpointOnlyManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    outcome_rows = [e for e in read_events(state_dir) if e.get("phase") == "outcome"]
+    assert outcome_rows and outcome_rows[-1].get("outcome") == "success", outcome_rows
+
+    # The invariant itself: main's history for this cycle must contain a
+    # non-artificial commit even though the executor made only checkpoints.
+    log = subprocess.run(
+        ["git", "-C", str(base / "eeebot-self-evolving"), "log", "--format=%s", "-5"],
+        capture_output=True, text=True,
+    ).stdout
+    subjects = [s for s in log.splitlines() if s.strip()]
+    assert any(not is_artificial_commit_subject(s) and not s.startswith(("merge:", "chore: regenerate skills/index.md"))
+               for s in subjects), f"no non-artificial commit found in main's recent history: {subjects}"
+
+    # And the reader this whole addendum is about: change_shape must be
+    # present (a real, if generic, classification), never absent/"unknown".
+    assert "change_shape" in outcome_rows[-1], (
+        f"change_shape absent -- the checkpoint-only branch left no evidence: {outcome_rows[-1]}"
+    )
+
+
 # --- keep-work: a killed attempt keeps its checkpoint commits (ADR-035,
 # #1942 B2) --------------------------------------------------------------------
 

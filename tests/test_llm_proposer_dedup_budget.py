@@ -375,6 +375,27 @@ class TestEditBudget:
         assert "5 revisions" in feedback
         assert matched == "edit-budget:scripts/flaky_tool.py"
 
+    def test_checkpoint_commits_never_count_toward_the_edit_budget(self, tmp_path):
+        """ADR-035 keep-work architect addendum (#1942 B2): one logical edit
+        spread across several checkpointed steps must count as ONE commit
+        against this budget, not one per checkpoint -- 5 checkpoint-only
+        commits (the same count that rejects at
+        test_at_or_above_m_commits_since_last_used_rejected) must NOT reject,
+        since none of them are real, separately-counted revisions.
+        """
+        repo = _init_repo_with_scripts(tmp_path, ["scripts/flaky_tool.py"])
+        state = _state_dir(tmp_path)
+        _write_usage_sidecar(state, {"scripts/flaky_tool.py": {"last_used": "2020-01-01T00:00:00+00:00"}})
+        for i in range(5):
+            _commit_file_change(
+                repo, "scripts/flaky_tool.py", f"selfevo: checkpoint — scripts/flaky_tool.py ({i})",
+                iso_date="2021-01-01T00:00:00",
+            )
+
+        proposal = {"task_title": "improve flaky tool further", "target_path": "scripts/flaky_tool.py"}
+        dup, _, _ = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+        assert dup is False
+
     def test_below_m_commits_passes(self, tmp_path):
         repo = _init_repo_with_scripts(tmp_path, ["scripts/flaky_tool.py"])
         state = _state_dir(tmp_path)

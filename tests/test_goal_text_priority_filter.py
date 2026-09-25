@@ -277,10 +277,20 @@ def test_add_to_priority_not_done_by_shared_target_file(tmp_path: Path):
 def test_extend_priority_done_by_verbatim_label_in_log(tmp_path: Path):
     """The same extend entry IS done once the git log carries its verbatim
     'Priority N — <title>' label (integrated cycles auto-commit the proposal
-    title) — P11 keeps reading as done after the extend carve-out."""
+    title) — P11 keeps reading as done after the extend carve-out.
+
+    ADR-035 keep-work architect addendum (#1942 B2): the fixture commit
+    used to carry the ``selfevo: auto-commit uncommitted subagent work``
+    residual-auto-commit prefix -- now excluded from ``_recent_git_log``
+    like every other done-detection reader (a residual/checkpoint commit's
+    own wording must never satisfy "is this done", the same #1785 class
+    the self_dedup/novelty-pressure fixes cover). Uses a plain, real
+    integration-shaped subject instead, to keep testing the SAME verbatim-
+    label match without depending on now-excluded wording.
+    """
     repo = _make_git_repo_with_commit(
         tmp_path,
-        "selfevo: auto-commit uncommitted subagent work — Priority 11 — Loop "
+        "feat: Priority 11 — Loop "
         "health in dashboard: extend scripts/eeebot_dashboard.py with a "
         "compact loop-health section",
         create_files=("scripts/eeebot_dashboard.py",),
@@ -302,6 +312,54 @@ def test_extend_priority_done_by_verbatim_label_in_log(tmp_path: Path):
     assert "Priority 11" not in current
     assert "Priority 14" in current
     assert "Loop health in dashboard" in rewritten.split("Completed (do not repeat):", 1)[1]
+
+
+def test_checkpoint_and_residual_commits_never_mark_a_priority_done(tmp_path: Path):
+    """ADR-035 keep-work architect addendum (#1942 B2): `_recent_git_log`
+    (feeding `_title_already_done_in_git_log`) is a direct "is this already
+    done" detector -- a checkpoint or residual-auto-commit's own subject
+    carrying a priority's verbatim label must NOT mark it done, or an
+    in-flight (checkpoint) or bridge-side (residual) commit could silently
+    make a real, unfinished priority disappear from the prompt.
+    """
+    import subprocess
+
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    repo = tmp_path / "eeebot-self-evolving"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("0", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+
+    label = "Priority 11 — Loop health in dashboard: extend scripts/eeebot_dashboard.py"
+    (repo / "f.txt").write_text("1", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", f"selfevo: checkpoint — {label}", "-m", CHECKPOINT_TRAILER],
+        cwd=repo, check=True,
+    )
+    (repo / "f.txt").write_text("2", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", f"selfevo: auto-commit residual state — {label}",
+         "-m", "Selfevo-Residual: true"],
+        cwd=repo, check=True,
+    )
+
+    text = (
+        "mission statement\n\n"
+        "Current priority targets:\n"
+        f"(A) {label}.\n"
+    )
+
+    rewritten = filter_completed_priorities_from_goal_text(text, repo)
+
+    assert "Completed (do not repeat):" not in rewritten
+    assert "Priority 11" in rewritten
 
 
 def test_no_target_file_falls_back_to_word_heuristic(tmp_path: Path):

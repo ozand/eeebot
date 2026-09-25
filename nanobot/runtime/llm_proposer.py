@@ -2740,12 +2740,22 @@ def _git_commit_count_for_path(repo_root: Path, rel_path: str, since_iso: str | 
     ``since_iso`` (``None`` -> full history). Matches the subprocess style of
     :func:`goal_text_utils._recent_git_log` (10s timeout, stderr discarded).
     Fail-open: ``0`` (never blocks a cycle) on any subprocess error/timeout.
+
+    ADR-035 keep-work architect addendum (#1942 B2): excludes residual
+    auto-commits and per-step checkpoint commits (`commit_markers.
+    ARTIFICIAL_COMMIT_GREP_PATTERNS`) -- one logical edit spread across
+    several checkpointed steps must count as ONE commit against this
+    edit-budget churn counter, not one per checkpoint.
     """
     import subprocess as _sp
+
+    from nanobot.runtime.commit_markers import ARTIFICIAL_COMMIT_GREP_PATTERNS
 
     git_cmd = [
         "git", "-c", f"safe.directory={repo_root}", "-C", str(repo_root),
         "log", "--oneline",
+        "--invert-grep", "-i",
+        *(f"--grep={p}" for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
     ]
     if since_iso:
         git_cmd.append(f"--since={since_iso}")

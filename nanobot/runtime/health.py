@@ -344,34 +344,75 @@ def _calculate_severity(
     return "ok", 0
 
 
+def _commit_subjects_24h(
+    selfevo_repo: Path, *, runner: CommandRunner | None = None,
+) -> list[str] | None:
+    """Every commit subject in the last 24h in *selfevo_repo*, or ``None``
+    on any git error. One git call classified twice locally (real work vs.
+    artificial) rather than two separate ``--invert-grep`` calls."""
+    run = runner or _default_runner
+    try:
+        proc = run([
+            "git", "-c", f"safe.directory={selfevo_repo}",
+            "-C", str(selfevo_repo),
+            "log", "--format=%s", "--since=24 hours ago",
+        ])
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return [line for line in proc.stdout.splitlines() if line.strip()]
+
+
 def read_autonomous_commits_24h(
     state_root: Path,
     *,
     runner: CommandRunner | None = None,
 ) -> int | None:
-    """Count commits in the last 24h in the selfevo executor repo.
+    """Count REAL-WORK commits in the last 24h in the selfevo executor repo.
 
     The selfevo repo lives alongside the state root at
     ``state_root.parent / "eeebot-self-evolving"`` (same sibling-layout
     convention used by ``coordinator._has_concrete_changes`` and
     ``coordinator._parse_backlog_task_from_memory``). Fails soft: returns
     None when the repo is absent or git errors, never raises.
+
+    ADR-035 keep-work architect addendum (#1942 B2): residual auto-commits
+    and per-step checkpoint commits are excluded, or this activity metric
+    would rise from checkpointing alone rather than from real work. Their
+    own count is not silently dropped -- see
+    :func:`read_checkpoint_commits_24h`, reported alongside this one so a
+    killed-and-resumed cycle's activity stays visible, just not counted as
+    completed work.
     """
     selfevo_repo = state_root.parent / _SELFEVO_REPO_DIRNAME
     if not selfevo_repo.is_dir():
         return None
-    run = runner or _default_runner
-    try:
-        proc = run([
-            "git", "-c", f"safe.directory={selfevo_repo}",
-            "-C", str(selfevo_repo),
-            "log", "--oneline", "--since=24 hours ago",
-        ])
-    except Exception:
+    from nanobot.runtime.commit_markers import is_artificial_commit_subject
+    subjects = _commit_subjects_24h(selfevo_repo, runner=runner)
+    if subjects is None:
         return None
-    if proc.returncode != 0:
+    return sum(1 for s in subjects if not is_artificial_commit_subject(s))
+
+
+def read_checkpoint_commits_24h(
+    state_root: Path,
+    *,
+    runner: CommandRunner | None = None,
+) -> int | None:
+    """Count residual/checkpoint (artificial) commits in the last 24h --
+    the complement :func:`read_autonomous_commits_24h` excludes, reported
+    separately so checkpointing activity from a killed-and-resumed cycle
+    stays visible on the dashboard instead of vanishing. ``None`` on the
+    same fail-open conditions as the sibling function."""
+    selfevo_repo = state_root.parent / _SELFEVO_REPO_DIRNAME
+    if not selfevo_repo.is_dir():
         return None
-    return len([line for line in proc.stdout.splitlines() if line.strip()])
+    from nanobot.runtime.commit_markers import is_artificial_commit_subject
+    subjects = _commit_subjects_24h(selfevo_repo, runner=runner)
+    if subjects is None:
+        return None
+    return sum(1 for s in subjects if is_artificial_commit_subject(s))
 
 
 def read_subagent_queue_depth(state_root: Path) -> int:
@@ -419,6 +460,7 @@ def build_cycle_health_summary(
     failed_units_count = read_failed_units_count(runner=runner)
     promotion_readiness = _promotion_readiness(runtime)
     autonomous_commits_24h = read_autonomous_commits_24h(state_root, runner=runner)
+    checkpoint_commits_24h = read_checkpoint_commits_24h(state_root, runner=runner)
     subagent_queue_depth = read_subagent_queue_depth(state_root)
     derived_queue = read_derived_priorities_queue(state_root)
     summary = {
@@ -435,6 +477,7 @@ def build_cycle_health_summary(
         "promotion_readiness": promotion_readiness,
         "success_signals": {
             "autonomous_commits_24h": autonomous_commits_24h,
+            "checkpoint_commits_24h": checkpoint_commits_24h,
             "subagent_queue_depth": subagent_queue_depth,
             "derived_priorities_queue_depth": derived_queue["depth"],
             "derived_priorities_queue_limit": derived_queue["limit"],
