@@ -105,6 +105,8 @@ The generator produces two sets:
 
 - **public pages** — cycles, attempts, sessions, roles, models, counts, causes,
   durations, verdicts; never the text of a request or an answer;
+  task and commit titles are public by the operator's decision of 2026-09-26;
+  the text of calls is not;
 - **private pages** — the per-call detail of rule 4.
 
 The boundary is enforced on **every file** of the publish tree, not only on HTML
