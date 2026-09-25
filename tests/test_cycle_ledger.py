@@ -199,6 +199,15 @@ class TestTypedHelpers:
         rows = _read_ledger(tmp_path)
         assert rows[0]["outcome"] == outcome
 
+    def test_model_call_incomplete_is_valid_and_retains_diagnostics(self, tmp_path):
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c-timeout", "model_call_incomplete", "model_call_incomplete", [], None,
+            model_call_failure={"error_type": "ReadTimeout", "model": "local/model", "prompt_size_chars": 1234, "limit": 60, "stage": "model_call"},
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert row["outcome"] == "model_call_incomplete"
+        assert row["model_call_failure"] == {"error_type": "ReadTimeout", "model": "local/model", "prompt_size_chars": 1234, "limit": 60, "stage": "model_call"}
+
     # ─── #1748: real_result carries bridge._is_real_result's own inputs ───
 
     def test_record_cycle_outcome_without_real_result_omits_the_key(self, tmp_path):

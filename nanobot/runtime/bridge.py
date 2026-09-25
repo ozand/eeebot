@@ -155,6 +155,7 @@ EXIT_SUPPLIER_PAUSED = 5
 # through every cycle forever; 3 covers an outage of two or three cycles and
 # leaves the rest to the next proposal.
 LLM_ERROR_MAX_RETRIES = int(os.environ.get('SUBAGENT_BRIDGE_LLM_ERROR_MAX_RETRIES', '3'))
+MODEL_CALL_INCOMPLETE_MAX_RETRIES = int(os.environ.get('SUBAGENT_BRIDGE_MODEL_CALL_INCOMPLETE_MAX_RETRIES', '3'))
 # #1765: distinct rollback reason for "the supplier could not serve us" —
 # kept apart from 'executor_llm_error' (which stays reserved for "the
 # supplier rejected OUR request", our own defect) so every reason-keyed
@@ -3832,6 +3833,7 @@ async def _main_impl_body():
             _target_path = _extract_target_path(req)
         except Exception:
             _target_path = None
+        _failure_evidence = None
 
         # #716: _recent_failure_match is a bounded-recency (default 24h) check
         # over recent bridge results. A proposal that was blocked/rolled-back/
@@ -3840,10 +3842,14 @@ async def _main_impl_body():
         # guard that does not affect [Done] bookkeeping — only prevents
         # re-spawning the same rejected work within the suppression window.
         if _dup_check_title and (
-            _recent_failure_title := _recent_failure_match(
-                _dup_check_title, STATE_DIR, target_path=_target_path,
+            _failure_evidence := _recent_failure_match(
+                _dup_check_title, STATE_DIR, target_path=_target_path, return_evidence=True,
             )
         ):
+            _recent_failure_title = (
+                _failure_evidence.get('title', '') if isinstance(_failure_evidence, dict)
+                else str(_failure_evidence or '')
+            )
             print(
                 f'bridge: task "{_dup_check_title[:60]}" matches recent failure/rejection '
                 f'"{_recent_failure_title[:60]}" (within {FAILURE_SUPPRESS_HOURS}h); '
@@ -3878,6 +3884,10 @@ async def _main_impl_body():
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'skipped-duplicate', 'recent_duplicate_failure', [], None,
                 verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                duplicate_failure_skip={
+                    'cycle_id': str((_failure_evidence or {}).get('cycle_id') or '') if isinstance(_failure_evidence, dict) else '',
+                    'error_class': str((_failure_evidence or {}).get('error_class') or 'unknown') if isinstance(_failure_evidence, dict) else 'unknown',
+                },
                 real_result=_real_result_ledger_inputs('blocked'),
             )
             # #721: no cycle branch on this path — tag at current HEAD.
@@ -4306,6 +4316,8 @@ async def _main_impl_body():
                     _run_record.set_run_metadata(classification='loop_breaker_abort', reason=_run_stop_reason)
                 elif _run_stop_reason == 'wall_clock_deadline':
                     _run_record.set_run_metadata(classification='wall_clock_abort', reason=_run_stop_reason)
+                elif _run_stop_reason == 'model_call_incomplete':
+                    _run_record.set_run_metadata(classification='model_call_incomplete', reason=_run_stop_reason)
             except Exception:
                 pass
             # #1280: the handled_ marker is no longer written here unconditionally
@@ -4313,6 +4325,9 @@ async def _main_impl_body():
             # counted, so a request whose subagent died on the LLM call is
             # re-offered (bounded) instead of retired with nothing done.
             _executor_llm_error_text = _executor_llm_error(STATE_DIR, _subagent_task_id)
+            _model_call_failure = _executor_model_call_failure(STATE_DIR, _subagent_task_id)
+            if _model_call_failure:
+                _run_stop_reason = 'model_call_incomplete'
             if _executor_llm_error_text:
                 _executor_llm_error_text = (
                     f"model={config.agents.defaults.model}; "
@@ -4405,18 +4420,22 @@ async def _main_impl_body():
             # bypasses the retry counter entirely (see _decide_handled_marker)
             # so an outage never burns the request's retry budget.
             _llm_error_class = (
-                _classify_llm_error(_executor_llm_error_text)
+                _classify_llm_error(
+                    _executor_llm_error_text, model_call_failure=_model_call_failure
+                )
                 if (_executor_llm_error_text and cycle_commit_count == 0) else ''
             )
             if _executor_llm_error_text and cycle_commit_count == 0:
                 _rollback_reason = _rollback_reason or (
                     LLM_SUPPLIER_PAUSED_REASON if _llm_error_class == 'paused-supplier'
+                    else 'model_call_incomplete' if _llm_error_class == 'model_call_incomplete'
                     else 'executor_llm_error'
                 )
             _decide_handled_marker(
                 handled_marker, req_path,
                 llm_error=bool(_executor_llm_error_text and cycle_commit_count == 0),
                 supplier_paused=(_llm_error_class == 'paused-supplier'),
+                model_call_incomplete=(_llm_error_class == 'model_call_incomplete'),
                 state_dir=STATE_DIR, cycle_id=_cycle_id,
             )
 
@@ -5328,6 +5347,7 @@ async def _main_impl_body():
     _subagent_task_id = _res.get('subagent_task_id')
     _citation_subagent_task_id = _res.get('citation_subagent_task_id', _subagent_task_id)
     _executor_llm_error_text = str(_res.get('executor_llm_error') or '')
+    _model_call_failure = _executor_model_call_failure(STATE_DIR, _subagent_task_id)
     _system_prompt_overflow_text = str(_res.get('system_prompt_overflow') or '')
     _prompt_fit_rung = None
     commits_pushed = cycle_commit_count if _integrated else 0
@@ -5346,7 +5366,7 @@ async def _main_impl_body():
     _bridge_status = 'completed'
     if _revision_record and _revision_record['outcome'] == 'blocked':
         _bridge_status = 'blocked'
-    if _rollback_reason in ('executor_llm_error', 'system_prompt_overflow', LLM_SUPPLIER_PAUSED_REASON):
+    if _rollback_reason in ('executor_llm_error', 'model_call_incomplete', 'system_prompt_overflow', LLM_SUPPLIER_PAUSED_REASON):
         # #1280 / #1300: the executor's LLM call never returned, or no
         # executor was spawned because the prompt could not hold its critical
         # sections, and nothing was committed — this is `blocked`, not a new
@@ -5369,6 +5389,7 @@ async def _main_impl_body():
         'main_sha_before': main_sha_before,
         'main_sha_after': main_sha_after,
         'reason': _rollback_reason,
+        **({'error_class': _classify_llm_error(_executor_llm_error_text, model_call_failure=_model_call_failure)} if _executor_llm_error_text else {}),
         # #666: bridge committed uncommitted subagent work itself (see
         # _auto_commit_uncommitted_work) because the subagent finished without
         # a git commit despite having a dirty working tree.
@@ -5436,6 +5457,8 @@ async def _main_impl_body():
         # demand cooling and futility (see their own call sites) never count
         # an outage as a defect of the work or the proposal.
         _cycle_outcome = 'paused-supplier'
+    elif _rollback_reason == 'model_call_incomplete':
+        _cycle_outcome = 'model_call_incomplete'
     elif _rollback_reason in ('internal_error', 'executor_llm_error', 'system_prompt_overflow'):
         # #1280: an executor whose LLM call never returned is a failure with
         # zero commits, not a `partial` no-op — `partial` is what eleven
@@ -5459,7 +5482,7 @@ async def _main_impl_body():
     # ``outcome: skipped`` self-report upgrades the verdict reason so a
     # verified already-done skip records 'reject', not 'inconclusive'.
     _verdict_reason_hint = _rollback_reason
-    if _cycle_outcome in ('partial', 'failed') and not _rollback_reason:
+    if _cycle_outcome in ('partial', 'failed', 'model_call_incomplete') and not _rollback_reason:
         if _executor_reported_skipped(STATE_DIR, _subagent_task_id):
             _verdict_reason_hint = 'executor_reported_skipped'
     _verdict, _verdict_reason = _derive_cycle_verdict(_cycle_outcome, _verdict_reason_hint)
@@ -5559,9 +5582,12 @@ async def _main_impl_body():
         # #1765: the classifier's decision AND the raw error text, together,
         # so a misclassification is auditable after the fact — never just
         # the derived outcome/reason with the evidence discarded.
+        model_call_failure=_model_call_failure,
         llm_error_classification=(
             {
-                "class": _classify_llm_error(_executor_llm_error_text),
+                "class": _classify_llm_error(
+                    _executor_llm_error_text, model_call_failure=_model_call_failure
+                ),
                 "raw_error": _executor_llm_error_text[:400],
             }
             if _executor_llm_error_text else None
@@ -6067,7 +6093,7 @@ _INCONCLUSIVE_REASONS = frozenset({
     'gate_failed', 'mutation_surface_violation', 'blocked_file_present',
     'out_of_band_main_detected', 'switch_base_gate_error',
     'switch_base_gate_blocked', 'head_on_main_precondition_failed',
-    'no_commit', 'internal_error', 'executor_llm_error',
+    'no_commit', 'internal_error', 'executor_llm_error', 'model_call_incomplete',
     # #1765: a supplier outage is infra trouble by definition — never
     # upgraded to accept/reject.
     LLM_SUPPLIER_PAUSED_REASON,
@@ -6132,26 +6158,13 @@ def _authoritative_subagent_task_id(
 # of a catch-all.
 _SUPPLIER_UNAVAILABLE_RX = re.compile(
     r'connection (?:refused|reset|error)'
-    r'|connect(?:ion)? timed? ?out'
-    r'|\btimed? ?out\b'
-    r'|\btimeout\b'
-    r'|\bread timeout\b'
-    r'|\berror code:\s*(?:429|500|502|503|504)\b'
-    r'|\b(?:429|500|502|503|504)\b.{0,20}\berror\b'
+    r'|notfounderror.{0,40}(?:model route|no route|not found)'
+    r'|\b(?:429|500|502|503|504)\b'
     r'|ratelimiterror'
     r'|internalservererror'
     r'|serviceunavailableerror'
-    r'|apiconnectionerror'
-    r'|notfounderror'
     r'|no deployments available'
     r'|no healthy deployment'
-    r'|try again in \d'
-    # #1765 review: a genuine supplier-side unavailability observed in the
-    # wild carries HTTP 400 (litellm.BadRequestError) — the local gateway's
-    # own model daemon has no model loaded yet, not a malformed request of
-    # ours. Classified on the MESSAGE, never on the status code alone (a
-    # bare "400" stays unmatched — see the client-defect test fixtures) —
-    # this is exactly why the allowlist below matches phrasing, not codes.
     r'|model.{0,20}not loaded'
     r'|/inference/load\b'
     r'|load first\b',
@@ -6159,10 +6172,8 @@ _SUPPLIER_UNAVAILABLE_RX = re.compile(
 )
 
 
-def _classify_llm_error(error_text: str) -> str:
-    """#1765: 'paused-supplier' (the gateway/model provider could not serve
-    us) or 'failed' (the supplier rejected OUR request — our own defect,
-    must keep failing loudly), from the raw executor LLM-call error text.
+def _classify_llm_error(error_text: str, *, model_call_failure: dict | None = None) -> str:
+    """Classify a model-call failure separately from proven supplier outages."
 
     Positive-match only (see :data:`_SUPPLIER_UNAVAILABLE_RX`) — when the
     text does not clearly say "supplier unavailable", this returns 'failed',
@@ -6175,6 +6186,8 @@ def _classify_llm_error(error_text: str) -> str:
         return 'failed'
     if _SUPPLIER_UNAVAILABLE_RX.search(error_text):
         return 'paused-supplier'
+    if isinstance(model_call_failure, dict) and model_call_failure.get('stage') == 'model_call':
+        return 'model_call_incomplete'
     return 'failed'
 
 
@@ -6205,6 +6218,17 @@ def _executor_llm_error(state_dir: Path, task_id: 'str | None') -> str:
         return text.strip()[:400]
     except Exception:
         return ''
+
+
+def _executor_model_call_failure(state_dir: Path, task_id: str | None) -> dict | None:
+    if not task_id:
+        return None
+    try:
+        payload = json.loads((Path(state_dir) / 'subagents' / f'{task_id}.json').read_text(encoding='utf-8'))
+        failure = payload.get('model_call_failure') if isinstance(payload, dict) else None
+        return failure if isinstance(failure, dict) and failure.get('stage') == 'model_call' else None
+    except Exception:
+        return None
 
 
 def _llm_error_retry_path(request_id: 'str | None') -> 'Path | None':
@@ -6266,9 +6290,29 @@ def _recorded_llm_error_attempts(state_dir: 'Path | str', cycle_id: 'str | None'
         return 0
 
 
+def _model_call_incomplete_retries_exhausted(request_id: str | None) -> bool:
+    retry_path = _model_call_incomplete_retry_path(request_id)
+    if retry_path is None:
+        return False
+    try:
+        if not retry_path.exists():
+            return False
+        return int((json.loads(retry_path.read_text(encoding='utf-8')) or {}).get('count') or 0) >= MODEL_CALL_INCOMPLETE_MAX_RETRIES
+    except Exception:
+        return True
+
+
+def _model_call_incomplete_retry_path(request_id: str | None) -> Path | None:
+    if not request_id:
+        return None
+    safe_id = str(request_id).replace('/', '_')[:120]
+    return BRIDGE_STATE_DIR / f'retry_incomplete_{safe_id}.json'
+
+
 def _decide_handled_marker(
     handled_marker: Path, req_path: 'Path | str', *, llm_error: bool,
     supplier_paused: bool = False,
+    model_call_incomplete: bool = False,
     state_dir: 'Path | str | None' = None, cycle_id: 'str | None' = None,
 ) -> str:
     """#1280: write the ``handled_`` marker — retiring the request forever —
@@ -6310,6 +6354,27 @@ def _decide_handled_marker(
                 '(#1765) — not counted toward the LLM-error retry budget'
             )
             return 'supplier_paused'
+        if model_call_incomplete:
+            retry_path = handled_marker.with_name(
+                handled_marker.name.replace('handled_', 'retry_incomplete_', 1)
+            ).with_suffix('.json')
+            try:
+                count = int((json.loads(retry_path.read_text(encoding='utf-8')) or {}).get('count') or 0) if retry_path.exists() else 0
+            except Exception:
+                count = MODEL_CALL_INCOMPLETE_MAX_RETRIES
+            count += 1
+            retry_path.write_text(json.dumps({
+                'count': count, 'max': MODEL_CALL_INCOMPLETE_MAX_RETRIES,
+                'last_ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                'reason': 'model_call_incomplete',
+                'operator_check': 'check request size / budget',
+            }), encoding='utf-8')
+            if count >= MODEL_CALL_INCOMPLETE_MAX_RETRIES:
+                handled_marker.write_text(str(req_path), encoding='utf-8')
+                print('model_call_incomplete: automatic retries paused; check request size / budget')
+                return 'incomplete_retries_paused'
+            print(f'model_call_incomplete: retry pending ({count}/{MODEL_CALL_INCOMPLETE_MAX_RETRIES}); check request size / budget')
+            return 'incomplete_retry'
         if not llm_error:
             handled_marker.write_text(str(req_path), encoding='utf-8')
             return 'handled'
@@ -6492,7 +6557,8 @@ def _recent_failure_match(
     max_scan: int = 10,
     target_path: 'str | None' = None,
     entries: 'list[tuple[Path, dict, float]] | None' = None,
-) -> 'str | None':
+    return_evidence: bool = False,
+) -> 'str | dict | None':
     """Return the title of a recently-failed/rejected result that
     ``dup_check_title`` matches, or None (#716; #757 return type — the
     matched HISTORICAL title, so the ledger's ``matched_against`` can record
@@ -6622,6 +6688,8 @@ def _recent_failure_match(
                 continue
             if not reason and status not in ('blocked', 'no_commit'):
                 continue
+            if reason == 'model_call_incomplete':
+                continue
             if reason == 'executor_llm_error' and not _llm_error_retries_exhausted(data.get('request_id')):
                 # #1280: a cycle that died on the LLM call says nothing about
                 # the proposal, so while its request still has retry budget
@@ -6649,6 +6717,11 @@ def _recent_failure_match(
             candidate_intent = derive_intent(title, hist_target)
             if proposal_intent is not None and candidate_intent is not None:
                 if intents_match(proposal_intent, candidate_intent):
+                    if return_evidence:
+                        rollback = data.get('rollback') if isinstance(data.get('rollback'), dict) else {}
+                        classification = data.get('llm_error_classification')
+                        error_class = classification.get('class') if isinstance(classification, dict) else rollback.get('error_class') or rollback.get('reason')
+                        return {'title': title, 'cycle_id': str(data.get('cycle_id') or ''), 'error_class': str(error_class or 'unknown')}
                     return title
                 continue
             # #798: both sides name a concrete target path but intent
@@ -6667,6 +6740,11 @@ def _recent_failure_match(
                 continue
             matches = sum(1 for w in words if w in candidate_words)
             if matches >= min(3, len(words)):
+                if return_evidence:
+                    rollback = data.get('rollback') if isinstance(data.get('rollback'), dict) else {}
+                    classification = data.get('llm_error_classification')
+                    error_class = classification.get('class') if isinstance(classification, dict) else rollback.get('error_class') or rollback.get('reason')
+                    return {'title': title, 'cycle_id': str(data.get('cycle_id') or ''), 'error_class': str(error_class or 'unknown')}
                 return title
 
         return None

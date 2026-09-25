@@ -654,7 +654,7 @@ def _recent_proposed_titles(rows: list[dict[str, Any]], n: int = _RECENT_PROPOSE
 # 'success'/'promotion_candidate', which DID land. Deliberately excludes
 # 'skipped-duplicate' (never an attempt at new work; already covered by
 # _recent_proposed_titles/git-log dedup).
-_NON_INTEGRATED_OUTCOMES = frozenset({"failed", "partial", "timeout"})
+_NON_INTEGRATED_OUTCOMES = frozenset({"failed", "partial", "timeout", "model_call_incomplete", "paused-supplier"})
 # #716: gate rollback reasons that mean the cycle produced real work but it
 # was blocked from integrating — same "attempted, not integrated" bucket as
 # _NON_INTEGRATED_OUTCOMES above, just recorded on a 'gate' row instead of an

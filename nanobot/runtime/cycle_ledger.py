@@ -90,6 +90,7 @@ _DEFAULT_RETENTION_DAYS = 90
 VALID_OUTCOMES = frozenset({
     "success", "partial", "failed", "skipped-duplicate", "promotion_candidate",
     "push_pending", "pushed_late", "superseded", "abandoned", "paused-supplier",
+    "model_call_incomplete",
 })
 VALID_DEDUP_DECISIONS = frozenset({"proceeded", "skipped_duplicate", "skipped_recent_failure"})
 
@@ -457,6 +458,8 @@ def record_cycle_outcome(
     main_sha_before: str | None = None,
     real_result: dict | None = None,
     llm_error_classification: dict | None = None,
+    model_call_failure: dict | None = None,
+    duplicate_failure_skip: dict | None = None,
     iterations_used: int | None = None,
     iterations_limit: int | None = None,
     iterations_predicted: int | None = None,
@@ -566,6 +569,19 @@ def record_cycle_outcome(
             "materialized_from": real_result.get("materialized_from"),
             "blocker_reason": real_result.get("blocker_reason"),
             "is_real_result": bool(real_result.get("is_real_result")),
+        }
+    if isinstance(duplicate_failure_skip, dict) and duplicate_failure_skip:
+        row["duplicate_failure_skip"] = {
+            "cycle_id": str(duplicate_failure_skip.get("cycle_id") or "")[:120],
+            "error_class": str(duplicate_failure_skip.get("error_class") or "unknown")[:80],
+        }
+    if isinstance(model_call_failure, dict) and model_call_failure:
+        row["model_call_failure"] = {
+            "error_type": str(model_call_failure.get("error_type") or "unknown")[:80],
+            "model": str(model_call_failure.get("model") or "")[:160],
+            "prompt_size_chars": model_call_failure.get("prompt_size_chars"),
+            "limit": model_call_failure.get("limit"),
+            "stage": str(model_call_failure.get("stage") or "unknown")[:40],
         }
     if isinstance(llm_error_classification, dict) and llm_error_classification:
         # #1765: the classifier's decision AND the raw error text it read,
