@@ -3753,13 +3753,14 @@ async def _main_impl_body():
         except Exception:
             _matched_candidate = None
 
+    # ADR-035 rule 1 (#1942): "its plan is the executor's task" — the title
+    # always comes from the planner's OWN wording, never a matched
+    # candidate's summary (that would smuggle a proposer-authored title
+    # back in through candidate_id resolution). affected_path is plumbing,
+    # not a title, so it still resolves from the matched candidate when set.
     _plan_text = str(_plan.get('plan') or '').strip()
-    if _matched_candidate:
-        _task_title = (_matched_candidate.get('summary') or _plan_text[:120]).strip()
-        _plan_target_path = _matched_candidate.get('affected_path') or ''
-    else:
-        _task_title = (_plan_text.splitlines()[0] if _plan_text else 'planner increment')[:120].strip()
-        _plan_target_path = ''
+    _task_title = (_plan_text.splitlines()[0] if _plan_text else 'planner increment')[:120].strip()
+    _plan_target_path = _matched_candidate.get('affected_path') or '' if _matched_candidate else ''
 
     req_path = None
     req = {
