@@ -449,6 +449,18 @@ _PRIORITIES_BLOCK_OVERSIZE_TEXT = (
 )
 
 
+def format_derived_priority_line(entry: "PriorityEntry") -> str:
+    """ADR-034 (Consequences, #1951): "Derived priorities are shown in
+    compact form — number, label, vector and source; their bodies are not
+    rendered" -- for EVERY rule-5 reader (executor, proposer, planner), not
+    only the ones that happen to call :func:`render_priorities_block`
+    directly. One formatter, imported by every caller that renders a
+    derived entry (:mod:`nanobot.runtime.llm_proposer`'s own derived
+    section included), so the three roles cannot drift onto different
+    shapes -- the #1952 review finding this closes."""
+    return f"{entry.number}. {entry.title} (vector: {entry.vector}, source: derived)"
+
+
 def render_priorities_block(
     operator_res: PriorityResolution,
     derived_entries: "tuple[PriorityEntry, ...]" = (),
@@ -507,7 +519,7 @@ def render_priorities_block(
         )
     if derived_entries:
         body += "\n\n## Derived priorities (source: derived)\n\n" + "\n".join(
-            f"{e.number}. {e.title} (vector: {e.vector}, source: derived)" for e in derived_entries
+            format_derived_priority_line(e) for e in derived_entries
         )
     text = heading + body
     if len(text) > cap:

@@ -470,6 +470,33 @@ class TestBuildContext:
         assert "skipped-duplicate" in context
         assert "Mutable surface rule" in context
 
+    def test_derived_priorities_are_compact_never_the_instructions_body(self, tmp_path):
+        """ADR-034 (Consequences, #1951): "Derived priorities are shown in
+        compact form — number, label, vector and source; their bodies are
+        not rendered" — for every rule-5 reader, including the proposer's
+        own context (#1952 review: this reader's ``_render_derived_priorities``
+        was the one place still rendering the full instructions body)."""
+        state_dir = _state_dir(tmp_path)
+        long_unique_body = "UNIQUE-BODY-TEXT " + ("filler word " * 60)
+        (state_dir / "goals" / "derived_priorities.json").write_text(
+            json.dumps({
+                "schema_version": "derived-priorities-v1",
+                "priorities": [{
+                    "label": "Trim the retry loop",
+                    "body": long_unique_body,
+                    "number": 42,
+                    "vector": "V1",
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+        context = llm_proposer.build_context(state_dir, None)
+
+        assert long_unique_body not in context
+        assert "filler word" not in context
+        assert "42. Trim the retry loop (vector: V1, source: derived)" in context
+
     def test_hard_cap_enforced_with_huge_ledger(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, "x" * 5000)

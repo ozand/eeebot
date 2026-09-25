@@ -78,6 +78,7 @@ from nanobot.runtime.operator_documents import (
     PRIORITY_UNAVAILABLE,
     STATE_TEXT,
     PriorityResolution,
+    format_derived_priority_line,
     render_priorities_block,
     resolve_charter,
     resolve_derived_priorities_split,
@@ -549,15 +550,15 @@ def _load_derived_priorities(
 
 def _render_derived_priorities(entries: "tuple[Any, ...]") -> str:
     """Render open derived-priority entries as their own labeled block —
-    never mixed into the charter's own numbering (ADR-034 rule 4)."""
+    never mixed into the charter's own numbering (ADR-034 rule 4). Compact
+    form only -- number, label, vector, source -- never the instructions
+    body (ADR-034 Consequences, #1951; #1952 review: this block used to
+    render the body, the same shared :func:`operator_documents.
+    format_derived_priority_line` the executor/planner section uses now
+    keeps this reader from drifting onto a different shape)."""
     if not entries:
         return ""
-    lines = [
-        f"Priority {e.number} — {e.title} ({e.vector}): {e.instructions}" if e.vector
-        else f"Priority {e.number} — {e.title}: {e.instructions}"
-        for e in entries
-    ]
-    return "\n".join(lines)
+    return "\n".join(format_derived_priority_line(e) for e in entries)
 
 
 def _priorities_remain(filtered_goal_text: str) -> bool:
