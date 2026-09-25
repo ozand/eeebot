@@ -1120,3 +1120,104 @@ def test_supply_hold_uses_rest_snapshot_with_backoff(tmp_path: Path, monkeypatch
     assert len(repo_prep_calls) == 1
     assert len(provider_calls) == 1
     assert len(planning_calls) == 1
+
+
+# --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
+# architect addendum, #1942 B2) -----------------------------------------------
+
+def test_checkpoint_commit_excluded_from_self_dedup_and_recent_activity(tmp_path: Path):
+    """A checkpoint commit's own subject names the paths it touched -- the
+    same shape as real work -- so it must be invisible to every "is this
+    already done" git-log reader, or its own text becomes a false
+    self_dedup/novelty-pressure match (the #1785 class of defect this
+    exclusion mechanism, shared with the residual auto-commit, exists to
+    prevent). Drives real git commands against a real repo -- no mocked git
+    log parsing -- so a call-site that forgets to pass the shared exclusion
+    patterns fails this test rather than merely diverging in production.
+    """
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo, _run
+
+    from nanobot.runtime import bridge, llm_proposer
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "repo"
+    base.mkdir()
+    _origin, work = _init_selfevo_repo(base)
+
+    target = work / "mod.py"
+    target.write_text("def ok():\n    return True\n\n# changed\n", encoding="utf-8")
+    _run(work, "add", "mod.py")
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — mod.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    _run(work, "push", "origin", "HEAD:main")
+
+    # self_dedup: the checkpoint commit must never surface as "the latest
+    # non-residual commit touching mod.py" -- mod.py's own init commit is
+    # the next real commit behind it, so a working exclusion falls through
+    # to THAT, never the checkpoint; a broken one would return the
+    # checkpoint's own sha/subject instead.
+    commit = llm_proposer._latest_non_residual_commit_for_path(work, "mod.py")
+    assert commit is not None
+    _sha, subject = commit
+    assert subject == "init", f"checkpoint commit leaked into self_dedup evidence: {commit}"
+
+    # recent-activity/do-not-repeat window: the checkpoint commit must not
+    # appear in the novelty-pressure prompt block at all.
+    context = bridge._recent_activity_context(None, work)
+    assert "checkpoint" not in context.lower()
+    assert "mod.py" not in context
+
+    # The raw exclusion window itself: _recent_commits_with_paths must have
+    # dropped the checkpoint commit, not merely hidden it downstream.
+    commits = bridge._recent_commits_with_paths(work, since="7 days ago")
+    subjects = [subject for _sha, subject, _paths in commits]
+    assert not any(s.lower().startswith("selfevo: checkpoint") for s in subjects)
+
+
+def test_checkpoint_commit_is_not_an_integration(tmp_path: Path):
+    """A checkpoint commit is never itself an integration (ADR-035
+    keep-work): integration only ever happens through the bridge's own
+    explicit, smoke-gated call to ``_integrate_cycle_to_main`` -- never as a
+    side effect of a cycle branch merely having commits on it. Two
+    complementary checks: the shared exclusion (checkpoint commits are
+    indistinguishable from "no real work" to every done-work reader, proven
+    above) and a structural guard that ``_integrate_cycle_to_main`` has no
+    caller outside the explicit smoke-gated sites -- a call site added
+    without that gate would flip this assertion.
+    """
+    import ast
+    import inspect
+
+    from nanobot.runtime import bridge
+
+    source = inspect.getsource(bridge)
+    tree = ast.parse(source)
+    call_lines = sorted(
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == '_integrate_cycle_to_main'
+    )
+    # Exactly the two live call sites (the single-candidate path and the
+    # explore-mode path) -- both gated behind a passed smoke test
+    # (`record_gate_decision(..., True, 'smoke_passed', [])` immediately
+    # precedes each). A checkpoint commit existing on a branch never reaches
+    # either: both require the executor's own run to finish and the smoke
+    # gate to pass first. A new call site added without that gate changes
+    # this count and must be reviewed, not silently accepted.
+    assert len(call_lines) == 2, (
+        f"expected exactly two _integrate_cycle_to_main call sites, found {len(call_lines)} at "
+        f"lines {call_lines} -- a new one must stay behind an explicit smoke-gated do_integration branch"
+    )
+    source_lines = source.splitlines()
+    for lineno in call_lines:
+        preceding = '\n'.join(source_lines[max(0, lineno - 20):lineno])
+        assert 'smoke_passed' in preceding, (
+            f"_integrate_cycle_to_main call at line {lineno} is not preceded by a "
+            "smoke-gate decision within 20 lines -- integration must stay gated, "
+            "never triggered by commit presence alone"
+        )

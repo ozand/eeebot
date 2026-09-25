@@ -2545,15 +2545,17 @@ def _latest_non_residual_commit_for_path(
         return None
     import subprocess as _sp
 
+    from nanobot.runtime.commit_markers import (
+        ARTIFICIAL_COMMIT_GREP_PATTERNS, is_artificial_commit_subject,
+    )
+
     repo = Path(selfevo_repo)
     try:
         raw = _sp.check_output(
             [
                 "git", "-c", f"safe.directory={repo}", "-C", str(repo),
                 "log", "-n1", "--format=%H%x1f%s", "--invert-grep", "-i",
-                "--grep=^Selfevo-Residual: true",
-                "--grep=^selfevo: auto-commit uncommitted subagent work",
-                "--grep=^selfevo: auto-commit residual state",
+                *(f"--grep={p}" for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
                 "--", target_path,
             ],
             stderr=_sp.DEVNULL,
@@ -2562,10 +2564,7 @@ def _latest_non_residual_commit_for_path(
         if not raw:
             return None
         sha, subject = raw.split("\x1f", 1)
-        if subject.lower().startswith((
-            "selfevo: auto-commit uncommitted subagent work",
-            "selfevo: auto-commit residual state",
-        )):
+        if is_artificial_commit_subject(subject):
             return None
         return sha[:12], subject
     except Exception:

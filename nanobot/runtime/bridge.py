@@ -1955,13 +1955,15 @@ def _recent_commits_with_paths(repo_root: 'Path', since: str) -> 'list[tuple[str
     """
     import subprocess as _sp
 
+    from nanobot.runtime.commit_markers import (
+        ARTIFICIAL_COMMIT_GREP_PATTERNS, is_artificial_commit_subject,
+    )
+
     git_cmd = [
         'git', '-c', f'safe.directory={repo_root}', '-C', str(repo_root),
         'log',
         '--invert-grep', '-i',
-        '--grep=^Selfevo-Residual: true',
-        '--grep=^selfevo: auto-commit uncommitted subagent work',
-        '--grep=^selfevo: auto-commit residual state',
+        *(f'--grep={p}' for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
         '--pretty=format:%x00%h %s', '--name-only', f'--since={since}',
     ]
     try:
@@ -1977,11 +1979,7 @@ def _recent_commits_with_paths(repo_root: 'Path', since: str) -> 'list[tuple[str
         sha, _, subject = header.partition(' ')
         if not sha:
             continue
-        subj_lower = subject.strip().lower()
-        if subj_lower.startswith((
-            'selfevo: auto-commit residual state',
-            'selfevo: auto-commit uncommitted subagent work',
-        )):
+        if is_artificial_commit_subject(subject):
             continue
         paths = [ln for ln in block_lines[1:] if ln.strip()]
         commits.append((sha, subject, paths))
@@ -2032,14 +2030,12 @@ def _recent_activity_context(
             # (`_recent_commit_is_bookkeeping_only`), not by this specific
             # subject text, so any future per-cycle bookkeeping commit is
             # covered by adding its path prefix, not a new special case.
+            from nanobot.runtime.commit_markers import is_artificial_commit_subject
+
             subjects: list[str] = []
             for sha, subject, paths in commits:
                 subj_lower = subject.strip().lower()
-                if subj_lower.startswith((
-                    'merge:',
-                    'selfevo: auto-commit residual state',
-                    'selfevo: auto-commit uncommitted subagent work',
-                )):
+                if subj_lower.startswith('merge:') or is_artificial_commit_subject(subject):
                     continue
                 if _recent_commit_is_bookkeeping_only(paths):
                     continue
