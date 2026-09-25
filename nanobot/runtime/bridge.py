@@ -1067,14 +1067,21 @@ def _integrate_cycle_to_main(
         MERGE_TRAILER_CYCLE_KEY, sanitize_trailer_value,
     )
     _merge_body_lines: 'list[str]' = []
+    # pG review (0cf0a6f7): the body PARAGRAPH may run up to 500 chars
+    # (human-readable prose), but the Selfevo-Task TRAILER is a trailer
+    # like any other and must stay within the same 120-char cap
+    # (_TRAILER_VALUE_MAX_LEN) as Selfevo-Cycle/Selfevo-Demand -- reusing
+    # the 500-char paragraph value there let an over-length title corrupt
+    # the trailer block's own size contract.
     _clean_title = sanitize_trailer_value(task_title, max_len=500) if task_title else ''
+    _task_trailer_value = sanitize_trailer_value(task_title) if task_title else ''
     if _clean_title:
         _merge_body_lines.append(_clean_title)
         _merge_body_lines.append('')
     if cycle_id:
         _merge_body_lines.append(f'{MERGE_TRAILER_CYCLE_KEY}: {sanitize_trailer_value(cycle_id)}')
-    if _clean_title:
-        _merge_body_lines.append(f'Selfevo-Task: {_clean_title}')
+    if _task_trailer_value:
+        _merge_body_lines.append(f'Selfevo-Task: {_task_trailer_value}')
     if demand_id:
         _merge_body_lines.append(f'Selfevo-Demand: {sanitize_trailer_value(demand_id)}')
     _merge_cmd = git + ['merge', '--no-ff', cycle_branch, '-m', f'merge: integrate {cycle_branch}']

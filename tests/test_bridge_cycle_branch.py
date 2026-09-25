@@ -214,6 +214,48 @@ class TestIntegrateCycleToMain:
         ).stdout.strip().splitlines()
         assert len([l for l in first_parent_count if l.strip()]) == 2  # init + this merge
 
+    def test_long_task_title_trailer_is_truncated_but_body_paragraph_is_not(self, tmp_path):
+        """pG review (0cf0a6f7): the Selfevo-Task TRAILER must stay within
+        the same 120-char cap as every other trailer
+        (commit_markers._TRAILER_VALUE_MAX_LEN) -- a 300-char title must
+        not corrupt the trailer block's own size contract, even though the
+        human-readable body PARAGRAPH may keep up to 500 chars of it.
+        """
+        import subprocess
+
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, "longtitle")
+        assert setup["ok"]
+        _commit_file(work, "feature.py", "def feature():\n    return 42\n", "feat: add feature")
+
+        long_title = "A" * 300
+        integ = bridge._integrate_cycle_to_main(
+            work, setup["branch"], setup["main_sha"],
+            cycle_id="longtitle", task_title=long_title,
+        )
+        assert integ["ok"] is True, integ
+
+        trailer_value = subprocess.run(
+            ["git", "-C", str(work), "log", "-1",
+             "--format=%(trailers:key=Selfevo-Task,valueonly)"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        assert len(trailer_value) == 120, f"expected trailer value capped at 120, got {len(trailer_value)}"
+
+        full_line = subprocess.run(
+            ["git", "-C", str(work), "log", "-1",
+             "--format=%(trailers:key=Selfevo-Task)"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        assert len(full_line) <= 120 + len("Selfevo-Task: ")
+
+        body = subprocess.run(
+            ["git", "-C", str(work), "log", "-1", "--format=%b"], capture_output=True, text=True,
+        ).stdout
+        # The body paragraph is allowed to keep more of the original title
+        # than the trailer does.
+        assert long_title[:200] in body
+
     def test_dirty_tree_at_integration_still_integrates(self, tmp_path):
         """#828: a subagent may leave the shared checkout's working tree dirty
         at integration time (stray uncommitted edits / untracked files — some

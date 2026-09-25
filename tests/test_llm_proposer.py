@@ -3415,6 +3415,40 @@ class TestTargetPathState:
         assert result == GIT_UNAVAILABLE
         assert result is not None
 
+    def test_direct_to_main_residual_commit_is_skipped_for_the_real_prior_one(self, tmp_path):
+        """pG review (0cf0a6f7): --first-parent alone is NOT sufficient --
+        a residual auto-commit or a direct-to-main writer (bridge-memory,
+        the knowledge curator) commits ON first-parent directly, so a
+        residual-shaped commit sitting there must still be skipped, the
+        same #1785 class the self_dedup exclusion exists to prevent.
+        """
+        import subprocess as _sp
+
+        repo = _init_instance_repo(
+            tmp_path, subject="feat: real prior change",
+            script_rel="scripts/existing_target.py",
+        )
+        (repo / "scripts" / "existing_target.py").write_text("# residual edit\n")
+        _sp.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+        _sp.run(
+            ["git", "-C", str(repo), "commit", "-m",
+             "selfevo: auto-commit residual state — scripts/existing_target.py",
+             "-m", "Selfevo-Residual: true"],
+            check=True, capture_output=True,
+        )
+
+        result = llm_proposer._latest_non_residual_commit_for_path(
+            repo, "scripts/existing_target.py",
+        )
+        assert result is not None
+        sha, subject = result
+        assert subject == "feat: real prior change"
+
+        count = llm_proposer._git_commit_count_for_path(repo, "scripts/existing_target.py", None)
+        # Only the creation commit ("feat: real prior change") counts --
+        # the residual commit must not be counted at all.
+        assert count == 1, f"expected 1 (residual excluded), got {count}"
+
     def test_existing_path_dedup_passes_commit_as_evidence(self, tmp_path, monkeypatch):
         repo = _init_instance_repo(
             tmp_path, subject="feat: latest real target change",

@@ -2547,8 +2547,15 @@ def _latest_non_residual_commit_for_path(
     ``--first-parent main`` -- a ``--no-ff`` merge is compared against its
     first parent, so one integration is one log entry carrying the whole
     cycle branch's diff; a cycle branch's own checkpoint/residual commits
-    (second-parent side) are structurally invisible to this traversal, so
-    no subject-pattern exclusion is needed here anymore.
+    (second-parent side) are structurally invisible to this traversal.
+    pG review (0cf0a6f7): first-parent alone is NOT sufficient, though --
+    a residual auto-commit or a direct-to-main writer (bridge-memory, the
+    knowledge curator) commits ON first-parent directly, so
+    ``--invert-grep`` (:data:`commit_markers.ARTIFICIAL_COMMIT_GREP_PATTERNS`)
+    is kept on this query too: a residual-shaped commit is skipped
+    entirely, falling through to the previous REAL first-parent commit,
+    the same #1785 class the self_dedup exclusion elsewhere in this
+    module exists to prevent.
 
     The latest first-parent commit touching the path is either a
     direct-to-main commit (bridge-memory/curator writers -- use its own
@@ -2578,6 +2585,8 @@ def _latest_non_residual_commit_for_path(
             [
                 "git", "-c", f"safe.directory={repo}", "-C", str(repo),
                 "log", "--first-parent", "main", "-n1", "--format=%H%x1f%s",
+                "--invert-grep", "-i",
+                *(f"--grep={p}" for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
                 "--", target_path,
             ],
             capture_output=True, text=True, timeout=10,
@@ -2816,10 +2825,16 @@ def _git_commit_count_for_path(repo_root: Path, rel_path: str, since_iso: str | 
     ADR-035 keep-work architect resolution (#1942 B2): reads
     ``--first-parent main`` -- a ``--no-ff`` merge is one log entry per
     integration, and a cycle branch's own checkpoint/residual commits
-    (second-parent side) are structurally invisible to this traversal, so
-    no subject-pattern exclusion is needed here anymore: one logical edit
-    spread across several checkpointed steps counts as one commit (the
-    integration), not several.
+    (second-parent side) are structurally invisible to this traversal:
+    one logical edit spread across several checkpointed steps counts as
+    one commit (the integration), not several.
+
+    pG review (0cf0a6f7): first-parent alone is NOT sufficient, though --
+    a residual auto-commit or a direct-to-main writer (bridge-memory, the
+    knowledge curator) commits ON first-parent directly, so
+    ``--invert-grep`` (:data:`commit_markers.ARTIFICIAL_COMMIT_GREP_PATTERNS`)
+    stays on this query too: a residual-shaped commit must not inflate
+    this budget counter as "real" work either.
 
     Returns ``None`` (never ``0``) on a git error/timeout -- ``0`` must
     mean "confirmed zero integrations since the window started", not
@@ -2828,9 +2843,13 @@ def _git_commit_count_for_path(repo_root: Path, rel_path: str, since_iso: str | 
     """
     import subprocess as _sp
 
+    from nanobot.runtime.commit_markers import ARTIFICIAL_COMMIT_GREP_PATTERNS
+
     git_cmd = [
         "git", "-c", f"safe.directory={repo_root}", "-C", str(repo_root),
         "log", "--first-parent", "main", "--oneline",
+        "--invert-grep", "-i",
+        *(f"--grep={p}" for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
     ]
     if since_iso:
         git_cmd.append(f"--since={since_iso}")
