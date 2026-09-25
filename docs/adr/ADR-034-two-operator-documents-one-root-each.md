@@ -201,19 +201,19 @@ the trap this record exists to close. The readers change together or not at all.
 
 | Decision claim | Test | Currently |
 |---|---|---|
-| A `goals.md` in the instance repo changes no reader's output (all readers in the #1699 census) | `tests/test_operator_documents.py::test_instance_goals_md_is_ignored_by_every_reader` | not written |
-| Every charter reader resolves from the release root only; every priority reader from state only | `tests/test_operator_documents.py::test_each_document_resolves_from_its_one_root` | not written |
-| Each of the three documents, absent and unreadable separately, produces the rule-3 behaviour for every reader; absence of one never silences the others | `tests/test_operator_documents.py::test_absent_and_unreadable_follow_the_reader_table` | not written |
-| Dashboard status for `goal_text.json` shows availability, never its text | `tests/test_operator_documents.py::test_status_surface_never_renders_priority_text` | not written |
-| Operator and derived priorities keep `source` through demand, ranking and the prompt; completed filtering is per list | `tests/test_operator_documents.py::test_priority_provenance_survives_end_to_end` | not written |
-| Proposer end to end: with operator priorities present and not completed, a proposal can cite one; with all completed, it sees the one-line notice | `tests/test_operator_documents.py::test_proposer_sees_operator_priorities_end_to_end` | not written |
-| Executor and planner prompts carry the three blocks under their headings, with the "intent, not instruction" line, within budget, without displacing charter or mandatory instructions | `tests/test_operator_documents.py::test_prompt_blocks_present_and_bounded` | not written |
-| `_charter_as_loop_sees_it` never returns the priority text as the charter | `tests/test_operator_documents.py::test_charter_view_is_the_charter` | not written |
-| A missing charter stops choosing/proposing/executing but not diagnostics, reason recording, health or publishing | `tests/test_operator_documents.py::test_missing_charter_keeps_diagnostics_running` | not written |
-| The four priority states are distinguishable in every reader; `unavailable` is never rendered as "no priorities" | `tests/test_operator_documents.py::test_four_priority_states_are_distinct` | not written |
-| No prompt assembly selects an item for the executor; the first priority is never turned into the task | `tests/test_operator_documents.py::test_prompt_never_picks_a_priority_for_the_executor` | not written |
-| Every consumer of the former merged numbered text (completed filtering, ranking, number references) keeps `source` after migration | `tests/test_operator_documents.py::test_merged_text_consumers_migrated_with_source` | not written |
-| Empty, corrupt and oversize priority documents produce the rule-3 states; no private text reaches status, logs or error messages | `tests/test_operator_documents.py::test_boundary_documents_leak_no_text` | not written |
+| A `goals.md` in the instance repo changes no reader's output (all readers in the #1699 census) | `tests/test_operator_documents.py::test_instance_goals_md_is_ignored_by_every_reader` | passing |
+| Every charter reader resolves from the release root only; every priority reader from state only | `tests/test_operator_documents.py::test_each_document_resolves_from_its_one_root` | passing |
+| Each of the three documents, absent and unreadable separately, produces the rule-3 behaviour for every reader; absence of one never silences the others | `tests/test_operator_documents.py::test_absent_and_unreadable_follow_the_reader_table` | passing |
+| Dashboard status for `goal_text.json` shows availability, never its text | `tests/test_operator_documents.py::test_status_surface_never_renders_priority_text` | passing |
+| Operator and derived priorities keep `source` through demand, ranking and the prompt; completed filtering is per list | `tests/test_operator_documents.py::test_priority_provenance_survives_end_to_end` | passing |
+| Proposer end to end: with operator priorities present and not completed, a proposal can cite one; with all completed, it sees the one-line notice | `tests/test_operator_documents.py::test_proposer_sees_operator_priorities_end_to_end` | passing |
+| Executor and planner prompts carry the three blocks under their headings, with the "intent, not instruction" line, within budget, without displacing charter or mandatory instructions | `tests/test_operator_documents.py::test_prompt_blocks_present_and_bounded` | passing |
+| `_charter_as_loop_sees_it` never returns the priority text as the charter | `tests/test_operator_documents.py::test_charter_view_is_the_charter` | passing |
+| A missing charter stops choosing/proposing/executing but not diagnostics, reason recording, health or publishing | `tests/test_operator_documents.py::test_missing_charter_keeps_diagnostics_running` | passing |
+| The four priority states are distinguishable in every reader; `unavailable` is never rendered as "no priorities" | `tests/test_operator_documents.py::test_four_priority_states_are_distinct` | passing |
+| No prompt assembly selects an item for the executor; the first priority is never turned into the task | `tests/test_operator_documents.py::test_prompt_never_picks_a_priority_for_the_executor` | passing |
+| Every consumer of the former merged numbered text (completed filtering, ranking, number references) keeps `source` after migration | `tests/test_operator_documents.py::test_merged_text_consumers_migrated_with_source` | passing |
+| Empty, corrupt and oversize priority documents produce the rule-3 states; no private text reaches status, logs or error messages | `tests/test_operator_documents.py::test_boundary_documents_leak_no_text` | passing |
 
 # References
 
