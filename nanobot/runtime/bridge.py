@@ -3182,8 +3182,24 @@ async def _run_planning_session(
     import asyncio as _asyncio
     import subprocess as _sp_run
 
-    from nanobot.runtime import day_diary, no_plan_recovery, role_prompt
+    from nanobot.runtime import day_diary, no_plan_recovery, planner_rest, role_prompt
     from nanobot.runtime.cycle_ledger import record_planning_session
+
+    # ADR-035 rest amendment (#1964): the harness pre-check runs before
+    # anything else in this function -- before the charter read, before any
+    # model call. "Tests change, never value": held only when the active
+    # rest's named input is unchanged AND its deadline has not passed;
+    # unreadable, changed, or expired all return the choice to the planner.
+    # No plan is attempted and no repository preparation runs on this tick.
+    _rest_run, _rest_reason = planner_rest.precheck(state_dir, selfevo_repo)
+    if not _rest_run:
+        record_planning_session(
+            state_dir, cycle_id, 'rest_unchanged',
+            iterations_used=None, iterations_planned=None, reason=_rest_reason,
+        )
+        planner_rest.record_held_tick(state_dir, cycle_id)
+        print(f'planning-session: rest_unchanged ({_rest_reason})')
+        return {'ran': False, 'iterations_used': None, 'iterations_planned': None, 'tampered_files': []}
 
     _task_writing_read = False
     _task_writing_source = ""
@@ -3201,6 +3217,7 @@ async def _run_planning_session(
             task_writing_sha256=_task_writing_sha256 or None,
         )
         no_plan_recovery.record_outcome(state_dir, cycle_id, outcome)
+        planner_rest.record_non_rest_outcome(state_dir, cycle_id, outcome)
         print(f'planning-session: {outcome} ({reason[:200]})')
         return {
             'ran': False, 'iterations_used': None, 'iterations_planned': None,
@@ -3287,6 +3304,18 @@ async def _run_planning_session(
     except Exception:
         _candidates_block = ''
 
+    # ADR-035 rest amendment (#1964): "the sha and the reason are an input
+    # to the next session, or it would choose the same increment again."
+    # Consumed (read-and-cleared) here, so it reaches exactly this one
+    # session -- fail-open, same as the candidates block above.
+    try:
+        from nanobot.runtime import planner_dedup_evidence as _dedup_evidence_mod
+
+        _dedup_evidence = _dedup_evidence_mod.consume_pending_evidence(state_dir)
+        _dedup_evidence_block = _dedup_evidence_mod.render_dedup_evidence_block(_dedup_evidence)
+    except Exception:
+        _dedup_evidence_block = ''
+
     _planner_task = (
         'The harness pre-read the mandatory release-owned task-writing contract '
         'before this model turn. Apply it to the next increment.\n\n'
@@ -3295,6 +3324,7 @@ async def _run_planning_session(
         '--- end task-writing contract ---\n\n'
         f'{_priorities_block}\n\n'
         f'{_candidates_block}\n\n'
+        f'{_dedup_evidence_block}\n\n'
         'Plan the next cycle.'
     )
 
@@ -3411,12 +3441,58 @@ async def _run_planning_session(
             task_writing_sha256=_task_writing_sha256 or None,
         )
         no_plan_recovery.record_outcome(state_dir, cycle_id, 'no_plan')
+        planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'no_plan')
         print(f'planning-session: no_plan ({reason})')
         return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
     # #1903/#1925: keep the role's no-wrapping instruction, but accept one
     # terminal fenced object as a recorded format violation (never extract a
     # JSON example from reasoning prose).
     parsed, parse_mode, format_violation, parse_error = _parse_planner_final_response(raw_result)
+
+    # ADR-035 rest amendment (#1964): a structured `rest` is a third valid
+    # final response, checked before the "plan required" rule below --
+    # `rest` and `plan` are mutually exclusive shapes of the SAME final
+    # JSON, never both required at once.
+    _rest_candidate = parsed.get('rest') if isinstance(parsed, dict) else None
+    if parse_error is None and _rest_candidate is not None:
+        try:
+            _wake_condition, _deadline = planner_rest.parse_rest(_rest_candidate)
+        except planner_rest.RestValidationError as _rest_exc:
+            record_planning_session(
+                state_dir, cycle_id, 'malformed',
+                iterations_used=iterations_used, iterations_planned=None,
+                reason=f'invalid rest: {_rest_exc}',
+                parse_mode=parse_mode,
+                format_violation=format_violation,
+                task_writing_read=_task_writing_read,
+                task_writing_source=_task_writing_source or None,
+                task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+                task_writing_bytes=_task_writing_bytes_count,
+                task_writing_sha256=_task_writing_sha256 or None,
+            )
+            no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
+            planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
+            print(f'planning-session: malformed rest ({_rest_exc})')
+            return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
+
+        record_planning_session(
+            state_dir, cycle_id, 'rest',
+            iterations_used=iterations_used, iterations_planned=None,
+            reason=f'waiting for {_wake_condition.kind}:{_wake_condition.ref} until {_deadline}',
+            parse_mode=parse_mode,
+            format_violation=format_violation,
+            task_writing_read=_task_writing_read,
+            task_writing_source=_task_writing_source or None,
+            task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+            task_writing_bytes=_task_writing_bytes_count,
+            task_writing_sha256=_task_writing_sha256 or None,
+        )
+        # `rest` never counts toward no_plan_recovery's supply/planner
+        # families -- only planner_rest.record_rest tracks its own streak.
+        planner_rest.record_rest(state_dir, cycle_id, _wake_condition, _deadline, selfevo_repo)
+        print(f'planning-session: rest (waiting for {_wake_condition.kind}:{_wake_condition.ref} until {_deadline})')
+        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
+
     if parse_error is None and (
         not isinstance(parsed, dict)
         or not isinstance(parsed.get('plan'), str)
@@ -3443,6 +3519,7 @@ async def _run_planning_session(
             task_writing_sha256=_task_writing_sha256 or None,
         )
         no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
+        planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
         print(f'planning-session: malformed final response ({exc})')
         return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
 
@@ -3504,11 +3581,48 @@ async def _run_planning_session(
         task_writing_sha256=_task_writing_sha256,
     )
     no_plan_recovery.record_outcome(state_dir, cycle_id, write_result['outcome'])
+    planner_rest.record_non_rest_outcome(state_dir, cycle_id, write_result['outcome'])
     return {
         'ran': True, 'iterations_used': iterations_used,
         'iterations_planned': iterations_planned if write_result['outcome'] == 'integrated' else None,
         'tampered_files': [],
     }
+
+
+def _prepare_repository_for_cycle(repo_root: 'Path', state_dir: 'Path') -> dict:
+    """ADR-035 rest amendment (#1964): repository preparation now runs on
+    every started cycle -- one the harness pre-check did not hold -- not
+    only when a request happens to be queued.
+
+    Order is load-bearing: :func:`_restore_to_main` FIRST (a stray branch or
+    dirty tree left by a prior cycle must be cleaned before anything reads
+    or writes this checkout), THEN staged-promotions pickup and
+    pending-push completion. Both of those copy FROM ``state_dir`` INTO the
+    checkout and commit+push in one call, so neither ever leaves an
+    uncommitted intermediate a LATER ``_restore_to_main`` could wipe -- the
+    "curator outputs reset by the bridge" defect class this ordering keeps
+    closed (see ``tests/test_agent_chooses.py::test_repo_preparation_preserves_staged_and_pending``).
+
+    Returns ``{"restored": bool | str, "staged_promoted": int,
+    "pending_pushed": int}``. Never raises -- every piece here was already
+    fail-open at its own former call site.
+    """
+    result = {'restored': True, 'staged_promoted': 0, 'pending_pushed': 0}
+    if not Path(repo_root).is_dir():
+        return result
+    try:
+        result['restored'] = _restore_to_main(repo_root, state_dir)
+    except Exception as exc:
+        result['restored'] = f'error: {exc}'
+    try:
+        result['staged_promoted'] = _pickup_staged_promotions(repo_root, state_dir)
+    except Exception:
+        pass
+    try:
+        result['pending_pushed'] = _finish_pending_pushes(repo_root, state_dir)
+    except Exception:
+        pass
+    return result
 
 
 async def _main_impl_body():
@@ -3584,6 +3698,25 @@ async def _main_impl_body():
         return 0
 
     BRIDGE_STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # ADR-035 rest amendment (#1964): the harness pre-check runs before
+    # repository preparation too -- a held tick touches neither the model
+    # nor the checkout. Reads the SAME state _run_planning_session's own
+    # (redundant, cheap) precheck reads further down; both must agree.
+    from nanobot.runtime import planner_rest as _planner_rest_toplevel
+    from nanobot.runtime.cycle_ledger import record_planning_session as _record_planning_session_toplevel
+
+    _selfevo_repo_toplevel = STATE_DIR.parent / 'eeebot-self-evolving'
+    _precheck_run, _precheck_reason = _planner_rest_toplevel.precheck(STATE_DIR, _selfevo_repo_toplevel)
+    if not _precheck_run:
+        _record_planning_session_toplevel(
+            STATE_DIR, '', 'rest_unchanged',
+            iterations_used=None, iterations_planned=None, reason=_precheck_reason,
+        )
+        _planner_rest_toplevel.record_held_tick(STATE_DIR, '')
+        print(f'bridge: rest pre-check held ({_precheck_reason}); no session, no repository preparation')
+        return 0
+    _prepare_repository_for_cycle(_selfevo_repo_toplevel, STATE_DIR)
 
     # #733: bulk-skip pre-spawn duplicates in one run. Each iteration pulls
     # the next pending request; a pre-spawn duplicate (tag-first match or

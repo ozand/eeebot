@@ -1,7 +1,8 @@
 """ADR-035 (the planning session chooses and closes HADI), rules 1 and 3,
 issue #1942 (B2): the planning session chooses before selection, its
 hypothesis is stored in ADR-030's form, and no_plan recovery is bounded and
-visible.
+visible. Also covers the rest amendment (docs PR #1964): a structured
+`rest` outcome, the change-only harness pre-check, and `rejected_duplicate`.
 
 Only the rows this increment closes are exercised here. Rows requiring the
 live task-selection wiring in ``bridge.py`` (rule 1's "its plan IS the
@@ -15,7 +16,10 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import day_diary, no_plan_recovery, planner_candidates, planner_hypothesis
+from nanobot.runtime import (
+    day_diary, no_plan_recovery, planner_candidates, planner_dedup_evidence,
+    planner_hypothesis, planner_rest,
+)
 from nanobot.runtime.cycle_ledger import read_events
 from nanobot.runtime.demand import _make_item
 
@@ -457,6 +461,233 @@ def test_defect_decline_requires_a_reason(tmp_path: Path):
     state = tmp_path / "state"
     with pytest.raises(ValueError):
         planner_candidates.record_defect_declines(state, "cycle-1", {"defect-x": ""})
+
+
+# --- test_rest_is_structured_and_outside_no_plan_counts (#1964) -----------
+
+def test_rest_is_structured_and_outside_no_plan_counts(tmp_path: Path):
+    state = tmp_path / "state"
+    wc, deadline = planner_rest.parse_rest({
+        "wake_condition": {"kind": "main_commit"},
+        "deadline": "2026-09-26T00:00:00Z",
+    })
+    assert wc.kind == "main_commit"
+
+    rest_state = planner_rest.record_rest(state, "cycle-1", wc, deadline, selfevo_repo=None)
+    assert rest_state.consecutive_rests == 1
+
+    # A `rest` never touches no_plan_recovery's counters.
+    no_plan_state = no_plan_recovery.load_state(state)
+    assert no_plan_state.consecutive_planner == 0
+    assert no_plan_state.consecutive_supply == 0
+
+
+@pytest.mark.parametrize("bad_raw", [
+    {"wake_condition": {"kind": "main_commit"}},  # missing deadline
+    {"deadline": "2026-09-26T00:00:00Z"},  # missing wake_condition
+    {"wake_condition": {"kind": "unknown_kind"}, "deadline": "2026-09-26T00:00:00Z"},
+    {"wake_condition": {"kind": "file", "ref": ""}, "deadline": "2026-09-26T00:00:00Z"},  # file needs a ref
+    {"wake_condition": {"kind": "main_commit"}, "deadline": "not a timestamp"},
+    "just a string",
+])
+def test_rest_without_both_fields_is_malformed(bad_raw):
+    with pytest.raises(planner_rest.RestValidationError):
+        planner_rest.parse_rest(bad_raw)
+
+
+# --- test_precheck_tests_change_not_value (#1964) --------------------------
+
+def test_precheck_tests_change_not_value(tmp_path: Path):
+    state = tmp_path / "state"
+    watched_file = tmp_path / "watched.txt"
+    watched_file.write_text("v1", encoding="utf-8")
+
+    wc, deadline = planner_rest.parse_rest({
+        "wake_condition": {"kind": "file", "ref": str(watched_file)},
+        "deadline": "2099-01-01T00:00:00Z",
+    })
+    planner_rest.record_rest(state, "cycle-1", wc, deadline, selfevo_repo=None)
+
+    # Unchanged, deadline far away -> held.
+    run, reason = planner_rest.precheck(state, None)
+    assert run is False
+    assert reason == "unchanged"
+
+    # Any change in the input's VERSION -> session runs, regardless of how
+    # small the change is -- the pre-check never judges importance.
+    watched_file.write_text("v1_plus_one_byte", encoding="utf-8")
+    run2, reason2 = planner_rest.precheck(state, None)
+    assert run2 is True
+    assert reason2 == "input_changed"
+
+
+def test_precheck_runs_on_unreadable_input(tmp_path: Path):
+    state = tmp_path / "state"
+    missing = tmp_path / "does_not_exist.txt"
+    wc, deadline = planner_rest.parse_rest({
+        "wake_condition": {"kind": "file", "ref": str(missing)},
+        "deadline": "2099-01-01T00:00:00Z",
+    })
+    planner_rest.record_rest(state, "cycle-1", wc, deadline, selfevo_repo=None)
+    run, reason = planner_rest.precheck(state, None)
+    assert run is True
+    assert reason == "input_unreadable"
+
+
+def test_precheck_runs_once_deadline_passes(tmp_path: Path):
+    state = tmp_path / "state"
+    watched_file = tmp_path / "watched.txt"
+    watched_file.write_text("v1", encoding="utf-8")
+    wc, deadline = planner_rest.parse_rest({
+        "wake_condition": {"kind": "file", "ref": str(watched_file)},
+        "deadline": "2000-01-01T00:00:00Z",  # already in the past
+    })
+    planner_rest.record_rest(state, "cycle-1", wc, deadline, selfevo_repo=None)
+    run, reason = planner_rest.precheck(state, None)
+    assert run is True
+    assert reason == "deadline_passed"
+
+
+# --- test_six_rests_raise_review_signal (#1964) -----------------------------
+
+def test_six_rests_raise_review_signal(tmp_path: Path):
+    state = tmp_path / "state"
+    wc, deadline = planner_rest.parse_rest({
+        "wake_condition": {"kind": "main_commit"}, "deadline": "2099-01-01T00:00:00Z",
+    })
+    for i in range(5):
+        s = planner_rest.record_rest(state, f"cycle-{i}", wc, deadline, selfevo_repo=None)
+        assert s.review_signal is False
+
+    sixth = planner_rest.record_rest(state, "cycle-6", wc, deadline, selfevo_repo=None)
+    assert sixth.consecutive_rests == 6
+    assert sixth.review_signal is True
+
+    events = read_events(state)
+    signals = [e for e in events if e.get("phase") == "planner_rest_review_signal"]
+    assert len(signals) == 1
+    assert "not proof of a defect" in signals[0]["note"]
+
+
+# --- test_held_rest_and_no_plan_counted_apart (#1964) -----------------------
+
+def test_held_rest_and_no_plan_counted_apart(tmp_path: Path):
+    state = tmp_path / "state"
+    wc, deadline = planner_rest.parse_rest({
+        "wake_condition": {"kind": "main_commit"}, "deadline": "2099-01-01T00:00:00Z",
+    })
+    planner_rest.record_rest(state, "cycle-1", wc, deadline, selfevo_repo=None)
+    planner_rest.record_held_tick(state, "cycle-2")
+    planner_rest.record_held_tick(state, "cycle-3")
+    no_plan_recovery.record_outcome(state, "cycle-4", "no_plan")
+
+    rest_state = planner_rest.load_state(state)
+    no_plan_state = no_plan_recovery.load_state(state)
+
+    events = read_events(state)
+    held_events = [e for e in events if e.get("phase") == "planner_rest_held"]
+    rest_events = [e for e in events if e.get("phase") == "planner_rest"]
+
+    assert len(held_events) == 2
+    assert len(rest_events) == 1
+    assert rest_state.consecutive_rests == 1  # unaffected by held ticks or no_plan
+    assert no_plan_state.consecutive_planner == 1  # unaffected by rest/held
+
+    # A non-rest outcome (no_plan here) clears the active rest and its streak.
+    planner_rest.record_non_rest_outcome(state, "cycle-4", "no_plan")
+    assert planner_rest.load_state(state).consecutive_rests == 0
+
+
+# --- test_rejected_duplicate_is_recorded_and_fed_forward (#1964) -----------
+
+def test_rejected_duplicate_is_recorded_and_fed_forward(tmp_path: Path):
+    state = tmp_path / "state"
+    planner_dedup_evidence.record_rejected_duplicate(
+        state, "cycle-1", "connect the orphaned validator", "abc123sha", "already committed in cycle-99",
+    )
+
+    events = read_events(state)
+    rows = [e for e in events if e.get("phase") == "rejected_duplicate"]
+    assert len(rows) == 1
+    assert rows[0]["evidence_sha"] == "abc123sha"
+
+    # Fed forward to exactly the next session, then cleared.
+    evidence = planner_dedup_evidence.consume_pending_evidence(state)
+    assert evidence["evidence_sha"] == "abc123sha"
+    block = planner_dedup_evidence.render_dedup_evidence_block(evidence)
+    assert "abc123sha" in block
+    assert "connect the orphaned validator" in block
+
+    assert planner_dedup_evidence.consume_pending_evidence(state) is None
+    assert planner_dedup_evidence.render_dedup_evidence_block(None) == ""
+
+
+# --- test_repo_preparation_preserves_staged_and_pending (#1964) ------------
+
+def test_repo_preparation_preserves_staged_and_pending(tmp_path: Path):
+    """ADR-035 rest amendment: repository preparation (_restore_to_main,
+    then staged-promotions pickup, then pending-push completion) now runs
+    on every started cycle -- proving the ORDER keeps the historical
+    "curator outputs reset by the bridge" defect closed: a stray/dirty
+    checkout is cleaned FIRST, and only then are staged/pending items
+    applied -- both copy from state_dir and commit+push atomically, so
+    neither is ever caught mid-write by the reset.
+    """
+    from nanobot.runtime.bridge import _prepare_repository_for_cycle, _setup_cycle_branch
+    from nanobot.runtime.cycle_ledger import record_cycle_outcome
+    from nanobot.runtime.knowledge_curator import load_staged_manifest
+    from tests.test_bridge_cycle_branch import _commit_file, _init_repo, _origin_main_sha, _run
+    from tests.test_curator_staging_pickup import _write_manifest
+
+    origin, work = _init_repo(tmp_path)
+    state = tmp_path / "state"
+
+    (work / "memory").mkdir(parents=True)
+    (work / "memory" / "index.md").write_text("# Index\n", encoding="utf-8")
+    _run(work, "add", "memory/index.md")
+    _run(work, "commit", "-m", "add index")
+    _run(work, "push", "origin", "main")
+
+    # A staged curator promotion, sitting entirely in state_dir.
+    _write_manifest(state, [{
+        "path": "memory/facts/my-fact.md",
+        "action": "create",
+        "payload_file": "memory__facts__my-fact.md",
+        "index_line": "- [My Fact](memory/facts/my-fact.md)",
+        "index_rel": "memory/index.md",
+        "_content": "# My Fact\n\nSome knowledge.\n",
+    }])
+
+    # A push_pending cycle from a "previous" run.
+    setup = _setup_cycle_branch(work, "cid-pending")
+    assert setup["ok"]
+    _commit_file(work, "feature.py", "def feature():\n    return 42\n", "feat: add feature")
+    _run(work, "checkout", "main")
+    record_cycle_outcome(
+        state, "cid-pending", "push_pending", "push_pending", [], setup["branch"],
+        main_sha_before=setup["main_sha"],
+    )
+
+    # A stray, dirty, off-main checkout -- exactly what _restore_to_main
+    # exists to clean, and exactly the condition the historical defect
+    # (curator outputs wiped at cycle start) happened under.
+    _run(work, "checkout", "-b", "stray-branch")
+    (work / "junk.txt").write_text("uncommitted\n", encoding="utf-8")
+
+    result = _prepare_repository_for_cycle(work, state)
+
+    # The stray branch/dirty file WAS cleaned (restore ran).
+    assert not (work / "junk.txt").exists()
+    assert _run(work, "branch", "--show-current").stdout.strip() == "main"
+
+    # Staged promotion survived and was committed+pushed, not lost.
+    assert result["staged_promoted"] == 1
+    assert (work / "memory" / "facts" / "my-fact.md").exists()
+    assert load_staged_manifest(state) == []
+
+    # Pending push survived and was resolved, not lost.
+    assert result["pending_pushed"] == 1
+    assert _origin_main_sha(origin) != setup["main_sha"]
 
 
 def test_record_plan_amendment_ledger(tmp_path: Path):

@@ -387,8 +387,23 @@ def record_diary_open_entry(
 #: unconditionally -- a failed session must fail open (the cycle proceeds
 #: on the ranked queue as before) and say so here, not silently. "integrated"
 #: is the only success outcome, mirroring diary-open-entry's shape above.
+#:
+#: ADR-035 rule 1 gap, architect addendum (a separate ADR amendment PR is
+#: pending; #1942 B2 implements it now):
+#: - "rest": the planner legitimately decided not to start an increment and
+#:   named what it is waiting for. Distinct from `no_plan` -- it is a real,
+#:   valid final response, not a failure -- and never counted in
+#:   `no_plan_recovery`'s supply/planner families.
+#: - "rest_unchanged": the harness's own pre-filter skipped the session
+#:   entirely (no model call) because nothing has changed since the last
+#:   `rest` -- new verdicts, operator priorities, candidates, or commits to
+#:   main. Distinct from `rest` itself.
+#: - "rejected_duplicate": the plan's chosen increment matched an existing
+#:   dedup gate (tag/recent-failure/existence-index) against ITS OWN
+#:   title/target -- not `no_plan`, not counted in `no_plan_recovery`.
 VALID_PLANNING_OUTCOMES = frozenset({
     "integrated", "refused", "malformed", "no_plan", "spawn_failed", "commit_failed", "timed_out",
+    "rest", "rest_unchanged", "rejected_duplicate",
 })
 
 
