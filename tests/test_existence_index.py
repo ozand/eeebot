@@ -19,6 +19,7 @@ import pytest
 
 from nanobot.runtime import bridge
 from nanobot.runtime import existence_index as ei
+from tests.test_bridge_executor_llm_error import _stub_planning_session
 from tests.test_cycle_ledger import (
     _FakeSubagentManager,
     _init_selfevo_repo,
@@ -1049,6 +1050,7 @@ class TestBridgeExistenceIndexIntegration:
             task_title="Create a script to monitor RAM and memory usage",
             task="Create a script to monitor RAM and memory usage.\n",
         )
+        _stub_planning_session(monkeypatch, "Create a script to monitor RAM and memory usage.")
 
         result = asyncio.run(bridge._main_impl())
         assert result == 0
@@ -1098,6 +1100,7 @@ class TestBridgeExistenceIndexIntegration:
             task_title="Create a script to monitor RAM and memory usage",
             task="Create a script to monitor RAM and memory usage.\n",
         )
+        _stub_planning_session(monkeypatch, "Create a script to monitor RAM and memory usage.")
 
         result = asyncio.run(bridge._main_impl())
         assert result == 0
