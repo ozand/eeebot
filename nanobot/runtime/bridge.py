@@ -3199,7 +3199,7 @@ async def _run_planning_session(
         )
         planner_rest.record_held_tick(state_dir, cycle_id)
         print(f'planning-session: rest_unchanged ({_rest_reason})')
-        return {'ran': False, 'iterations_used': None, 'iterations_planned': None, 'tampered_files': []}
+        return {'ran': False, 'iterations_used': None, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
 
     _task_writing_read = False
     _task_writing_source = ""
@@ -3221,7 +3221,7 @@ async def _run_planning_session(
         print(f'planning-session: {outcome} ({reason[:200]})')
         return {
             'ran': False, 'iterations_used': None, 'iterations_planned': None,
-            'tampered_files': tampered_files or [],
+            'tampered_files': tampered_files or [], 'plan': None,
         }
 
     # ADR-034 rule 3: a missing/unreadable release charter stops the
@@ -3451,7 +3451,7 @@ async def _run_planning_session(
         no_plan_recovery.record_outcome(state_dir, cycle_id, 'no_plan')
         planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'no_plan')
         print(f'planning-session: no_plan ({reason})')
-        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
+        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
     # #1903/#1925: keep the role's no-wrapping instruction, but accept one
     # terminal fenced object as a recorded format violation (never extract a
     # JSON example from reasoning prose).
@@ -3481,7 +3481,7 @@ async def _run_planning_session(
             no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
             planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
             print(f'planning-session: malformed rest ({_rest_exc})')
-            return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
+            return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
 
         record_planning_session(
             state_dir, cycle_id, 'rest',
@@ -3499,7 +3499,7 @@ async def _run_planning_session(
         # families -- only planner_rest.record_rest tracks its own streak.
         planner_rest.record_rest(state_dir, cycle_id, _wake_condition, _deadline, selfevo_repo)
         print(f'planning-session: rest (waiting for {_wake_condition.kind}:{_wake_condition.ref} until {_deadline})')
-        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
+        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
 
     if parse_error is None and (
         not isinstance(parsed, dict)
@@ -3529,7 +3529,7 @@ async def _run_planning_session(
         no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
         planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
         print(f'planning-session: malformed final response ({exc})')
-        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
+        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
 
     plan_lines = [f"Insight: {(parsed.get('insight') or '').strip() or '(none stated)'}", f"Plan: {parsed['plan'].strip()}"]
     dor = parsed.get("dor")
@@ -3594,6 +3594,13 @@ async def _run_planning_session(
         'ran': True, 'iterations_used': iterations_used,
         'iterations_planned': iterations_planned if write_result['outcome'] == 'integrated' else None,
         'tampered_files': [],
+        # ADR-035 rule 1: the plan is the executor's task. `parsed` here
+        # carries whatever the planner's final JSON had -- `plan`, `insight`,
+        # `dor`, `dod`, `hypotheses`, `declined`, and an optional
+        # `candidate_id` naming which ranked candidate (if any) the plan is
+        # built on -- only when the diary write itself also succeeded
+        # (never hand the caller a plan that never reached the diary).
+        'plan': parsed if write_result['outcome'] == 'integrated' else None,
     }
 
 

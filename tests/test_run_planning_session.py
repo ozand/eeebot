@@ -160,7 +160,9 @@ def test_happy_path_writes_the_diary_and_journals_success(tmp_path: Path, monkey
 
     outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
 
-    assert outcome == {"ran": True, "iterations_used": 3, "iterations_planned": 35, "tampered_files": []}
+    assert outcome == {
+        "ran": True, "iterations_used": 3, "iterations_planned": 35, "tampered_files": [], "plan": result_obj,
+    }
 
     _git(repo, "fetch", "origin", "main")
     pushed = subprocess.run(
@@ -401,7 +403,9 @@ def test_spawn_failure_degrades_to_the_ranked_queue(tmp_path: Path, monkeypatch)
 
     outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
 
-    assert outcome == {"ran": False, "iterations_used": None, "iterations_planned": None, "tampered_files": []}
+    assert outcome == {
+        "ran": False, "iterations_used": None, "iterations_planned": None, "tampered_files": [], "plan": None,
+    }
     rows = _ledger_rows(state, "planning_session")
     assert rows[0]["outcome"] == "spawn_failed"
 
