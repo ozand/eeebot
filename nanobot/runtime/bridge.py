@@ -3716,7 +3716,37 @@ async def _main_impl_body():
         _planner_rest_toplevel.record_held_tick(STATE_DIR, '')
         print(f'bridge: rest pre-check held ({_precheck_reason}); no session, no repository preparation')
         return 0
-    _prepare_repository_for_cycle(_selfevo_repo_toplevel, STATE_DIR)
+
+    # #680 defense-in-depth, relocated here by the ADR-035 rest amendment
+    # follow-up (#1942): repository preparation now runs exactly ONCE per
+    # started cycle. The in-loop precondition re-check and its own
+    # staged-promotions/pending-push calls further down this function were
+    # REMOVED, not left as a redundant safety net -- a second
+    # `_restore_to_main` inside the bulk-skip loop is not harmless: it can
+    # wipe whatever this call already did between the two invocations,
+    # exactly the "the bridge resets curator outputs" defect class this
+    # single-call-site ordering exists to keep closed (see
+    # test_repo_preparation_preserves_staged_and_pending).
+    #
+    # If the checkout still cannot be repaired, no request has been looked
+    # up yet -- there is no request to attribute a "blocked" result to, and
+    # nothing here should be marked handled; the next invocation's own
+    # pre-check/prep retries the same repair against the same queue.
+    _prep_result = _prepare_repository_for_cycle(_selfevo_repo_toplevel, STATE_DIR)
+    if _prep_result['restored'] is not True:
+        _prep_fail_reason = 'head_on_main_precondition_failed'
+        if isinstance(_prep_result['restored'], str):
+            _prep_fail_reason = f"dirty_tree: {_prep_result['restored']}"
+        print(
+            f'bridge: verify-clean precondition failed for {_selfevo_repo_toplevel} '
+            f'({_prep_fail_reason}); aborting run, no subagent spawned'
+        )
+        append_event(STATE_DIR, {
+            'phase': 'repo_preparation_failed',
+            'cycle_id': '',
+            'reason': _prep_fail_reason,
+        })
+        return 0
 
     # #733: bulk-skip pre-spawn duplicates in one run. Each iteration pulls
     # the next pending request; a pre-spawn duplicate (tag-first match or
@@ -3728,11 +3758,6 @@ async def _main_impl_body():
     # spawn happens per run either way (S6 invariant) — the loop only ever
     # iterates on pre-spawn skips.
     _skips = 0
-    # #680 precondition (below) verifies shared-checkout repo state, not the
-    # request content — it only needs to run once per run, not once per
-    # skipped request, since no skip branch touches the cycle-branch/repo
-    # state it guards against.
-    _precondition_checked = False
     # #733 follow-up: a request whose handled marker exists under the
     # SANITIZED request_id can still slip find_pending_request's real_handled
     # filter (which compares the RAW request_id/marker stem) and keep being
@@ -3824,81 +3849,19 @@ async def _main_impl_body():
         # matching terminal outcome row, a deterministic recovery signal.
         record_cycle_started(STATE_DIR, _cycle_id, request_id, None)
 
-        # ── #680 defense-in-depth: HEAD-on-main precondition ────────────────
-        # _restore_to_main() below only WARNs when it fails (see the `finally` in
-        # the cycle-branch block further down) — it does not abort the *current*
-        # cycle, because by the time it runs the cycle already happened. But if a
-        # PRIOR cycle's restore failed twice, the shared checkout is left sitting
-        # on a stray `selfevo/cycle-<id>` branch, and this (next) invocation would
-        # otherwise proceed straight into the pre-spawn checks below on that
-        # stray branch — later work could land on it and be silently
-        # discarded the moment _setup_cycle_branch() does its own
-        # `checkout -B ... origin/main`. Re-run _restore_to_main defensively here,
-        # before any git work happens, and hard-abort the cycle (no subagent
-        # spawn) if it still can't repair the checkout. A missing repo (not yet
-        # cloned) is not a stray-branch condition — leave that to
-        # _setup_cycle_branch's existing 'repo_missing' handling below.
-        # #733: this check verifies repo state, not the request, so it only
-        # needs to run once per bridge run — subsequent skip iterations reuse
-        # the already-verified state (no skip branch below moves HEAD off main).
+        # #680 defense-in-depth (HEAD-on-main precondition) used to be
+        # re-checked here, per request, with its own staged-promotions/
+        # pending-push calls right after it. ADR-035 rest amendment
+        # follow-up (#1942): repository preparation now runs exactly ONCE
+        # per started cycle, at the top of this function, before any
+        # request is even selected -- see `_prepare_repository_for_cycle`
+        # and its call site above. Re-running `_restore_to_main` here too
+        # was not a harmless safety net: a second restore could wipe
+        # whatever the top-level call already did in between, the "bridge
+        # resets curator outputs" defect class that ordering exists to
+        # keep closed (test_repo_preparation_preserves_staged_and_pending).
         _selfevo_repo_check = STATE_DIR.parent / 'eeebot-self-evolving'
-        if not _precondition_checked:
-            _precondition_checked = True
-            _restored = _restore_to_main(_selfevo_repo_check, STATE_DIR) if _selfevo_repo_check.is_dir() else True
-            if _restored is not True:
-                fail_reason = 'head_on_main_precondition_failed'
-                fail_summary = 'HEAD-on-main precondition failed: checkout could not be restored to main'
-                if isinstance(_restored, str):
-                    fail_reason = f'dirty_tree: {_restored}'
-                    fail_summary = f'dirty_tree precondition failed: unremovable untracked files block checkout\n{_restored}'
-
-                print(
-                    f'bridge: verify-clean precondition failed for {_selfevo_repo_check}; '
-                    'aborting cycle (blocked), no subagent spawned'
-                )
-                handled_marker.write_text(str(req_path), encoding='utf-8')
-                _write_bridge_completed_result(
-                    state_dir=STATE_DIR,
-                    req=req,
-                    request_id=request_id,
-                    cycle_id=req.get('cycle_id') or '',
-                    goal_id=goal_id,
-                    files_changed=[],
-                    commits_pushed=0,
-                    result_status='blocked',
-                    backlog_title='',
-                    key_learnings=[
-                        f'{fail_summary}. Aborting cycle without '
-                        'spawning a subagent to avoid running bookkeeping on a broken tree.',
-                    ],
-                    rollback={
-                        'integrated': False,
-                        'cycle_branch': None,
-                        'main_sha_before': None,
-                        'main_sha_after': None,
-                        'reason': fail_reason,
-                        'auto_committed': False,
-                    },
-                )
-                _v, _vr = _derive_cycle_verdict('failed', fail_reason)
-                record_cycle_outcome(
-                    STATE_DIR, _cycle_id, 'failed', fail_reason, [], None,
-                    verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
-                    real_result=_real_result_ledger_inputs('blocked'),
-                )
-                # #721: no cycle branch exists yet on this path — tag at current HEAD.
-                _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'failed')
-                _record_diary_fitness_marker(STATE_DIR, _cycle_id)
-                return 0
-
-        # #1001: pick up any curator-staged fact promotions at the safe cycle-start
-        # boundary — bridge lock held, HEAD on clean main. Fail-open: a pickup
-        # failure is printed and the cycle proceeds normally.
         if _selfevo_repo_check.is_dir():
-            _pickup_staged_promotions(_selfevo_repo_check, STATE_DIR)
-            # #1709 increment 2: same safe boundary — finish any push a prior
-            # cycle's exhausted transient retries left as push_pending.
-            _finish_pending_pushes(_selfevo_repo_check, STATE_DIR)
             # ADR-028 rules 2-3 (#1811): this cycle's opening diary entry,
             # written and pushed to origin/main HERE — before the cycle
             # branch is even cut — so it needs no protection from the gate
