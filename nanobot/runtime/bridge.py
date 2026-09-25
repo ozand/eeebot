@@ -5210,14 +5210,17 @@ async def _main_impl_body():
                 from nanobot.runtime import day_key
                 from nanobot.runtime.cycle_ledger import read_events, record_explore_started
                 _today = day_key.day_key()
-                _daily_explores = sum(
-                    1 for e in read_events(STATE_DIR)
-                    if e.get('phase') == 'explore_started'
-                    and (
-                        day_key.day_key(_dt_explore.fromisoformat(str(e.get('ts', '')).replace('Z', '+00:00'))) == _today
-                        if e.get('ts') else False
-                    )
-                )
+
+                def _is_today_explore(event: dict) -> bool:
+                    if event.get('phase') != 'explore_started' or not event.get('ts'):
+                        return False
+                    try:
+                        parsed_ts = _dt_explore.fromisoformat(str(event['ts']).replace('Z', '+00:00'))
+                        return day_key.day_key(parsed_ts) == _today
+                    except Exception:
+                        return False
+
+                _daily_explores = sum(1 for e in read_events(STATE_DIR) if _is_today_explore(e))
                 if _daily_explores >= 1:
                     _explore_n = 1
                 else:

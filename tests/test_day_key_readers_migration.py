@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import gzip
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -151,3 +151,94 @@ def test_default_day_derives_yesterday_in_host_local_calendar():
     narrator_time_msk = datetime(2026, 9, 25, 0, 30, tzinfo=timezone.utc)
     yesterday_narrator = default_day(narrator_time_msk, local_tz=MSK)
     assert yesterday_narrator == "2026-09-24"
+
+
+def test_day_key_treats_all_three_utc_objects_identically_by_value():
+    """day_key decides UTC offset by value, not object identity (tzinfo is timezone.utc).
+    The same instant represented with timezone.utc, ZoneInfo("UTC"), and
+    timezone(timedelta(0), "UTC") MUST produce identical results.
+    """
+    dt_utc1 = datetime(2026, 9, 24, 21, 5, tzinfo=timezone.utc)
+    dt_utc2 = datetime(2026, 9, 24, 21, 5, tzinfo=ZoneInfo("UTC"))
+    dt_utc3 = datetime(2026, 9, 24, 21, 5, tzinfo=timezone(timedelta(0), "UTC"))
+
+    # When local_tz=MSK: 21:05 UTC is 00:05 MSK next day (2026-09-25) across all three
+    res1 = day_key.day_key(dt_utc1, local_tz=MSK)
+    res2 = day_key.day_key(dt_utc2, local_tz=MSK)
+    res3 = day_key.day_key(dt_utc3, local_tz=MSK)
+
+    assert res1 == "2026-09-25"
+    assert res2 == "2026-09-25"
+    assert res3 == "2026-09-25"
+
+    # When local_tz=None: system timezone conversion must also be identical across all three
+    host1 = day_key.day_key(dt_utc1)
+    host2 = day_key.day_key(dt_utc2)
+    host3 = day_key.day_key(dt_utc3)
+
+    assert host1 == host2 == host3
+
+
+def test_archive_day_bounds_regression_on_real_cutover_bounds():
+    """Regression test on exact real-world boundaries on host eeepc:
+    cutover = 2026-09-24T10:03:03Z, MSK (+3h).
+    - 09-23 = [09-23 00:00Z, 09-24 00:00Z) (24h UTC)
+    - 09-24 = [09-24 00:00Z, 09-24 21:00Z) (21h transition day)
+    - 09-25 = [09-24 21:00Z, 09-25 21:00Z) (24h normal MSK day)
+    """
+    cutover = datetime(2026, 9, 24, 10, 3, 3, tzinfo=timezone.utc)
+
+    # Day 09-23: entirely pre-cutover, flat UTC 24h
+    s23, e23 = day_key.archive_day_bounds("2026-09-23", cutover, local_tz=MSK)
+    assert s23.astimezone(timezone.utc) == datetime(2026, 9, 23, 0, 0, tzinfo=timezone.utc)
+    assert e23.astimezone(timezone.utc) == datetime(2026, 9, 24, 0, 0, tzinfo=timezone.utc)
+    assert (e23 - s23).total_seconds() / 3600.0 == 24.0
+
+    # Day 09-24: transition day (00:00Z to 21:00Z, 21.0h)
+    s24, e24 = day_key.archive_day_bounds("2026-09-24", cutover, local_tz=MSK)
+    assert s24.astimezone(timezone.utc) == datetime(2026, 9, 24, 0, 0, tzinfo=timezone.utc)
+    assert e24.astimezone(timezone.utc) == datetime(2026, 9, 24, 21, 0, tzinfo=timezone.utc)
+    assert (e24 - s24).total_seconds() / 3600.0 == 21.0
+
+    # Day 09-25: normal MSK day (00:00 MSK = 21:00Z to 21:00Z, 24.0h)
+    s25, e25 = day_key.archive_day_bounds("2026-09-25", cutover, local_tz=MSK)
+    assert s25.astimezone(timezone.utc) == datetime(2026, 9, 24, 21, 0, tzinfo=timezone.utc)
+    assert e25.astimezone(timezone.utc) == datetime(2026, 9, 25, 21, 0, tzinfo=timezone.utc)
+    assert (e25 - s25).total_seconds() / 3600.0 == 24.0
+
+    # Continuous boundaries with zero gap and zero overlap
+    assert e23 == s24
+    assert e24.astimezone(timezone.utc) == s25.astimezone(timezone.utc)
+
+
+def test_explore_quota_skips_malformed_ts_row_and_continues_counting(tmp_path, monkeypatch):
+    """A row with malformed/missing `ts` must not crash or abort daily explore counting.
+    The bad row is skipped and valid rows continue to be counted.
+    """
+    from datetime import datetime as _dt_explore
+
+    from nanobot.runtime import day_key
+
+    today = day_key.day_key()
+    valid_ts1 = datetime.now().astimezone().isoformat()
+    valid_ts2 = (datetime.now().astimezone() - timedelta(minutes=5)).isoformat()
+
+    test_events = [
+        {"phase": "explore_started", "ts": valid_ts1},
+        {"phase": "explore_started", "ts": "invalid-garbage-timestamp"},
+        {"phase": "explore_started", "ts": None},
+        {"phase": "explore_started"},
+        {"phase": "explore_started", "ts": valid_ts2},
+    ]
+
+    def _is_today_explore(event: dict) -> bool:
+        if event.get("phase") != "explore_started" or not event.get("ts"):
+            return False
+        try:
+            parsed_ts = _dt_explore.fromisoformat(str(event["ts"]).replace("Z", "+00:00"))
+            return day_key.day_key(parsed_ts) == today
+        except Exception:
+            return False
+
+    daily_explores = sum(1 for e in test_events if _is_today_explore(e))
+    assert daily_explores == 2, f"Expected 2 valid explores counted, got {daily_explores}"

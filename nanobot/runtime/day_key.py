@@ -163,12 +163,22 @@ def day_key(now: "datetime | None" = None, *, local_tz: Any = None) -> str:
     through so its own tests can do the same without depending on the
     machine running them. A naive *now* is used as-is (Python's own
     convention: a naive datetime is already "local").
+
+    Timezone offset rule (decided by offset value, never object identity):
+    - Zero-offset datetimes (UTC, regardless of whether represented by
+      timezone.utc, ZoneInfo("UTC"), or timezone(timedelta(0))):
+      converted to *local_tz* if specified, otherwise converted to host-local
+      via astimezone().
+    - Non-zero-offset datetimes: converted to *local_tz* if specified;
+      otherwise formatted as-is (treated as an already-localized moment).
     """
     if now is None:
         moment = datetime.now().astimezone(local_tz)
+    elif now.tzinfo is None:
+        moment = now
     elif local_tz is not None:
-        moment = now.astimezone(local_tz) if now.tzinfo is not None else now
-    elif now.tzinfo is timezone.utc:
+        moment = now.astimezone(local_tz)
+    elif now.utcoffset() == timedelta(0):
         moment = now.astimezone()
     else:
         moment = now
