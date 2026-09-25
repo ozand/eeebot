@@ -3292,9 +3292,17 @@ async def _run_planning_session(
     # here must not stop the session, only leave it without this block.
     try:
         from nanobot.runtime import demand as _demand_mod
+        from nanobot.runtime import llm_proposer as _llm_proposer_mod
         from nanobot.runtime import planner_candidates as _planner_candidates_mod
 
         _planner_candidate_items = _demand_mod.collect_demand(state_dir, selfevo_repo)
+        # ADR-035 rule 2: the proposer's own still-live requests become
+        # candidates too, positioned right after defect items (rule 1's
+        # trust order) -- read-only, no LLM call.
+        _planner_proposer_items = _llm_proposer_mod.proposer_candidate_items(state_dir)
+        _planner_candidate_items = _planner_candidates_mod.merge_proposer_candidates(
+            _planner_candidate_items, _planner_proposer_items,
+        )
         _planner_new_priority_ids = _planner_candidates_mod.mark_new_priority_items(
             state_dir, _planner_candidate_items,
         )
@@ -3747,6 +3755,13 @@ async def _main_impl_body():
             'reason': _prep_fail_reason,
         })
         return 0
+
+    # ADR-035 rest amendment's drain rule (#1942): every queued proposer
+    # request is marked superseded so the old rotation path below never
+    # executes it -- its candidate keeps reaching the planner regardless,
+    # via llm_proposer.proposer_candidate_items. Idempotent and cheap
+    # (a glob + per-file read), safe to call unconditionally every cycle.
+    llm_proposer.drain_queued_proposer_requests(STATE_DIR)
 
     # #733: bulk-skip pre-spawn duplicates in one run. Each iteration pulls
     # the next pending request; a pre-spawn duplicate (tag-first match or

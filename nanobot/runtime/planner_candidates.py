@@ -100,6 +100,33 @@ def mark_new_priority_items(state_dir: "Path", items: list[dict[str, str]]) -> s
     return new_ids
 
 
+def merge_proposer_candidates(
+    items: list[dict[str, str]], proposer_items: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Splice ``proposer_items`` (kind ``"proposer"``,
+    :func:`nanobot.runtime.llm_proposer.proposer_candidate_items`) into
+    ``items`` (:func:`nanobot.runtime.demand.collect_demand`'s own output)
+    at the position ADR-035 rule 1's trust order puts them: right after the
+    contiguous run of ``kind == "defect"`` items (which always sit
+    immediately after ``priority`` items in ``collect_demand``'s own
+    ordering), before goal-gap and everything else. If there are no defect
+    items, they go right after any priority items instead; if there are
+    neither, at the front.
+
+    ``items`` itself is never reordered -- only where the proposer's items
+    are inserted is decided here.
+    """
+    if not proposer_items:
+        return list(items)
+    insert_at = 0
+    for idx, item in enumerate(items):
+        if item.get("kind") in ("priority", "defect"):
+            insert_at = idx + 1
+        else:
+            break
+    return items[:insert_at] + list(proposer_items) + items[insert_at:]
+
+
 def render_candidates_block(
     items: list[dict[str, str]], new_priority_ids: "set[str] | None" = None, *, limit: int = 20,
 ) -> str:
