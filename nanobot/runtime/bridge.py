@@ -3732,16 +3732,16 @@ async def _main_impl_body():
         print(f'bridge: rest pre-check held ({_precheck_reason}); no session, no repository preparation')
         return 0
 
-    # #680 defense-in-depth, relocated here by the ADR-035 rest amendment
-    # follow-up (#1942): repository preparation now runs exactly ONCE per
-    # started cycle. The in-loop precondition re-check and its own
-    # staged-promotions/pending-push calls further down this function were
-    # REMOVED, not left as a redundant safety net -- a second
-    # `_restore_to_main` inside the bulk-skip loop is not harmless: it can
-    # wipe whatever this call already did between the two invocations,
-    # exactly the "the bridge resets curator outputs" defect class this
-    # single-call-site ordering exists to keep closed (see
-    # test_repo_preparation_preserves_staged_and_pending).
+    # #680 defense-in-depth (ADR-035 rest amendment, #1964): repository
+    # preparation now runs exactly ONCE per started cycle, here, before any
+    # request is even selected -- see `_prepare_repository_for_cycle`. This
+    # is what a stray branch/dirty tree left by a PRIOR bridge invocation
+    # gets cleaned up by, before anything (dedup checks, the opening diary
+    # entry) assumes the checkout is on a clean `main`. `_write_diary_open_entry`
+    # below does not itself checkout main -- it commits+pushes to whatever
+    # is checked out, so a stray branch here would silently land the diary
+    # commit off `main` (the "later work discarded" hazard the old in-loop
+    # precondition-check's own comment named).
     #
     # If the checkout still cannot be repaired, no request has been looked
     # up yet -- there is no request to attribute a "blocked" result to, and
@@ -4204,6 +4204,20 @@ async def _main_impl_body():
     async def _evaluate_candidate(cand_cycle_id: str, do_integration: bool, meas_metric: str = "") -> dict:
         _cycle_id = cand_cycle_id
         _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
+        # A second, targeted _restore_to_main -- NOT a full
+        # _prepare_repository_for_cycle repeat (#1942 follow-up on the ADR-035
+        # rest amendment). Between the top-level prep call and here, the
+        # bulk-skip loop's "no request found" branch may have called
+        # llm_proposer.maybe_propose(), which fail-open-writes an UNCOMMITTED
+        # docs/SYSTEM_MAP.md into this same checkout "regardless of the
+        # kill-switch... every cycle" (llm_proposer.py's own docstring) --
+        # exactly the dirty tree _setup_cycle_branch below refuses to branch
+        # from. Nothing legitimate is left uncommitted at this point (the
+        # opening diary entry above already committed AND pushed), so
+        # discarding whatever is here is safe -- this is not the "second
+        # restore wipes curator work" hazard the single-call-site ordering
+        # in _prepare_repository_for_cycle guards against.
+        _restore_to_main(_selfevo_repo, STATE_DIR)
         # _cycle_id was already resolved up front (right after request_id, before
         # the write-ahead ledger marker) — reused here unchanged.
         _cycle_setup = _setup_cycle_branch(_selfevo_repo, _cycle_id, STATE_DIR)
