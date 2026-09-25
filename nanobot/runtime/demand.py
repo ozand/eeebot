@@ -169,6 +169,7 @@ from nanobot.runtime.operator_documents import (
     resolve_operator_priority_numbers,
 )
 from nanobot.runtime.schemas import QUALIFYING_ARTIFACT_DIRS
+from nanobot.runtime.service_paths import is_service_only
 from nanobot.runtime.state_access import Window, artifacts, evidence_status, ledger_window
 
 logger = logging.getLogger(__name__)
@@ -561,6 +562,8 @@ def integration_class_counts(
         if event_ts is None or event_ts < cutoff:
             continue
         files = event.get("files_changed")
+        if is_service_only(files if isinstance(files, list) else []):
+            continue
         cls = classify_integration_class(files if isinstance(files, list) else [])
         counts[cls.replace("-", "_")] += 1
         total += 1
@@ -580,7 +583,7 @@ def count_doc_only_integrations_24h(state_dir: Path, now: datetime | None = None
     window = ledger_window(Path(state_dir), since_ts=_iso(now - timedelta(hours=24)), phases=frozenset({"outcome"}))
     count = 0
     for event in window.rows:
-        if event.get("outcome") != "success":
+        if event.get("outcome") != "success" or is_service_only(event.get("files_changed")):
             continue
         event_ts = _parse_ts(event.get("ts"))
         if event_ts is None or event_ts < now - timedelta(hours=24):
@@ -2371,6 +2374,7 @@ def _repair_skill_counts(
             elif (
                 phase == "outcome"
                 and str(row.get("outcome") or "").strip().lower() == "success"
+                and not is_service_only(row.get("files_changed"))
                 and cycle_id in cycle_proposed
             ):
                 d_id = cycle_proposed[cycle_id]
@@ -2680,7 +2684,6 @@ def _fold_completed(
                 # cycle that did the work) — folds into completed the same as
                 # 'success' so the demand is not re-proposed as unfinished.
                 if str(row.get("outcome") or "").strip().lower() in ("success", "pushed_late"):
-                    from nanobot.runtime.service_paths import is_service_only
                     if not is_service_only(row.get("files_changed")):
                         success_by_cycle[cycle_id] = row
         changed = False

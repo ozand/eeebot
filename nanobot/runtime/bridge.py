@@ -4163,6 +4163,7 @@ async def _main_impl_body():
         _cycle_tier = 'script'  # #812: 'script' | 'runtime' (set by surface classify below)
         _integrated = False
         _delivered = False
+        _service_only = False
         _rollback_reason: 'str | None' = None
         # #678 F1/F3: mutation-surface / blocked-pattern violations across ALL cycle
         # commits (not just the auto-commit fallback) — populated below once
@@ -4934,8 +4935,9 @@ async def _main_impl_body():
                                     except Exception: pass
                             if _integ['ok']:
                                 _integrated = True
-                                from nanobot.runtime.service_paths import is_service_only as _is_service_only_branch
-                                _delivered = not _is_service_only_branch(files_changed)
+                                from nanobot.runtime.service_paths import is_delivered as _is_delivered
+                                _delivered = _is_delivered(True, files_changed)
+                                _service_only = not _delivered
                                 try:
                                     from nanobot.runtime import archive as _archive_mod
                                     _archive_mod.record_stepping_stone(
@@ -5473,6 +5475,8 @@ async def _main_impl_body():
     if _cycle_outcome in ('partial', 'failed') and not _rollback_reason:
         if _executor_reported_skipped(STATE_DIR, _subagent_task_id):
             _verdict_reason_hint = 'executor_reported_skipped'
+    if _service_only:
+        _verdict_reason_hint = 'service_only'
     _verdict, _verdict_reason = _derive_cycle_verdict(_cycle_outcome, _verdict_reason_hint)
     try:
         from nanobot import crash_record as _run_record
@@ -6075,9 +6079,9 @@ _REJECT_REASONS = frozenset({
 # result — always 'inconclusive', never upgraded to accept/reject even when
 # they co-occur with an otherwise-terminal outcome.
 _INCONCLUSIVE_REASONS = frozenset({
-    'gate_failed', 'mutation_surface_violation', 'blocked_file_present', 'service_only',
+    'gate_failed', 'mutation_surface_violation', 'blocked_file_present',
     'out_of_band_main_detected', 'switch_base_gate_error',
-    'switch_base_gate_blocked', 'head_on_main_precondition_failed',
+    'switch_base_gate_blocked', 'head_on_main_precondition_failed', 'service_only',
     'no_commit', 'internal_error', 'executor_llm_error',
     # #1765: a supplier outage is infra trouble by definition — never
     # upgraded to accept/reject.

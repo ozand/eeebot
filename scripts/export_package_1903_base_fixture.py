@@ -1,70 +1,83 @@
 #!/usr/bin/env python3
-"""Export the immutable pre-registered 2026-09-21 Rule-C base fixture."""
+"""Read-only host exporter for the 2026-09-21 Rule-C base fixture."""
 from __future__ import annotations
+import gzip, json, pathlib, subprocess, sys
+from nanobot.runtime.service_paths import is_service_only
 
-import base64
-import json
-import subprocess
-from pathlib import Path
 
-HOST = "ozand@eeepc-lan"
-REMOTE = r'''
-import datetime, gzip, json, pathlib, subprocess
-root=pathlib.Path("/var/lib/eeepc-agent/self-evolving-agent")
-state=root/"state"; repo=root/"eeebot-self-evolving"
-cut=datetime.datetime.fromisoformat("2026-09-24T23:37:48+00:00")
-rows=[]
-for lp in sorted((state/"ledger").glob("cycles-*.jsonl.gz")):
- with gzip.open(lp, "rt") as f:
-  for line in f:
-   try: rows.append(json.loads(line))
-   except: pass
-active=state/"ledger/cycles.jsonl"
-if active.exists():
- for line in active.read_text().splitlines():
-  try: rows.append(json.loads(line))
-  except: pass
-starts={}; outcomes={}
-for r in rows:
- c=r.get("cycle_id"); t=r.get("ts")
- if not c or not t: continue
- if r.get("phase")=="started": starts[c]=min(starts.get(c,t),t)
- if r.get("phase")=="outcome" and (c not in outcomes or t>outcomes[c].get("ts","")): outcomes[c]=r
-base=[c for c,t in starts.items() if "2026-09-21T00:00:00"<=t<"2026-09-22T00:00:00"]
-first={}
-for line in (state/"llm_calls/2026-09-21.jsonl").read_text().splitlines():
- try:r=json.loads(line)
- except:continue
- if r.get("component")=="executor" and r.get("cycle_id"):
-  c=r["cycle_id"]; first[c]=min(first.get(c,r["ts"]),r["ts"])
-first24=sorted((c for c in base if c in first),key=lambda c:first[c])[:24]
-assert len(base)==42 and len(first24)==24
-assert all(datetime.datetime.fromisoformat(starts[c].replace("Z","+00:00"))<cut for c in base), "window cycle in base export"
-accepted={c for c in base if outcomes.get(c,{}).get("outcome")=="success" and outcomes[c].get("verdict")=="accept"}
-log=subprocess.run(["git","-C",str(repo),"log","origin/main","--first-parent","--format=%H%x09%s"],capture_output=True,text=True,check=True).stdout
-merges={}
-for line in log.splitlines():
- sha,_,s=line.partition("	"); prefix="merge: integrate selfevo/cycle-"
- if s.startswith(prefix):
-  c=s[len(prefix):].strip()
-  if c in accepted and c not in merges:merges[c]=sha
-files={}
-for c,sha in merges.items():
- ps=subprocess.run(["git","-C",str(repo),"diff","--name-only",f"{sha}^1",f"{sha}^2"],capture_output=True,text=True,check=True).stdout.splitlines()
- assert all(not p.startswith("/") and ".." not in pathlib.PurePosixPath(p).parts for p in ps)
- files[c]=ps
-order=first24+[c for c in sorted(base) if c not in first24]
-print(json.dumps([{"cycle_id":c,"outcome":outcomes[c].get("outcome"),"verdict":outcomes[c].get("verdict"),"branch_files":files.get(c,[])} for c in order if c in outcomes],separators=(",",":")))
-'''
+ROOT = pathlib.Path('/var/lib/eeepc-agent/self-evolving-agent')
+WINDOW_START = '2026-09-24T23:37:48Z'
+WINDOW_START_DT = __import__("datetime").datetime.fromisoformat(WINDOW_START.replace("Z", "+00:00"))
+
+def before_window(first_start: str) -> bool:
+    from datetime import datetime
+    return datetime.fromisoformat(first_start.replace("Z", "+00:00")) < WINDOW_START_DT
+
+def require_pre_window(first_start: str) -> None:
+    if not before_window(first_start):
+        raise SystemExit('post-window first start found in base cohort')
 
 def main() -> None:
-    payload = base64.b64encode(REMOTE.encode()).decode()
-    remote_cmd = "sudo -n -u eeepc-agent python3 -c 'import base64;exec(base64.b64decode(\"" + payload + "\"))'"
-    raw = subprocess.run(["ssh", HOST, remote_cmd], check=False, text=True, capture_output=True)
-    if raw.returncode:
-        raise RuntimeError(f"read-only export failed ({raw.returncode}): {raw.stderr[-500:]}")
-    rows = json.loads(raw.stdout)
-    assert len(rows) >= 42 and all(set(r) == {"cycle_id", "outcome", "verdict", "branch_files"} for r in rows)
-    (Path(__file__).parent.parent / "tests/fixtures/package_1903_base_2026-09-21.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+    state, repo = ROOT / 'state', ROOT / 'eeebot-self-evolving'
+    rows = []
+    for path in sorted((state / 'ledger').glob('cycles-*.jsonl.gz')):
+        with gzip.open(path, 'rt') as stream:
+            for line in stream:
+                try: rows.append(json.loads(line))
+                except Exception: pass
+    active = state / 'ledger/cycles.jsonl'
+    if active.exists():
+        for line in active.read_text().splitlines():
+            try: rows.append(json.loads(line))
+            except Exception: pass
+    starts, outcomes = {}, {}
+    for row in rows:
+        cid, ts = row.get('cycle_id'), row.get('ts')
+        if not cid or not ts: continue
+        if row.get('phase') == 'started': starts[cid] = min(starts.get(cid, ts), ts)
+        if row.get('phase') == 'outcome' and (cid not in outcomes or ts > outcomes[cid].get('ts', '')):
+            outcomes[cid] = row
+    base = [cid for cid, ts in starts.items() if '2026-09-21T00:00:00' <= ts < '2026-09-22T00:00:00']
+    for cid in base:
+        require_pre_window(starts[cid])
+    calls = {}
+    for line in (state / 'llm_calls/2026-09-21.jsonl').read_text().splitlines():
+        try: row = json.loads(line)
+        except Exception: continue
+        if row.get('component') == 'executor' and row.get('cycle_id'):
+            cid = row['cycle_id']; calls[cid] = min(calls.get(cid, row['ts']), row['ts'])
+    first24 = sorted((cid for cid in base if cid in calls), key=lambda cid: calls[cid])[:24]
+    if len(base) != 42 or len(first24) != 24: raise SystemExit('base selection count mismatch')
+    accepted = {cid for cid in base if outcomes.get(cid, {}).get('outcome') == 'success' and outcomes[cid].get('verdict') == 'accept'}
+    log = subprocess.run(['git', '-C', str(repo), 'log', 'origin/main', '--first-parent', '--format=%H%x09%s'], check=True, capture_output=True, text=True).stdout
+    merges = {}
+    prefix = 'merge: integrate selfevo/cycle-'
+    for line in log.splitlines():
+        sha, _, subject = line.partition('\t')
+        if subject.startswith(prefix):
+            cid = subject[len(prefix):].strip()
+            if cid in accepted and cid not in merges: merges[cid] = sha
+    files = {}
+    for cid, sha in merges.items():
+        names = subprocess.run(['git', '-C', str(repo), 'diff', '--name-only', f'{sha}^1', f'{sha}^2'], check=True, capture_output=True, text=True).stdout.splitlines()
+        if any(path.startswith('/') or '..' in pathlib.PurePosixPath(path).parts for path in names): raise SystemExit('diff path outside instance repository')
+        files[cid] = names
+    order = first24 + [cid for cid in sorted(base) if cid not in first24]
+    export = [{'cycle_id': cid, 'outcome': outcomes.get(cid, {}).get('outcome'), 'verdict': outcomes.get(cid, {}).get('verdict'), 'branch_files': files.get(cid, [])} for cid in order]
+    selected24 = set(first24)
+    for group, selected in ((base, set(base)), (first24, selected24)):
+        successes = [cid for cid in selected if outcomes.get(cid, {}).get('outcome') == 'success' and outcomes[cid].get('verdict') == 'accept']
+        excluded = sum(is_service_only(files.get(cid)) for cid in successes)
+        if len(successes) - excluded != (15 if len(selected) == 42 else 14):
+            raise SystemExit('rule-C baseline count mismatch')
+    print(json.dumps(export, indent=2))
 
-if __name__ == "__main__": main()
+if __name__ == '__main__':
+    if '--check-boundary' in sys.argv:
+        try:
+            require_pre_window(WINDOW_START)
+        except SystemExit:
+            print('PASS: synthetic first start at cutoff rejected')
+            raise SystemExit(0)
+        raise SystemExit('FAIL: cutoff accepted')
+    main()

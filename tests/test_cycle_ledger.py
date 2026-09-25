@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from nanobot.runtime import bridge, cycle_ledger, llm_proposer, state_access
+from nanobot.runtime.service_paths import is_delivered
 
 
 def _read_ledger(state_dir: Path) -> list[dict]:
@@ -27,6 +28,29 @@ def _read_ledger(state_dir: Path) -> list[dict]:
         return []
     lines = path.read_text(encoding="utf-8").splitlines()
     return [json.loads(line) for line in lines if line.strip()]
+
+
+class TestRuleCDelivery:
+    def test_git_integration_and_delivery_are_separate(self):
+        service = ["diary/2026-09-21.md", "memory/MEMORY.md"]
+        mixed = [*service, "scripts/feature.py"]
+        assert is_delivered(True, service) is False
+        assert is_delivered(True, mixed) is True
+        assert is_delivered(False, mixed) is False
+
+    def test_service_only_ledger_contract_is_partial_inconclusive_and_not_real(self, tmp_path):
+        inputs = bridge._real_result_ledger_inputs("blocked")
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "cycle-service", "partial", "service_only", [
+                "diary/2026-09-21.md", "memory/MEMORY.md",
+            ], "selfevo/cycle-service", verdict="inconclusive",
+            verdict_reason="service_only", real_result=inputs,
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert (row["outcome"], row["verdict"], row["reason"], row["verdict_reason"]) == (
+            "partial", "inconclusive", "service_only", "service_only",
+        )
+        assert row["real_result"]["is_real_result"] is False
 
 
 # ─── append_event / round-trip ────────────────────────────────────────────────

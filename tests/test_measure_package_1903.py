@@ -133,12 +133,12 @@ def test_base_fixture_recomputes_published_rule_c_counts():
     assert len(rows) == 42
     assert all(set(row) == {"cycle_id", "outcome", "verdict", "branch_files"} for row in rows)
     assert all(not path.startswith("/") and ".." not in Path(path).parts for row in rows for path in row["branch_files"])
-    first_24_ids = [row["cycle_id"] for row in rows[:24]]
-    first_24 = [row for row in rows if row["cycle_id"] in set(first_24_ids)]
+    from nanobot.runtime.service_paths import is_service_only
     rule_c_count = lambda selected: sum(
         row["outcome"] == "success" and row["verdict"] == "accept"
-        and not m.is_service_only(row["branch_files"]) for row in selected
+        and not is_service_only(row["branch_files"]) for row in selected
     )
+    first_24 = rows[:24]
     assert rule_c_count(rows) == 15
     assert rule_c_count(first_24) == 14
 

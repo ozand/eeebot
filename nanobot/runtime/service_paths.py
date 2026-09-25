@@ -20,3 +20,8 @@ def is_service_path(path: str) -> bool:
 def is_service_only(files: list[str] | None) -> bool:
     """Whether a non-empty changed-file list contains only service paths."""
     return bool(files) and all(is_service_path(path) for path in files)
+
+
+def is_delivered(integrated: bool, files: list[str] | None) -> bool:
+    """Rule-C delivery signal; git integration and delivered work are distinct."""
+    return bool(integrated and not is_service_only(files))
