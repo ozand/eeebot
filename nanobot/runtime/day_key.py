@@ -7,9 +7,9 @@ calendar-day key from the HOST's LOCAL wall clock, replacing the ad-hoc
 Not the same concept as :mod:`nanobot.runtime.day_clock`: that module's
 ``DAY_BOUNDARY_HOUR_UTC`` is ADR-026's deliberately-UTC "day is a cycle"
 boundary (deep sleep, day actions) and is explicitly out of scope for this
-migration. :mod:`nanobot.runtime.day_diary` has its own known bug
-(``day_diary._today()``, tracked separately as #1877) -- do not migrate it
-from here; a different pane owns that fix.
+migration. :mod:`nanobot.runtime.day_diary` writer (:func:`day_diary._today`) and its
+paired reader (:func:`diary_fitness._today`) migrated to :func:`day_key` in
+#1958.
 
 Step 1 shipped :func:`day_key` / :func:`local_offset` / :func:`is_transition_day`
 / :func:`transition_day_hours` -- no caller migrated yet.
