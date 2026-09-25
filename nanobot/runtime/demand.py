@@ -2680,7 +2680,9 @@ def _fold_completed(
                 # cycle that did the work) — folds into completed the same as
                 # 'success' so the demand is not re-proposed as unfinished.
                 if str(row.get("outcome") or "").strip().lower() in ("success", "pushed_late"):
-                    success_by_cycle[cycle_id] = row
+                    from nanobot.runtime.service_paths import is_service_only
+                    if not is_service_only(row.get("files_changed")):
+                        success_by_cycle[cycle_id] = row
         changed = False
         for cycle_id in fallback_cycles:
             if cycle_id not in success_by_cycle:

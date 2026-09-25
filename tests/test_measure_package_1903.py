@@ -128,6 +128,21 @@ def test_summary_matches_manual_count(tmp_path):
     assert summary["usage_confirmed_count"] == 1
 
 
+def test_base_fixture_recomputes_published_rule_c_counts():
+    rows = json.loads((Path(__file__).parent / "fixtures/package_1903_base_2026-09-21.json").read_text())
+    assert len(rows) == 42
+    assert all(set(row) == {"cycle_id", "outcome", "verdict", "branch_files"} for row in rows)
+    assert all(not path.startswith("/") and ".." not in Path(path).parts for row in rows for path in row["branch_files"])
+    first_24_ids = [row["cycle_id"] for row in rows[:24]]
+    first_24 = [row for row in rows if row["cycle_id"] in set(first_24_ids)]
+    rule_c_count = lambda selected: sum(
+        row["outcome"] == "success" and row["verdict"] == "accept"
+        and not m.is_service_only(row["branch_files"]) for row in selected
+    )
+    assert rule_c_count(rows) == 15
+    assert rule_c_count(first_24) == 14
+
+
 def test_service_paths_follow_the_published_rule_c_set():
     assert m.is_service_path("diary/2026-09-24.md")
     assert m.is_service_path("memory/HISTORY.md")
