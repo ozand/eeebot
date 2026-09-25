@@ -132,6 +132,17 @@ Infrastructure recovery — model endpoint, deploy rollback, unit health — is 
 cycle's work and never waited on a plan; it stays with the harness processes that
 own it today.
 
+**The plan is appended, never overwritten.** Each session's plan is a new dated
+entry in the diary, with the cycle id, above the previous one. Today's writer
+replaces a single plan block, so the history of plans is lost and a planner learns
+that it "named the same follow-up twice" only by reading commits (diary
+2026-09-25). The insight of rule 3 needs the previous plan to exist.
+
+**The plan carries its own size.** It states the forecast iterations for the
+increment, and the harness records the actual count beside it (ADR-031 rule 3).
+A forecast far below the box is visible to the next session as a sizing datum,
+not only to the operator.
+
 ### 2. The proposer offers, it does not assign
 
 The proposer's output becomes candidates in the ranked list. It keeps its
@@ -143,7 +154,10 @@ name the cycle's task.
 - **H — the planning session writes it.** Each increment carries one hypothesis in
   ADR-030's form: what will become true, the measure, and what result would refute
   it. The harness stores it in `state/hypotheses/` with a stable id; the
-  hypothesis entry is instance-written, as today.
+  hypothesis entry is instance-written, as today. A statement without a measure
+  and a refutation condition is not a hypothesis and is rejected at parse time —
+  the plans of 2026-09-25 carried implementation assumptions ("hunk headers are
+  sufficient to compute ranges") that no verdict can ever settle.
 - **A — the executor.** It works the plan and writes intent to the diary at the
   start, as ADR-028 says, not a result report.
 - **D — the harness.** Unchanged: verdicts come from sidecars the instance cannot
@@ -193,14 +207,26 @@ tell whether choosing helped (ADR-032 consequence).
 Each role that loses authority is mapped by what it produces and who reads it, so
 no reader is left with a healthy-looking empty input.
 
+Re-checked against every live reader in #1941 (B1 census, 2026-09-25): runtime,
+both dashboard generators (`scripts/eeebot_dashboard.py` on the host and
+`eeebot-ops-dashboard/scripts/techtree_viewer.py`) and host units.
+
 | role | output today | live readers | after this record |
 |---|---|---|---|
-| goal review as priority writer | new entries in `derived_priorities.json` | `demand._priority_items`, `llm_proposer`, bridge mission merge, `health.py:383` | **dropped** — no new entries; the existing ten stay readable as `source: derived, legacy` candidates until each is done or the planner drops it; `health.py` reports the frozen count, not a growing depth |
-| goal review as evidence reader | supported hypotheses → priority candidates | goal review itself | **superseded** by rule 3: the planner reads verdicts directly |
-| reflector demand items | `reflection`/instruction-change demand | `demand` | **superseded** — findings go to lessons and the diary, which the planner reads |
-| rotation selector | the cycle's one item | proposer | **superseded** by the planner's choice; ranking (ADR-027) orders the list the planner sees |
-| proposer task text | "Implement and commit: X" | executor | **dropped** |
-| day judge verdict | `state/day_verdict/` | none | **gains its reader**: the planner and the dashboard |
+| goal review as priority writer | new entries in `derived_priorities.json` | `demand._priority_items`, `llm_proposer` goal context, bridge mission block, `health.py:383`, `eeebot_dashboard.py`, `techtree_viewer.py` derived view, `about_page.py` | **dropped** — no new entries; the existing ten stay readable as `source: derived, legacy` candidates until each is done or the planner drops it. `health.py` and both dashboards show the state `frozen` and the count, never a depth against a limit. These readers change in the same release as the writer stops, or the freeze looks like a healthy queue that went quiet |
+| goal review as evidence reader | supported hypotheses → priority candidates | goal review itself; `tech_tree.py` and `scorecard.py` read supported hypotheses for tech-tree nodes | **superseded** by rule 3 for the goal review; the tech-tree readers are unaffected and stay. `demand._hypothesis_items` gains the three-state rule: a missing lifecycle file is `unavailable`, not zero hypotheses |
+| reflector demand items | `reflection`/instruction-change demand | `demand`, `llm_proposer` candidate join | **superseded** — findings go to lessons and the diary, which the planner reads. **Kept:** the reflection-context hints (`reflection_context.py`) and the knowledge curator's reading of the journals; only the demand lane closes. The dashboard's cycle-detail join labels reflection as `informational` rather than rendering an empty list |
+| rotation selector | the cycle's one item | `llm_proposer` stamps it; ops dashboard renders served times | **superseded** by the planner's choice; ranking (ADR-027) orders the list the planner sees. The dashboard labels the served map `retired (ADR-035)` from the switch-over, so its stale times are not read as recent selection |
+| proposer task text | "Implement and commit: X" into `improvements/` requests | executor via `bridge.py`; dashboard proposer panel; `loop_metrics_report.py` | **dropped**. **Drain rule:** at the switch-over every queued proposer request is marked `superseded (ADR-035)` and never executed; its candidate re-enters the ranked list. The proposer panel keeps its history and shows `authority: candidates only` from the switch-over |
+| day judge verdict | `state/day_verdict/` | none today (writer runs at 03:00; no runtime, dashboard or unit reader) | **gains its readers** in this record's implementation: the planner (rule 1) and the dashboard. Until they land, the absence of a reader is a known void recorded here, not a healthy state |
+
+**Rates whose meaning changes.** Per-cycle rates computed over the proposer's
+cycle population change denominator when planner-first cycles and `no_plan`
+arrive: `scorecard.py` (terminal cycles, hypothesis selection rate, idle share),
+`judge_daily_movement.py` (total attempts, productive ratio, appearance cycles),
+`loop_metrics_report.py` (spawn, gate and integration rates), and the rate panels
+of both dashboards. Each carries a version boundary at the switch-over; values are
+never compared across it without recalculation on one definition.
 
 A reader whose input is dropped must say so (ADR-034 rule 3), never read the
 absence as "nothing to do". The frozen `derived_priorities.json` is labelled
@@ -269,6 +295,12 @@ actor that has both.
 | Revise creates a linked version; the original measure and verdict are unchanged; drop keeps the refutation | `tests/test_agent_chooses.py::test_revise_and_drop_preserve_evidence` | not written |
 | The executor may amend the plan with a recorded reason; the amendment is attributed | `tests/test_agent_chooses.py::test_executor_plan_amendment_is_attributed` | not written |
 | Every decommissioned output leaves its readers reporting the change, not an empty healthy input | `tests/test_agent_chooses.py::test_decommissioned_outputs_leave_no_healthy_void` | not written |
+| Each plan is a new dated diary entry; earlier plans survive | `tests/test_agent_chooses.py::test_plans_are_appended_not_overwritten` | not written |
+| The plan's forecast iterations and the actual count are both recorded | `tests/test_agent_chooses.py::test_plan_forecast_and_actual_recorded` | not written |
+| A hypothesis without measure and refutation condition is rejected at parse time | `tests/test_agent_chooses.py::test_hypothesis_without_refutation_is_rejected` | not written |
+| At switch-over queued proposer requests are marked superseded and never executed | `tests/test_agent_chooses.py::test_queued_proposer_requests_drained_at_switchover` | not written |
+| Frozen derived priorities show as `frozen` in health and both dashboards | `tests/test_agent_chooses.py::test_frozen_derived_is_labelled_everywhere` | not written |
+| Rate readers carry a version boundary at the switch-over | `tests/test_agent_chooses.py::test_rate_readers_carry_switchover_boundary` | not written |
 
 # References
 
