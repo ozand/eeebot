@@ -7,16 +7,19 @@ Covers:
 - Transition day (cutover 2026-09-24T10:03:03Z) does not split a local day into
   two diary files.
 - Integration between day_diary writer and diary_fitness reader.
+- Seam verification: explicit local_tz (UTC vs Europe/Moscow) behaves identically
+  on local development machines and UTC/MSK CI runners.
 """
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from nanobot.runtime import day_diary, diary_fitness
 from nanobot.runtime.day_key import CUTOVER_UTC
 
-MSK = timezone(timedelta(hours=3))
+MSK = ZoneInfo("Europe/Moscow")
 
 
 def test_early_morning_msk_boundary_agreement():
@@ -28,18 +31,18 @@ def test_early_morning_msk_boundary_agreement():
     dt_msk = datetime(2026, 9, 25, 1, 30, tzinfo=MSK)
     dt_utc = datetime(2026, 9, 24, 22, 30, tzinfo=timezone.utc)
 
-    # 1. Day derivation agreement
-    assert day_diary._today(dt_msk) == date(2026, 9, 25)
-    assert day_diary._today(dt_utc) == date(2026, 9, 25)
-    assert diary_fitness._today(dt_msk) == "2026-09-25"
-    assert diary_fitness._today(dt_utc) == "2026-09-25"
+    # 1. Day derivation agreement (via explicit local_tz=MSK seam)
+    assert day_diary._today(dt_msk, local_tz=MSK) == date(2026, 9, 25)
+    assert day_diary._today(dt_utc, local_tz=MSK) == date(2026, 9, 25)
+    assert diary_fitness._today(dt_msk, local_tz=MSK) == "2026-09-25"
+    assert diary_fitness._today(dt_utc, local_tz=MSK) == "2026-09-25"
 
     # 2. File relpath and content header agreement
     expected_path = "diary/2026-09-25.md"
-    assert day_diary.diary_relpath(now=dt_msk) == expected_path
-    assert day_diary.diary_relpath(now=dt_utc) == expected_path
-    assert day_diary.new_day_file(now=dt_msk).startswith("# Diary — 2026-09-25\n\n")
-    assert day_diary.new_day_file(now=dt_utc).startswith("# Diary — 2026-09-25\n\n")
+    assert day_diary.diary_relpath(now=dt_msk, local_tz=MSK) == expected_path
+    assert day_diary.diary_relpath(now=dt_utc, local_tz=MSK) == expected_path
+    assert day_diary.new_day_file(now=dt_msk, local_tz=MSK).startswith("# Diary — 2026-09-25\n\n")
+    assert day_diary.new_day_file(now=dt_utc, local_tz=MSK).startswith("# Diary — 2026-09-25\n\n")
 
 
 def test_late_evening_msk_boundary_agreement():
@@ -47,10 +50,12 @@ def test_late_evening_msk_boundary_agreement():
     dt_msk = datetime(2026, 9, 25, 23, 30, tzinfo=MSK)
     dt_utc = datetime(2026, 9, 25, 20, 30, tzinfo=timezone.utc)
 
-    assert day_diary._today(dt_msk) == date(2026, 9, 25)
-    assert diary_fitness._today(dt_msk) == "2026-09-25"
-    assert day_diary.diary_relpath(now=dt_msk) == "diary/2026-09-25.md"
-    assert day_diary.diary_relpath(now=dt_utc) == "diary/2026-09-25.md"
+    assert day_diary._today(dt_msk, local_tz=MSK) == date(2026, 9, 25)
+    assert day_diary._today(dt_utc, local_tz=MSK) == date(2026, 9, 25)
+    assert diary_fitness._today(dt_msk, local_tz=MSK) == "2026-09-25"
+    assert diary_fitness._today(dt_utc, local_tz=MSK) == "2026-09-25"
+    assert day_diary.diary_relpath(now=dt_msk, local_tz=MSK) == "diary/2026-09-25.md"
+    assert day_diary.diary_relpath(now=dt_utc, local_tz=MSK) == "diary/2026-09-25.md"
 
 
 def test_boundary_sweep_across_midnight_msk():
@@ -61,9 +66,9 @@ def test_boundary_sweep_across_midnight_msk():
         expected_date = "2026-09-24" if minute < 10 else "2026-09-25"
         expected_file = f"diary/{expected_date}.md"
 
-        assert day_diary._today(dt).isoformat() == expected_date
-        assert diary_fitness._today(dt) == expected_date
-        assert day_diary.diary_relpath(now=dt) == expected_file
+        assert day_diary._today(dt, local_tz=MSK).isoformat() == expected_date
+        assert diary_fitness._today(dt, local_tz=MSK) == expected_date
+        assert day_diary.diary_relpath(now=dt, local_tz=MSK) == expected_file
 
 
 def test_transition_day_does_not_split_local_day():
@@ -83,10 +88,10 @@ def test_transition_day_does_not_split_local_day():
         datetime(2026, 9, 24, 20, 50, tzinfo=timezone.utc),  # 23:50 MSK (post-cutover late night)
     ]
     for ts in sample_timestamps:
-        assert day_diary._today(ts) == date(2026, 9, 24)
-        assert diary_fitness._today(ts) == "2026-09-24"
-        assert day_diary.diary_relpath(now=ts) == "diary/2026-09-24.md"
-        assert day_diary.new_day_file(now=ts).startswith("# Diary — 2026-09-24\n\n")
+        assert day_diary._today(ts, local_tz=MSK) == date(2026, 9, 24)
+        assert diary_fitness._today(ts, local_tz=MSK) == "2026-09-24"
+        assert day_diary.diary_relpath(now=ts, local_tz=MSK) == "diary/2026-09-24.md"
+        assert day_diary.new_day_file(now=ts, local_tz=MSK).startswith("# Diary — 2026-09-24\n\n")
 
 
 def test_record_cycle_diary_read_matches_day_diary_relpath(tmp_path: Path):
@@ -97,11 +102,11 @@ def test_record_cycle_diary_read_matches_day_diary_relpath(tmp_path: Path):
     state_dir = tmp_path / "state"
 
     # Simulated cycle actions:
-    written_path = day_diary.diary_relpath(now=cycle_time)
+    written_path = day_diary.diary_relpath(now=cycle_time, local_tz=MSK)
     assert written_path == "diary/2026-09-25.md"
 
     # Instrument read of today's diary
-    day_read = day_diary._today(now=cycle_time).isoformat()
+    day_read = day_diary._today(now=cycle_time, local_tz=MSK).isoformat()
     reads = [{"day": day_read, "position": 2}]
 
     row = diary_fitness.record_cycle_diary_read(
@@ -110,6 +115,7 @@ def test_record_cycle_diary_read_matches_day_diary_relpath(tmp_path: Path):
         reads=reads,
         wrote=True,
         now=cycle_time,
+        local_tz=MSK,
     )
 
     assert row["diary_read"] is True
@@ -127,3 +133,15 @@ def test_diary_relpath_and_new_day_file_accept_str_and_date():
     assert day_diary.diary_relpath(d_str) == "diary/2026-09-25.md"
     assert day_diary.new_day_file(d_obj).startswith("# Diary — 2026-09-25\n\n")
     assert day_diary.new_day_file(d_str).startswith("# Diary — 2026-09-25\n\n")
+
+
+def test_tz_seam_respects_explicit_timezone():
+    """Verify that the seam respects the explicit local_tz passed in,
+    handling UTC runner environments identically to host MSK environments.
+    """
+    # 22:30 UTC on Sep 24 is Sep 24 in UTC, but Sep 25 in MSK (+3)
+    dt_utc = datetime(2026, 9, 24, 22, 30, tzinfo=timezone.utc)
+    assert day_diary._today(dt_utc, local_tz=timezone.utc) == date(2026, 9, 24)
+    assert day_diary._today(dt_utc, local_tz=MSK) == date(2026, 9, 25)
+    assert diary_fitness._today(dt_utc, local_tz=timezone.utc) == "2026-09-24"
+    assert diary_fitness._today(dt_utc, local_tz=MSK) == "2026-09-25"
