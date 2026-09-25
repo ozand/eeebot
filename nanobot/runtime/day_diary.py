@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Any
 
 #: The one directory this whole module is about. A relative, POSIX-style
 #: prefix -- diary files live in the instance repository, versioned like
@@ -53,7 +54,7 @@ PLAN_END = "<!-- diary: plan end -->"
 _NO_PLAN_YET = "(no plan recorded yet)"
 
 
-def _today() -> date:
+def _today(now: "datetime | None" = None, *, local_tz: Any = None) -> date:
     """ADR-029 (#1831) migration point -- the ONE clock call this whole
     module uses to decide "what day is it".
 
@@ -67,15 +68,24 @@ def _today() -> date:
     function rather than each deciding their own clock, so that migration
     is a one-line edit here -- not a hunt across every caller.
     """
-    return datetime.now(timezone.utc).date()
+    from nanobot.runtime import day_key
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    return date.fromisoformat(day_key.day_key(now, local_tz=local_tz))
 
 
-def diary_relpath(day: "date | None" = None) -> str:
+def diary_relpath(day: "date | str | None" = None, *, now: "datetime | None" = None, local_tz: Any = None) -> str:
     """Workspace-relative path for *day*'s diary file: ``diary/YYYY-MM-DD.md``
     (ADR-028 rule 1). *day* defaults to :func:`_today` -- see its docstring
     for which clock that is and why it is centralized there."""
-    day = day or _today()
-    return f"{DIARY_DIR}/{day.isoformat()}.md"
+    if day is None:
+        day_str = _today(now=now, local_tz=local_tz).isoformat()
+    elif isinstance(day, date):
+        day_str = day.isoformat()
+    else:
+        day_str = str(day).strip()
+    return f"{DIARY_DIR}/{day_str}.md"
 
 
 def is_diary_path(path: Path, workspace: Path) -> bool:
@@ -94,7 +104,7 @@ def is_diary_path(path: Path, workspace: Path) -> bool:
     return rel.parts[:1] == (DIARY_DIR,)
 
 
-def new_day_file(day: "date | None" = None) -> str:
+def new_day_file(day: "date | str | None" = None, *, now: "datetime | None" = None, local_tz: Any = None) -> str:
     """Header + exactly one marker line -- the shape a fresh day file must
     have, built once here so a cycle never free-hands the format (AC 2).
 
@@ -106,9 +116,14 @@ def new_day_file(day: "date | None" = None) -> str:
     *day* defaults to :func:`_today` -- see its docstring for which clock
     (ADR-029/#1831 migration point).
     """
-    day = day or _today()
+    if day is None:
+        day_str = _today(now=now, local_tz=local_tz).isoformat()
+    elif isinstance(day, date):
+        day_str = day.isoformat()
+    else:
+        day_str = str(day).strip()
     return (
-        f"# Diary — {day.isoformat()}\n\n"
+        f"# Diary — {day_str}\n\n"
         "Entries below record intent: what a cycle is attempting and why, "
         "written at the start of its turn. This is not a report of what "
         "was done -- the ledger already holds that.\n\n"

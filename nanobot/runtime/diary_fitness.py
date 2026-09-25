@@ -30,9 +30,10 @@ import of, and no reader in, ``nanobot.agent.context`` or
 ``nanobot.agent.subagent``'s prompt-assembly path -- rule 4 forbids
 even this module's own name from appearing in either file's source.
 
-Clock choice (ADR-029 / #1831): the "is this TODAY's diary" check in
-:func:`_today` runs on UTC, matching ``day_diary.diary_relpath``'s own
-default day boundary -- see :func:`_today`'s docstring for the single
+Clock choice (ADR-029 / #1831, #1958): the "is this TODAY's diary" check in
+:func:`_today` runs on host-local time via ``day_key.day_key``, matching
+``day_diary.diary_relpath``'s own default day boundary -- see
+:func:`_today`'s docstring for the single
 place this is decided. The rolling read-RATE window in
 :func:`diary_read_rate` (``_WINDOW_DAYS``) is a plain elapsed-time
 cutoff over cycle timestamps (``now - timedelta(days=30)``), not a
@@ -59,26 +60,21 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _today() -> str:
+def _today(now: "datetime | None" = None, *, local_tz: Any = None) -> str:
     """The day boundary this module checks a read against.
 
-    CLOCK CHOICE, visible in this one place: UTC. Mirrors
+    ADR-029 (#1831, #1958): resolved on host-local time via
+    :func:`nanobot.runtime.day_key.day_key`, matching
     ``nanobot.runtime.day_diary.diary_relpath``'s own default (the file
-    the loop actually writes/reads is named on this same clock, at this
-    module's line 46/75) -- the two must agree or "did the cycle read
-    today's diary" would compare a UTC-keyed read against a locally-keyed
-    file, or vice versa.
-
-    ADR-029 / #1831: the day boundary is moving to LOCAL time
-    system-wide (systemd timers and ``bridge.py``'s ``date.today()`` are
-    local; ledger/telemetry/action-index rotation is UTC -- a 3-hour
-    daily disagreement on which day it is). This function and
-    ``day_diary.diary_relpath``'s default are both instances of that
-    class and belong in #1831's census of readers to migrate together --
-    changing one without the other would break the comparison this
-    module depends on.
+    the loop actually writes/reads is named on this same clock). The two
+    must agree or "did the cycle read today's diary" would compare a
+    UTC-keyed read against a locally-keyed file, or vice versa.
     """
-    return datetime.now(timezone.utc).date().isoformat()
+    from nanobot.runtime import day_key
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    return day_key.day_key(now, local_tz=local_tz)
 
 
 def _parse_ts(value: Any) -> "datetime | None":
@@ -122,6 +118,8 @@ def record_cycle_diary_read(
     cycle_id: str,
     reads: "list[dict[str, Any]] | None" = None,
     wrote: bool = False,
+    now: "datetime | None" = None,
+    local_tz: Any = None,
 ) -> dict[str, Any]:
     """Append one unconditional marker row for this cycle.
 
@@ -131,7 +129,7 @@ def record_cycle_diary_read(
     :meth:`nanobot.agent.subagent.SubagentManager.collect_day_file_reads`.
 
     ``diary_read`` is True iff at least one of *reads* named TODAY's date
-    (UTC, matching the day the diary itself is keyed by -- see
+    (host-local, matching the day the diary itself is keyed by -- see
     ``day_diary.diary_relpath``'s default). ``tool_call_position`` is the
     smallest ``position`` among today's reads, i.e. how early in the
     cycle the obligation was met -- or ``None`` when it was not met at
@@ -158,7 +156,7 @@ def record_cycle_diary_read(
     exception here must never break the cycle it is reporting on.
     """
     try:
-        today = _today()
+        today = _today(now=now, local_tz=local_tz)
         today_positions = [
             int(r["position"])
             for r in (reads or [])

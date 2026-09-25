@@ -2851,11 +2851,11 @@ def _write_diary_open_entry(repo_root: 'Path', state_dir: 'Path', cycle_id: str,
     from nanobot.runtime import day_diary
     from nanobot.runtime.cycle_ledger import record_diary_open_entry
 
-    # ADR-029 (#1831): "what day is it" for the diary is decided in exactly
-    # ONE place -- day_diary._today() (nanobot/runtime/day_diary.py) --
-    # currently UTC. This call site does not decide a clock itself and must
-    # not gain its own date.today()/datetime.now() call; #1831's migration
-    # changes day_diary._today() alone.
+    # ADR-029 (#1831, #1958): "what day is it" for the diary is decided in
+    # exactly ONE place -- day_diary._today() (nanobot/runtime/day_diary.py) --
+    # resolved on host-local time via day_key.day_key(). This call site does
+    # not decide a clock itself and must not gain its own
+    # date.today()/datetime.now() call.
     relpath = day_diary.diary_relpath()
     if _is_blocked_filename(relpath):
         record_diary_open_entry(state_dir, cycle_id, 'refused', None, f'blocked filename pattern: {relpath}')
