@@ -132,6 +132,38 @@ Infrastructure recovery — model endpoint, deploy rollback, unit health — is 
 cycle's work and never waited on a plan; it stays with the harness processes that
 own it today.
 
+**Rest is a choice with a wake condition, and the harness only notices change.**
+Most bridge invocations today start no cycle, because the queue is empty. With the
+planner first, every timer tick (about three minutes) would otherwise become a
+20-tick session on the shared model queue. So the session has a third outcome
+besides a plan and `no_plan`:
+
+- **`rest`** — the planner decides that no increment is worth starting now. It is
+  structured, not prose: a **wake condition** that names an observable input
+  (a hypothesis verdict, an operator priority, a candidate, a commit on `main`,
+  a unit or file the harness can read) and a **deadline** for the next look. A
+  rest without both is `malformed`. Rest never counts toward the 3/6 `no_plan`
+  thresholds.
+- **The harness pre-check tests change, never value.** At a rest it records a
+  snapshot of the versions of the listed inputs. On the next ticks, before any
+  model call and before repository preparation, it compares versions only. If
+  none changed and the deadline has not passed, no session runs. Any change, any
+  input that cannot be read, or the deadline passing returns the choice to the
+  planner. The harness never judges whether a change is important enough — that
+  is a choice, and choices are the planner's.
+- **Six rests in a row** raise a review signal to the operator. It is a prompt
+  to look, not proof of a defect.
+- **Three counts stay separate** in the ledger and on the dashboard: timer ticks
+  that started no session (pre-check held), `rest` decisions, and `no_plan`.
+  Without the split, the saving would be invisible and a silent stop would look
+  like healthy idleness.
+
+**A duplicate is a recorded outcome too.** When the chosen increment is refused by
+the duplicate check, the cycle records `rejected_duplicate` with the evidence sha
+and reason, runs nothing in its place, and does not count toward `no_plan`. The
+sha and the reason are an input to the next session, or it would choose the same
+increment again.
+
 **The plan is appended, never overwritten.** Each session's plan is a new dated
 entry in the diary, with the cycle id, above the previous one. Today's writer
 replaces a single plan block, so the history of plans is lost and a planner learns
@@ -301,6 +333,12 @@ actor that has both.
 | At switch-over queued proposer requests are marked superseded and never executed | `tests/test_agent_chooses.py::test_queued_proposer_requests_drained_at_switchover` | not written |
 | Frozen derived priorities show as `frozen` in health and both dashboards | `tests/test_agent_chooses.py::test_frozen_derived_is_labelled_everywhere` | not written |
 | Rate readers carry a version boundary at the switch-over | `tests/test_agent_chooses.py::test_rate_readers_carry_switchover_boundary` | not written |
+| `rest` requires a wake condition naming an observable input and a deadline; without both it is `malformed`; rest never counts toward 3/6 | `tests/test_agent_chooses.py::test_rest_is_structured_and_outside_no_plan_counts` | not written |
+| The pre-check compares input versions only; unchanged + deadline not passed → no session and no repo preparation; any change, unreadable input or passed deadline → session | `tests/test_agent_chooses.py::test_precheck_tests_change_not_value` | not written |
+| Six rests in a row raise a review signal | `tests/test_agent_chooses.py::test_six_rests_raise_review_signal` | not written |
+| Held ticks, `rest` decisions and `no_plan` are counted separately | `tests/test_agent_chooses.py::test_held_rest_and_no_plan_counted_apart` | not written |
+| `rejected_duplicate` records the evidence sha, substitutes nothing, stays outside `no_plan`, and reaches the next session | `tests/test_agent_chooses.py::test_rejected_duplicate_is_recorded_and_fed_forward` | not written |
+| Staged promotions and pending pushes survive repository preparation that now runs on every started cycle | `tests/test_agent_chooses.py::test_repo_preparation_preserves_staged_and_pending` | not written |
 
 # References
 
