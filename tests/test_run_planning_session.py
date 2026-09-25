@@ -454,6 +454,55 @@ def test_planning_session_includes_dor_and_dod_in_plan_block(tmp_path: Path, mon
     assert "DoD: tokens_per_integration improves by 1%" in pushed
 
 
+def test_planning_session_records_declined_defects_in_diary(tmp_path: Path, monkeypatch):
+    """ADR-035 rule 1: a declined defect is named with its reason, and the
+    decline-escalation counter (nanobot.runtime.planner_candidates) fires
+    once the same defect has been declined three sessions running."""
+    from nanobot.runtime.cycle_ledger import read_events
+
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    result_obj = {
+        "insight": "x", "plan": "y", "iterations_planned": 5,
+        "declined": [{"defect_id": "defect-flaky-x", "reason": "not reproducible yet"}],
+    }
+    monkeypatch.setattr(bridge, "SubagentManager", _make_fake_mgr_factory(state, result_obj))
+
+    for cycle_id in ("cycle-1", "cycle-2", "cycle-3"):
+        outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set(), cycle_id=cycle_id))
+        assert outcome["ran"] is True
+
+    _git(repo, "fetch", "origin", "main")
+    pushed = subprocess.run(
+        ["git", "-C", str(repo), "show", f"origin/main:{diary_relpath()}"], capture_output=True, text=True,
+    ).stdout
+    assert "Declined: defect-flaky-x — not reproducible yet [ESCALATED to operator: 3 declines running]" in pushed
+
+    escalations = [e for e in read_events(state) if e.get("phase") == "defect_decline_escalated"]
+    assert len(escalations) == 1
+    assert escalations[0]["defect_id"] == "defect-flaky-x"
+    assert escalations[0]["consecutive"] == 3
+
+
+def test_planning_session_ignores_a_decline_with_no_reason(tmp_path: Path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    result_obj = {
+        "insight": "x", "plan": "y", "iterations_planned": 5,
+        "declined": [{"defect_id": "defect-x", "reason": ""}],
+    }
+    monkeypatch.setattr(bridge, "SubagentManager", _make_fake_mgr_factory(state, result_obj))
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+    assert outcome["ran"] is True
+
+    _git(repo, "fetch", "origin", "main")
+    pushed = subprocess.run(
+        ["git", "-C", str(repo), "show", f"origin/main:{diary_relpath()}"], capture_output=True, text=True,
+    ).stdout
+    assert "Declined:" not in pushed
+
+
 def test_refuses_without_spawning_when_charter_absent(tmp_path: Path, monkeypatch):
     """ADR-034 rule 3: a missing release charter stops the planning session
     before any spawn -- reason recorded via record_planning_session, same

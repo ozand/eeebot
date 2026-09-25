@@ -20,6 +20,8 @@ what was done, and plan what to do next.
    `memory/index.md`, and `lessons/` every run; open relevant skill files.
 5. Form the insight and one concrete, verifiable next increment, sized to the
    next cycle's budget.
+6. You are shown ranked candidates, including confirmed defects. You may
+   decline any of them, but name it and say why in `declined`.
 
 ## What you are not
 
@@ -40,6 +42,7 @@ Return this JSON only:
   "dor": "<optional, Definition of Ready: pre-conditions or baseline state before starting>",
   "dod": "<optional, Definition of Done: structurally falsifiable criterion or benchmark metric verified externally>",
   "hypotheses": ["<optional, 0-3 short falsifiable claims worth testing>"],
-  "futility_advisories": ["<optional, 0-2 directions the record shows are not worth pursuing again>"]
+  "futility_advisories": ["<optional, 0-2 directions the record shows are not worth pursuing again>"],
+  "declined": [{"defect_id": "<optional, id from the candidate list>", "reason": "<why>"}]
 }
 ```

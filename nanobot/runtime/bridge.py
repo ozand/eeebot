@@ -3459,6 +3459,33 @@ async def _run_planning_session(
     for f in (parsed.get('futility_advisories') or [])[:2]:
         if isinstance(f, str) and f.strip():
             plan_lines.append(f'Futility: {f.strip()}')
+
+    # ADR-035 rule 1: "the planner may decline any candidate, including a
+    # defect, but must name the declined defect and why; a defect declined
+    # three sessions running is raised to the operator." Fail-open: the
+    # decline record is bookkeeping on top of an already-produced plan --
+    # a failure here must never turn an otherwise-integrated plan into a
+    # degraded outcome.
+    _declined_raw = parsed.get('declined')
+    if isinstance(_declined_raw, list):
+        _declined_map = {
+            str(d['defect_id']).strip(): str(d['reason']).strip()
+            for d in _declined_raw
+            if isinstance(d, dict) and str(d.get('defect_id') or '').strip() and str(d.get('reason') or '').strip()
+        }
+        if _declined_map:
+            try:
+                from nanobot.runtime import planner_candidates as _planner_candidates_mod
+
+                _decline_results = _planner_candidates_mod.record_defect_declines(
+                    state_dir, cycle_id, _declined_map,
+                )
+                for _defect_id, _reason in _declined_map.items():
+                    _escalated = _decline_results.get(_defect_id, {}).get('escalated', False)
+                    _tag = ' [ESCALATED to operator: 3 declines running]' if _escalated else ''
+                    plan_lines.append(f'Declined: {_defect_id} — {_reason}{_tag}')
+            except Exception:
+                pass
     plan_text = '\n'.join(plan_lines)
 
     write_result = _write_diary_plan_block(
