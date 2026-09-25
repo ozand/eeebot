@@ -23,6 +23,29 @@ import asyncio
 import json
 
 from nanobot.runtime import bridge
+from tests.test_cycle_ledger import _init_selfevo_repo
+
+
+def _mock_planning_infra(monkeypatch, base):
+    """ADR-035 rule 1 (#1942): the planning session (and the repository
+    preparation/provider it needs) now runs on EVERY resolvable-goal cycle,
+    before any request is selected — a resolvable goal id no longer falls
+    straight through to an ``already_handled`` print with no infra touched
+    (that print, and the rotation path it belonged to, is retired). Tests
+    that only care about goal-id resolution stand in a real selfevo
+    checkout for repo prep and stub the provider/planning session to the
+    cheap ``no plan`` outcome, so they still exercise nothing past goal
+    bootstrap."""
+    _init_selfevo_repo(base)
+    monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+
+    async def _fake_planning_session(**_kwargs):
+        return {
+            'ran': False, 'iterations_used': None, 'iterations_planned': None,
+            'tampered_files': [], 'plan': None,
+        }
+
+    monkeypatch.setattr(bridge, "_run_planning_session", _fake_planning_session)
 
 
 def _set_common_paths(monkeypatch, state_dir, base, *, charter=True):
@@ -60,6 +83,7 @@ class TestGoalIdBootstrap:
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         _set_common_paths(monkeypatch, state_dir, tmp_path)
+        _mock_planning_infra(monkeypatch, tmp_path)
 
         _write_goal_text(state_dir, "goal-canon")
         # No outbox/, no registry.json — the fresh-install case.
@@ -69,9 +93,12 @@ class TestGoalIdBootstrap:
         result = asyncio.run(bridge._main_impl())
         assert result == 0
 
+        # ADR-035 rule 1 (#1942): a resolvable goal id now proceeds to a
+        # real planning session (stubbed here to `no plan`) rather than the
+        # retired `already_handled` rotation-queue print.
         out = capsys.readouterr().out
         assert "no_active_goal" not in out
-        assert "already_handled" in out
+        assert "no plan produced this cycle" in out
 
     def test_frozen_registry_and_outbox_are_not_a_goal_source(self, tmp_path, monkeypatch, capsys):
         """The coordinator's files may still sit on the host; they are not read."""
@@ -100,6 +127,7 @@ class TestGoalIdBootstrap:
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         _set_common_paths(monkeypatch, state_dir, tmp_path)
+        _mock_planning_infra(monkeypatch, tmp_path)
 
         _write_goal_text(state_dir, "goal-canon")
         (state_dir / "goals" / "registry.json").write_text(
@@ -201,6 +229,7 @@ class TestNoBacklogSnapshot:
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         _set_common_paths(monkeypatch, state_dir, tmp_path)
+        _mock_planning_infra(monkeypatch, tmp_path)
         _write_goal_text(state_dir, "goal-1")
 
         assert asyncio.run(bridge._main_impl()) == 0
