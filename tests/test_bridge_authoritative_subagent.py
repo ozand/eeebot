@@ -23,6 +23,7 @@ import json
 import pytest
 
 from nanobot.runtime import bridge
+from tests.test_bridge_executor_llm_error import _stub_planning_session
 from tests.test_cycle_ledger import _init_selfevo_repo, _run, _seed_bridge_request
 
 PRIMARY_TASK_ID = "acf80d1f"
@@ -141,6 +142,7 @@ class TestAuthoritativeSpawnEndToEnd:
     def test_repair_turn_that_succeeds_is_read_not_the_stale_primary(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-repair-ok", "cycle-repair-ok")
+        _stub_planning_session(monkeypatch, "add feature")
 
         rc = asyncio.run(bridge._main_impl())
 
@@ -154,6 +156,7 @@ class TestAuthoritativeSpawnEndToEnd:
     def test_repair_turn_that_fails_falls_back_to_the_primary_not_its_stub(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("cancelled", REPAIR_TEXT_CANCELLED))
         _seed_bridge_request(state_dir, "req-repair-cancelled", "cycle-repair-cancelled")
+        _stub_planning_session(monkeypatch, "add feature")
 
         rc = asyncio.run(bridge._main_impl())
 
