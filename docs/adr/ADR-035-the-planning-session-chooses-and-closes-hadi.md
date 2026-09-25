@@ -158,6 +158,22 @@ besides a plan and `no_plan`:
   Without the split, the saving would be invisible and a silent stop would look
   like healthy idleness.
 
+**An interrupted increment is carried, not retried by the harness.** When the model
+supply fails mid-increment (timeout, 503, queue), the harness records the plan as
+an `open_increment` with the cause and hands it to the next session first, marked
+`interrupted(supply)`; that session decides keep, edit or delete (rule 3), and keep
+continues the same plan (ADR-031 rule 2). There is no runtime state called
+"supplier paused", so the hold reuses the rest mechanism: the interruption writes
+the same input-version snapshot as a rest, with a deadline of now plus a supply
+cooldown — 15 minutes, doubling on each consecutive supply interruption up to
+60 minutes, reset by any completed model call. The pre-check holds until the
+deadline; a changed or unreadable input, or the deadline passing, starts a session,
+and the session itself discovers whether supply is back. Held ticks join the
+"ticks without a session" count. The same `open_increment` interrupted by supply
+three times running is flagged to the operator (#1765) and is never dropped
+automatically. A failure that is not supply — code, gate — is an ordinary outcome
+and reaches the next session as data, unmarked.
+
 **A duplicate is a recorded outcome too.** When the chosen increment is refused by
 the duplicate check, the cycle records `rejected_duplicate` with the evidence sha
 and reason, runs nothing in its place, and does not count toward `no_plan`. The
@@ -338,6 +354,8 @@ actor that has both.
 | Six rests in a row raise a review signal | `tests/test_agent_chooses.py::test_six_rests_raise_review_signal` | not written |
 | Held ticks, `rest` decisions and `no_plan` are counted separately | `tests/test_agent_chooses.py::test_held_rest_and_no_plan_counted_apart` | not written |
 | `rejected_duplicate` records the evidence sha, substitutes nothing, stays outside `no_plan`, and reaches the next session | `tests/test_agent_chooses.py::test_rejected_duplicate_is_recorded_and_fed_forward` | not written |
+| A supply interruption carries the plan as `open_increment`, first and marked, to the next session; the harness never re-runs it by itself | `tests/test_agent_chooses.py::test_supply_interruption_carries_open_increment` | not written |
+| The supply hold: before the deadline no session, no repo preparation, no provider call; cooldown doubles to a 60-minute cap and resets on a completed call; after the deadline the session sees the open increment first | `tests/test_agent_chooses.py::test_supply_hold_uses_rest_snapshot_with_backoff` | not written |
 | Staged promotions and pending pushes survive repository preparation that now runs on every started cycle | `tests/test_agent_chooses.py::test_repo_preparation_preserves_staged_and_pending` | not written |
 
 # References
