@@ -173,6 +173,7 @@ class SubagentManager:
         denied_paths: "set[Path] | None" = None,
         release_root: "Path | None" = None,
         role_system_prompt: "str | None" = None,
+        wall_deadline: float | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -183,6 +184,8 @@ class SubagentManager:
         self.web_search_config = web_search_config or WebSearchConfig()
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
+        self._wall_deadline = wall_deadline
+        self.last_max_call_gap_s: float | None = None
         self.subagent_config = subagent_config
         configured_max_running = getattr(subagent_config, "max_running", None)
         self.max_running = int(max_running or configured_max_running or 1)
@@ -457,17 +460,31 @@ class SubagentManager:
             # a response that was not truncated -- i.e. the recovery actually
             # worked, which is the number that makes this change measurable.
             _truncation = {"count": 0, "consecutive": 0, "continued": False}
-            # #1101: wall-clock soft deadline (injectable for tests)
-            _wall_deadline = _subagent_wall_deadline(_monotonic=getattr(self, '_monotonic', None))
+            # #1101/#1899: wall-clock soft deadline and progress watchdog
+            _clock = getattr(self, '_monotonic', None) or time.monotonic
+            _wall_deadline = (
+                self._wall_deadline
+                if self._wall_deadline is not None
+                else _subagent_wall_deadline(_monotonic=_clock)
+            )
+            from nanobot.runtime.session_clock import ProgressWatchdog, should_stop_for_wall_clock
+            _watchdog = ProgressWatchdog(clock=_clock)
 
             while iteration < max_iterations:
-                # #1101: wall-clock deadline check (same graceful path as max_iterations)
-                if _wall_deadline is not None:
-                    _clock = getattr(self, '_monotonic', None) or time.monotonic
-                    if _clock() >= _wall_deadline:
-                        logger.warning("Subagent [{}] wall-clock deadline reached", task_id)
-                        stop_reason = "wall_clock_deadline"
-                        break
+                # #1101/#1899: wall-clock deadline check with safety margin
+                if _wall_deadline is not None and should_stop_for_wall_clock(_wall_deadline, clock=_clock):
+                    logger.warning("Subagent [{}] wall-clock deadline safety margin reached", task_id)
+                    stop_reason = "wall_clock_deadline"
+                    break
+
+                # #1899: progress watchdog check (no progress for N minutes)
+                if _watchdog.is_stalled():
+                    logger.warning(
+                        "Subagent [{}] progress watchdog timeout reached (no progress for {:.1f}s)",
+                        task_id, _watchdog.timeout_secs,
+                    )
+                    stop_reason = "progress_watchdog_timeout"
+                    break
 
                 iteration += 1
                 _iter_msg_start = len(messages)
@@ -518,21 +535,47 @@ class SubagentManager:
                             ),
                         })
                 _tools_def = [] if _is_final_turn else tools.get_definitions()
-                if self._telemetry_component:
-                    from nanobot.observability.llm_telemetry import call_context, current_cycle_id
+                try:
+                    # #1899: bound in-flight model call by remaining progress watchdog time
+                    _call_timeout = _watchdog.remaining_time()
+                    if _call_timeout <= 0:
+                        logger.warning("Subagent [{}] progress timeout before model call", task_id)
+                        stop_reason = "progress_watchdog_timeout"
+                        break
 
-                    with call_context(current_cycle_id(), self._telemetry_component):
-                        response = await self.provider.chat_with_retry(
-                            messages=messages,
-                            tools=_tools_def,
-                            model=self.model,
+                    if self._telemetry_component:
+                        from nanobot.observability.llm_telemetry import (
+                            call_context,
+                            current_cycle_id,
                         )
-                else:
-                    response = await self.provider.chat_with_retry(
-                        messages=messages,
-                        tools=_tools_def,
-                        model=self.model,
+
+                        with call_context(current_cycle_id(), self._telemetry_component):
+                            response = await asyncio.wait_for(
+                                self.provider.chat_with_retry(
+                                    messages=messages,
+                                    tools=_tools_def,
+                                    model=self.model,
+                                ),
+                                timeout=_call_timeout,
+                            )
+                    else:
+                        response = await asyncio.wait_for(
+                            self.provider.chat_with_retry(
+                                messages=messages,
+                                tools=_tools_def,
+                                model=self.model,
+                            ),
+                            timeout=_call_timeout,
+                        )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Subagent [{}] model call timed out by progress watchdog ({:.1f}s)",
+                        task_id, _watchdog.timeout_secs,
                     )
+                    stop_reason = "progress_watchdog_timeout"
+                    break
+
+                _watchdog.record_call_completed()
                 usage = getattr(response, "usage", None)
                 prompt_tokens = (
                     usage.get("prompt_tokens")
@@ -637,6 +680,7 @@ class SubagentManager:
                             "name": tool_call.name,
                             "content": result,
                         })
+                        _watchdog.record_step_completed()
                     if memory_unavailable_reason:
                         stop_reason = "memory_search_unavailable"
                         break
@@ -720,6 +764,11 @@ class SubagentManager:
                     f"The reply is too long to finish; the next attempt should ask for a "
                     f"smaller step."
                 )
+            elif stop_reason == "progress_watchdog_timeout":
+                final_result = (
+                    f"Task aborted: no progress (model call or tool step) "
+                    f"completed for {_watchdog.timeout_secs:.1f}s (stop_reason=progress_watchdog_timeout)."
+                )
             elif final_result is None:
                 final_result = "Task completed but no final response was generated."
 
@@ -727,6 +776,7 @@ class SubagentManager:
             _telem_status = "blocked" if stop_reason == "memory_search_unavailable" else (
                 "bounded_stop" if stop_reason else "ok"
             )
+            self.last_max_call_gap_s = _watchdog.max_call_gap_s
             self._write_subagent_telemetry(
                 task_id,
                 self._build_subagent_telemetry_payload(
@@ -747,6 +797,7 @@ class SubagentManager:
                         "count": _truncation["count"],
                         "continued": _truncation["continued"],
                     },
+                    max_call_gap_s=_watchdog.max_call_gap_s,
                 ),
             )
             peak = context_usage["peak_tokens"]
@@ -892,6 +943,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         stop_reason: str | None = None,
         context_usage: dict[str, Any] | None = None,
         truncation: dict[str, Any] | None = None,
+        max_call_gap_s: float | None = None,
     ) -> dict[str, Any]:
         payload = {
             "subagent_id": task_id,
@@ -910,6 +962,8 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         }
         if stop_reason:
             payload["stop_reason"] = stop_reason
+        if max_call_gap_s is not None:
+            payload["max_call_gap_s"] = round(float(max_call_gap_s), 1)
         if correlation_context:
             payload.update(correlation_context)
         if context_usage is not None:
