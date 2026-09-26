@@ -309,6 +309,63 @@ class TestUnfinishedAmendedRepairNeverIntegrates:
         )
 
 
+class TestUnfinishedAmendedRepairWithFailedTipReadNeverIntegrates:
+    def test_one_failed_sha_read_still_blocks_an_unfinished_amend(self, tmp_path, monkeypatch):
+        """Round 5 external re-check, item N1 (architect resolution
+        2026-09-26): ``_current_tip_sha()`` returns ``''`` on a git
+        failure or exception, and the old comparison
+        (``bool(before) and bool(after) and before != after``) required
+        BOTH reads to be truthy before it would even consider them
+        different -- so a single failed read (before OR after) made
+        ``_repair_tip_changed`` read False, i.e. "unchanged", exactly
+        the same as a genuinely no-op repair. Combined with an amend
+        (which never grows the commit count), the barrier never fires
+        even though the repair's own status is not 'ok'. One of the two
+        tip-sha reads is forced to fail here; the amend and the non-ok
+        telemetry are both real, same as the ordinary amend test above.
+        """
+        import subprocess
+
+        repair_cls = _make_amending_repair_manager("error", "Error: repair turn crashed mid-fix")
+        state_dir = _wire(tmp_path, monkeypatch, repair_cls)
+        _seed_bridge_request(state_dir, "req-repair-amend-tipreadfail", "cycle-repair-amend-tipreadfail")
+        _stub_planning_session(monkeypatch, "add feature")
+
+        _real_tip_sha = bridge._current_tip_sha
+        _tip_calls = {"n": 0}
+
+        def _flaky_tip_sha(repo):
+            _tip_calls["n"] += 1
+            if _tip_calls["n"] == 1:
+                # Simulates a transient git failure on the "before" read --
+                # the real repo state is untouched, only this ONE read fails.
+                return ""
+            return _real_tip_sha(repo)
+
+        monkeypatch.setattr(bridge, "_current_tip_sha", _flaky_tip_sha)
+
+        rc = asyncio.run(bridge._main_impl())
+        assert rc == 0
+
+        work = tmp_path / "eeebot-self-evolving"
+        main_blob = subprocess.run(
+            ["git", "-C", str(work), "show", "main:scripts/feature.py"],
+            capture_output=True, text=True,
+        )
+        assert main_blob.returncode != 0 or "repaired" not in main_blob.stdout, (
+            "a failed tip-sha read must never turn an unfinished amend into a verified no-op -- "
+            "the unfinished repair must never integrate"
+        )
+
+        from nanobot.runtime import open_increment
+
+        pending = open_increment.pending_open_increment(state_dir)
+        assert pending is not None, (
+            "an unverifiable (failed tip read) repair must leave the branch as a pending open increment, "
+            "not be silently treated as unchanged"
+        )
+
+
 class TestHelpers:
     def test_authoritative_resolution_prefers_latest_ok_repair(self, tmp_path):
         _write_telemetry(tmp_path, "primary", "ok", PRIMARY_TEXT)
