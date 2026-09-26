@@ -1469,6 +1469,8 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
                 # classify the branch as service-only or delivered.
                 late_outcome, late_reason = 'pushed_late', 'delivery_unknown'
             _v, _vr = _derive_cycle_verdict(late_outcome, late_reason)
+            if delivery_state == 'unknown':
+                _v, _vr = 'inconclusive', 'delivery_unknown'
             record_cycle_outcome(
                 state_dir, cycle_id, late_outcome, late_reason, files_changed, branch,
                 verdict=_v, verdict_reason=_vr, delivered=delivered,

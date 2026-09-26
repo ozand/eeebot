@@ -2711,7 +2711,15 @@ def _fold_completed(
                             continue
                         success_by_cycle[cycle_id] = row
                         continue
-                    if not isinstance(changed_files, list) or not changed_files:
+                    if not isinstance(changed_files, list):
+                        continue
+                    if not changed_files:
+                        # Pre-delivery-tracking success rows normalized unknown
+                        # paths to []; preserve their historical completion.
+                        # Late-push empties remain withheld because the outcome
+                        # is not an ordinary legacy success.
+                        if row.get("outcome") == "success":
+                            success_by_cycle[cycle_id] = row
                         continue
                     if not is_service_only(changed_files):
                         success_by_cycle[cycle_id] = row
