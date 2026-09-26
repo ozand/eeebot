@@ -98,7 +98,6 @@ from nanobot.runtime.operator_documents import (
     resolve_charter,
     resolve_derived_priorities,
     resolve_operator_priorities_metadata,
-    resolve_operator_priorities,
     resolve_operator_priority_labels,
     resolve_operator_priority_numbers,
 )

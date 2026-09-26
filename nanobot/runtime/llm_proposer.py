@@ -1710,12 +1710,14 @@ def build_context(
                 state_dir, selfevo_repo_root=selfevo_repo
             )
             _derived_resolution = resolve_derived_priorities(state_dir)
-            derived_text = _render_derived_priorities(_derived_open)
             derived_state = _derived_resolution.state
-            if _derived_resolution.state == STATE_TEXT:
-                derived_state = "present" if _derived_open else "empty"
+            if derived_state == STATE_TEXT:
+                derived_state = (
+                    "present" if _derived_open else
+                    "all_completed" if _derived_resolution.entries else "empty"
+                )
         except Exception:
-            derived_text = ""
+            _derived_open = ()
             derived_state = "unreadable"
         # ADR-034 rule 5 (#1940, A4): the operator's OWN priority list (with
         # its Completed headers), which nothing in this context previously
@@ -1728,7 +1730,11 @@ def build_context(
             _operator_priorities_res = resolve_operator_priorities(state_dir, selfevo_repo_root=selfevo_repo)
         except Exception:
             _operator_priorities_res = PriorityResolution(state=PRIORITY_UNAVAILABLE, reason="resolve_failed")
-        operator_priorities_block = render_priorities_block(_operator_priorities_res, ())
+        operator_priorities_block = render_priorities_block(
+            _operator_priorities_res,
+            _derived_open if derived_state == "present" else (),
+            derived_status=derived_state,
+        )
         ledger_rows = _load_ledger_rows(state_dir)
         digest_lines = _digest_ledger(ledger_rows)
         recent_proposed_titles = _recent_proposed_titles(ledger_rows)
@@ -1759,16 +1765,12 @@ def build_context(
         # proposer and it kept generating duplicate/failed proposals (post-hoc
         # dedup caught them, but the wasted LLM call already happened). Now only
         # the blob is trimmed; guardrails + surface_rule are appended after.
-        goal_cut_marker = ""
         blob_parts = [
             "## Operator priorities (protected; rendered before lower-priority context)",
             operator_priorities_block,
             "",
             "## Goal (charter, filtered — already-completed priorities removed)",
             filtered_goal.strip() or "(no goal text available)",
-            "",
-            "## Derived priorities (source: derived; filtered — already-completed removed)",
-            derived_text or ("(none)" if derived_state == STATE_ABSENT else f"(unavailable: {derived_state})"),
             "",
             "## Recent cycle outcomes (most recent last — do not repeat done/failed work)",
             "\n".join(f"- {line}" for line in digest_lines) or "(no ledger history yet)",
@@ -1823,7 +1825,9 @@ def build_context(
             keep = max(0, budget - len(marker))
             blob = blob[:keep] + marker[:budget - keep]
             if operator_priorities_block not in blob:
-                blob = operator_priorities_block[:budget] + "\n[remaining context truncated]"
+                marker = "\n[priorities truncated]\n"
+                keep = max(0, budget - len(marker))
+                blob = operator_priorities_block[:keep] + marker[:budget - keep]
         context = blob + "\n" + guardrail_tail + "\n" + surface_rule
 
         # #844: PROTECTED (never-truncated) stepping-stones section — optional

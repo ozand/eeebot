@@ -66,8 +66,8 @@ def test_f4_unreadable_derived_state_is_not_depth_zero_or_none(tmp_path):
     assert health.read_derived_priorities_queue(state)["status"] == "unavailable"
 
     context = llm_proposer.build_context(state, None)
-    assert "derived priorities (source: derived; filtered — already-completed removed)" in context.lower()
-    assert "(unavailable: unreadable)" in context.lower()
+    assert "derived priorities" in context.lower()
+    assert "unavailable; resolver state: unreadable" in context.lower()
 
 
 def test_f4_derived_view_carries_operator_priority_status_without_text(tmp_path):

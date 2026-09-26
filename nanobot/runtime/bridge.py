@@ -72,6 +72,7 @@ from nanobot.runtime.operator_documents import (  # noqa: E402
     PRIORITY_UNAVAILABLE,
     PriorityResolution,
     render_priorities_block,
+    resolve_derived_priorities,
     resolve_derived_priorities_split,
     resolve_operator_priorities,
 )
@@ -3254,9 +3255,20 @@ async def _run_planning_session(
         _planner_operator_res = PriorityResolution(state=PRIORITY_UNAVAILABLE, reason='resolve_failed')
     try:
         _planner_derived_entries, _ = resolve_derived_priorities_split(state_dir, selfevo_repo_root=selfevo_repo)
+        _planner_derived_res = resolve_derived_priorities(state_dir)
+        _planner_derived_state = _planner_derived_res.state
+        if _planner_derived_state == "text":
+            _planner_derived_state = (
+                "present" if _planner_derived_entries else
+                "all_completed" if _planner_derived_res.entries else "empty"
+            )
     except Exception:
         _planner_derived_entries = ()
-    _priorities_block = render_priorities_block(_planner_operator_res, _planner_derived_entries)
+        _planner_derived_state = "unreadable"
+    _priorities_block = render_priorities_block(
+        _planner_operator_res, _planner_derived_entries,
+        derived_status=_planner_derived_state,
+    )
 
     _planner_task = (
         'The harness pre-read the mandatory release-owned task-writing contract '

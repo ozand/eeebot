@@ -362,7 +362,7 @@ def resolve_operator_priority_labels(state_dir: "Path | str") -> "frozenset[str]
     """Normalized labels from the operator's structured and Completed entries."""
     res = resolve_operator_priorities(state_dir)
     entries = (*res.open_entries, *res.completed_entries)
-    return frozenset(re.sub(r"\\s+", " ", entry.title.strip().lower()) for entry in entries if entry.title.strip())
+    return frozenset(re.sub(r"\s+", " ", entry.title.strip().lower()) for entry in entries if entry.title.strip())
 
 
 def resolve_operator_priorities_status(state_dir: "Path | str") -> PriorityStatus:
@@ -497,6 +497,7 @@ def render_priorities_block(
     operator_res: PriorityResolution,
     derived_entries: "tuple[PriorityEntry, ...]" = (),
     *,
+    derived_status: str | None = None,
     cap: int = PRIORITIES_BLOCK_CAP,
 ) -> str:
     """ADR-034 rule 5: render the operator-priorities section (four rule-3
@@ -553,6 +554,14 @@ def render_priorities_block(
         body += "\n\n## Derived priorities (source: derived)\n\n" + "\n".join(
             format_derived_priority_line(e) for e in derived_entries
         )
+    elif derived_status == STATE_ABSENT:
+        body += "\n\n## Derived priorities\n(none; document absent)"
+    elif derived_status == "empty":
+        body += "\n\n## Derived priorities\n(none; document contains no open priorities)"
+    elif derived_status == "all_completed":
+        body += "\n\n## Derived priorities\n(none; all priorities completed)"
+    elif derived_status not in (None, STATE_TEXT):
+        body += f"\n\n## Derived priorities\n(unavailable; resolver state: {derived_status})"
     text = heading + body
     if len(text) > cap:
         return _PRIORITIES_BLOCK_OVERSIZE_TEXT
