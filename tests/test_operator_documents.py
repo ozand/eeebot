@@ -183,6 +183,22 @@ def test_completed_parenthesized_priority_syntax_is_preserved(tmp_path: Path):
     ]
 
 
+def test_completed_priority_parser_preserves_closing_vector_tag(tmp_path: Path):
+    """ADR-034: completed prose preserves a closing `(V1)`/`(V2)` title tag."""
+    state = tmp_path / "state"
+    _goal_text_json(
+        state,
+        "Completed (do not repeat): Priority 14 — Existing label (V1).",
+    )
+
+    result = resolve_operator_priorities(state)
+
+    assert [(entry.number, entry.title) for entry in result.completed_entries] == [
+        (14, "Existing label (V1)"),
+    ]
+    assert "existing label" in resolve_operator_priority_labels(state)
+
+
 def test_four_priority_states_are_distinct(tmp_path: Path):
     state_present = tmp_path / "present"
     _goal_text_json(
