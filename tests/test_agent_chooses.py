@@ -3077,6 +3077,44 @@ def test_recent_commits_with_paths_returns_unknown_on_git_failure(tmp_path: Path
     assert result is None, f"a git failure must read as None (unknown), got {result!r}"
 
 
+def test_change_shape_excludes_checkpoints_via_shared_constant(tmp_path: Path):
+    """Small item (ADR-035 Test Contract, #1962): ``scripts/change_shape.py``'s
+    ``classify_integrated_commits`` must use the SAME shared exclusion
+    constant (``commit_markers.ARTIFICIAL_COMMIT_GREP_PATTERNS``) every
+    other "is this already done" git-log reader does -- a history with
+    checkpoint commits must not count them as real, classified work.
+    """
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo, _run
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+    from scripts.change_shape import classify_integrated_commits
+
+    base = tmp_path / "base"
+    base.mkdir()
+    _origin, work = _init_selfevo_repo(base)
+
+    for i in range(3):
+        (work / f"wip{i}.py").write_text(f"X = {i}\n", encoding="utf-8")
+        _run(work, "add", f"wip{i}.py")
+        subprocess.run(
+            ["git", "-C", str(work), "commit", "-m", f"selfevo: checkpoint — wip{i}.py", "-m", CHECKPOINT_TRAILER],
+            check=True, capture_output=True,
+        )
+    (work / "real.py").write_text("Y = 1\n", encoding="utf-8")
+    _run(work, "add", "real.py")
+    subprocess.run(["git", "-C", str(work), "commit", "-m", "feat: add real feature"], check=True, capture_output=True)
+
+    result = classify_integrated_commits(work)
+    assert result["status"] == "present"
+    # _init_selfevo_repo's own "init" commit (unclassified) plus the one
+    # "feat:" commit -- the three checkpoints must NOT inflate this.
+    assert result["commit_count"] == 2, (
+        f"checkpoint commits leaked into the classified commit count: {result!r}"
+    )
+    assert result["distribution"]["feature"] == 1
+
+
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
 # architect addendum, #1942 B2) -----------------------------------------------
 
