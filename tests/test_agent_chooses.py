@@ -4156,6 +4156,92 @@ def test_response_with_both_plan_and_rest_is_rejected_as_malformed(tmp_path: Pat
     )
 
 
+def test_rest_is_rejected_while_an_open_increment_awaits_resolution(tmp_path: Path, monkeypatch):
+    """Codex review of 777ada1a (``nanobot/runtime/bridge.py:3688``, P1,
+    architect resolution 2026-09-26): D8 already rejects a `plan` response
+    that leaves a pending open increment unresolved (missing/invalid
+    ``open_increment_decision``) -- but the rest-branch runs BEFORE that
+    check and returns early on any structurally valid `rest`, regardless
+    of whether an open increment is pending. A `rest` is exactly as much
+    a way to "skip" the mandatory keep/edit/delete decision as an
+    ordinary malformed plan would be, and must be rejected the same way
+    (``malformed``, planner family) -- never accepted as a legitimate
+    rest while the prior increment is still unresolved.
+    """
+    import asyncio
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge, no_plan_recovery, open_increment, planner_rest
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    _task_writing_dir = bridge.RELEASE_ROOT / "nanobot" / "skills" / "task-writing"
+    _task_writing_dir.mkdir(parents=True, exist_ok=True)
+    (_task_writing_dir / "SKILL.md").write_text("task-writing contract (test stub)\n", encoding="utf-8")
+
+    old_cycle_id = "cycle-rest-with-pending"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id,
+        retry_key="rest-with-pending-test", plan_text="finish the wip feature", candidate_id=None,
+        selfevo_repo=work, branch=old_branch,
+    )
+    _oi_state = open_increment.load_state(state_dir)
+    _oi_state.hold["deadline"] = "2000-01-01T00:00:00Z"
+    open_increment._save_state(state_dir, _oi_state)
+
+    class _PlannerRestWithPendingManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            if self._telemetry_component != "planner":
+                return "fake subagent spawned"
+            task_id = "planner-rest-with-pending-01"
+            raw_rest = json.dumps({
+                "rest": {
+                    "wake_condition": {"kind": "main_commit", "ref": ""},
+                    "deadline": "2099-01-01T00:00:00Z",
+                },
+            })
+            (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+            (state_dir / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({"status": "ok", "result": raw_rest, "context_usage": {"iterations": [{}]}}),
+                encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
+            return "fake planner spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _PlannerRestWithPendingManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    _rest_state = planner_rest.load_state(state_dir)
+    assert _rest_state.active_rest is None and _rest_state.consecutive_rests == 0, (
+        "a rest response must never be recorded as a legitimate rest while an open increment "
+        "is still unresolved -- the session skipped its mandatory keep/edit/delete decision"
+    )
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is not None and pending["cycle_id"] == old_cycle_id, (
+        f"the original open increment must remain pending, untouched: {pending!r}"
+    )
+    no_plan_state = no_plan_recovery.load_state(state_dir)
+    assert no_plan_state.consecutive_planner >= 1, (
+        "a rest that skips a pending open increment's decision must count as a planner-family "
+        "malformed outcome"
+    )
+
+
 def test_planner_rest_snapshot_checks_returncode(tmp_path: Path, monkeypatch):
     """Small item (ADR-035 Test Contract, #1962): ``planner_rest``'s
     version snapshot must check the returncode of ``git rev-parse``, not
