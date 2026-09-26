@@ -5429,23 +5429,24 @@ async def _main_impl_body():
                 )
                 if (_session_unfinished and cycle_commit_count > 0) else ''
             )
+            _unfinished_interruption_persisted = True
             if _unfinished_error_class == 'paused-supplier':
-                _open_increment_exec.record_supply_interruption(
+                _unfinished_interruption_persisted = _open_increment_exec.record_supply_interruption(
                     STATE_DIR, _cycle_id,
                     retry_key=req.get('retry_key') or '',
                     plan_text=req.get('task') or '',
                     candidate_id=req.get('candidate_id') or None,
                     selfevo_repo=_selfevo_repo,
                     branch=cycle_branch,
-                )
+                ).persisted
             elif _unfinished_error_class == 'failed':
-                _open_increment_exec.record_defect_interruption(
+                _unfinished_interruption_persisted = _open_increment_exec.record_defect_interruption(
                     STATE_DIR, _cycle_id,
                     retry_key=req.get('retry_key') or '',
                     plan_text=req.get('task') or '',
                     candidate_id=req.get('candidate_id') or None,
                     branch=cycle_branch,
-                )
+                ).persisted
 
             if _closing_commit_failed:
                 # D6 (ADR-035 Test Contract, external review finding #6):
@@ -5492,6 +5493,24 @@ async def _main_impl_body():
                 # commits it holds) is retained for forensics/resume, main
                 # is left untouched; the pending open increment set just
                 # above (supply or defect) is the next session's first item.
+                #
+                # Codex review of 22e1aeb8, P1 (architect resolution
+                # 2026-09-27): if that interruption record failed to
+                # verifiably persist, marking this cycle "finished" here
+                # (handled marker, terminal ledger row) would retire the
+                # request forever with NO durable record of the
+                # interrupted attempt anywhere -- the work is silently
+                # lost, not merely delayed. Stop before finishing, same
+                # shape as N4's registration-failure block: no handled
+                # marker, so the next tick's own kill-check naturally
+                # retries this exact stale registration.
+                if not _unfinished_interruption_persisted:
+                    print(
+                        'open-increment interruption record failed to persist; '
+                        'not marking cycle finished, retrying next tick'
+                    )
+                    _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
+                    return {'status': 0}
                 _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
                 handled_marker.write_text(str(req_path), encoding='utf-8')
                 _unfinished_reason = (
