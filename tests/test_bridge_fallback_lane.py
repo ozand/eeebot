@@ -231,6 +231,11 @@ class TestTriggerRoutes:
         crows = _rows_for_cycle(rows, "cycle-existing")
         assert crows[-1]["outcome"] == "skipped-duplicate"
         assert crows[-1]["reason"] == "existence_index_duplicate"
+        artifact = json.loads(
+            (state_dir / "subagents" / "results" / "result-req-existing.json")
+            .read_text(encoding="utf-8")
+        )
+        assert artifact["delivered"] is False
 
 
 class TestFallbackOutputStillSuppressed:
