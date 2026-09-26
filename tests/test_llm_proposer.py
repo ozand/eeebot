@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import bridge, cycle_ledger, demand, llm_proposer
+from nanobot.runtime import bridge, cycle_ledger, demand, llm_proposer, system_map
 from tests.test_goal_backlog_routing import GOAL_TEXT_JSON, _make_git_repo_with_commit
 
 ENV_VAR = llm_proposer.ENABLED_ENV
@@ -619,6 +619,25 @@ class TestBuildContext:
         _write_goal_text(state_dir, "some real goal text")
         context = llm_proposer.build_context(state_dir, None)
         assert "Existing scripts" not in context
+
+    def test_includes_inventory_section_from_state_system_map_file(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        repo = tmp_path / "selfevo_repo"
+        repo.mkdir(parents=True)
+        sm_path = system_map.system_map_path(state_dir)
+        sm_path.parent.mkdir(parents=True, exist_ok=True)
+        sm_path.write_text(
+            "# SYSTEM MAP\n\n## Inventory\n\n"
+            "- scripts/track_memory.py — Track memory usage over time.\n\n"
+            "## Near-duplicate candidates\n\n(none detected)\n",
+            encoding="utf-8",
+        )
+
+        context = llm_proposer.build_context(state_dir, repo)
+
+        assert "Existing scripts (do not duplicate" in context
+        assert "scripts/track_memory.py — Track memory usage over time." in context
 
     def test_includes_inventory_section_from_system_map_file(self, tmp_path):
         state_dir = _state_dir(tmp_path)
@@ -2343,7 +2362,8 @@ class TestSystemMapWiring:
         result = llm_proposer.maybe_propose(state_dir, repo)
 
         assert result is None  # kill switch off, no proposal
-        assert (repo / "docs" / "SYSTEM_MAP.md").is_file()
+        assert system_map.system_map_path(state_dir).is_file()
+        assert not (repo / "docs" / "SYSTEM_MAP.md").exists()
 
     def test_maybe_propose_survives_system_map_failure(self, tmp_path, monkeypatch):
         monkeypatch.delenv(ENV_VAR, raising=False)

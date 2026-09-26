@@ -180,6 +180,10 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.runtime.bridge:_write_bridge_completed_result",
         "repo:scripts/cleanup_subagent_queue.py",  # results/requests -> archive/
     ),
+    # #1966: system map and watermark in state directory.
+    "system_map": (
+        "nanobot.runtime.system_map:update_system_map",
+    ),
 }
 
 # Every ``orphan:#N`` reference must name an issue listed here, with the
