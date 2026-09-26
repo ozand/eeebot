@@ -4126,6 +4126,88 @@ async def _main_impl_body():
     from nanobot.runtime.session_clock import get_bridge_wall_secs
     _bridge_wall_deadline = _bridge_start_mono + get_bridge_wall_secs()
 
+    _planning_cycle_id = f'cycle-{uuid.uuid4().hex[:12]}'
+
+    # D2 (ADR-035 Test Contract, #1942 B2): a running-attempt registration
+    # with no terminal outcome by the time THIS cycle starts means the
+    # process that wrote it (record_attempt_started, in _evaluate_candidate
+    # below) died before reaching one -- a hard kill, or an exact imitation
+    # of one. Converted to a pending open increment (interrupted_kill)
+    # BEFORE the planning session runs, so it is surfaced exactly like any
+    # other open increment (keep/edit/delete) rather than losing the
+    # attempt silently. Deliberately placed here, not inside
+    # _run_planning_session -- every _main_impl-level test in this file
+    # stubs that function wholesale, and this check must still run.
+    #
+    # Round 4 external re-check, item P2-b (architect resolution
+    # 2026-09-26): moved to BEFORE both pre-checks below (and before
+    # repository/provider preparation) -- recovering a supply-classified
+    # error creates a fresh backoff hold (record_supply_interruption), and
+    # that hold must be visible to THIS SAME tick's own
+    # open_increment.precheck() call, or the tick proceeds to spawn a
+    # real planning session (and prepare the repo, and build a provider)
+    # in the exact tick that just decided to back off.
+    try:
+        from nanobot.runtime import open_increment as _open_increment_killcheck
+
+        _stale_running = _open_increment_killcheck.check_running_for_kill(STATE_DIR, _planning_cycle_id)
+        if _stale_running:
+            _stale_cycle_id = _stale_running.get('cycle_id', '')
+            _stale_branch = _stale_running.get('branch', '')
+            # N1 (round 2 external re-check, architect resolution
+            # 2026-09-26): the attempt's OWN plan (record_attempt_started),
+            # carried forward as the pending increment's plan_text -- a
+            # later `keep`-confirm must hand the executor its real task
+            # back, not a description of the kill. A registration written
+            # before this field existed (or an unset one) falls back to
+            # the old explanatory placeholder, never a blank plan.
+            _stale_plan_text = _stale_running.get('plan_text') or (
+                '(a prior attempt on this branch was interrupted before it '
+                'reached a terminal outcome, and its own plan text was not '
+                'recorded)'
+            )
+            # Round 2 external re-check, item 2 (architect resolution
+            # 2026-09-26): a telemetry-confirmed `error` is classified
+            # HERE, immediately, instead of the (never-run, since the
+            # process that would have run it already died) in-tick
+            # classifier round 1 assumed -- see
+            # `check_running_for_kill`'s own docstring.
+            if _stale_running.get('executor_status') == 'error':
+                if _stale_running.get('error_class') == 'paused-supplier':
+                    # C (round 3 external re-check, architect resolution
+                    # 2026-09-26): without selfevo_repo, the hold's version
+                    # snapshot is None -- planner_rest.snapshot_version
+                    # returns None for a missing repo, so precheck reads
+                    # every subsequent tick as "input_changed" and the
+                    # backoff never actually holds.
+                    _open_increment_killcheck.record_supply_interruption(
+                        STATE_DIR, _stale_cycle_id,
+                        retry_key=f"kill:{_stale_cycle_id}",
+                        plan_text=_stale_plan_text,
+                        candidate_id=None,
+                        selfevo_repo=STATE_DIR.parent / 'eeebot-self-evolving',
+                        branch=_stale_branch,
+                    )
+                else:
+                    _open_increment_killcheck.record_defect_interruption(
+                        STATE_DIR, _stale_cycle_id,
+                        retry_key=f"kill:{_stale_cycle_id}",
+                        plan_text=_stale_plan_text,
+                        candidate_id=None,
+                        branch=_stale_branch,
+                    )
+            else:
+                _open_increment_killcheck.record_kill_interruption(
+                    STATE_DIR, _stale_cycle_id,
+                    retry_key=f"kill:{_stale_cycle_id}",
+                    plan_text=_stale_plan_text,
+                    candidate_id=None,
+                    branch=_stale_branch,
+                    executor_status=_stale_running.get('executor_status'),
+                )
+    except Exception:
+        pass
+
     # ADR-035 rest amendment (#1964): the harness pre-check runs before
     # repository preparation too -- a held tick touches neither the model
     # nor the checkout. Reads the SAME state _run_planning_session's own
@@ -4209,80 +4291,13 @@ async def _main_impl_body():
     # ADR-035 rule 1 (#1942): the planning session runs here, before any
     # task exists for the cycle. provider/bus never depended on a specific
     # request -- moved up from their old post-selection position.
+    #
+    # Round 4 external re-check, item P2-b (architect resolution
+    # 2026-09-26): the stale-attempt recovery check (D2) that used to
+    # live here has MOVED to before both pre-checks above -- see the
+    # comment there for why. `_planning_cycle_id` moved with it.
     provider = _make_provider(config)
     bus = MessageBus()
-    _planning_cycle_id = f'cycle-{uuid.uuid4().hex[:12]}'
-
-    # D2 (ADR-035 Test Contract, #1942 B2): a running-attempt registration
-    # with no terminal outcome by the time THIS cycle starts means the
-    # process that wrote it (record_attempt_started, in _evaluate_candidate
-    # below) died before reaching one -- a hard kill, or an exact imitation
-    # of one. Converted to a pending open increment (interrupted_kill)
-    # BEFORE the planning session runs, so it is surfaced exactly like any
-    # other open increment (keep/edit/delete) rather than losing the
-    # attempt silently. Deliberately placed here, not inside
-    # _run_planning_session -- every _main_impl-level test in this file
-    # stubs that function wholesale, and this check must still run.
-    try:
-        from nanobot.runtime import open_increment as _open_increment_killcheck
-
-        _stale_running = _open_increment_killcheck.check_running_for_kill(STATE_DIR, _planning_cycle_id)
-        if _stale_running:
-            _stale_cycle_id = _stale_running.get('cycle_id', '')
-            _stale_branch = _stale_running.get('branch', '')
-            # N1 (round 2 external re-check, architect resolution
-            # 2026-09-26): the attempt's OWN plan (record_attempt_started),
-            # carried forward as the pending increment's plan_text -- a
-            # later `keep`-confirm must hand the executor its real task
-            # back, not a description of the kill. A registration written
-            # before this field existed (or an unset one) falls back to
-            # the old explanatory placeholder, never a blank plan.
-            _stale_plan_text = _stale_running.get('plan_text') or (
-                '(a prior attempt on this branch was interrupted before it '
-                'reached a terminal outcome, and its own plan text was not '
-                'recorded)'
-            )
-            # Round 2 external re-check, item 2 (architect resolution
-            # 2026-09-26): a telemetry-confirmed `error` is classified
-            # HERE, immediately, instead of the (never-run, since the
-            # process that would have run it already died) in-tick
-            # classifier round 1 assumed -- see
-            # `check_running_for_kill`'s own docstring.
-            if _stale_running.get('executor_status') == 'error':
-                if _stale_running.get('error_class') == 'paused-supplier':
-                    # C (round 3 external re-check, architect resolution
-                    # 2026-09-26): without selfevo_repo, the hold's version
-                    # snapshot is None -- planner_rest.snapshot_version
-                    # returns None for a missing repo, so precheck reads
-                    # every subsequent tick as "input_changed" and the
-                    # backoff never actually holds.
-                    _open_increment_killcheck.record_supply_interruption(
-                        STATE_DIR, _stale_cycle_id,
-                        retry_key=f"kill:{_stale_cycle_id}",
-                        plan_text=_stale_plan_text,
-                        candidate_id=None,
-                        selfevo_repo=STATE_DIR.parent / 'eeebot-self-evolving',
-                        branch=_stale_branch,
-                    )
-                else:
-                    _open_increment_killcheck.record_defect_interruption(
-                        STATE_DIR, _stale_cycle_id,
-                        retry_key=f"kill:{_stale_cycle_id}",
-                        plan_text=_stale_plan_text,
-                        candidate_id=None,
-                        branch=_stale_branch,
-                    )
-            else:
-                _open_increment_killcheck.record_kill_interruption(
-                    STATE_DIR, _stale_cycle_id,
-                    retry_key=f"kill:{_stale_cycle_id}",
-                    plan_text=_stale_plan_text,
-                    candidate_id=None,
-                    branch=_stale_branch,
-                    executor_status=_stale_running.get('executor_status'),
-                )
-    except Exception:
-        pass
 
     # D9 (ADR-035 Test Contract, external review finding #9): a `stopped`
     # no_plan_recovery state blocks session start until the operator
