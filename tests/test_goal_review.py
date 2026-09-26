@@ -1079,6 +1079,23 @@ class TestDerivedPriorities:
         assert all(d["label"] != "Old task 0" for d in stored)
         assert stored[0]["label"] == "Old task 1"  # oldest (index 0) evicted
 
+    def test_completed_operator_prose_rejects_derived_candidate_by_title(self, tmp_path, monkeypatch):
+        from nanobot.runtime import operator_documents
+
+        state_dir = tmp_path / "state"
+        _write_goal_text(
+            state_dir,
+            "Completed (do not repeat): Priority 17 — Trim proposer retry burn: "
+            "cut wasted retries.",
+        )
+        labels = operator_documents.resolve_operator_priority_labels(state_dir)
+        normalized, reason = goal_review.validate_priority(
+            dict(VALID_PRIORITY), {"E1": "test evidence"}, labels
+        )
+
+        assert normalized is None
+        assert reason == "duplicate"
+
     def test_operator_readding_derived_label_is_not_doubled(self, tmp_path):
         """#860 review: if the operator later bakes a derived label into
         goal_text itself, the reader must NOT present it twice (two

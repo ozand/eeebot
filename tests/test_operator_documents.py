@@ -199,6 +199,24 @@ def test_completed_priority_parser_preserves_closing_vector_tag(tmp_path: Path):
     assert "existing label" in resolve_operator_priority_labels(state)
 
 
+def test_completed_em_dash_title_excludes_instruction_tail_and_dedupes(tmp_path: Path):
+    """Completed prose title excludes the colon-delimited instruction body."""
+    state = tmp_path / "state"
+    _goal_text_json(
+        state,
+        "Completed (do not repeat): Priority 17 — Trim proposer retry burn: "
+        "cut wasted retries.",
+    )
+
+    result = resolve_operator_priorities(state)
+
+    assert [(entry.number, entry.title) for entry in result.completed_entries] == [
+        (17, "Trim proposer retry burn"),
+    ]
+    assert "trim proposer retry burn" in resolve_operator_priority_labels(state)
+    assert "cut wasted retries" not in resolve_operator_priority_labels(state)
+
+
 def test_completed_em_dash_title_preserves_internal_punctuation(tmp_path: Path):
     """ADR-034: punctuation inside an em-dash Completed title is not a delimiter."""
     state = tmp_path / "state"
