@@ -583,6 +583,7 @@ class _FakeSkillHygieneSubagentManager:
 
     def __init__(self, *, workspace, **_kwargs):
         self.workspace = workspace
+        self._state_dir = _kwargs.get("skill_fitness_state_dir")
         self._running_tasks: dict = {}
 
     async def spawn(self, **_kwargs):
@@ -599,6 +600,19 @@ class _FakeSkillHygieneSubagentManager:
             )
         _run(self.workspace, "add", "skills")
         _run(self.workspace, "commit", "-m", "feat: add duplicate skill batch")
+        # Round 2, item 1: completion is positive-only -- production always
+        # writes 'ok' terminal telemetry for a finished executor.
+        if self._state_dir is not None:
+            task_id = f"skill-hygiene-{id(self)}"
+            (Path(self._state_dir) / "subagents").mkdir(parents=True, exist_ok=True)
+            (Path(self._state_dir) / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({"status": "ok", "summary": "done", "result": "done"}), encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
         return "fake skill subagent spawned"
 
 
@@ -618,6 +632,7 @@ class _FakeSubagentManager:
     def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
         self.workspace = workspace
         self._telemetry_component = telemetry_component
+        self._state_dir = _kwargs.get("skill_fitness_state_dir")
         self._running_tasks: dict = {}
 
     async def spawn(self, **_kwargs):
@@ -627,6 +642,25 @@ class _FakeSubagentManager:
         (self.workspace / "scripts" / "feature.py").write_text("def feature():\n    return 42\n")
         _run(self.workspace, "add", "scripts/feature.py")
         _run(self.workspace, "commit", "-m", "feat: add feature")
+        # Round 2 external re-check, item 1 (architect resolution
+        # 2026-09-26): completion is positive-only -- a real subagent
+        # always writes terminal telemetry with status: "ok" on success
+        # (nanobot/agent/subagent.py's `_write_subagent_telemetry`).
+        # Without a durable state_dir (a caller that never passed
+        # `skill_fitness_state_dir` through to the real SubagentManager
+        # constructor) there is nowhere to write it -- same as any other
+        # caller-shape gap, left as a no-op rather than guessed at.
+        if self._state_dir is not None:
+            task_id = f"fake-executor-{id(self)}"
+            (Path(self._state_dir) / "subagents").mkdir(parents=True, exist_ok=True)
+            (Path(self._state_dir) / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({"status": "ok", "summary": "done", "result": "done"}), encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
         return "fake subagent spawned"
 
 
@@ -644,6 +678,21 @@ def _core_smoke_set_matches_fixture_repo(monkeypatch, tmp_path):
     monkeypatch.setattr(bridge, "RELEASE_ROOT", _adr034_release_root)
 
 
+def _stub_planning_session(monkeypatch, plan_text: str = "a novel bounded increment") -> None:
+    """ADR-035 rule 1 (#1942): req/task now come from the planning session's
+    own plan, never from a rotation-picked queue file -- stand in a plan
+    that survives the pre-spawn dedup gates untouched (no prior result to
+    collide with) so these integration tests still exercise the executor
+    spawn/gate/outcome machinery, not planner decision-making."""
+    async def _fake_planning_session(**_kwargs):
+        return {
+            'ran': True, 'iterations_used': 1, 'iterations_planned': 1,
+            'tampered_files': [], 'plan': {'plan': plan_text, 'candidate_id': None},
+        }
+
+    monkeypatch.setattr(bridge, "_run_planning_session", _fake_planning_session)
+
+
 class TestBridgeIntegrationLedgerRows:
     def test_skill_hygiene_violation_reaches_production_gate_journal(self, tmp_path, monkeypatch):
         base = tmp_path
@@ -657,6 +706,7 @@ class TestBridgeIntegrationLedgerRows:
         monkeypatch.setattr(bridge, "SubagentManager", _FakeSkillHygieneSubagentManager)
         monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
         monkeypatch.setenv("SUBAGENT_BRIDGE_MAX_REVISIONS", "0")
+        _stub_planning_session(monkeypatch)
 
         _seed_bridge_request(state_dir, "req-skill", "cycle-skill")
         assert asyncio.run(bridge._main_impl()) == 0
@@ -682,6 +732,7 @@ class TestBridgeIntegrationLedgerRows:
         # No real LLM call happens (spawn() is faked above) — avoid the
         # "no API key configured" hard-exit in _make_provider by stubbing it.
         monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        _stub_planning_session(monkeypatch)
 
         _seed_bridge_request(state_dir, "req-green", "cycle-green")
 
@@ -710,32 +761,17 @@ class TestBridgeIntegrationLedgerRows:
         monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
         monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "target_workspace")
         monkeypatch.setattr(bridge, "_cycle_tag_exists", lambda *_a, **_k: True)
+        monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        _stub_planning_session(monkeypatch)
 
         _seed_bridge_request(state_dir, "req-tagged", "cycle-tagged")
         assert asyncio.run(bridge._main_impl()) == 0
 
         rows = _read_ledger(state_dir)
-        assert [row["phase"] for row in rows] == ["started", "dedup", "outcome"]
+        # ADR-035 rest amendment (#1964): a dedup match now also feeds
+        # planner_dedup_evidence.record_rejected_duplicate, so the next
+        # planning session sees why -- an extra trailing ledger row.
+        assert [row["phase"] for row in rows] == ["started", "dedup", "outcome", "rejected_duplicate"]
         assert rows[1]["decision"] == "skipped_duplicate"
         assert rows[2]["outcome"] == "skipped-duplicate"
         assert rows[2]["reason"] == "already_done_tag"
-
-    def test_exact_tag_skip_invokes_llm_proposer_at_bulk_cap(self, tmp_path, monkeypatch):
-        state_dir = tmp_path / "state"
-        state_dir.mkdir()
-        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
-        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
-        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "target_workspace")
-        monkeypatch.setattr(bridge, "_cycle_tag_exists", lambda *_a, **_k: True)
-        monkeypatch.setattr(bridge, "MAX_SKIPS_PER_RUN", 1)
-
-        calls = []
-        monkeypatch.setattr(
-            llm_proposer,
-            "maybe_propose",
-            lambda *args, **kwargs: calls.append((args, kwargs)) or False,
-        )
-        _seed_bridge_request(state_dir, "req-tagged", "cycle-tagged")
-        assert asyncio.run(bridge._main_impl()) == 0
-        assert len(calls) == 1
-        assert calls[0][0][0] == state_dir

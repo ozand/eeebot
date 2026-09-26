@@ -1,0 +1,1017 @@
+"""ADR-035 rule 3 (#1942) / ADR-031 rule 2, architect resolution 2026-09-25:
+the open increment a supply-family interruption leaves behind.
+
+A plan interrupted by a model-call error or a supplier pause during
+execution (:func:`nanobot.runtime.bridge._classify_llm_error` returning
+``"paused-supplier"``) is not retried and not queued (that queue is
+retired -- ADR-035 rule 1). The harness records it as an **open increment**
+with reason ``interrupted_supply`` and holds further sessions -- exactly
+like :mod:`nanobot.runtime.planner_rest`'s pre-check (#1964): a snapshot of
+one named input plus a deadline, "tests change, never value". This module
+reuses :func:`planner_rest.snapshot_version`/``WakeCondition`` for that
+version check, but keeps its OWN state file and OWN counters -- the
+architect's resolution is explicit that held ticks here count apart from
+both ``planner_rest`` (voluntary rest) and ``no_plan_recovery`` (the
+planning session's own no-plan bound): this hold is the harness reacting to
+an EXECUTION-time supply failure, not a planner decision.
+
+Deadline is a doubling backoff: :data:`SUPPLY_RETRY_COOLDOWN_BASE_SECONDS`
+(15 minutes) times two per CONSECUTIVE ``interrupted_supply`` outcome for
+the same open increment (15 -> 30 -> 60), capped at
+:data:`SUPPLY_RETRY_COOLDOWN_CAP_SECONDS` (60 minutes) -- architect addendum
+2026-09-25: a fixed 15-minute retry would hammer a queue busy for hours.
+:func:`record_model_call_completed` resets the streak (and so the backoff)
+on ANY model call that finishes without a supply classification, whether it
+produced a plan, failed for our own reasons, or came from the executor or
+the planner -- proof the supplier is reachable again. Any change to the
+snapshotted input, an unreadable input, or a passed deadline also lets the
+next session run -- :func:`precheck` never judges whether the supplier is
+actually healthy again; the session itself finds that out.
+
+The pending open increment (:func:`pending_open_increment`) is the next
+planning session's first item; the session must resolve it via
+:func:`resolve` with one of ``keep``/``edit``/``delete`` (ADR-035 rule 3,
+"I": "for its own previous plan: keep, edit or delete"). Three consecutive
+``interrupted_supply`` outcomes for the SAME open increment raise an
+operator-facing flag that :func:`resolve` never clears -- only
+:func:`operator_clear_flag` does (mirrors
+``no_plan_recovery.stopped``/``resume``).
+"""
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+from nanobot.runtime.llm_error_classification import classify_llm_error
+from nanobot.runtime.planner_rest import WakeCondition, _parse_deadline, snapshot_version
+
+_STATE_RELPATH = ("planner", "open_increment.json")
+_SCHEMA = "open-increment-v1"
+
+#: Base cooldown before the harness first lets a session test supplier
+#: recovery after an ``interrupted_supply`` outcome; doubles per consecutive
+#: interruption for the SAME open increment. Overridable for operators/tests.
+SUPPLY_RETRY_COOLDOWN_BASE_SECONDS = int(
+    os.environ.get("SUBAGENT_BRIDGE_SUPPLY_RETRY_COOLDOWN_BASE_SECONDS", str(15 * 60))
+)
+#: Backoff ceiling -- a queue that stays busy for hours must not push the
+#: retry interval past this.
+SUPPLY_RETRY_COOLDOWN_CAP_SECONDS = int(
+    os.environ.get("SUBAGENT_BRIDGE_SUPPLY_RETRY_COOLDOWN_CAP_SECONDS", str(60 * 60))
+)
+
+
+def _backoff_seconds(consecutive: int, *, base: int, cap: int) -> int:
+    """15 -> 30 -> 60 (minutes, at the defaults): base * 2**(consecutive-1),
+    capped. ``consecutive`` is 1-indexed (the interruption just recorded)."""
+    return min(base * (2 ** max(consecutive - 1, 0)), cap)
+
+#: Consecutive interrupted_supply outcomes for the SAME open increment
+#: (same retry_key) before the non-auto-clearing operator flag is raised.
+OPERATOR_FLAG_THRESHOLD = 3
+
+_VALID_DECISIONS = frozenset({"keep", "edit", "delete"})
+
+
+class OpenIncrementDecisionError(ValueError):
+    """An unrecognized keep/edit/delete decision was passed to :func:`resolve`."""
+
+
+@dataclass
+class OpenIncrementState:
+    #: The interrupted plan itself, or None when nothing is pending.
+    pending: "dict[str, Any] | None" = None
+    #: The active precheck hold ({"wake_condition": ..., "deadline": ..., "snapshot": ...}), or None.
+    hold: "dict[str, Any] | None" = None
+    #: Ticks the precheck held on (no session at all) since the last one ran -- its own counter.
+    held_ticks: int = 0
+    #: Consecutive interrupted_supply outcomes for `pending`'s retry_key.
+    consecutive_supply_interrupts: int = 0
+    #: Non-auto-clearing operator-facing flag (architect resolution point 3).
+    operator_flagged: bool = False
+    #: D2 (ADR-035 Test Contract, #1942 B2): the in-flight attempt
+    #: registration ({"cycle_id", "branch", "attempt", "started_at",
+    #: "resumed_by"}), written BEFORE the executor can be killed and
+    #: cleared ONLY by a terminal outcome (record_attempt_finished) --
+    #: never by resolve()/keep, which only annotates it. A registration
+    #: still standing for a DIFFERENT cycle_id than the one about to run
+    #: is exactly the durable proof a hard kill needs: the process that
+    #: wrote it died before reaching a terminal outcome.
+    running: "dict[str, Any] | None" = None
+    #: Round 4 external re-check, item P2-a (architect resolution
+    #: 2026-09-26): set ONLY by :func:`resolve`, on its return value --
+    #: True when the intended transition was verified by READING THE
+    #: SAVED STATE BACK (not merely a truthy ``_save_state`` return),
+    #: False otherwise. Never part of the persisted schema (excluded in
+    #: :meth:`as_dict`) and never set by :func:`load_state` -- it
+    #: describes what THIS resolve() call did, not a durable fact.
+    resolve_saved: "bool | None" = None
+
+    def as_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d.pop("resolve_saved", None)
+        return d
+
+
+def _state_path(state_dir: "Path") -> "Path":
+    return Path(state_dir).joinpath(*_STATE_RELPATH)
+
+
+def _load_state_strict(state_dir: "Path") -> "OpenIncrementState | None":
+    """Round 5 external re-check, item N2 (architect resolution
+    2026-09-26): like :func:`load_state`, but returns ``None`` when the
+    file is missing, unreadable, or malformed -- distinguishing
+    "successfully read a valid state with ``pending=None``" from "could
+    not read state at all". Used ONLY by :func:`resolve`'s own post-save
+    verification: :func:`load_state`'s permissive default (a fresh
+    ``OpenIncrementState()``) is indistinguishable from a genuine
+    ``pending=None``, silently turning "couldn't verify" into "verified
+    cleared" for ``delete``/``edit``."""
+    path = _state_path(state_dir)
+    try:
+        if not path.is_file():
+            return None
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    known = set(OpenIncrementState.__dataclass_fields__)
+    try:
+        return OpenIncrementState(**{k: v for k, v in raw.items() if k in known})
+    except Exception:
+        return None
+
+
+def load_state(state_dir: "Path") -> OpenIncrementState:
+    path = _state_path(state_dir)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+    except Exception:
+        raw = None
+    if not isinstance(raw, dict):
+        return OpenIncrementState()
+    known = set(OpenIncrementState.__dataclass_fields__)
+    try:
+        return OpenIncrementState(**{k: v for k, v in raw.items() if k in known})
+    except Exception:
+        return OpenIncrementState()
+
+
+def _save_state(state_dir: "Path", state: OpenIncrementState) -> bool:
+    """Returns True only when the write actually landed (N4, round 2
+    external re-check, architect resolution 2026-09-26) -- most callers
+    still ignore this (fail-open bookkeeping), but
+    :func:`record_attempt_started` uses it as a correctness precondition
+    for spawning the executor at all."""
+    path = _state_path(state_dir)
+    payload = {"schema": _SCHEMA, **state.as_dict()}
+    tmp_name: "str | None" = None
+    ok = False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False,
+        ) as fh:
+            tmp_name = fh.name
+            fh.write(json.dumps(payload, indent=2, ensure_ascii=False))
+        os.chmod(tmp_name, 0o644)
+        os.replace(tmp_name, path)
+        tmp_name = None
+        ok = True
+    except Exception:
+        pass
+    finally:
+        if tmp_name:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+    return ok
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def record_supply_interruption(
+    state_dir: "Path",
+    cycle_id: str,
+    *,
+    retry_key: str,
+    plan_text: str,
+    candidate_id: "str | None",
+    selfevo_repo: "Path | None" = None,
+    wake_condition: "WakeCondition | None" = None,
+    cooldown_base_seconds: int = SUPPLY_RETRY_COOLDOWN_BASE_SECONDS,
+    cooldown_cap_seconds: int = SUPPLY_RETRY_COOLDOWN_CAP_SECONDS,
+    branch: str = "",
+) -> OpenIncrementState:
+    """The executor's LLM call died on a supplier-side classification
+    (``paused-supplier``) mid-plan. Records the interrupted plan as the
+    pending open increment (``reason: interrupted_supply``) and starts a
+    rest-shaped hold on the harness's OWN counters -- never touching
+    :mod:`planner_rest` or :mod:`no_plan_recovery`'s state.
+
+    ``retry_key`` ties consecutive interruptions of the SAME underlying
+    increment together (see ``bridge._retry_key_for``); a different
+    retry_key restarts the streak at 1, matching the bounded-retry
+    mechanism's own per-candidate keying.
+
+    ``branch`` (ADR-035 keep-work, #1942 B2) is the cycle branch
+    (``selfevo/cycle-<cycle_id>``) the interrupted attempt's checkpoint
+    commits live on -- the caller already computed it via
+    ``bridge._setup_cycle_branch`` and passes it straight through, so this
+    module never needs its own branch-naming logic. A *keep* decision
+    (:func:`resolve`) reads it back before clearing ``pending`` so the next
+    executor spawn can resume the SAME branch instead of branching a fresh
+    one off ``origin/main``. ``opening_entry_written`` is always set True
+    here: the interrupted attempt's own opening diary entry was already
+    written before it started executing (ADR-028 rule 2), so a *keep*
+    resume must never write a second one for the same increment.
+    """
+    from nanobot.runtime.cycle_ledger import append_event
+
+    state = load_state(state_dir)
+    same_increment = bool(state.pending) and state.pending.get("retry_key") == retry_key
+    consecutive = (state.consecutive_supply_interrupts + 1) if same_increment else 1
+
+    # Round 3 external re-check, item B (architect resolution 2026-09-26):
+    # a re-interruption of the SAME increment (same cycle_id -- a kept/
+    # resumed attempt killed or errored again) must carry plan_version
+    # forward, not silently reset it -- resolve(keep, plan_text=...)'s own
+    # version bump would otherwise be lost the instant the resumed attempt
+    # is interrupted again.
+    _prior_pending = state.pending if (state.pending and state.pending.get("cycle_id") == (cycle_id or "")) else None
+    plan_version = (_prior_pending or {}).get("plan_version", 1)
+
+    # Round 4 external re-check, item P1-a (architect resolution
+    # 2026-09-26): `running` -> `pending` in ONE save, not two. Left
+    # standing, a stale `running` for THIS SAME cycle_id (the common
+    # case: this very registration is what just went stale) survives
+    # into the very next tick's `check_running_for_kill`, which then
+    # misclassifies it as a FRESH kill of the resumed attempt and
+    # re-interrupts using `running`'s own (possibly pre-edit) plan_text
+    # -- silently discarding an edit already accepted into `pending`.
+    if state.running and state.running.get("cycle_id") == (cycle_id or ""):
+        state.running = None
+
+    state.pending = {
+        "retry_key": retry_key,
+        "cycle_id": cycle_id or "",
+        "plan_text": plan_text,
+        "plan_version": plan_version,
+        "candidate_id": candidate_id or None,
+        "reason": "interrupted_supply",
+        "interrupted_at": _now_iso(),
+        "branch": branch or "",
+        "opening_entry_written": True,
+    }
+    state.consecutive_supply_interrupts = consecutive
+
+    escalated = consecutive >= OPERATOR_FLAG_THRESHOLD and not state.operator_flagged
+    if escalated:
+        state.operator_flagged = True
+
+    wc = wake_condition or WakeCondition(kind="main_commit")
+    cooldown_seconds = _backoff_seconds(consecutive, base=cooldown_base_seconds, cap=cooldown_cap_seconds)
+    deadline = (datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    snapshot = snapshot_version(state_dir, selfevo_repo, wc)
+    state.hold = {
+        "wake_condition": {"kind": wc.kind, "ref": wc.ref},
+        "deadline": deadline,
+        "snapshot": snapshot,
+    }
+    state.held_ticks = 0
+    _save_state(state_dir, state)
+
+    append_event(state_dir, {
+        "phase": "open_increment",
+        "cycle_id": cycle_id or "",
+        "status": "interrupted_supply",
+        "retry_key": retry_key,
+        "consecutive_supply_interrupts": consecutive,
+        "cooldown_seconds": cooldown_seconds,
+        "deadline": deadline,
+    })
+    if escalated:
+        append_event(state_dir, {
+            "phase": "open_increment_operator_flag",
+            "cycle_id": cycle_id or "",
+            "retry_key": retry_key,
+            "consecutive_supply_interrupts": consecutive,
+            "note": (
+                f"{consecutive} consecutive supply interruptions for the same open "
+                "increment -- flagged for the operator; never auto-clears"
+            ),
+        })
+    return state
+
+
+def record_model_call_completed(state_dir: "Path") -> OpenIncrementState:
+    """A model call (executor or planner) finished WITHOUT a supply
+    classification -- proof the supplier is reachable, whatever the call's
+    own content turned out to be. Resets the consecutive-interruption
+    streak (and so the backoff) for the NEXT ``interrupted_supply``, if
+    any; does not touch ``pending``/``hold``/``operator_flagged``, which
+    only :func:`resolve`/:func:`operator_clear_flag` change. A cheap no-op
+    write when the streak is already 0."""
+    state = load_state(state_dir)
+    if state.consecutive_supply_interrupts:
+        state.consecutive_supply_interrupts = 0
+        _save_state(state_dir, state)
+    return state
+
+
+def precheck(state_dir: "Path", selfevo_repo: "Path | None") -> "tuple[bool, str]":
+    """Should the harness run a real session (and repository preparation,
+    and create a provider) this tick? Same slot and same version-only shape
+    as :func:`planner_rest.precheck` -- called alongside it, on separate
+    state. No active hold -> run. Deadline passed / input changed / input
+    unreadable -> run (the session itself tests supplier recovery). Else
+    hold."""
+    state = load_state(state_dir)
+    hold = state.hold
+    if not hold:
+        return True, "no_active_hold"
+    try:
+        wc = WakeCondition(kind=hold["wake_condition"]["kind"], ref=hold["wake_condition"].get("ref", ""))
+        deadline = hold["deadline"]
+        snapshot = hold.get("snapshot")
+    except Exception:
+        return True, "corrupt_hold_state"
+    try:
+        if datetime.now(timezone.utc) >= _parse_deadline(deadline):
+            return True, "deadline_passed"
+    except Exception:
+        return True, "corrupt_deadline"
+    current = snapshot_version(state_dir, selfevo_repo, wc)
+    if current is None:
+        return True, "input_unreadable"
+    if current != snapshot:
+        return True, "input_changed"
+    return False, "unchanged"
+
+
+def render_open_increment_block(pending: "dict[str, Any] | None", consecutive_supply_interrupts: int) -> str:
+    """The planning session's FIRST context block when an open increment is
+    pending (ADR-035 rule 3, architect resolution 2026-09-25) -- empty
+    string when there is none. Mandates a keep/edit/delete decision via
+    ``open_increment_decision`` in the plan's final JSON before anything
+    else, so the session cannot silently plan past an unresolved
+    interruption.
+
+    D11 (#1903 planning-cost measurement, architect resolution
+    2026-09-26): for ``keep``, the session is told it may CONFIRM the
+    plan shown above instead of composing a fresh one from scratch --
+    ``plan_action: "confirm"`` (the default whenever it is absent) skips
+    the mandatory ``plan`` field entirely (the harness reuses the text
+    shown here verbatim); ``plan_action: "edit"`` requires a revised
+    ``plan`` and is recorded as an edit of THIS plan, never a new one.
+    Planning a `keep` from scratch was measured (#1903) to nearly double
+    the planner's own call budget after a kill.
+    """
+    if not pending:
+        return ""
+    return (
+        "## Open increment -- interrupted (supply), decide first\n"
+        "A prior plan was interrupted by a model-call/supplier failure "
+        "(#1765) and never completed:\n\n"
+        f"{pending.get('plan_text', '')}\n\n"
+        f"Interrupted at: {pending.get('interrupted_at', '')} "
+        f"(consecutive supply interruptions: {consecutive_supply_interrupts}).\n"
+        "You must decide `keep`, `edit`, or `delete` for this open increment "
+        "before planning anything else -- set `open_increment_decision` to one "
+        "of those three values in your final plan JSON.\n\n"
+        "If you decide `keep`: do not plan this increment from scratch. Set "
+        "`plan_action` to `confirm` to reuse the plan shown above as-is (the "
+        "`plan` field may be omitted), or to `edit` together with a revised "
+        "`plan` field -- recorded as an edit of this same plan, not a new one."
+    )
+
+
+def record_held_tick(state_dir: "Path", cycle_id: str) -> OpenIncrementState:
+    """The precheck held this tick -- no session, no repository
+    preparation, no provider. Counted on this module's own
+    ``held_ticks`` -- never ``planner_rest.held_ticks_since_last_session``
+    or any ``no_plan_recovery`` counter (architect resolution)."""
+    from nanobot.runtime.cycle_ledger import append_event
+
+    state = load_state(state_dir)
+    state.held_ticks += 1
+    _save_state(state_dir, state)
+    append_event(state_dir, {
+        "phase": "open_increment_held",
+        "cycle_id": cycle_id or "",
+        "held_ticks": state.held_ticks,
+    })
+    return state
+
+
+def pending_open_increment(state_dir: "Path") -> "dict[str, Any] | None":
+    """The unresolved open increment, if any -- the next planning session's
+    first item, marked ``interrupted_supply``."""
+    return load_state(state_dir).pending
+
+
+def _create_inspection_ref(selfevo_repo: "Path", pending: "dict[str, Any] | None") -> bool:
+    """D7 (ADR-035 Test Contract, external review finding #7; round 2
+    external re-check, architect resolution 2026-09-26): ``delete`` must
+    not silently hand the branch to the next prune sweep --
+    ``refs/selfevo/inspect/<cycle_id>`` pins the branch's current tip
+    under a ref namespace pruning never looks at
+    (:func:`nanobot.runtime.bridge._prune_stale_cycle_branches` only ever
+    queries ``refs/heads/selfevo/cycle-*``), so the commit stays
+    reachable and named for inspection even after the original branch
+    ref is eventually pruned as ordinary forensic history. Retention on
+    the inspection ref itself (14 days) is a separate, not-yet-built
+    cleanup -- out of scope here.
+
+    Returns True only when the ``update-ref`` write actually succeeded --
+    round 1 was fail-open/silent here (a failed write never blocked
+    ``resolve``'s ``delete``, so a stale lock on the ref, or any other
+    write failure, lost the branch's pending-pruning exemption without
+    ever gaining the protection it was traded for). The caller
+    (:func:`resolve`) now uses this return value to decide whether
+    ``delete`` may actually clear ``pending``."""
+    if not pending:
+        return False
+    branch = str(pending.get("branch") or "").strip()
+    cycle_id = str(pending.get("cycle_id") or "").strip()
+    if not branch or not cycle_id:
+        return False
+    import subprocess
+
+    try:
+        git = ["git", "-c", f"safe.directory={selfevo_repo}", "-C", str(selfevo_repo)]
+        tip = subprocess.run(
+            git + ["rev-parse", f"refs/heads/{branch}"], capture_output=True, text=True, timeout=10,
+        )
+        if tip.returncode != 0 or not tip.stdout.strip():
+            return False
+        update = subprocess.run(
+            git + ["update-ref", f"refs/selfevo/inspect/{cycle_id}", tip.stdout.strip()],
+            capture_output=True, text=True, timeout=10,
+        )
+        return update.returncode == 0
+    except Exception:
+        return False
+
+
+def resolve(
+    state_dir: "Path", cycle_id: str, decision: str, *, reason: str = "",
+    selfevo_repo: "Path | None" = None, plan_text: "str | None" = None,
+) -> OpenIncrementState:
+    """The planning session's keep/edit/delete decision on the pending open
+    increment (ADR-035 rule 3, "I").
+
+    ``edit``/``delete`` clear ``pending``/``hold``/``held_ticks`` and reset
+    the consecutive-interruption streak to 0, same as before B2 -- but
+    NEVER clear ``operator_flagged``; only :func:`operator_clear_flag` does
+    (mirrors ``no_plan_recovery.resume`` leaving ``planner_degraded``
+    untouched).
+
+    D2 (ADR-035 Test Contract, #1942 B2): ``keep`` does NOT clear
+    ``pending`` -- it is the only durable proof this increment still needs
+    a terminal outcome. Clearing it here, before the resumed attempt has
+    even re-registered itself (:func:`record_attempt_started`), would make
+    a kill in that exact hand-off gap invisible to the next cycle -- the
+    77ca scenario B2 exists for. ``pending`` is instead annotated
+    ``resumed_by`` with the deciding cycle; only :func:`record_attempt_finished`
+    (a REAL terminal outcome for this increment's ``cycle_id``) removes it.
+
+    Codex review of 984a133f (``nanobot/runtime/open_increment.py:499``):
+    a generic ``_save_state`` failure (permissions, full disk, I/O error)
+    for ``edit``/``delete`` was silently ignored -- the caller trusted the
+    mutated in-memory ``pending=None`` although nothing landed on disk,
+    and would go on to hand off a brand-new, unrelated plan while the old
+    increment sat unresolved forever. This function now reverts the
+    mutation and returns the state AS IT ACTUALLY IS ON DISK (the load
+    from the top of this call, since ``_save_state``'s failure mode is an
+    atomic temp-file write that never replaces the real file -- see
+    :func:`_save_state`) whenever its own save fails, same shape as the
+    ``delete``/inspection-ref-failure branch just above. Callers that
+    already check ``resolve(...).pending is not None`` (``delete``, and
+    now ``edit``) catch this uniformly with the inspection-ref case.
+
+    D7 (ADR-035 Test Contract, external review finding #7; round 2
+    external re-check, architect resolution 2026-09-26): ``delete``
+    counts as resolved only if pinning the pending increment's branch
+    under ``refs/selfevo/inspect/<cycle_id>`` (see
+    :func:`_create_inspection_ref`) actually SUCCEEDED. A failed write
+    (a stale lock on that ref, a missing ``selfevo_repo``, or any other
+    error) leaves ``pending`` untouched -- the branch keeps its
+    pending-increment pruning exemption and the decision is asked again
+    next time, rather than silently trading one protection for the other
+    and getting neither.
+
+    N2 (round 2 external re-check, architect resolution 2026-09-26): a
+    ``keep`` decision that also EDITS the plan (``plan_text`` given, not
+    ``None``) updates the pending increment's durable ``plan_text``
+    (and bumps ``plan_version``) BEFORE this call returns control to the
+    caller for execution hand-off. Round 1 substituted the revised text
+    only into the CURRENT call's parsed response/executor task -- the
+    durable ``pending`` record kept the OLD plan, so a kill before the
+    resumed attempt's own terminal outcome recovered with the stale
+    original, silently undoing the accepted revision.
+
+    P2-a (round 4 external re-check, architect resolution 2026-09-26):
+    the returned state's ``resolve_saved`` is the single, explicit
+    signal every caller should check -- True only once the FULL intended
+    transition has been verified by reading the state back from disk
+    (not merely a truthy ``_save_state`` return, which only proves the
+    write landed, not that it landed with the intended content). Replaces
+    each caller improvising its own bespoke check (``delete``'s
+    ``pending is not None``, ``keep``+edit's separate re-read of
+    :func:`pending_open_increment`) with one uniform contract that
+    covers every decision, including plain ``keep`` (no edit), which
+    previously had no caller-side check at all.
+    """
+    from nanobot.runtime.cycle_ledger import append_event
+
+    if decision not in _VALID_DECISIONS:
+        raise OpenIncrementDecisionError(
+            f"open-increment decision must be one of {sorted(_VALID_DECISIONS)}, got {decision!r}"
+        )
+    state = load_state(state_dir)
+    retry_key = (state.pending or {}).get("retry_key", "")
+    original_pending = state.pending
+    original_hold = state.hold
+    original_held_ticks = state.held_ticks
+    original_consecutive = state.consecutive_supply_interrupts
+    if decision == "delete":
+        protected = selfevo_repo is not None and _create_inspection_ref(selfevo_repo, state.pending)
+        if not protected:
+            state.hold = None
+            state.held_ticks = 0
+            state.consecutive_supply_interrupts = 0
+            _save_state(state_dir, state)
+            append_event(state_dir, {
+                "phase": "open_increment_delete_failed",
+                "cycle_id": cycle_id or "",
+                "retry_key": retry_key,
+                "reason": "inspection_ref_failed",
+            })
+            state.resolve_saved = False
+            return state
+    if decision == "keep":
+        if state.pending is not None:
+            updated = {**state.pending, "resumed_by": cycle_id or ""}
+            if plan_text is not None:
+                updated["plan_text"] = plan_text
+                updated["plan_version"] = int(state.pending.get("plan_version") or 1) + 1
+            state.pending = updated
+        state.hold = None
+        state.held_ticks = 0
+        state.consecutive_supply_interrupts = 0
+    else:
+        state.pending = None
+        state.hold = None
+        state.held_ticks = 0
+        state.consecutive_supply_interrupts = 0
+    persisted = _save_state(state_dir, state)
+    if not persisted:
+        state.pending = original_pending
+        state.hold = original_hold
+        state.held_ticks = original_held_ticks
+        state.consecutive_supply_interrupts = original_consecutive
+        append_event(state_dir, {
+            "phase": "open_increment_resolve_failed",
+            "cycle_id": cycle_id or "",
+            "retry_key": retry_key,
+            "decision": decision,
+            "reason": "save_failed",
+        })
+        state.resolve_saved = False
+        return state
+
+    # Round 4 external re-check, item P2-a (architect resolution
+    # 2026-09-26): `_save_state` returning True means the write landed,
+    # not that it landed with the INTENDED content -- a concurrent writer
+    # could race between this save and now. Read the saved state back
+    # and verify the FULL intended transition before telling the caller
+    # it may proceed: `delete`/`edit` really cleared `pending`; `keep`
+    # (with or without an edit) matches the intended plan_text,
+    # plan_version, and resumed_by exactly.
+    #
+    # Round 5 external re-check, item N2 (architect resolution
+    # 2026-09-26): the readback uses :func:`_load_state_strict`, not
+    # :func:`load_state` -- the latter's permissive default (a fresh
+    # ``OpenIncrementState()``, ``pending=None``) is indistinguishable
+    # from a genuinely verified `delete`/`edit` the instant the
+    # verification READ itself fails (a corrupt file, a transient I/O
+    # error) right after a real, successful write. "Could not verify"
+    # must never read as "verified cleared".
+    _reloaded = _load_state_strict(state_dir)
+    _verified = _reloaded is not None and (
+        (_reloaded.pending is None) if decision in ("edit", "delete") else (_reloaded.pending == state.pending)
+    )
+    if not _verified:
+        append_event(state_dir, {
+            "phase": "open_increment_resolve_failed",
+            "cycle_id": cycle_id or "",
+            "retry_key": retry_key,
+            "decision": decision,
+            "reason": "verify_failed" if _reloaded is not None else "verify_unreadable",
+        })
+        if _reloaded is not None:
+            _reloaded.resolve_saved = False
+            return _reloaded
+        state.pending = original_pending
+        state.hold = original_hold
+        state.held_ticks = original_held_ticks
+        state.consecutive_supply_interrupts = original_consecutive
+        state.resolve_saved = False
+        return state
+
+    append_event(state_dir, {
+        "phase": "open_increment_resolved",
+        "cycle_id": cycle_id or "",
+        "retry_key": retry_key,
+        "decision": decision,
+        "reason": reason or None,
+    })
+    state.resolve_saved = True
+    return state
+
+
+def operator_clear_flag(state_dir: "Path", cycle_id: str) -> OpenIncrementState:
+    """Operator action clearing :data:`OpenIncrementState.operator_flagged`
+    (mirrors ``no_plan_recovery.resume``)."""
+    from nanobot.runtime.cycle_ledger import append_event
+
+    state = load_state(state_dir)
+    if state.operator_flagged:
+        state.operator_flagged = False
+        _save_state(state_dir, state)
+        append_event(state_dir, {"phase": "open_increment_operator_flag_cleared", "cycle_id": cycle_id or ""})
+    return state
+
+
+# --- D2 (ADR-035 Test Contract, #1942 B2): register before the execution
+# can be killed ---------------------------------------------------------
+
+
+def record_attempt_started(
+    state_dir: "Path", cycle_id: str, branch: str, attempt: int = 1, plan_text: str = "",
+) -> bool:
+    """Register the in-flight attempt BEFORE the executor can be killed --
+    called once cycle-branch setup succeeds, before the subagent spawns.
+    This is the durable proof a kill needs: if the process dies before a
+    terminal outcome is ever recorded for ``cycle_id``
+    (:func:`record_attempt_finished`, wired into
+    :func:`nanobot.runtime.cycle_ledger.record_cycle_outcome` so every
+    exit path is covered), the next cycle's :func:`check_running_for_kill`
+    finds this registration still standing and converts it into a pending
+    open increment (``reason: interrupted_kill``) instead of losing the
+    attempt silently. ``task_id`` starts unset -- the subagent's own id
+    does not exist yet at this point; see :func:`record_attempt_task_id`.
+
+    N1 (round 2 external re-check, architect resolution 2026-09-26):
+    ``plan_text`` is this attempt's OWN plan -- stored here (not just at
+    interruption time) so a later kill-recovery
+    (:func:`check_running_for_kill`) can hand the REAL plan to
+    ``record_kill_interruption``/``record_supply_interruption``/
+    ``record_defect_interruption`` instead of a generic explanatory
+    placeholder. A subsequent ``keep``-confirm then hands the executor
+    back its actual task, not a description of the kill.
+
+    N4 (round 2 external re-check, architect resolution 2026-09-26):
+    returns True only when the registration write was VERIFIED to have
+    persisted (read back from disk, not merely "no exception raised") --
+    this write is now a correctness prerequisite, not optional telemetry.
+    The caller (``bridge.py``, right before the executor spawns) must
+    stop the attempt when this is False (reason ``registration_failed``),
+    or a kill with an unwritable open-increment state destination leaves
+    no resumable registration at all.
+    """
+    from nanobot.runtime.cycle_ledger import append_event
+
+    state = load_state(state_dir)
+    state.running = {
+        "cycle_id": cycle_id or "",
+        "branch": branch or "",
+        "attempt": int(attempt),
+        "started_at": _now_iso(),
+        "resumed_by": None,
+        "task_id": None,
+        "plan_text": plan_text or "",
+    }
+    persisted = _save_state(state_dir, state) and load_state(state_dir).running == state.running
+    if not persisted:
+        return False
+    append_event(state_dir, {
+        "phase": "open_increment_running_registered",
+        "cycle_id": cycle_id or "",
+        "branch": branch or "",
+        "attempt": int(attempt),
+    })
+    return True
+
+
+def record_attempt_task_id(state_dir: "Path", cycle_id: str, task_id: str) -> OpenIncrementState:
+    """Attach the subagent's own telemetry ``task_id`` to the running
+    registration once it exists (right after ``spawn()`` returns -- the id
+    is minted inside it, so it cannot be known at
+    :func:`record_attempt_started` time). A kill in the narrow window
+    before this call leaves ``task_id`` unset, same as no telemetry at
+    all -- :func:`check_running_for_kill` treats both identically. Only
+    updates the registration when it still belongs to THIS ``cycle_id``,
+    so a race with a concurrent, already-superseded registration can
+    never attach the wrong task_id."""
+    state = load_state(state_dir)
+    if state.running and state.running.get("cycle_id") == (cycle_id or ""):
+        state.running["task_id"] = task_id
+        _save_state(state_dir, state)
+    return state
+
+
+def _read_executor_terminal_status(state_dir: "Path", task_id: str) -> "str | None":
+    """The executor's own terminal telemetry ``status`` for ``task_id``
+    (``ok``/``bounded_stop``/``blocked``/``cancelled``/``error``/``running``),
+    or ``None`` when there is no task_id yet (a kill before
+    :func:`record_attempt_task_id` ran) or its telemetry file is
+    unreadable/absent (a kill before the executor wrote ANY row). Both
+    ``None`` cases are equally "no evidence the executor ever finished" --
+    :func:`check_running_for_kill` treats them the same as any other
+    non-error status.
+
+    Deliberately does NOT import :func:`nanobot.runtime.bridge._subagent_own_status`
+    (#1546) even though the read is identical -- ``open_increment`` is a
+    low-level state module reachable from the trainer call graph
+    (``tests/test_trainer_no_direct_mutation.py``'s reachability check),
+    and importing ``bridge`` from here would make bridge.py's entire git-
+    mutating call graph transitively "reachable" from every trainer
+    module that merely reads an open increment. A tiny, independently
+    read-only duplicate is the cheaper risk here than that layering
+    violation; keep this in sync with ``_subagent_own_status`` by hand if
+    its shape ever changes."""
+    if not task_id:
+        return None
+    try:
+        payload = json.loads((Path(state_dir) / "subagents" / f"{task_id}.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    status = payload.get("status")
+    return str(status) if status else None
+
+
+def _read_executor_error_text(state_dir: "Path", task_id: str) -> str:
+    """Round 2 external re-check, item 2 (architect resolution
+    2026-09-26): the raw error text behind a stale ``status: error``
+    registration, so :func:`check_running_for_kill` can classify it
+    immediately (:func:`nanobot.runtime.llm_error_classification.classify_llm_error`)
+    instead of leaving it for a same-tick classifier that may never run
+    if the process died first. Same duplicate-read shape as
+    :func:`_read_executor_terminal_status` (see its docstring for why
+    this module never imports ``bridge.py``). Fail-open to ``""`` on any
+    read problem -- the caller's classifier already defaults an empty
+    string to ``'failed'`` (our own defect), never a manufactured supply
+    classification."""
+    if not task_id:
+        return ""
+    try:
+        payload = json.loads((Path(state_dir) / "subagents" / f"{task_id}.json").read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    text = payload.get("summary") or payload.get("result") or ""
+    return str(text)[:400]
+
+
+def record_attempt_finished(state_dir: "Path", cycle_id: str) -> OpenIncrementState:
+    """A terminal outcome was recorded for ``cycle_id``
+    (:func:`nanobot.runtime.cycle_ledger.record_cycle_outcome` calls this
+    for every cycle, so this is the ONE place that clears the running
+    registration -- whatever the many outcome-writing call sites
+    upstream are). A registration for a DIFFERENT, not-yet-resolved
+    cycle_id is left untouched.
+
+    Deliberately does NOT touch ``pending``: reaching SOME terminal
+    ledger row does not by itself mean the underlying open increment is
+    resolved -- D1's own interrupted_supply/interrupted_defect rows are
+    written for the SAME cycle_id that just became the pending open
+    increment, in the SAME call. Clearing ``pending`` here would erase
+    that record the instant it was created. Only :func:`resolve`
+    (edit/delete) or :func:`clear_pending_on_integration` (a genuine
+    successful integration) may clear ``pending``."""
+    state = load_state(state_dir)
+    if state.running and state.running.get("cycle_id") == (cycle_id or ""):
+        state.running = None
+        _save_state(state_dir, state)
+    return state
+
+
+def clear_pending_on_integration(state_dir: "Path", cycle_id: str) -> bool:
+    """The cycle lineage named by the pending open increment's
+    ``cycle_id`` just integrated successfully (main advanced) -- the
+    increment this record was tracking is done, so it is cleared. Called
+    from EVERY genuine integration-success path (never from a
+    blocked/interrupted terminal outcome, which SETS pending rather than
+    clearing it) -- a `keep`-resumed attempt that finally succeeds is
+    exactly the case this exists for; without it, a resolved increment
+    would keep surfacing to the planner forever.
+
+    Round 3 external re-check, item N3 (architect resolution
+    2026-09-26): returns True when there was nothing to clear (no pending
+    for this cycle_id -- the common case) OR the clear was verified
+    persisted; False only when a pending record for THIS cycle existed
+    and the save failed. Callers use this to decide whether the cycle
+    branch may be deleted -- a failed clear must not delete a branch a
+    retry would still need to resume."""
+    state = load_state(state_dir)
+    if state.pending and state.pending.get("cycle_id") == (cycle_id or ""):
+        state.pending = None
+        state.hold = None
+        state.held_ticks = 0
+        state.consecutive_supply_interrupts = 0
+        return _save_state(state_dir, state)
+    return True
+
+
+def check_running_for_kill(state_dir: "Path", current_cycle_id: str) -> "dict[str, Any] | None":
+    """Called once per bridge tick, before THIS tick's own attempt is
+    registered (and before the planning session reads
+    :func:`pending_open_increment`, so a detected kill is surfaced to it
+    like any other open increment). Returns the stale running record
+    (with an added ``executor_status`` key -- see
+    :func:`_read_executor_terminal_status`) when it belongs to a
+    DIFFERENT cycle_id than the one about to run -- proof the process
+    that wrote it died before a terminal outcome -- or ``None`` when
+    there is nothing stale, or nothing THIS function should classify.
+
+    Full mapping (architect resolution, #1979 external-review followups;
+    round 2 external re-check item 2, architect resolution 2026-09-26):
+    the executor's own terminal telemetry status, whatever it is, does
+    NOT by itself mean the cycle finished -- the GATE (smoke tests, the
+    integration decision) never rendered a verdict for this cycle_id
+    either way, or :func:`record_attempt_finished` would have cleared
+    this registration. ``ok``/``bounded_stop``/``blocked``/``cancelled``,
+    or no telemetry at all (unwritten, or ``task_id`` never attached) --
+    all become ``interrupted_kill`` here.
+
+    ``error`` is classified IMMEDIATELY, right here, via
+    :func:`nanobot.runtime.llm_error_classification.classify_llm_error` --
+    round 1 left this "for the existing supply/defect classifier,
+    synchronously, in the SAME tick it happened", reasoning that the
+    classification would already have set ``pending`` before this tick
+    ended. That assumption breaks exactly when the PROCESS that would
+    have run that classifier dies in the narrow window between the
+    executor writing its ``error`` telemetry and the bridge reaching its
+    own classification code -- nothing ever runs it, ``pending`` is never
+    set, and the next attempt's :func:`record_attempt_started` silently
+    overwrites this registration with no interruption ever recorded. The
+    returned dict's ``error_class`` (``'paused-supplier'`` or
+    ``'failed'``) tells the caller which of
+    :func:`record_supply_interruption`/:func:`record_defect_interruption`
+    to call instead of :func:`record_kill_interruption`.
+
+    Round 3 external re-check, item 2 (architect resolution 2026-09-26):
+    an existing ``pending`` no longer unconditionally short-circuits this
+    function. A ``keep`` decision deliberately retains ``pending`` while
+    the resumed attempt runs (D2) -- its OWN ``running`` registration
+    shares ``pending``'s ``cycle_id``. If THAT exact resumed attempt goes
+    stale, it must be classified exactly like any other stale attempt (the
+    caller's existing supply/defect/kill dispatch, and this module's own
+    plan-version carry-forward, already handle "re-interrupting an
+    already-pending increment" correctly) -- not silently ignored because
+    something was already pending. Only an UNRELATED pending increment
+    (no running at all, or one for a different cycle_id) still defers
+    entirely, unchanged from round 1/2.
+    """
+    state = load_state(state_dir)
+    running = state.running
+    if state.pending and not (running and running.get("cycle_id") == state.pending.get("cycle_id")):
+        return None
+    if not running or running.get("cycle_id") == (current_cycle_id or ""):
+        return None
+    task_id = running.get("task_id") or ""
+    executor_status = _read_executor_terminal_status(state_dir, task_id)
+    if executor_status == "error":
+        error_text = _read_executor_error_text(state_dir, task_id)
+        error_class = classify_llm_error(error_text or "(status: error, no LLM-call text recorded)")
+        return {**running, "executor_status": executor_status, "error_class": error_class}
+    return {**running, "executor_status": executor_status}
+
+
+def _record_interruption_without_backoff(
+    state_dir: "Path",
+    cycle_id: str,
+    reason: str,
+    *,
+    retry_key: str,
+    plan_text: str,
+    candidate_id: "str | None",
+    branch: str = "",
+    extra_fields: "dict[str, Any] | None" = None,
+) -> OpenIncrementState:
+    """Shared shape for the two NO-backoff interruption reasons
+    (``interrupted_kill``, ``interrupted_defect``) -- neither is
+    supplier evidence, so the very next session may resolve it
+    immediately, unlike :func:`record_supply_interruption`'s doubling
+    backoff hold. Kept as one function so the two reasons cannot drift
+    apart in shape (the asymmetric-readers class of defect)."""
+    from nanobot.runtime.cycle_ledger import append_event
+
+    extra = extra_fields or {}
+    state = load_state(state_dir)
+    # Round 3 external re-check, item B (architect resolution 2026-09-26):
+    # same carry-forward as record_supply_interruption -- a re-interruption
+    # of the SAME increment (same cycle_id) must not silently reset
+    # plan_version to the default.
+    _prior_pending = state.pending if (state.pending and state.pending.get("cycle_id") == (cycle_id or "")) else None
+    plan_version = (_prior_pending or {}).get("plan_version", 1)
+    # Round 4 external re-check, item P1-a (architect resolution
+    # 2026-09-26): same "running -> pending in ONE save" fix as
+    # record_supply_interruption -- see its comment for the full
+    # rationale.
+    if state.running and state.running.get("cycle_id") == (cycle_id or ""):
+        state.running = None
+    state.pending = {
+        "retry_key": retry_key,
+        "cycle_id": cycle_id or "",
+        "plan_text": plan_text,
+        "plan_version": plan_version,
+        "candidate_id": candidate_id or None,
+        "reason": reason,
+        "interrupted_at": _now_iso(),
+        "branch": branch or "",
+        "opening_entry_written": True,
+        **extra,
+    }
+    state.hold = None
+    state.held_ticks = 0
+    _save_state(state_dir, state)
+    append_event(state_dir, {
+        "phase": "open_increment",
+        "cycle_id": cycle_id or "",
+        "status": reason,
+        "retry_key": retry_key,
+        "branch": branch or "",
+        **extra,
+    })
+    return state
+
+
+def record_kill_interruption(
+    state_dir: "Path",
+    cycle_id: str,
+    *,
+    retry_key: str,
+    plan_text: str,
+    candidate_id: "str | None",
+    branch: str = "",
+    executor_status: "str | None" = None,
+) -> OpenIncrementState:
+    """The running-attempt registration for ``cycle_id`` (see
+    :func:`record_attempt_started`) had no terminal outcome by the time a
+    fresh cycle started -- a hard kill, or an exact imitation of one.
+    Recorded as the pending open increment with ``reason:
+    interrupted_kill``. ``executor_status`` (architect resolution,
+    #1979 external-review followups) is the evidence
+    :func:`check_running_for_kill` read from the executor's own
+    telemetry (``None`` when there was none) -- carried into the record
+    so the operator/planner can see WHAT the executor last reported,
+    even though the gate never acted on it. Clears ``running`` when it
+    still belongs to THIS ``cycle_id`` (round 4 external re-check, item
+    P1-a, architect resolution 2026-09-26) -- left standing, the stale
+    entry would survive into the NEXT tick's :func:`check_running_for_kill`
+    and be misclassified as a fresh kill of the resumed attempt."""
+    return _record_interruption_without_backoff(
+        state_dir, cycle_id, "interrupted_kill",
+        retry_key=retry_key, plan_text=plan_text, candidate_id=candidate_id, branch=branch,
+        extra_fields={"executor_status": executor_status},
+    )
+
+
+def record_defect_interruption(
+    state_dir: "Path",
+    cycle_id: str,
+    *,
+    retry_key: str,
+    plan_text: str,
+    candidate_id: "str | None",
+    branch: str = "",
+) -> OpenIncrementState:
+    """D1 (ADR-035 Test Contract, external review finding #1): the
+    executor's OWN telemetry says ``status: error``, checkpoints already
+    exist on ``branch``, and :func:`nanobot.runtime.bridge._classify_llm_error`
+    found OUR OWN defect rather than a supplier outage. Recorded as the
+    pending open increment with ``reason: interrupted_defect`` -- same
+    keep/edit/delete contract as ``interrupted_supply``, but with NO
+    backoff hold: our own defect is not supplier evidence, so the very
+    next session may resolve it immediately. Clears ``running`` when it
+    still belongs to THIS ``cycle_id`` (round 4 external re-check, item
+    P1-a) -- see :func:`record_kill_interruption`'s docstring."""
+    return _record_interruption_without_backoff(
+        state_dir, cycle_id, "interrupted_defect",
+        retry_key=retry_key, plan_text=plan_text, candidate_id=candidate_id, branch=branch,
+    )

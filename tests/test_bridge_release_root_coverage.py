@@ -7,6 +7,7 @@ from pathlib import Path
 
 from nanobot.runtime import bridge, llm_proposer
 from nanobot.runtime.bridge import build_task
+from tests.test_bridge_executor_llm_error import _stub_planning_session
 from tests.test_cycle_ledger import _init_selfevo_repo, _seed_bridge_request
 
 CANONICAL_RELEASE_ROOT = "/opt/eeepc-agent/runtimes/self-evolving-agent/current"
@@ -141,6 +142,7 @@ def test_spawn_reads_charter_and_identity_from_release_root_not_target(
     _ReleaseRootManager.instances.clear()
 
     _seed_bridge_request(state_dir, "req-root", "cycle-root")
+    _stub_planning_session(monkeypatch, "add feature")
     assert asyncio.run(bridge._main_impl()) == 0
 
     manager = _ReleaseRootManager.instances[0]
@@ -155,7 +157,9 @@ def test_spawn_reads_charter_and_identity_from_release_root_not_target(
     assert "RELEASE IDENTITY" in prompt
     assert "WRONG TARGET" not in prompt
     assert manager.workspace == work
-    dumps = list((state_dir / "prompts").glob("cycle-root.system.txt"))
+    # ADR-035 rule 1 (#1942): the dump is named after the planning
+    # session's own fresh cycle_id, not the retired queue's literal id.
+    dumps = list((state_dir / "prompts").glob("*.system.txt"))
     assert len(dumps) == 1
 
 

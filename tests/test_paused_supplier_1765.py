@@ -21,7 +21,11 @@ from pathlib import Path
 import pytest
 
 from nanobot.runtime import bridge, cycle_ledger, goal_gap_futility as futility, scorecard
-from tests.test_bridge_executor_llm_error import TRANSPORT_ERROR, _LLMDeadSubagentManager
+from tests.test_bridge_executor_llm_error import (
+    TRANSPORT_ERROR,
+    _LLMDeadSubagentManager,
+    _stub_planning_session,
+)
 from tests.test_cycle_ledger import _init_selfevo_repo, _seed_bridge_request
 
 
@@ -167,14 +171,18 @@ class TestDecideHandledMarkerSupplierPaused:
 
 class TestOutageCycleOffersTheSameItemAgainUnchanged:
     def test_paused_supplier_cycle_records_outcome_and_never_retires(self, tmp_path, monkeypatch):
+        """Architect resolution 2026-09-25 (ADR-035 rule 3 / ADR-031 rule 2):
+        an interrupted-by-supply plan is not retried inline and not
+        requeued -- it becomes the pending open increment, and further
+        ticks are HELD (no session, no repo prep, no provider) until the
+        backoff deadline, never re-offered every tick the way the old
+        rotation-queue behavior would have."""
+        from nanobot.runtime import open_increment
+
         state_dir = _wire(tmp_path, monkeypatch, _LLMDeadSubagentManager)
         title = "Add markdown catalog link path resolver to workspace_validation_helpers.py"
-        artifact = tmp_path / "improvements" / "llm-proposed-cycle-outage.json"
-        artifact.parent.mkdir(parents=True, exist_ok=True)
-        artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
-        _seed_bridge_request(
-            state_dir, "req-outage", "cycle-outage", task_title=title, source_artifact=str(artifact),
-        )
+        _seed_bridge_request(state_dir, "req-outage", "cycle-outage", task_title=title)
+        _stub_planning_session(monkeypatch, title)
         bridge_state = state_dir / "subagent_bridge"
 
         rc = asyncio.run(bridge._main_impl())
@@ -192,47 +200,77 @@ class TestOutageCycleOffersTheSameItemAgainUnchanged:
         # (2) no error card: no error_card_recording ledger row at all.
         assert not any(r["phase"] == "error_card_recording" for r in _read_ledger(state_dir))
 
-        # (3) no marker, no retry counter -- the request is untouched.
-        assert not (bridge_state / "handled_req-outage.txt").exists()
-        assert not (bridge_state / "retry_req-outage.json").exists()
+        # (3) no marker, no retry counter anywhere -- the bounded llm_error
+        # retry mechanism this would otherwise share is never touched.
+        assert list(bridge_state.glob("handled_*.txt")) == []
+        assert list(bridge_state.glob("retry_*.json")) == []
 
         # (4) demand cooling never sees this as a recent failure.
         assert bridge._recent_failure_match(title, state_dir) is None
 
-        # (5) offered again, unchanged, across MANY more outage cycles --
-        # never retired, never a growing retry counter (unlike the bounded
-        # llm_error path this would otherwise share).
-        for _ in range(5):
-            rc = asyncio.run(bridge._main_impl())
-            assert rc == bridge.EXIT_SUPPLIER_PAUSED
-            assert not (bridge_state / "handled_req-outage.txt").exists()
-            assert not (bridge_state / "retry_req-outage.json").exists()
-            assert bridge._recent_failure_match(title, state_dir) is None
+        # (5) the interrupted plan is now the pending open increment.
+        pending = open_increment.pending_open_increment(state_dir)
+        assert pending is not None
+        assert pending["reason"] == "interrupted_supply"
 
-        # Same request file, same content, the whole time -- never touched.
-        req_path = state_dir / "subagents" / "requests" / "req-outage.json"
-        assert json.loads(req_path.read_text(encoding="utf-8"))["task_title"] == title
+        # (6) a tick before the backoff deadline: held, no session at all --
+        # nothing new in the ledger, nothing in bridge_state either.
+        rows_before = _read_ledger(state_dir)
+        rc = asyncio.run(bridge._main_impl())
+        assert rc == 0
+        rows_after = _read_ledger(state_dir)
+        # Exactly one new row: the held-tick's own bookkeeping (mirrors
+        # planner_rest's `planner_rest_held` event) -- no cycle phases
+        # (started/dedup/gate/outcome) at all, since no session ran.
+        new_rows = rows_after[len(rows_before):]
+        assert [r["phase"] for r in new_rows] == ["open_increment_held"]
+        assert list(bridge_state.glob("handled_*.txt")) == []
+        assert list(bridge_state.glob("retry_*.json")) == []
+
+        # (7) a tick after the deadline: the session runs again (simulate
+        # cooldown elapsed -- real wait is minutes), open_increment still
+        # first (this stub never emits a resolution decision).
+        oi_state = open_increment.load_state(state_dir)
+        oi_state.hold["deadline"] = "2000-01-01T00:00:00Z"
+        open_increment._save_state(state_dir, oi_state)
+        rc = asyncio.run(bridge._main_impl())
+        assert rc == bridge.EXIT_SUPPLIER_PAUSED
+        assert open_increment.pending_open_increment(state_dir) is not None
+        # Consecutive interruption of the SAME retry_key -- backoff doubled.
+        assert open_increment.load_state(state_dir).consecutive_supply_interrupts == 2
 
     def test_once_the_supplier_recovers_the_same_request_completes_normally(self, tmp_path, monkeypatch):
-        """The request that survived the outage above is not stuck -- once
-        the supplier is healthy again (a normal manager), the very same
-        request completes like it never happened."""
+        """The candidate that survived the outage above is not stuck -- once
+        the supplier is healthy again (a normal manager) and the backoff
+        deadline has passed, the very same candidate completes like it
+        never happened. (Resolving the pending open increment itself is the
+        real planning session's job via `open_increment_decision`, not
+        exercised by the stub here.)"""
+        from nanobot.runtime import open_increment
         from tests.test_cycle_ledger import _FakeSubagentManager
 
         state_dir = _wire(tmp_path, monkeypatch, _LLMDeadSubagentManager)
         title = "Add markdown catalog link path resolver to workspace_validation_helpers.py"
         _seed_bridge_request(state_dir, "req-recovers", "cycle-recovers", task_title=title)
+        _stub_planning_session(monkeypatch, title)
+        key = bridge._retry_key_for(None, title)
 
-        for _ in range(3):
-            rc = asyncio.run(bridge._main_impl())
-            assert rc == bridge.EXIT_SUPPLIER_PAUSED
+        rc = asyncio.run(bridge._main_impl())
+        assert rc == bridge.EXIT_SUPPLIER_PAUSED
+        assert open_increment.pending_open_increment(state_dir) is not None
+
+        # Force the backoff deadline into the past (simulates cooldown
+        # elapsed) before the supplier recovers.
+        oi_state = open_increment.load_state(state_dir)
+        oi_state.hold["deadline"] = "2000-01-01T00:00:00Z"
+        open_increment._save_state(state_dir, oi_state)
 
         monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
         rc = asyncio.run(bridge._main_impl())
         assert rc == 0
         outcome = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"][-1]
         assert outcome["outcome"] == "success"
-        assert (state_dir / "subagent_bridge" / "handled_req-recovers.txt").exists()
+        assert (state_dir / "subagent_bridge" / f"handled_{key}.txt").exists()
 
 
 # ─── the exit-code consumers: crash_record's exit_streak, health.py ───────

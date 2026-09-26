@@ -126,6 +126,21 @@ def _wire(tmp_path, monkeypatch, manager_cls):
     return state_dir
 
 
+def _stub_planning_session(monkeypatch, plan_text: str, candidate_id: "str | None" = None):
+    """ADR-035 rule 1 (#1942): req/task now come from the planning session's
+    own plan, never a rotation-picked queue file -- stand in a plan whose
+    text IS the title these tests seed, so a repeated call keeps deriving
+    the SAME _retry_key_for(candidate_id, plan_text) across cycles, exactly
+    as the retired stable-queue-filename keying used to provide."""
+    async def _fake_planning_session(**_kwargs):
+        return {
+            'ran': True, 'iterations_used': 1, 'iterations_planned': 1,
+            'tampered_files': [], 'plan': {'plan': plan_text, 'candidate_id': candidate_id},
+        }
+
+    monkeypatch.setattr(bridge, "_run_planning_session", _fake_planning_session)
+
+
 def _llm_call_rows(path):
     return [
         json.loads(line)
@@ -170,25 +185,30 @@ async def test_executor_telemetry_recording_failure_is_logged(caplog, monkeypatc
     assert "llm call telemetry recording failed: llm_calls unavailable" in caplog.text
 
 
-def _result_for(state_dir, request_id):
-    matches = list((state_dir / "subagents").rglob(f"result-{request_id}.json"))
-    assert len(matches) == 1, matches
-    return json.loads(matches[0].read_text(encoding="utf-8"))
+def _result_for(state_dir, request_id=None):
+    """ADR-035 rule 1 (#1942): result files are keyed by the per-cycle
+    request_id (a fresh uuid every run), never a stable seeded id -- returns
+    the most-recently-written result instead. ``request_id`` is accepted
+    and ignored for call-site compatibility with tests written before this."""
+    del request_id
+    matches = sorted(
+        (state_dir / "subagents").rglob("result-*.json"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    assert matches, "no result written"
+    return json.loads(matches[-1].read_text(encoding="utf-8"))
 
 
 class TestExecutorLLMErrorIsAFailure:
     def test_dead_llm_cycle_is_blocked_failed_unmarked_and_exits_nonzero(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _LLMBadRequestSubagentManager)
-        # Production requests point at a proposal artifact; the result row's
-        # backlog_title (what _recent_failure_match matches on) comes from its
-        # next_bounded_candidate.title — seed one exactly like the proposer does.
         title = "Add markdown catalog link path resolver to workspace_validation_helpers.py"
-        artifact = tmp_path / "improvements" / "llm-proposed-cycle-dead.json"
-        artifact.parent.mkdir(parents=True, exist_ok=True)
-        artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
-        _seed_bridge_request(
-            state_dir, "req-dead", "cycle-dead", task_title=title, source_artifact=str(artifact),
-        )
+        _seed_bridge_request(state_dir, "req-dead", "cycle-dead", task_title=title)
+        _stub_planning_session(monkeypatch, title)
+        # ADR-035 rule 1 (#1942): req/task come from the plan now, so the
+        # retry/handled bookkeeping keys on _retry_key_for's stable hash of
+        # the plan's own title, not a queue file's request_id.
+        key = bridge._retry_key_for(None, title)
 
         rc = asyncio.run(bridge._main_impl())
 
@@ -197,17 +217,21 @@ class TestExecutorLLMErrorIsAFailure:
         # retry budget the row must NOT feed suppression, or the #716 branch
         # retires the request on its next offer and the retry never runs
         # (review finding on PR #1282). Once the budget is spent it counts.
-        res = _result_for(state_dir, "req-dead")
+        res = _result_for(state_dir)
         assert res["result_status"] == "blocked"
         assert res["rollback"]["reason"] == "executor_llm_error"
         assert res["commits_pushed"] == 0
-        assert res["backlog_title"] == title
+        # ADR-035 rule 1: no source_artifact anymore, so backlog_title is
+        # empty; semantic_task_id carries the plan's own title instead.
+        assert res["backlog_title"] == ""
+        assert res["semantic_task_id"] == title
+        assert res["retry_key"] == key
         assert any("EXECUTOR LLM ERROR (#1280)" in s and "maximum context length" in s for s in res.get("key_learnings") or [])
         assert "model=" in res["key_learnings"][0] or any("model=" in s for s in res.get("key_learnings") or [])
         assert bridge._recent_failure_match(title, state_dir) is None
-        assert bridge._llm_error_retries_exhausted("req-dead") is False
+        assert bridge._llm_error_retries_exhausted(key) is False
         # Same row, budget spent: the failure proxy sees it like any other.
-        retry_path = state_dir / "subagent_bridge" / "retry_req-dead.json"
+        retry_path = state_dir / "subagent_bridge" / f"retry_{key}.json"
         retry_path.write_text(json.dumps({"count": bridge.LLM_ERROR_MAX_RETRIES}), encoding="utf-8")
         assert bridge._recent_failure_match(title, state_dir) == title
         retry_path.write_text(json.dumps({"count": 1, "max": bridge.LLM_ERROR_MAX_RETRIES}), encoding="utf-8")
@@ -230,26 +254,24 @@ class TestExecutorLLMErrorIsAFailure:
         # (3) no handled_ marker: the request is re-offered; a retry counter
         # records the attempt.
         bridge_state = state_dir / "subagent_bridge"
-        assert not (bridge_state / "handled_req-dead.txt").exists()
-        retry = json.loads((bridge_state / "retry_req-dead.json").read_text(encoding="utf-8"))
+        assert not (bridge_state / f"handled_{key}.txt").exists()
+        retry = json.loads((bridge_state / f"retry_{key}.json").read_text(encoding="utf-8"))
         assert retry["count"] == 1 and retry["max"] == bridge.LLM_ERROR_MAX_RETRIES
 
     def test_retry_is_bounded_then_the_request_is_retired(self, tmp_path, monkeypatch, capsys):
-        """Production-shaped request: a source_artifact whose
-        next_bounded_candidate.title becomes the result row's backlog_title.
-        The first version of this test seeded no artifact, so backlog_title was
-        empty, the #716 suppression had nothing to match, and the retry passed
-        for the wrong reason; with the artifact the review reproduced the
-        request being retired on attempt 2 of 3 by the suppression branch."""
+        """The planner keeps re-proposing the SAME title every cycle (ADR-035
+        rule 1, #1942: there is no queue left to retire an entry from — the
+        planning session is stubbed here to always return the identical
+        plan, standing in for "the planner has not yet noticed the failure
+        and moved on"). _retry_key_for's stable hash of that title is what
+        makes the bounded retry-then-retire contract (#1280) survive across
+        cycles now that request_id/cycle_id no longer do."""
         state_dir = _wire(tmp_path, monkeypatch, _LLMBadRequestSubagentManager)
         monkeypatch.setattr(bridge, "LLM_ERROR_MAX_RETRIES", 3)
         title = "Add markdown catalog link path resolver to workspace_validation_helpers.py"
-        artifact = tmp_path / "improvements" / "llm-proposed-cycle-loop.json"
-        artifact.parent.mkdir(parents=True, exist_ok=True)
-        artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
-        _seed_bridge_request(
-            state_dir, "req-loop", "cycle-loop", task_title=title, source_artifact=str(artifact),
-        )
+        _seed_bridge_request(state_dir, "req-loop", "cycle-loop", task_title=title)
+        _stub_planning_session(monkeypatch, title)
+        key = bridge._retry_key_for(None, title)
         bridge_state = state_dir / "subagent_bridge"
 
         for attempt in (1, 2):
@@ -258,28 +280,32 @@ class TestExecutorLLMErrorIsAFailure:
             assert rc == bridge.EXIT_EXECUTOR_LLM_ERROR, out
             assert "matches recent failure/rejection" not in out, out  # suppression must not fire yet
             assert f"request left pending for retry ({attempt}/3)" in out
-            assert not (bridge_state / "handled_req-loop.txt").exists()
-            assert json.loads((bridge_state / "retry_req-loop.json").read_text())["count"] == attempt
-            assert _result_for(state_dir, "req-loop")["backlog_title"] == title
+            assert not (bridge_state / f"handled_{key}.txt").exists()
+            assert json.loads((bridge_state / f"retry_{key}.json").read_text())["count"] == attempt
+            assert _result_for(state_dir)["semantic_task_id"] == title
             assert bridge._recent_failure_match(title, state_dir) is None
 
         rc = asyncio.run(bridge._main_impl())
         out = capsys.readouterr().out
         assert rc == bridge.EXIT_EXECUTOR_LLM_ERROR, out
         assert "request retired after 3 failed LLM attempts" in out
-        assert (bridge_state / "handled_req-loop.txt").exists(), "third failure must retire the request"
-        assert json.loads((bridge_state / "retry_req-loop.json").read_text())["count"] == 3
+        assert (bridge_state / f"handled_{key}.txt").exists(), "third failure must retire the request"
+        assert json.loads((bridge_state / f"retry_{key}.json").read_text())["count"] == 3
         # Budget spent: the title now counts for the 24 h suppression window,
         # so a re-minted proposal with the same title is held back.
-        assert bridge._llm_error_retries_exhausted("req-loop") is True
+        assert bridge._llm_error_retries_exhausted(key) is True
         assert bridge._recent_failure_match(title, state_dir) == title
 
-        # Fourth run: the request is already handled — no fourth spawn.
+        # Fourth run: the planner proposes the same title again, but the
+        # pre-spawn recent-failure gate now suppresses it before any spawn
+        # -- never reaching _decide_handled_marker, so the retry counter is
+        # untouched (no fifth-cycle "already_handled" print left to check;
+        # that belonged to the retired rotation queue).
         rc = asyncio.run(bridge._main_impl())
         out = capsys.readouterr().out
         assert rc == 0
-        assert "already_handled" in out
-        assert json.loads((bridge_state / "retry_req-loop.json").read_text())["count"] == 3
+        assert "matches recent failure/rejection" in out
+        assert json.loads((bridge_state / f"retry_{key}.json").read_text())["count"] == 3
 
     def test_lost_counter_and_result_rows_between_attempts_cannot_reoffer_indefinitely(self, tmp_path, monkeypatch, capsys):
         """#1282 review, the demonstrated case: when BOTH the retry counter and
@@ -287,24 +313,32 @@ class TestExecutorLLMErrorIsAFailure:
         pruned archive within a cycle; the counter is one file), the #716
         suppression finds nothing, so the writer's own fallback is the only
         thing left that can stop an unbounded re-offer. Its witness is the
-        ledger: a recorded executor_llm_error outcome for this cycle means the
-        request was previously live, and a missing counter then retires it —
-        the same direction the reader takes. Counter-only loss is NOT tested
-        here because that case already retires via the suppression branch and
-        would pass while proving nothing."""
+        ledger: a recorded executor_llm_error outcome for this retry_key means
+        the candidate was previously live, and a missing counter then retires
+        it — the same direction the reader takes. Counter-only loss is NOT
+        tested here because that case already retires via the suppression
+        branch and would pass while proving nothing.
+
+        ADR-035 rule 1 (#1942) changed what "retired" means at the edges: the
+        planner keeps proposing (there is no queue for a handled_ marker to
+        remove an entry from), so a lost-state retirement recurs every time
+        the planner re-proposes the same title while its own evidence
+        (results, ledger rows for this retry_key) is gone -- but it recurs as
+        the SAME bounded, correctly-classified retired_state_lost outcome,
+        never as an unbounded/incorrectly-restarted retry count. That
+        bounded-recurrence property is what this test now pins for the third
+        offer, replacing the retired rotation queue's "already_handled, no
+        third spawn" behavior."""
         state_dir = _wire(tmp_path, monkeypatch, _LLMBadRequestSubagentManager)
         monkeypatch.setattr(bridge, "LLM_ERROR_MAX_RETRIES", 3)
         title = "Add markdown catalog link path resolver to workspace_validation_helpers.py"
-        artifact = tmp_path / "improvements" / "llm-proposed-cycle-lost.json"
-        artifact.parent.mkdir(parents=True, exist_ok=True)
-        artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
-        _seed_bridge_request(
-            state_dir, "req-lost", "cycle-lost", task_title=title, source_artifact=str(artifact),
-        )
+        _seed_bridge_request(state_dir, "req-lost", "cycle-lost", task_title=title)
+        _stub_planning_session(monkeypatch, title)
+        key = bridge._retry_key_for(None, title)
         bridge_state = state_dir / "subagent_bridge"
 
         def lose_state():
-            (bridge_state / "retry_req-lost.json").unlink(missing_ok=True)
+            (bridge_state / f"retry_{key}.json").unlink(missing_ok=True)
             for p in (state_dir / "subagents").rglob("result-*.json"):
                 p.unlink()
 
@@ -312,10 +346,10 @@ class TestExecutorLLMErrorIsAFailure:
         out = capsys.readouterr().out
         assert rc == bridge.EXIT_EXECUTOR_LLM_ERROR
         assert "request left pending for retry (1/3)" in out
-        assert json.loads((bridge_state / "retry_req-lost.json").read_text())["count"] == 1
+        assert json.loads((bridge_state / f"retry_{key}.json").read_text())["count"] == 1
         lose_state()
-        # The ledger still knows this cycle failed on the LLM once.
-        assert bridge._recorded_llm_error_attempts(state_dir, "cycle-lost") == 1
+        # The ledger still knows this retry_key failed on the LLM once.
+        assert bridge._recorded_llm_error_attempts(state_dir, key) == 1
         assert bridge._recent_failure_match(title, state_dir) is None  # nothing left to match
 
         # Second offer with all retry state gone: must retire, not restart at 1.
@@ -323,30 +357,37 @@ class TestExecutorLLMErrorIsAFailure:
         out = capsys.readouterr().out
         assert rc == bridge.EXIT_EXECUTOR_LLM_ERROR, out
         assert "retired_state_lost" in out and "missing after 1 recorded attempt" in out, out
-        assert (bridge_state / "handled_req-lost.txt").exists(), "lost state must retire, never re-offer"
-        assert not (bridge_state / "retry_req-lost.json").exists()
+        assert (bridge_state / f"handled_{key}.txt").exists(), "lost state must retire, never re-offer"
+        assert not (bridge_state / f"retry_{key}.json").exists()
 
-        # Third offer: already handled — the loop cannot spin.
+        # Third offer: the planner proposes the same title again (nothing
+        # gates on handled_<key>.txt pre-spawn), and with the ledger/result
+        # evidence lost again, retires the SAME way again -- bounded,
+        # correctly classified, never restarting the retry count from 1.
         lose_state()
         rc = asyncio.run(bridge._main_impl())
         out = capsys.readouterr().out
-        assert rc == 0
-        assert "already_handled" in out
+        assert rc == bridge.EXIT_EXECUTOR_LLM_ERROR, out
+        assert "retired_state_lost" in out, out
+        assert not (bridge_state / f"retry_{key}.json").exists()
 
     def test_healthy_cycle_is_unchanged(self, tmp_path, monkeypatch):
         """Control: the pre-#1280 path — a subagent that commits real work —
         still records completed, writes the marker, and exits 0."""
         state_dir = _wire(tmp_path, monkeypatch, _FakeSubagentManager)
-        _seed_bridge_request(state_dir, "req-ok", "cycle-ok", task_title="add feature")
+        title = "add feature"
+        _seed_bridge_request(state_dir, "req-ok", "cycle-ok", task_title=title)
+        _stub_planning_session(monkeypatch, title)
+        key = bridge._retry_key_for(None, title)
 
         rc = asyncio.run(bridge._main_impl())
 
         assert rc == 0
-        res = _result_for(state_dir, "req-ok")
+        res = _result_for(state_dir)
         assert res["result_status"] == "completed"
         assert res["rollback"]["reason"] in ("", None)
-        assert (state_dir / "subagent_bridge" / "handled_req-ok.txt").exists()
-        assert not (state_dir / "subagent_bridge" / "retry_req-ok.json").exists()
+        assert (state_dir / "subagent_bridge" / f"handled_{key}.txt").exists()
+        assert not (state_dir / "subagent_bridge" / f"retry_{key}.json").exists()
         assert [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"][-1]["outcome"] == "success"
 
 
@@ -383,21 +424,21 @@ class TestHelpers:
         counter = tmp_path / "retry_req.json"
 
         counter.write_text("{not json", encoding="utf-8")
-        assert bridge._decide_handled_marker(marker, "req.json", llm_error=True, state_dir=tmp_path, cycle_id="c1") == "retired_state_lost"
+        assert bridge._decide_handled_marker(marker, "req.json", llm_error=True, state_dir=tmp_path, retry_key="c1") == "retired_state_lost"
         assert marker.exists()
         assert "unreadable" in capsys.readouterr().out
         marker.unlink()
         counter.unlink()
 
-        # Missing, no recorded attempt for this cycle: a genuine first attempt.
-        assert bridge._decide_handled_marker(marker, "req.json", llm_error=True, state_dir=tmp_path, cycle_id="c1") == "retry"
+        # Missing, no recorded attempt for this retry_key: a genuine first attempt.
+        assert bridge._decide_handled_marker(marker, "req.json", llm_error=True, state_dir=tmp_path, retry_key="c1") == "retry"
         assert not marker.exists()
         counter.unlink()
 
-        # Missing, but the ledger says this cycle already died once: retire.
-        record_cycle_outcome(tmp_path, "c1", "failed", "executor_llm_error", [], "selfevo/cycle-c1")
+        # Missing, but the ledger says this retry_key already died once: retire.
+        record_cycle_outcome(tmp_path, "c1", "failed", "executor_llm_error", [], "selfevo/cycle-c1", retry_key="c1")
         assert bridge._recorded_llm_error_attempts(tmp_path, "c1") == 1
-        assert bridge._decide_handled_marker(marker, "req.json", llm_error=True, state_dir=tmp_path, cycle_id="c1") == "retired_state_lost"
+        assert bridge._decide_handled_marker(marker, "req.json", llm_error=True, state_dir=tmp_path, retry_key="c1") == "retired_state_lost"
         assert marker.exists()
         assert "missing after 1 recorded attempt" in capsys.readouterr().out
         assert bridge._llm_error_retries_exhausted("req") is True  # reader: missing counter → spent

@@ -387,8 +387,23 @@ def record_diary_open_entry(
 #: unconditionally -- a failed session must fail open (the cycle proceeds
 #: on the ranked queue as before) and say so here, not silently. "integrated"
 #: is the only success outcome, mirroring diary-open-entry's shape above.
+#:
+#: ADR-035 rule 1 gap, architect addendum (a separate ADR amendment PR is
+#: pending; #1942 B2 implements it now):
+#: - "rest": the planner legitimately decided not to start an increment and
+#:   named what it is waiting for. Distinct from `no_plan` -- it is a real,
+#:   valid final response, not a failure -- and never counted in
+#:   `no_plan_recovery`'s supply/planner families.
+#: - "rest_unchanged": the harness's own pre-filter skipped the session
+#:   entirely (no model call) because nothing has changed since the last
+#:   `rest` -- new verdicts, operator priorities, candidates, or commits to
+#:   main. Distinct from `rest` itself.
+#: - "rejected_duplicate": the plan's chosen increment matched an existing
+#:   dedup gate (tag/recent-failure/existence-index) against ITS OWN
+#:   title/target -- not `no_plan`, not counted in `no_plan_recovery`.
 VALID_PLANNING_OUTCOMES = frozenset({
     "integrated", "refused", "malformed", "no_plan", "spawn_failed", "commit_failed", "timed_out",
+    "rest", "rest_unchanged", "rejected_duplicate",
 })
 
 
@@ -439,6 +454,98 @@ def record_planning_session(
     )
 
 
+#: ADR-035 rule 3: the next planning session's decision for every open
+#: hypothesis with a new verdict. "continue"/"revise"/"drop" are the only
+#: three the ADR names; an unrecognized value is coerced to "continue" so a
+#: malformed write is visible as an odd decision on a real hypothesis rather
+#: than a dropped/absent ledger row.
+VALID_INSIGHT_DECISIONS = frozenset({"continue", "revise", "drop"})
+
+
+def record_insight_decision(
+    state_dir: Path,
+    cycle_id: str,
+    hypothesis_id: str,
+    decision: str,
+    *,
+    note: str = "",
+) -> None:
+    """Log the planning session's insight decision for one hypothesis
+    (ADR-035 rule 3): continue the line, revise it, or drop it. Distinct
+    from the harness-computed verdict (#878) this decision interprets --
+    this row records what the AGENT decided the verdict means, never the
+    verdict itself.
+    """
+    if decision not in VALID_INSIGHT_DECISIONS:
+        decision = "continue"
+    append_event(
+        state_dir,
+        {
+            "phase": "insight_decision",
+            "cycle_id": cycle_id or "",
+            "hypothesis_id": hypothesis_id,
+            "decision": decision,
+            "note": (note or "")[:500] or None,
+        },
+    )
+
+
+#: ADR-035 rule 1: the two no_plan cause families and the state labels the
+#: bounded-recovery transitions carry. Kept here, beside the planning outcomes
+#: they classify, so a reader of one ledger phase can find the other.
+VALID_NO_PLAN_FAMILIES = frozenset({"supply", "planner"})
+VALID_RECOVERY_STATES = frozenset({
+    "normal", "planner_degraded", "stopped", "model_supply_degraded", "reset",
+})
+
+
+def record_plan_amendment(state_dir: Path, cycle_id: str, amended_by: str, reason: str) -> None:
+    """Log the executor's amendment of the planning session's plan
+    (ADR-035 rule 1 + Attribution: "an amendment is attributed
+    (``amended_by: executor``) and is data for the next session, not a
+    failure").
+    """
+    append_event(
+        state_dir,
+        {
+            "phase": "plan_amendment",
+            "cycle_id": cycle_id or "",
+            "amended_by": amended_by or "executor",
+            "reason": (reason or "")[:500] or None,
+        },
+    )
+
+
+def record_no_plan_recovery_transition(
+    state_dir: Path,
+    cycle_id: str,
+    family: str,
+    consecutive_count: int,
+    state_label: str,
+) -> None:
+    """Log a no_plan-recovery state transition (ADR-035 rule 1, point 5:
+    "the ledger records every transition"). Called only when the state
+    actually changes -- not on every no_plan cycle -- so this phase's rows
+    are the transitions themselves, not a per-cycle repeat of the same
+    state. ``consecutive_count`` is the count that caused (or reset) the
+    transition, for later threshold-tuning analysis.
+    """
+    if family not in VALID_NO_PLAN_FAMILIES:
+        family = "planner"
+    if state_label not in VALID_RECOVERY_STATES:
+        state_label = "normal"
+    append_event(
+        state_dir,
+        {
+            "phase": "no_plan_recovery",
+            "cycle_id": cycle_id or "",
+            "family": family,
+            "consecutive_count": int(consecutive_count),
+            "state": state_label,
+        },
+    )
+
+
 def record_cycle_outcome(
     state_dir: Path,
     cycle_id: str,
@@ -460,6 +567,7 @@ def record_cycle_outcome(
     iterations_used: int | None = None,
     iterations_limit: int | None = None,
     iterations_predicted: int | None = None,
+    retry_key: str | None = None,
     max_call_gap_s: float | None = None,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
@@ -576,6 +684,13 @@ def record_cycle_outcome(
             "class": str(llm_error_classification.get("class") or ""),
             "raw_error": str(llm_error_classification.get("raw_error") or "")[:400],
         }
+    if retry_key:
+        # ADR-035 rule 1 (#1942): the executor LLM-error retry-then-retire
+        # bound's cross-cycle-stable key (bridge._retry_key_for) -- cycle_id
+        # is a fresh uuid every cycle now, so bridge._recorded_llm_error_
+        # attempts's ledger witness needs this instead to recognize a prior
+        # attempt for the SAME candidate. Additive, omitted otherwise.
+        row["retry_key"] = str(retry_key)
     if iterations_used is not None and isinstance(iterations_used, int):
         # #1850: record the cycle's actual iteration consumption against the limit
         # active in this cycle, plus the fraction consumed and forecast placeholder.
@@ -600,6 +715,20 @@ def record_cycle_outcome(
         state_dir,
         row,
     )
+    # D2 (ADR-035 Test Contract, #1942 B2): this IS the terminal outcome for
+    # `cycle_id` -- every code path that reaches integration, a blocked/
+    # failed classification, or a rollback funnels through this single
+    # function (rather than each of its many call sites remembering to say
+    # so separately), so clearing the in-flight running-attempt
+    # registration here guarantees it happens whenever a cycle actually
+    # finishes. Fail-open: a failure here must never turn an otherwise-
+    # written outcome row into a bookkeeping error.
+    try:
+        from nanobot.runtime import open_increment as _open_increment_terminal
+
+        _open_increment_terminal.record_attempt_finished(state_dir, cycle_id or "")
+    except Exception:
+        pass
 
 def read_events(state_dir: Path) -> list[dict]:
     """Read all rows from the ACTIVE ledger file. Best-effort — never raises.

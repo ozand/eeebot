@@ -160,7 +160,12 @@ def test_happy_path_writes_the_diary_and_journals_success(tmp_path: Path, monkey
 
     outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
 
-    assert outcome == {"ran": True, "iterations_used": 3, "iterations_planned": 35, "tampered_files": []}
+    assert outcome == {
+        "ran": True, "iterations_used": 3, "iterations_planned": 35, "tampered_files": [], "plan": result_obj,
+        # ADR-035 keep-work (#1942 B2): non-None only on a `keep` decision --
+        # this fixture has no pending open_increment, so all three are unset.
+        "resume_branch": None, "resume_cycle_id": None, "resume_skip_opening_entry": False,
+    }
 
     _git(repo, "fetch", "origin", "main")
     pushed = subprocess.run(
@@ -401,7 +406,9 @@ def test_spawn_failure_degrades_to_the_ranked_queue(tmp_path: Path, monkeypatch)
 
     outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
 
-    assert outcome == {"ran": False, "iterations_used": None, "iterations_planned": None, "tampered_files": []}
+    assert outcome == {
+        "ran": False, "iterations_used": None, "iterations_planned": None, "tampered_files": [], "plan": None,
+    }
     rows = _ledger_rows(state, "planning_session")
     assert rows[0]["outcome"] == "spawn_failed"
 
@@ -452,6 +459,55 @@ def test_planning_session_includes_dor_and_dod_in_plan_block(tmp_path: Path, mon
     ).stdout
     assert "DoR: baseline tokens_per_integration established" in pushed
     assert "DoD: tokens_per_integration improves by 1%" in pushed
+
+
+def test_planning_session_records_declined_defects_in_diary(tmp_path: Path, monkeypatch):
+    """ADR-035 rule 1: a declined defect is named with its reason, and the
+    decline-escalation counter (nanobot.runtime.planner_candidates) fires
+    once the same defect has been declined three sessions running."""
+    from nanobot.runtime.cycle_ledger import read_events
+
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    result_obj = {
+        "insight": "x", "plan": "y", "iterations_planned": 5,
+        "declined": [{"defect_id": "defect-flaky-x", "reason": "not reproducible yet"}],
+    }
+    monkeypatch.setattr(bridge, "SubagentManager", _make_fake_mgr_factory(state, result_obj))
+
+    for cycle_id in ("cycle-1", "cycle-2", "cycle-3"):
+        outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set(), cycle_id=cycle_id))
+        assert outcome["ran"] is True
+
+    _git(repo, "fetch", "origin", "main")
+    pushed = subprocess.run(
+        ["git", "-C", str(repo), "show", f"origin/main:{diary_relpath()}"], capture_output=True, text=True,
+    ).stdout
+    assert "Declined: defect-flaky-x — not reproducible yet [ESCALATED to operator: 3 declines running]" in pushed
+
+    escalations = [e for e in read_events(state) if e.get("phase") == "defect_decline_escalated"]
+    assert len(escalations) == 1
+    assert escalations[0]["defect_id"] == "defect-flaky-x"
+    assert escalations[0]["consecutive"] == 3
+
+
+def test_planning_session_ignores_a_decline_with_no_reason(tmp_path: Path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    result_obj = {
+        "insight": "x", "plan": "y", "iterations_planned": 5,
+        "declined": [{"defect_id": "defect-x", "reason": ""}],
+    }
+    monkeypatch.setattr(bridge, "SubagentManager", _make_fake_mgr_factory(state, result_obj))
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+    assert outcome["ran"] is True
+
+    _git(repo, "fetch", "origin", "main")
+    pushed = subprocess.run(
+        ["git", "-C", str(repo), "show", f"origin/main:{diary_relpath()}"], capture_output=True, text=True,
+    ).stdout
+    assert "Declined:" not in pushed
 
 
 def test_refuses_without_spawning_when_charter_absent(tmp_path: Path, monkeypatch):

@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import uuid
 import time
 from pathlib import Path
 
@@ -50,6 +51,7 @@ from nanobot.runtime.promoted_overlay import install_promoted_overlay
 install_promoted_overlay()
 
 from nanobot.runtime import llm_proposer, demand  # noqa: E402
+from nanobot.runtime import planner_candidates, planner_dedup_evidence  # noqa: E402
 from nanobot.agent.tools.toolsets import EXECUTOR_TOOL_NAMES  # noqa: E402
 from nanobot.runtime.cycle_ledger import (  # noqa: E402
     VALID_OUTCOMES,
@@ -181,17 +183,6 @@ except ValueError:
 # the 24h window with room to spare. It bounds CANDIDATES, not how far back the
 # window reaches — the age cutoff is FAILURE_SUPPRESS_HOURS and stays separate.
 _FAILURE_SCAN_CANDIDATES = 256
-
-try:
-    # #733: bounded cap on how many pre-spawn duplicate requests _main_impl
-    # will bulk-skip (each a cheap, zero-LLM git check) in a single bridge
-    # run before returning — a stale queue must never turn one timer
-    # invocation into an unbounded loop on the weak host.
-    MAX_SKIPS_PER_RUN = int(os.environ.get('SUBAGENT_BRIDGE_MAX_SKIPS_PER_RUN', '10').strip() or '10')
-    if MAX_SKIPS_PER_RUN < 1:
-        MAX_SKIPS_PER_RUN = 10
-except ValueError:
-    MAX_SKIPS_PER_RUN = 10
 
 # #721: bounded cap on how many local pre-cycle-*/cycle-* tags _prune_cycle_tags
 # inspects per bridge run — a pathologically large tag namespace (e.g. a stuck
@@ -373,54 +364,6 @@ def _iter_archive_entries(archive_dir: 'Path', limit: int) -> list[tuple['Path',
     return records
 
 
-def find_pending_request() -> tuple[Path | None, dict]:
-    """Find the oldest queued subagent request not yet handled by a real executor."""
-    req_dir = STATE_DIR / 'subagents' / 'requests'
-    if not req_dir.exists():
-        return None, {}
-
-    # Collect request_ids/paths that have REAL results (not blocked stubs)
-    real_handled: set[str] = set()
-    result_dir = STATE_DIR / 'subagents' / 'results'
-    for _rp, rd, _mtime in _iter_result_entries(result_dir):
-        if not _is_real_result(rd):
-            continue  # skip blocked stubs — still eligible for bridge
-        if rid := rd.get('request_id') or rd.get('verification_task_id'):
-            real_handled.add(rid)
-        if rpath := rd.get('request_path'):
-            real_handled.add(str(rpath))
-
-    # Also check bridge's own handled markers (those ARE real LLM runs)
-    if BRIDGE_STATE_DIR.exists():
-        for m in BRIDGE_STATE_DIR.glob('handled_*.txt'):
-            content = m.read_text(encoding='utf-8').strip()
-            real_handled.add(content)
-            # marker name encodes request_id
-            stem = m.stem[len('handled_'):]
-            real_handled.add(stem)
-
-    candidates = sorted(
-        [p for p in req_dir.glob('*.json') if p.is_file()],
-        key=lambda p: p.stat().st_mtime,
-    )
-    for path in candidates:
-        req = load_json(path) or {}
-        status = str(req.get('request_status') or req.get('status') or 'queued').lower()
-        if status not in ('queued', 'pending'):
-            continue
-        rid = req.get('request_id') or req.get('verification_task_id') or str(path)
-        # Bridge handled markers are filed under the SANITIZED id (see
-        # `safe_id = request_id.replace('/', '_')[:120]` below); compare that
-        # form too, or a raw id containing sanitized characters (e.g. '/')
-        # slips this filter and gets returned forever (#733 wedge).
-        safe_rid = rid.replace('/', '_')[:120]
-        if rid in real_handled or safe_rid in real_handled or str(path) in real_handled:
-            continue
-        return path, req
-    return None, {}
-
-
-
 def _get_previous_attempts(
     state_dir: 'Path',
     *,
@@ -535,6 +478,51 @@ def _capture_pre_spawn_sha(selfevo_repo: 'Path', sha_file: 'Path') -> str:
         if sha and r.returncode == 0:
             sha_file.write_text(sha, encoding='utf-8')
             return sha
+    except Exception:
+        pass
+    return ''
+
+
+def _all_commits_are_artificial_since(selfevo_repo: 'Path', pre_spawn_sha: str) -> bool:
+    """ADR-035 keep-work architect addendum (#1942 B2): True iff every
+    commit in ``pre_spawn_sha..HEAD`` is a residual auto-commit or a
+    per-step checkpoint (``commit_markers.is_artificial_commit_subject``).
+    False (never a false "yes") on an empty range, an unreadable sha, or
+    any git error -- the caller only acts on a confirmed positive.
+    """
+    if not pre_spawn_sha:
+        return False
+    import subprocess as _sp_art
+    from nanobot.runtime.commit_markers import is_artificial_commit_subject
+    try:
+        r = _sp_art.run(
+            ['git', '-c', f'safe.directory={selfevo_repo}', '-C', str(selfevo_repo),
+             'log', '--format=%s', f'{pre_spawn_sha}..HEAD'],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return False
+        subjects = [ln for ln in r.stdout.splitlines() if ln.strip()]
+        return bool(subjects) and all(is_artificial_commit_subject(s) for s in subjects)
+    except Exception:
+        return False
+
+
+def _current_tip_sha(selfevo_repo: 'Path') -> str:
+    """HEAD sha of ``selfevo_repo``'s current checkout, or ``''`` on any
+    error. Round 4 external re-check, item P1-b (architect resolution
+    2026-09-26): the repair barrier's commit-COUNT check
+    (:func:`_count_commits_since`) is blind to ``git commit --amend`` --
+    it changes the tip sha without adding a new commit. Comparing tip
+    shas before/after a repair turn catches that shape too."""
+    import subprocess as _sp_tip
+    try:
+        r = _sp_tip.run(
+            ['git', '-c', f'safe.directory={selfevo_repo}', '-C', str(selfevo_repo), 'rev-parse', 'HEAD'],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            return r.stdout.strip()
     except Exception:
         pass
     return ''
@@ -910,13 +898,40 @@ def _safe_ref_id(cycle_id: str) -> str:
     return _re_ref.sub(r'[^A-Za-z0-9._-]', '-', str(cycle_id or 'unknown'))[:80]
 
 
-def _setup_cycle_branch(repo_root: 'Path', cycle_id: str, state_dir: 'Path | None' = None) -> dict:
-    """Isolate the upcoming subagent run on a fresh branch off ``origin/main``.
+def _setup_cycle_branch(
+    repo_root: 'Path', cycle_id: str, state_dir: 'Path | None' = None,
+    reuse_existing_branch: bool = False,
+) -> dict:
+    """Isolate the upcoming subagent run on a branch off ``origin/main`` --
+    or, when ``reuse_existing_branch`` is True, on its OWN already-existing
+    ``selfevo/cycle-<cycle_id>`` branch, keeping whatever commits are
+    already on it.
 
     Implements R8/R9 of docs/specs/subagent-bridge/spec.md: the subagent commits
     against ``selfevo/cycle-<cycle_id>``, never directly against ``main``, so a
     self-push (or a bridge crash mid-run) can only ever publish the cycle
     branch — never ``origin/main``.
+
+    ADR-035 keep-work (#1942 B2): a *kept* ``open_increment`` is resumed by
+    calling this with the SAME ``cycle_id`` the interrupted attempt used
+    (bridge.py routes it in via ``_run_planning_session``'s
+    ``resume_cycle_id``) and ``reuse_existing_branch=True``. The branch this
+    computes is then already checked out with its checkpoint commits still
+    on it; ``git checkout <branch>`` reuses that ref as-is. Only *edit* and
+    *delete* (and every ordinary, non-resumed cycle) take the ``-B`` path
+    below, which force-resets the branch pointer to ``origin/main`` -- ADR
+    text: "the branch is never reset to main for a kept increment. Only
+    edit or delete may start from main".
+
+    D4 (ADR-035 Test Contract, external review finding #4): ``keep`` NEVER
+    falls through to the ``-B`` path, whatever goes wrong with the reuse.
+    A missing branch (pruned, fresh clone) stops the attempt with reason
+    ``resume_branch_missing`` rather than silently starting a fresh cycle
+    off ``origin/main`` as if nothing was being resumed. A branch that
+    exists but fails to check out (e.g. a rejecting ``post-checkout``
+    hook) stops with reason ``resume_checkout_failed`` -- falling back to
+    ``-B`` here would force-reset the very branch the keep decision was
+    meant to preserve, discarding its checkpoints.
 
     The #877 line switch that used to live here (branch the cycle off a
     stronger dormant sha when ``CycleArchive.stalled()`` said the line had
@@ -971,9 +986,29 @@ def _setup_cycle_branch(repo_root: 'Path', cycle_id: str, state_dir: 'Path | Non
     base = main_sha
     _sd = state_dir if state_dir is not None else STATE_DIR
 
-    checkout = _sp_setup.run(git + ['checkout', '-B', branch, base], capture_output=True, text=True)
-    if checkout.returncode != 0:
-        return {'ok': False, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha, 'reason': 'checkout_failed'}
+    if reuse_existing_branch:
+        exists = _sp_setup.run(
+            git + ['rev-parse', '--verify', '--quiet', branch], capture_output=True, text=True,
+        ).returncode == 0
+        if not exists:
+            # D4: never a silent fresh start -- this IS the failure, reported
+            # as such, not papered over by branching a new one off main.
+            return {
+                'ok': False, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha,
+                'reason': 'resume_branch_missing',
+            }
+        reuse_checkout = _sp_setup.run(git + ['checkout', branch], capture_output=True, text=True)
+        if reuse_checkout.returncode != 0:
+            # D4: never fall back to `-B` here -- that would force-reset the
+            # very branch this keep decision was meant to preserve.
+            return {
+                'ok': False, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha,
+                'reason': 'resume_checkout_failed',
+            }
+    else:
+        checkout = _sp_setup.run(git + ['checkout', '-B', branch, base], capture_output=True, text=True)
+        if checkout.returncode != 0:
+            return {'ok': False, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha, 'reason': 'checkout_failed'}
 
     # #830: bound leaked cycle branches. Integrated ones are removed by
     # _cleanup_cycle_branch, but forensic (gate-failed/blocked) branches were
@@ -981,12 +1016,20 @@ def _setup_cycle_branch(repo_root: 'Path', cycle_id: str, state_dir: 'Path | Non
     # fresh branch; best-effort so a prune failure never blocks the cycle.
     _prune_stale_cycle_branches(repo_root, state_dir=_sd)
 
-    return {'ok': True, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha, 'reason': None}
+    return {
+        'ok': True, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha, 'reason': None,
+        # Reaching here means whichever branch above (reuse or fresh `-B`)
+        # succeeded -- every failure path already returned early.
+        'resumed': bool(reuse_existing_branch),
+    }
 
 
 def _integrate_cycle_to_main(
     repo_root: 'Path', cycle_branch: str, main_sha_before: str,
     expected_origin_main: 'str | None' = None,
+    cycle_id: 'str | None' = None,
+    task_title: 'str | None' = None,
+    demand_id: 'str | None' = None,
 ) -> dict:
     """Merge a green cycle branch into ``main`` and push — the ONLY way ``origin/main`` advances.
 
@@ -1011,6 +1054,15 @@ def _integrate_cycle_to_main(
     movement (out-of-band race safety, #846 — see ``_detect_out_of_band_main``,
     which the caller must also point at ``expected_origin_main``, not
     ``main_sha_before``, for the same reason).
+
+    ADR-035 keep-work architect resolution (#1942 B2): ``cycle_id``, when
+    given, is written into the merge commit's BODY as a
+    ``Selfevo-Cycle: <id>`` trailer (:data:`commit_markers.
+    MERGE_TRAILER_CYCLE_KEY`) -- the SUBJECT stays exactly
+    ``"merge: integrate <cycle_branch>"``, unchanged, since several
+    readers (``scripts/revert_cycles.py``'s ``MERGE_SUBJECT_RX``, this
+    file's own novelty-pressure filter, ``scripts/measure_package_1903.py``,
+    both dashboard generators) match it verbatim.
 
     Returns ``{"ok": bool, "main_sha_after": str, "reason": str | None}``.
     """
@@ -1039,8 +1091,44 @@ def _integrate_cycle_to_main(
     if checkout_main.returncode != 0:
         return {'ok': False, 'main_sha_after': main_sha_before, 'reason': 'checkout_main_failed'}
 
+    # ADR-035 keep-work architect resolution (#1942 B2): the merge commit
+    # describes itself. SUBJECT stays exactly "merge: integrate
+    # <cycle_branch>" -- unchanged, since scripts/revert_cycles.py's
+    # MERGE_SUBJECT_RX, this file's own novelty-pressure filter,
+    # scripts/measure_package_1903.py, and both dashboard generators all
+    # match it verbatim. BODY carries the task title as a human-readable
+    # paragraph plus three trailers (Selfevo-Cycle, Selfevo-Task,
+    # Selfevo-Demand) for automated readers -- self_dedup evidence
+    # (llm_proposer._latest_non_residual_commit_for_path) reads the
+    # Selfevo-Task trailer for a NEW merge, falling back to merge^2 (the
+    # cycle branch tip's own last non-checkpoint commit) only for an OLD
+    # merge that predates this trailer.
+    from nanobot.runtime.commit_markers import (
+        MERGE_TRAILER_CYCLE_KEY, sanitize_trailer_value,
+    )
+    _merge_body_lines: 'list[str]' = []
+    # pG review (0cf0a6f7): the body PARAGRAPH may run up to 500 chars
+    # (human-readable prose), but the Selfevo-Task TRAILER is a trailer
+    # like any other and must stay within the same 120-char cap
+    # (_TRAILER_VALUE_MAX_LEN) as Selfevo-Cycle/Selfevo-Demand -- reusing
+    # the 500-char paragraph value there let an over-length title corrupt
+    # the trailer block's own size contract.
+    _clean_title = sanitize_trailer_value(task_title, max_len=500) if task_title else ''
+    _task_trailer_value = sanitize_trailer_value(task_title) if task_title else ''
+    if _clean_title:
+        _merge_body_lines.append(_clean_title)
+        _merge_body_lines.append('')
+    if cycle_id:
+        _merge_body_lines.append(f'{MERGE_TRAILER_CYCLE_KEY}: {sanitize_trailer_value(cycle_id)}')
+    if _task_trailer_value:
+        _merge_body_lines.append(f'Selfevo-Task: {_task_trailer_value}')
+    if demand_id:
+        _merge_body_lines.append(f'Selfevo-Demand: {sanitize_trailer_value(demand_id)}')
+    _merge_cmd = git + ['merge', '--no-ff', cycle_branch, '-m', f'merge: integrate {cycle_branch}']
+    if _merge_body_lines:
+        _merge_cmd += ['-m', '\n'.join(_merge_body_lines)]
     merge = _sp_int.run(
-        git + ['merge', '--no-ff', cycle_branch, '-m', f'merge: integrate {cycle_branch}'],
+        _merge_cmd,
         capture_output=True, text=True,
     )
     if merge.returncode != 0:
@@ -1190,26 +1278,6 @@ def _tag_cycle_pre(repo_root: 'Path', cycle_id: str, main_sha: str) -> None:
         )
     except Exception:
         pass
-
-
-def _maybe_propose_after_skip(selfevo_repo: 'Path') -> None:
-    """Invoke the #707 LLM proposer after a pre-spawn duplicate skip.
-
-    First canary finding: the deterministic planner mints stale duplicate
-    requests faster than the bridge consumes them, so the queue never empties
-    and the no-pending-request hook in ``_main_impl`` (near the top, guarded
-    by ``if not req_path``) never runs — a queue full of duplicates IS
-    novelty exhaustion. Called from the exact-tag and
-    ``_recent_failure_match`` pre-spawn skip branches, after their terminal
-    ledger/result bookkeeping, right before their ``return 0``. Fails open
-    (``maybe_propose`` never raises), so this is safe to call unconditionally.
-    The written request (if any) queues behind whatever stale requests remain
-    and is picked up oldest-first over the next few cycles as the queue
-    drains — no reordering logic needed.
-    """
-    _proposer_title = llm_proposer.maybe_propose(STATE_DIR, selfevo_repo)
-    if _proposer_title:
-        print(f'llm-proposer: queued {_proposer_title}')
 
 
 def _tag_cycle_post(repo_root: 'Path', cycle_id: str, outcome: str, sha: str | None = None, *, tag_suffix: str | None = None) -> None:
@@ -1451,7 +1519,27 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
                 state_dir, cycle_id, 'pushed_late', None, [], branch,
                 verdict=_v, verdict_reason=_vr,
             )
-            _cleanup_cycle_branch(repo_root, branch)
+            # N3 (round 2/3 external re-check, architect resolution
+            # 2026-09-26): a late push is a genuine integration success --
+            # a pending open increment for THIS cycle_id is resolved by it,
+            # exactly like the immediate integration path
+            # (_integrate_cycle_to_main) already clears. Without this, a
+            # kept increment that finishes here still reads as pending
+            # forever; the next `keep` then fails with resume_branch_missing
+            # even though the work already integrated. The branch is
+            # deleted only if the clear itself was saved (or nothing was
+            # pending for this cycle) -- a failed save must not delete a
+            # branch a retry would still need.
+            try:
+                from nanobot.runtime import open_increment as _open_increment_late_push
+
+                _pending_cleared = _open_increment_late_push.clear_pending_on_integration(state_dir, cycle_id)
+            except Exception:
+                _pending_cleared = False
+            if _pending_cleared:
+                _cleanup_cycle_branch(repo_root, branch)
+            else:
+                print(f'bridge: late push: pending-clear save failed for {branch}; branch kept for a retry')
             print(f'bridge: late push: {branch} (cycle {cycle_id}) pushed to main at {main_sha_after}')
             resolved_count += 1
         return resolved_count
@@ -1508,6 +1596,19 @@ def _prune_stale_cycle_branches(
     except Exception:
         _indexed_shas = set()
 
+    # ADR-035 keep-work (#1942 B2): never prune the branch a PENDING open
+    # increment still points at -- its checkpoint commits are the whole
+    # point of a future `keep` decision. Every killed cycle now leaves an
+    # unmerged forensic branch (checkpointing means there is always at
+    # least one commit), so this exemption is load-bearing, not
+    # belt-and-suspenders: without it, a busy supply-hold backoff could
+    # outlive the `keep` forensic-branch window and silently lose the work.
+    try:
+        from nanobot.runtime.open_increment import pending_open_increment as _pending_oi_branch
+        _pending_branch = (_pending_oi_branch(_sd) or {}).get('branch') or ''
+    except Exception:
+        _pending_branch = ''
+
     try:
         current = _run(['rev-parse', '--abbrev-ref', 'HEAD']).stdout.strip()
 
@@ -1531,6 +1632,7 @@ def _prune_stale_cycle_branches(
         to_delete.update(unmerged[keep:])
         to_delete.discard(current)  # never delete the branch we are on
         to_delete.discard('')
+        to_delete.discard(_pending_branch)  # ADR-035 keep-work: see above
 
         # #877: never delete a branch whose tip sha the evolution tree still
         # indexes (e.g. a forensic branch that also happens to be a
@@ -2014,7 +2116,7 @@ def _recent_commit_is_bookkeeping_only(paths: 'list[str]') -> bool:
     )
 
 
-def _recent_commits_with_paths(repo_root: 'Path', since: str) -> 'list[tuple[str, str, list[str]]]':
+def _recent_commits_with_paths(repo_root: 'Path', since: str) -> 'list[tuple[str, str, list[str]]] | None':
     """``(short_sha, subject, changed_paths)`` for every commit ``--since``
     *since*, newest first — the same window `_recent_git_log`
     (`nanobot.runtime.goal_text_utils`) reads, but with the changed-file
@@ -2027,24 +2129,28 @@ def _recent_commits_with_paths(repo_root: 'Path', since: str) -> 'list[tuple[str
 
     ``\\x00`` (never a legal character in a git subject or path) separates
     commit records so a multi-line changed-file list can be split
-    unambiguously. Best-effort — never raises; a git failure yields ``[]``,
-    the same fail-open contract as `_recent_git_log`.
+    unambiguously. Best-effort — never raises; a git failure yields
+    ``None`` (unknown), never ``[]`` -- a failed read and a genuinely
+    empty commit window must not collapse into the same value for a
+    caller like `_recent_activity_context`.
     """
     import subprocess as _sp
+
+    from nanobot.runtime.commit_markers import (
+        ARTIFICIAL_COMMIT_GREP_PATTERNS, is_artificial_commit_subject,
+    )
 
     git_cmd = [
         'git', '-c', f'safe.directory={repo_root}', '-C', str(repo_root),
         'log',
         '--invert-grep', '-i',
-        '--grep=^Selfevo-Residual: true',
-        '--grep=^selfevo: auto-commit uncommitted subagent work',
-        '--grep=^selfevo: auto-commit residual state',
+        *(f'--grep={p}' for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
         '--pretty=format:%x00%h %s', '--name-only', f'--since={since}',
     ]
     try:
         raw = _sp.check_output(git_cmd, stderr=_sp.DEVNULL, timeout=10).decode(errors='replace')
     except Exception:
-        return []
+        return None
     commits: 'list[tuple[str, str, list[str]]]' = []
     for block in raw.split('\x00'):
         if not block.strip():
@@ -2054,11 +2160,7 @@ def _recent_commits_with_paths(repo_root: 'Path', since: str) -> 'list[tuple[str
         sha, _, subject = header.partition(' ')
         if not sha:
             continue
-        subj_lower = subject.strip().lower()
-        if subj_lower.startswith((
-            'selfevo: auto-commit residual state',
-            'selfevo: auto-commit uncommitted subagent work',
-        )):
+        if is_artificial_commit_subject(subject):
             continue
         paths = [ln for ln in block_lines[1:] if ln.strip()]
         commits.append((sha, subject, paths))
@@ -2093,7 +2195,11 @@ def _recent_activity_context(
     try:
         lines: list[str] = []
 
-        if selfevo_repo_root is not None:
+        # A repo path that does not exist at all is a config/setup gap, not
+        # a git failure worth flagging as "unknown" -- stays silent, same
+        # as before the small item below distinguished the two. Only a
+        # git command failing against a repo that IS there gets "unknown".
+        if selfevo_repo_root is not None and Path(selfevo_repo_root).is_dir():
             commits = _recent_commits_with_paths(selfevo_repo_root, since="7 days ago")
             # #1727: 4 of 8 subjects on the recorded prompts were
             # `merge: integrate selfevo/cycle-...` — the bridge's own
@@ -2109,23 +2215,28 @@ def _recent_activity_context(
             # (`_recent_commit_is_bookkeeping_only`), not by this specific
             # subject text, so any future per-cycle bookkeeping commit is
             # covered by adding its path prefix, not a new special case.
-            subjects: list[str] = []
-            for sha, subject, paths in commits:
-                subj_lower = subject.strip().lower()
-                if subj_lower.startswith((
-                    'merge:',
-                    'selfevo: auto-commit residual state',
-                    'selfevo: auto-commit uncommitted subagent work',
-                )):
-                    continue
-                if _recent_commit_is_bookkeeping_only(paths):
-                    continue
-                subjects.append(f'{sha} {subject}')
-                if len(subjects) >= 8:
-                    break
-            if subjects:
-                lines.append('Recently completed (recent commits):')
-                lines.extend(f'- {s}' for s in subjects)
+            from nanobot.runtime.commit_markers import is_artificial_commit_subject
+
+            if commits is None:
+                # Small item (ADR-035 Test Contract, #1962): a git failure
+                # is unknown, not "nothing recent" -- say so, rather than
+                # silently omitting the section as if there were nothing to
+                # report.
+                lines.append('Recently completed (recent commits): unknown -- git read failed')
+            else:
+                subjects: list[str] = []
+                for sha, subject, paths in commits:
+                    subj_lower = subject.strip().lower()
+                    if subj_lower.startswith('merge:') or is_artificial_commit_subject(subject):
+                        continue
+                    if _recent_commit_is_bookkeeping_only(paths):
+                        continue
+                    subjects.append(f'{sha} {subject}')
+                    if len(subjects) >= 8:
+                        break
+                if subjects:
+                    lines.append('Recently completed (recent commits):')
+                    lines.extend(f'- {s}' for s in subjects)
 
         if state_dir is not None:
             results_dir = state_dir / 'subagents' / 'results'
@@ -2136,9 +2247,16 @@ def _recent_activity_context(
                 status = data.get('result_status')
                 if not reason and status not in ('blocked', 'no_commit'):
                     continue
+                # ADR-035 rule 1 (#1942): req/task come from the planning
+                # session's own plan now, never a proposer-written request
+                # -- result rows carry the plan's title only in
+                # semantic_task_id, never backlog_title/task_title (both
+                # sourced from a source_artifact/queue file that no longer
+                # exists).
                 title = (
                     data.get('backlog_title')
                     or data.get('task_title')
+                    or data.get('semantic_task_id')
                     or data.get('cycle_id')
                     or '(untitled)'
                 )
@@ -2291,7 +2409,11 @@ def build_task(req: dict, goal_text: str, report_source: str,
     if curriculum_level:
         _mission_line = f'This task is operator priority P{curriculum_level}.'
     else:
-        _mission_line = 'This task is not an operator priority; priorities are handled by the proposer.'
+        # ADR-035 rule 1 (#1942): the planning session chooses every task
+        # now, including self-directed increments with no matched candidate
+        # -- there is no proposer-authored assignment left to attribute this
+        # line to.
+        _mission_line = 'This task is not an operator priority; the planning session chose it.'
     # #954: charter is already in system_context when charter_in_system=True;
     # emit a single pointer line so the combined prompt has the charter text
     # exactly once.
@@ -2926,12 +3048,17 @@ def _write_diary_open_entry(repo_root: 'Path', state_dir: 'Path', cycle_id: str,
         return {'outcome': 'commit_failed', 'commit_sha': None}
 
 
-def _write_diary_plan_block(repo_root: 'Path', state_dir: 'Path', cycle_id: str, plan_text: str) -> dict:
-    """#1852 (ADR-031 rule 5): write the planning session's plan into today's
-    diary, replacing whatever plan block is already there, and integrate it
-    on its own verdict -- the same carve-out :func:`_write_diary_open_entry`
-    already established for ADR-028 rule 3, applied to the plan block
-    instead of the entries list.
+def _write_diary_plan_block(
+    repo_root: 'Path', state_dir: 'Path', cycle_id: str, plan_text: str,
+    *, iterations_planned: 'int | None' = None,
+) -> dict:
+    """#1852 (ADR-031 rule 5), ADR-035 rule 1: write the planning session's
+    plan into today's diary as a new dated entry above the previous ones
+    (never replacing the block wholesale -- see
+    :func:`day_diary.append_plan_entry`), and integrate it on its own
+    verdict -- the same carve-out :func:`_write_diary_open_entry` already
+    established for ADR-028 rule 3, applied to the plan block instead of
+    the entries list.
 
     Mirrors :func:`_write_diary_open_entry`'s subprocess shape exactly
     (commit on main, push immediately, roll back on push failure); the two
@@ -2954,7 +3081,9 @@ def _write_diary_plan_block(repo_root: 'Path', state_dir: 'Path', cycle_id: str,
     try:
         existing = target.read_text(encoding='utf-8') if target.is_file() else None
         base_content = existing if existing is not None else day_diary.new_day_file()
-        new_content = day_diary.set_plan_block(base_content, plan_text)
+        new_content = day_diary.append_plan_entry(
+            base_content, plan_text, cycle_id=cycle_id, iterations_planned=iterations_planned,
+        )
     except ValueError as exc:
         return {'outcome': 'malformed', 'commit_sha': None, 'reason': str(exc)}
     except Exception as exc:
@@ -3175,8 +3304,24 @@ async def _run_planning_session(
     import asyncio as _asyncio
     import subprocess as _sp_run
 
-    from nanobot.runtime import day_diary, role_prompt
+    from nanobot.runtime import day_diary, no_plan_recovery, planner_rest, role_prompt
     from nanobot.runtime.cycle_ledger import record_planning_session
+
+    # ADR-035 rest amendment (#1964): the harness pre-check runs before
+    # anything else in this function -- before the charter read, before any
+    # model call. "Tests change, never value": held only when the active
+    # rest's named input is unchanged AND its deadline has not passed;
+    # unreadable, changed, or expired all return the choice to the planner.
+    # No plan is attempted and no repository preparation runs on this tick.
+    _rest_run, _rest_reason = planner_rest.precheck(state_dir, selfevo_repo)
+    if not _rest_run:
+        record_planning_session(
+            state_dir, cycle_id, 'rest_unchanged',
+            iterations_used=None, iterations_planned=None, reason=_rest_reason,
+        )
+        planner_rest.record_held_tick(state_dir, cycle_id)
+        print(f'planning-session: rest_unchanged ({_rest_reason})')
+        return {'ran': False, 'iterations_used': None, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
 
     _task_writing_read = False
     _task_writing_source = ""
@@ -3193,10 +3338,12 @@ async def _run_planning_session(
             task_writing_bytes=_task_writing_bytes_count,
             task_writing_sha256=_task_writing_sha256 or None,
         )
+        no_plan_recovery.record_outcome(state_dir, cycle_id, outcome)
+        planner_rest.record_non_rest_outcome(state_dir, cycle_id, outcome)
         print(f'planning-session: {outcome} ({reason[:200]})')
         return {
             'ran': False, 'iterations_used': None, 'iterations_planned': None,
-            'tampered_files': tampered_files or [],
+            'tampered_files': tampered_files or [], 'plan': None,
         }
 
     # ADR-034 rule 3: a missing/unreadable release charter stops the
@@ -3258,13 +3405,92 @@ async def _run_planning_session(
         _planner_derived_entries = ()
     _priorities_block = render_priorities_block(_planner_operator_res, _planner_derived_entries)
 
+    # ADR-035 rule 1: "the ranked candidates (ADR-027 ranking; the
+    # proposer's ideas are candidates)" -- demand.collect_demand already
+    # assembles them in the trust order rule 1 keeps ("exactly as today");
+    # this only renders that same list and marks new/changed operator
+    # priorities, never reorders it. Fail-open: candidates are read-only
+    # context, never a selection made on the planner's behalf -- a failure
+    # here must not stop the session, only leave it without this block.
+    # D9 (ADR-035 Test Contract, external review finding #9; round 2
+    # external re-check, architect resolution 2026-09-26): minimal_mode
+    # actually selects a smaller context here -- not just a recorded flag
+    # nothing acts on. "minimal mode means the five best candidates, as
+    # in the ADR, not zero" -- round 1 omitted the candidates block
+    # entirely, which is its own unobservable-guard-adjacent defect (the
+    # planner loses the very demand signal it needs to keep choosing
+    # sensibly while degraded). The dedup evidence block is still
+    # skipped; priorities and the open-increment block (mandatory, and
+    # already small) are unaffected either way.
+    _minimal_mode_active = False
+    try:
+        from nanobot.runtime import no_plan_recovery as _no_plan_recovery_ctx
+
+        _minimal_mode_active = bool(_no_plan_recovery_ctx.load_state(state_dir).minimal_mode)
+    except Exception:
+        _minimal_mode_active = False
+
+    try:
+        from nanobot.runtime import demand as _demand_mod
+        from nanobot.runtime import llm_proposer as _llm_proposer_mod
+        from nanobot.runtime import planner_candidates as _planner_candidates_mod
+
+        _planner_candidate_items = _demand_mod.collect_demand(state_dir, selfevo_repo)
+        # ADR-035 rule 2: the proposer's own still-live requests become
+        # candidates too, positioned right after defect items (rule 1's
+        # trust order) -- read-only, no LLM call.
+        _planner_proposer_items = _llm_proposer_mod.proposer_candidate_items(state_dir)
+        _planner_candidate_items = _planner_candidates_mod.merge_proposer_candidates(
+            _planner_candidate_items, _planner_proposer_items,
+        )
+        _planner_new_priority_ids = _planner_candidates_mod.mark_new_priority_items(
+            state_dir, _planner_candidate_items,
+        )
+        _candidates_block = _planner_candidates_mod.render_candidates_block(
+            _planner_candidate_items, _planner_new_priority_ids,
+            limit=(5 if _minimal_mode_active else 20),
+        )
+    except Exception:
+        _candidates_block = ''
+
+    if _minimal_mode_active:
+        _dedup_evidence_block = ''
+    else:
+        # ADR-035 rest amendment (#1964): "the sha and the reason are an
+        # input to the next session, or it would choose the same increment
+        # again." Consumed (read-and-cleared) here, so it reaches exactly
+        # this one session -- fail-open, same as the candidates block above.
+        try:
+            from nanobot.runtime import planner_dedup_evidence as _dedup_evidence_mod
+
+            _dedup_evidence = _dedup_evidence_mod.consume_pending_evidence(state_dir)
+            _dedup_evidence_block = _dedup_evidence_mod.render_dedup_evidence_block(_dedup_evidence)
+        except Exception:
+            _dedup_evidence_block = ''
+
+    # Architect resolution 2026-09-25 (ADR-035 rule 3 / ADR-031 rule 2): a
+    # plan interrupted by a supplier-side executor failure is this
+    # session's FIRST item -- surfaced ahead of priorities/candidates, and
+    # the session must resolve it (keep/edit/delete) via
+    # `open_increment_decision` in its final plan JSON before anything else.
+    from nanobot.runtime import open_increment as _open_increment_mod
+
+    _pending_open_increment = _open_increment_mod.pending_open_increment(state_dir)
+    _open_increment_block = _open_increment_mod.render_open_increment_block(
+        _pending_open_increment,
+        _open_increment_mod.load_state(state_dir).consecutive_supply_interrupts,
+    )
+
     _planner_task = (
+        f'{_open_increment_block}\n\n'
         'The harness pre-read the mandatory release-owned task-writing contract '
         'before this model turn. Apply it to the next increment.\n\n'
         '--- task-writing contract ---\n'
         f'{_task_writing_contract}\n'
         '--- end task-writing contract ---\n\n'
         f'{_priorities_block}\n\n'
+        f'{_candidates_block}\n\n'
+        f'{_dedup_evidence_block}\n\n'
         'Plan the next cycle.'
     )
 
@@ -3364,6 +3590,41 @@ async def _run_planning_session(
 
     iterations_used = len((telem.get('context_usage') or {}).get('iterations') or [])
     raw_result = str(telem.get('result') or '').strip()
+
+    # D10 (ADR-035 Test Contract, external review finding #10): classify a
+    # terminal supplier error in the planner's OWN telemetry BEFORE any
+    # attempt to JSON-parse `raw_result` -- there is no final answer to
+    # parse, and doing so anyway produced "malformed (invalid_json)",
+    # wrongly counted toward the planner family. Reuses the same
+    # classifier the executor's own LLM-error path uses
+    # (_classify_llm_error) so the two readers cannot drift apart on what
+    # "looks like a supplier outage" means.
+    if str(telem.get('status') or '').strip().lower() == 'error':
+        _planner_error_text = str(telem.get('summary') or telem.get('result') or '').strip()
+        _planner_error_class = _classify_llm_error(_planner_error_text)
+        if _planner_error_class == 'paused-supplier':
+            return _fail('supplier_error', f'planner supplier error: {_planner_error_text[:200]}')
+        # Our own defect (a genuine planner-side exception, not a
+        # supplier outage) still keeps the existing 'malformed' shape --
+        # D10 only fixes the misclassification of supplier errors.
+        return _fail('malformed', f'planner error: {_planner_error_text[:200]}')
+
+    # Small item (ADR-035 Test Contract, #1962): reset the supply-
+    # interruption streak on ANY successful planner model call, including
+    # `rest` -- not just the executor's own post-spawn path. The streak
+    # exists to answer "is the supplier reachable again", and a completed
+    # planner call (whatever it then decides -- a plan, a rest, even a
+    # malformed/no_plan outcome that still means status != 'error') is
+    # exactly that proof; a successful `rest` in particular never reaches
+    # the executor path at all, so without this the streak could survive
+    # past the very recovery it was waiting to observe.
+    try:
+        from nanobot.runtime import open_increment as _open_increment_planner_ok
+
+        _open_increment_planner_ok.record_model_call_completed(state_dir)
+    except Exception:
+        pass
+
     # #1893: exhausted tool-call budgets and bounded stops are not malformed
     # JSON attempts. They produced no final plan at all; keep their reason
     # instead of reporting the parser's incidental Expecting value error.
@@ -3380,13 +3641,104 @@ async def _run_planning_session(
             task_writing_bytes=_task_writing_bytes_count,
             task_writing_sha256=_task_writing_sha256 or None,
         )
+        no_plan_recovery.record_outcome(state_dir, cycle_id, 'no_plan')
+        planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'no_plan')
         print(f'planning-session: no_plan ({reason})')
-        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
+        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
     # #1903/#1925: keep the role's no-wrapping instruction, but accept one
     # terminal fenced object as a recorded format violation (never extract a
     # JSON example from reasoning prose).
     parsed, parse_mode, format_violation, parse_error = _parse_planner_final_response(raw_result)
-    if parse_error is None and (
+
+    # ADR-035 rest amendment (#1964): a structured `rest` is a third valid
+    # final response, checked before the "plan required" rule below --
+    # `rest` and `plan` are mutually exclusive shapes of the SAME final
+    # JSON, never both required at once.
+    _rest_candidate = parsed.get('rest') if isinstance(parsed, dict) else None
+    _rest_and_plan_both_present = (
+        parse_error is None and _rest_candidate is not None
+        and isinstance(parsed, dict) and isinstance(parsed.get('plan'), str) and parsed['plan'].strip()
+    )
+    if _rest_and_plan_both_present:
+        # Codex review of 984a133f (nanobot/runtime/bridge.py:3638):
+        # `rest` is checked before "plan required" below, so a response
+        # carrying BOTH fields was accepted as rest solely because
+        # `rest` was non-null -- silently discarding the plan and never
+        # spawning the executor. `plan`/`rest` are mutually exclusive
+        # shapes of the one final JSON (roles/planner.md); a model
+        # returning both is a format violation, not a legitimate rest.
+        record_planning_session(
+            state_dir, cycle_id, 'malformed',
+            iterations_used=iterations_used, iterations_planned=None,
+            reason='response contains both "plan" and "rest"; mutually exclusive',
+            parse_mode=parse_mode,
+            format_violation=format_violation,
+            task_writing_read=_task_writing_read,
+            task_writing_source=_task_writing_source or None,
+            task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+            task_writing_bytes=_task_writing_bytes_count,
+            task_writing_sha256=_task_writing_sha256 or None,
+        )
+        no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
+        planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
+        print('planning-session: malformed (response contains both plan and rest)')
+        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
+    if parse_error is None and _rest_candidate is not None:
+        try:
+            _wake_condition, _deadline = planner_rest.parse_rest(_rest_candidate)
+        except planner_rest.RestValidationError as _rest_exc:
+            record_planning_session(
+                state_dir, cycle_id, 'malformed',
+                iterations_used=iterations_used, iterations_planned=None,
+                reason=f'invalid rest: {_rest_exc}',
+                parse_mode=parse_mode,
+                format_violation=format_violation,
+                task_writing_read=_task_writing_read,
+                task_writing_source=_task_writing_source or None,
+                task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+                task_writing_bytes=_task_writing_bytes_count,
+                task_writing_sha256=_task_writing_sha256 or None,
+            )
+            no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
+            planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
+            print(f'planning-session: malformed rest ({_rest_exc})')
+            return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
+
+        record_planning_session(
+            state_dir, cycle_id, 'rest',
+            iterations_used=iterations_used, iterations_planned=None,
+            reason=f'waiting for {_wake_condition.kind}:{_wake_condition.ref} until {_deadline}',
+            parse_mode=parse_mode,
+            format_violation=format_violation,
+            task_writing_read=_task_writing_read,
+            task_writing_source=_task_writing_source or None,
+            task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+            task_writing_bytes=_task_writing_bytes_count,
+            task_writing_sha256=_task_writing_sha256 or None,
+        )
+        # `rest` never counts toward no_plan_recovery's supply/planner
+        # families -- only planner_rest.record_rest tracks its own streak.
+        planner_rest.record_rest(state_dir, cycle_id, _wake_condition, _deadline, selfevo_repo)
+        print(f'planning-session: rest (waiting for {_wake_condition.kind}:{_wake_condition.ref} until {_deadline})')
+        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
+
+    # D11 (#1903 planning-cost measurement, architect resolution
+    # 2026-09-26): `keep` + `plan_action: confirm` (the default whenever
+    # absent) reuses the pending increment's OWN stored plan text
+    # verbatim -- the mandatory-plan-field check below must not demand a
+    # freshly-composed one for this case, or `keep` never actually skips
+    # planning from scratch. Only `plan_action: edit` still requires a
+    # revised `plan` field of its own.
+    _keep_confirm = (
+        bool(_pending_open_increment)
+        and isinstance(parsed, dict)
+        and str(parsed.get('open_increment_decision') or '').strip().lower() == 'keep'
+        and str(parsed.get('plan_action') or '').strip().lower() != 'edit'
+    )
+    if _keep_confirm and isinstance(parsed, dict):
+        parsed['plan'] = _pending_open_increment.get('plan_text', '') or parsed.get('plan') or ''
+
+    if parse_error is None and not _keep_confirm and (
         not isinstance(parsed, dict)
         or not isinstance(parsed.get('plan'), str)
         or not parsed['plan'].strip()
@@ -3411,8 +3763,10 @@ async def _run_planning_session(
             task_writing_bytes=_task_writing_bytes_count,
             task_writing_sha256=_task_writing_sha256 or None,
         )
+        no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
+        planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
         print(f'planning-session: malformed final response ({exc})')
-        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
+        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
 
     plan_lines = [f"Insight: {(parsed.get('insight') or '').strip() or '(none stated)'}", f"Plan: {parsed['plan'].strip()}"]
     dor = parsed.get("dor")
@@ -3427,9 +3781,156 @@ async def _run_planning_session(
     for f in (parsed.get('futility_advisories') or [])[:2]:
         if isinstance(f, str) and f.strip():
             plan_lines.append(f'Futility: {f.strip()}')
+
+    # ADR-035 rule 1: "the planner may decline any candidate, including a
+    # defect, but must name the declined defect and why; a defect declined
+    # three sessions running is raised to the operator." Fail-open: the
+    # decline record is bookkeeping on top of an already-produced plan --
+    # a failure here must never turn an otherwise-integrated plan into a
+    # degraded outcome.
+    _declined_raw = parsed.get('declined')
+    if isinstance(_declined_raw, list):
+        _declined_map = {
+            str(d['defect_id']).strip(): str(d['reason']).strip()
+            for d in _declined_raw
+            if isinstance(d, dict) and str(d.get('defect_id') or '').strip() and str(d.get('reason') or '').strip()
+        }
+        if _declined_map:
+            try:
+                from nanobot.runtime import planner_candidates as _planner_candidates_mod
+
+                _decline_results = _planner_candidates_mod.record_defect_declines(
+                    state_dir, cycle_id, _declined_map,
+                )
+                for _defect_id, _reason in _declined_map.items():
+                    _escalated = _decline_results.get(_defect_id, {}).get('escalated', False)
+                    _tag = ' [ESCALATED to operator: 3 declines running]' if _escalated else ''
+                    plan_lines.append(f'Declined: {_defect_id} — {_reason}{_tag}')
+            except Exception:
+                pass
+    # Architect resolution 2026-09-25 (ADR-035 rule 3, "I"): the session
+    # must resolve a pending open increment (keep/edit/delete) before this
+    # plan is treated as produced. Fail-open bookkeeping, same shape as the
+    # declined-defect handling above -- never turns an otherwise-integrated
+    # plan into a degraded outcome.
+    # ADR-035 keep-work (#1942 B2): a `keep` decision resumes the interrupted
+    # attempt's OWN cycle branch and skips a second opening diary entry --
+    # captured from `_pending_open_increment` BEFORE `resolve()` clears it,
+    # and returned below for `_main_impl_body` to route into
+    # `_setup_cycle_branch`/`_write_diary_open_entry`.
+    _resume_branch: 'str | None' = None
+    _resume_cycle_id: 'str | None' = None
+    _resume_skip_opening_entry = False
+    if _pending_open_increment:
+        _oi_decision = str(parsed.get('open_increment_decision') or '').strip().lower()
+        if _oi_decision in ('keep', 'edit', 'delete'):
+            try:
+                if _oi_decision == 'keep':
+                    _resume_branch = _pending_open_increment.get('branch') or None
+                    _resume_cycle_id = _pending_open_increment.get('cycle_id') or None
+                    _resume_skip_opening_entry = bool(_pending_open_increment.get('opening_entry_written'))
+                    # D11 (#1903 planning-cost measurement): the diary
+                    # entry itself names which of the two `keep` paths this
+                    # was -- confirm reused the previous plan verbatim
+                    # (`parsed['plan']` was substituted above, before
+                    # `plan_lines` was built); edit recorded a revised one,
+                    # referring back to the plan it revises.
+                    if _keep_confirm:
+                        plan_lines.append(
+                            'Plan action: confirm (previous plan for this open increment reused as-is, '
+                            'not re-planned from scratch)'
+                        )
+                    else:
+                        plan_lines.append(
+                            "Plan action: edit (this is an edit of the open increment's previous plan, "
+                            'not a new plan)'
+                        )
+                # N2 (round 2 external re-check, architect resolution
+                # 2026-09-26): keep+edit passes the revised plan through so
+                # `resolve` persists it into the DURABLE pending record --
+                # not just this call's `parsed['plan']` -- before handing
+                # off to the resumed executor. `_keep_confirm` reuses the
+                # existing plan verbatim, so nothing needs updating there.
+                _oi_resolve_state = _open_increment_mod.resolve(
+                    state_dir, cycle_id, _oi_decision, selfevo_repo=selfevo_repo,
+                    plan_text=(
+                        None if (_oi_decision != 'keep' or _keep_confirm) else parsed.get('plan')
+                    ),
+                )
+                # P2-a (round 4 external re-check, architect resolution
+                # 2026-09-26): ONE check for every decision --
+                # resolve()'s own `resolve_saved` is True only once the
+                # FULL intended transition (delete/edit really cleared
+                # `pending`; keep, with or without an edit, matches the
+                # intended plan_text/plan_version/resumed_by) has been
+                # verified by reading the state back. Replaces the two
+                # separate ad hoc checks round 3 built (delete's own
+                # `pending is not None`, keep+edit's separate re-read of
+                # `pending_open_increment`) -- and, for the first time,
+                # also covers plain `keep` (no edit), which previously
+                # had no caller-side check at all.
+                if not _oi_resolve_state.resolve_saved:
+                    record_planning_session(
+                        state_dir, cycle_id, 'malformed',
+                        iterations_used=iterations_used, iterations_planned=iterations_planned,
+                        reason=f'pending open increment {_oi_decision} failed to verify; decision not accepted',
+                        parse_mode=parse_mode,
+                        format_violation=format_violation,
+                        task_writing_read=_task_writing_read,
+                        task_writing_source=_task_writing_source or None,
+                        task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+                        task_writing_bytes=_task_writing_bytes_count,
+                        task_writing_sha256=_task_writing_sha256 or None,
+                    )
+                    no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
+                    planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
+                    print(
+                        f'planning-session: malformed ({_oi_decision} failed to verify; '
+                        'decision not accepted)'
+                    )
+                    return {
+                        'ran': True, 'iterations_used': iterations_used, 'iterations_planned': iterations_planned,
+                        'tampered_files': [], 'plan': None,
+                    }
+                plan_lines.append(f'Open increment: {_oi_decision}')
+            except Exception:
+                pass
+        else:
+            # D8 (ADR-035 Test Contract, external review finding #8): a
+            # pending increment with a MISSING or INVALID
+            # open_increment_decision is an invalid plan -- no_plan/
+            # malformed, planner family -- never silent acceptance of the
+            # new plan with no resume routed through. Enforced as output
+            # validation here; prompt wording alone (roles/planner.md) is
+            # not sufficient.
+            record_planning_session(
+                state_dir, cycle_id, 'malformed',
+                iterations_used=iterations_used, iterations_planned=iterations_planned,
+                reason=f'pending open increment unresolved: open_increment_decision={_oi_decision!r}',
+                parse_mode=parse_mode,
+                format_violation=format_violation,
+                task_writing_read=_task_writing_read,
+                task_writing_source=_task_writing_source or None,
+                task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+                task_writing_bytes=_task_writing_bytes_count,
+                task_writing_sha256=_task_writing_sha256 or None,
+            )
+            no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
+            planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
+            print(
+                f'planning-session: malformed (pending open increment unresolved, '
+                f'open_increment_decision={_oi_decision!r})'
+            )
+            return {
+                'ran': True, 'iterations_used': iterations_used, 'iterations_planned': iterations_planned,
+                'tampered_files': [], 'plan': None,
+            }
+
     plan_text = '\n'.join(plan_lines)
 
-    write_result = _write_diary_plan_block(selfevo_repo, state_dir, cycle_id, plan_text)
+    write_result = _write_diary_plan_block(
+        selfevo_repo, state_dir, cycle_id, plan_text, iterations_planned=iterations_planned,
+    )
     record_planning_session(
         state_dir, cycle_id, write_result['outcome'],
         iterations_used=iterations_used, iterations_planned=iterations_planned,
@@ -3442,11 +3943,60 @@ async def _run_planning_session(
         task_writing_bytes=_task_writing_bytes_count,
         task_writing_sha256=_task_writing_sha256,
     )
+    no_plan_recovery.record_outcome(state_dir, cycle_id, write_result['outcome'])
+    planner_rest.record_non_rest_outcome(state_dir, cycle_id, write_result['outcome'])
     return {
         'ran': True, 'iterations_used': iterations_used,
         'iterations_planned': iterations_planned if write_result['outcome'] == 'integrated' else None,
         'tampered_files': [],
+        # ADR-035 rule 1: the plan is the executor's task. `parsed` here
+        # carries whatever the planner's final JSON had -- `plan`, `insight`,
+        # `dor`, `dod`, `hypotheses`, `declined`, and an optional
+        # `candidate_id` naming which ranked candidate (if any) the plan is
+        # built on -- only when the diary write itself also succeeded
+        # (never hand the caller a plan that never reached the diary).
+        'plan': parsed if write_result['outcome'] == 'integrated' else None,
+        # ADR-035 keep-work (#1942 B2): non-None only on a `keep` decision.
+        'resume_branch': _resume_branch,
+        'resume_cycle_id': _resume_cycle_id,
+        'resume_skip_opening_entry': _resume_skip_opening_entry,
     }
+
+
+def _prepare_repository_for_cycle(repo_root: 'Path', state_dir: 'Path') -> dict:
+    """ADR-035 rest amendment (#1964): repository preparation now runs on
+    every started cycle -- one the harness pre-check did not hold -- not
+    only when a request happens to be queued.
+
+    Order is load-bearing: :func:`_restore_to_main` FIRST (a stray branch or
+    dirty tree left by a prior cycle must be cleaned before anything reads
+    or writes this checkout), THEN staged-promotions pickup and
+    pending-push completion. Both of those copy FROM ``state_dir`` INTO the
+    checkout and commit+push in one call, so neither ever leaves an
+    uncommitted intermediate a LATER ``_restore_to_main`` could wipe -- the
+    "curator outputs reset by the bridge" defect class this ordering keeps
+    closed (see ``tests/test_agent_chooses.py::test_repo_preparation_preserves_staged_and_pending``).
+
+    Returns ``{"restored": bool | str, "staged_promoted": int,
+    "pending_pushed": int}``. Never raises -- every piece here was already
+    fail-open at its own former call site.
+    """
+    result = {'restored': True, 'staged_promoted': 0, 'pending_pushed': 0}
+    if not Path(repo_root).is_dir():
+        return result
+    try:
+        result['restored'] = _restore_to_main(repo_root, state_dir)
+    except Exception as exc:
+        result['restored'] = f'error: {exc}'
+    try:
+        result['staged_promoted'] = _pickup_staged_promotions(repo_root, state_dir)
+    except Exception:
+        pass
+    try:
+        result['pending_pushed'] = _finish_pending_pushes(repo_root, state_dir)
+    except Exception:
+        pass
+    return result
 
 
 async def _main_impl_body():
@@ -3508,7 +4058,7 @@ async def _main_impl_body():
     # "print the reason, return 0, no bookkeeping" shape as the
     # no_active_goal/already_handled/bridge_disabled siblings: no request
     # has been dequeued yet, so there is nothing to mark handled — the
-    # next run's find_pending_request() sees the same queue unchanged.
+    # next run's planning session starts from the same unresolved state.
     if read_charter_text(RELEASE_ROOT) == '':
         print(
             f'bridge: charter unavailable at {RELEASE_ROOT}; '
@@ -3526,93 +4076,291 @@ async def _main_impl_body():
     from nanobot.runtime.session_clock import get_bridge_wall_secs
     _bridge_wall_deadline = _bridge_start_mono + get_bridge_wall_secs()
 
-    # #733: bulk-skip pre-spawn duplicates in one run. Each iteration pulls
-    # the next pending request; a pre-spawn duplicate (tag-first match or
-    # _recent_failure_match) does its full bookkeeping
-    # then `continue`s to the next request instead of returning — bounded by
-    # MAX_SKIPS_PER_RUN so a stale queue can't turn one timer invocation into
-    # an unbounded loop. A non-duplicate request `break`s out to the
-    # unchanged single-spawn path below. At most one _setup_cycle_branch/
-    # spawn happens per run either way (S6 invariant) — the loop only ever
-    # iterates on pre-spawn skips.
-    _skips = 0
-    # #680 precondition (below) verifies shared-checkout repo state, not the
-    # request content — it only needs to run once per run, not once per
-    # skipped request, since no skip branch touches the cycle-branch/repo
-    # state it guards against.
-    _precondition_checked = False
-    # #733 follow-up: a request whose handled marker exists under the
-    # SANITIZED request_id can still slip find_pending_request's real_handled
-    # filter (which compares the RAW request_id/marker stem) and keep being
-    # returned every iteration — wedging the bulk-skip loop at one skip per
-    # run. Track paths already returned this run; if the same path comes back
-    # we cannot make progress, so end the run cleanly instead of looping
-    # forever (defense-in-depth alongside turning the marker-exists branch
-    # below into a `continue`).
-    _seen_req_paths: set[str] = set()
-    # #1411: fallback lane — at most ONE same-cycle fallback proposal per
-    # bridge run, attempted only at a point that would otherwise end the run
-    # without ever spawning an executor (see the four call sites below).
-    # ``_pending_fallback``, when set, is consumed by the very next loop
-    # iteration in place of a fresh ``find_pending_request()`` disk read —
-    # the synthetic request still runs through every unchanged tag/
-    # recent-failure/existence-index gate below before it can spawn.
-    _fallback_attempted = False
-    _pending_fallback: 'tuple[Path, dict] | None' = None
-    while True:
-        if _pending_fallback is not None:
-            req_path, req = _pending_fallback
-            _pending_fallback = None
-        else:
-            req_path, req = find_pending_request()
-        if req_path is not None:
-            if str(req_path) in _seen_req_paths:
-                print('bridge: find_pending_request returned the same request twice this run; ending run')
-                return 0
-            _seen_req_paths.add(str(req_path))
-        if not req_path:
-            # #707: state-light LLM proposer — only fires on proven novelty
-            # exhaustion (see llm_proposer.should_propose), behind the
-            # SELFEVO_LLM_PROPOSER_ENABLED kill-switch (default OFF). Fails open
-            # (never raises), so this is safe to call unconditionally here. If it
-            # writes a request, the NEXT bridge invocation (next timer cycle)
-            # picks it up through the normal find_pending_request/dedup/gate path
-            # above — untouched by this change.
-            _selfevo_repo_for_proposer = STATE_DIR.parent / 'eeebot-self-evolving'
-            _proposer_title = llm_proposer.maybe_propose(STATE_DIR, _selfevo_repo_for_proposer)
-            if _proposer_title:
-                print(f'llm-proposer: queued {_proposer_title}')
-            # #1411 fallback lane trigger route: no_demand (should_propose was
-            # False, zero LLM calls) AND proposer_reject (should_propose was
-            # True but maybe_propose's own sizing/self-dedup/futile-surface
-            # gates rejected the proposal) both land here as `not
-            # _proposer_title` — this bridge run is about to end without ever
-            # spawning an executor. One fallback attempt, consumed by the
-            # very next loop iteration in place of a fresh disk read.
-            if not _proposer_title and not _fallback_attempted:
-                _fallback_attempted = True
-                _fallback_result = llm_proposer.propose_fallback(STATE_DIR, _selfevo_repo_for_proposer)
-                if _fallback_result is not None:
-                    _pending_fallback = _fallback_result
-                    continue
-            print('already_handled')
-            return 0
+    _planning_cycle_id = f'cycle-{uuid.uuid4().hex[:12]}'
 
+    # D2 (ADR-035 Test Contract, #1942 B2): a running-attempt registration
+    # with no terminal outcome by the time THIS cycle starts means the
+    # process that wrote it (record_attempt_started, in _evaluate_candidate
+    # below) died before reaching one -- a hard kill, or an exact imitation
+    # of one. Converted to a pending open increment (interrupted_kill)
+    # BEFORE the planning session runs, so it is surfaced exactly like any
+    # other open increment (keep/edit/delete) rather than losing the
+    # attempt silently. Deliberately placed here, not inside
+    # _run_planning_session -- every _main_impl-level test in this file
+    # stubs that function wholesale, and this check must still run.
+    #
+    # Round 4 external re-check, item P2-b (architect resolution
+    # 2026-09-26): moved to BEFORE both pre-checks below (and before
+    # repository/provider preparation) -- recovering a supply-classified
+    # error creates a fresh backoff hold (record_supply_interruption), and
+    # that hold must be visible to THIS SAME tick's own
+    # open_increment.precheck() call, or the tick proceeds to spawn a
+    # real planning session (and prepare the repo, and build a provider)
+    # in the exact tick that just decided to back off.
+    try:
+        from nanobot.runtime import open_increment as _open_increment_killcheck
+
+        _stale_running = _open_increment_killcheck.check_running_for_kill(STATE_DIR, _planning_cycle_id)
+        if _stale_running:
+            _stale_cycle_id = _stale_running.get('cycle_id', '')
+            _stale_branch = _stale_running.get('branch', '')
+            # N1 (round 2 external re-check, architect resolution
+            # 2026-09-26): the attempt's OWN plan (record_attempt_started),
+            # carried forward as the pending increment's plan_text -- a
+            # later `keep`-confirm must hand the executor its real task
+            # back, not a description of the kill. A registration written
+            # before this field existed (or an unset one) falls back to
+            # the old explanatory placeholder, never a blank plan.
+            _stale_plan_text = _stale_running.get('plan_text') or (
+                '(a prior attempt on this branch was interrupted before it '
+                'reached a terminal outcome, and its own plan text was not '
+                'recorded)'
+            )
+            # Round 2 external re-check, item 2 (architect resolution
+            # 2026-09-26): a telemetry-confirmed `error` is classified
+            # HERE, immediately, instead of the (never-run, since the
+            # process that would have run it already died) in-tick
+            # classifier round 1 assumed -- see
+            # `check_running_for_kill`'s own docstring.
+            if _stale_running.get('executor_status') == 'error':
+                if _stale_running.get('error_class') == 'paused-supplier':
+                    # C (round 3 external re-check, architect resolution
+                    # 2026-09-26): without selfevo_repo, the hold's version
+                    # snapshot is None -- planner_rest.snapshot_version
+                    # returns None for a missing repo, so precheck reads
+                    # every subsequent tick as "input_changed" and the
+                    # backoff never actually holds.
+                    _open_increment_killcheck.record_supply_interruption(
+                        STATE_DIR, _stale_cycle_id,
+                        retry_key=f"kill:{_stale_cycle_id}",
+                        plan_text=_stale_plan_text,
+                        candidate_id=None,
+                        selfevo_repo=STATE_DIR.parent / 'eeebot-self-evolving',
+                        branch=_stale_branch,
+                    )
+                else:
+                    _open_increment_killcheck.record_defect_interruption(
+                        STATE_DIR, _stale_cycle_id,
+                        retry_key=f"kill:{_stale_cycle_id}",
+                        plan_text=_stale_plan_text,
+                        candidate_id=None,
+                        branch=_stale_branch,
+                    )
+            else:
+                _open_increment_killcheck.record_kill_interruption(
+                    STATE_DIR, _stale_cycle_id,
+                    retry_key=f"kill:{_stale_cycle_id}",
+                    plan_text=_stale_plan_text,
+                    candidate_id=None,
+                    branch=_stale_branch,
+                    executor_status=_stale_running.get('executor_status'),
+                )
+    except Exception:
+        pass
+
+    # ADR-035 rest amendment (#1964): the harness pre-check runs before
+    # repository preparation too -- a held tick touches neither the model
+    # nor the checkout. Reads the SAME state _run_planning_session's own
+    # (redundant, cheap) precheck reads further down; both must agree.
+    from nanobot.runtime import planner_rest as _planner_rest_toplevel
+    from nanobot.runtime.cycle_ledger import record_planning_session as _record_planning_session_toplevel
+
+    _selfevo_repo_toplevel = STATE_DIR.parent / 'eeebot-self-evolving'
+    _precheck_run, _precheck_reason = _planner_rest_toplevel.precheck(STATE_DIR, _selfevo_repo_toplevel)
+    if not _precheck_run:
+        _record_planning_session_toplevel(
+            STATE_DIR, '', 'rest_unchanged',
+            iterations_used=None, iterations_planned=None, reason=_precheck_reason,
+        )
+        _planner_rest_toplevel.record_held_tick(STATE_DIR, '')
+        print(f'bridge: rest pre-check held ({_precheck_reason}); no session, no repository preparation')
+        return 0
+
+    # Architect resolution 2026-09-25 (ADR-035 rule 3 / ADR-031 rule 2): a
+    # plan interrupted by a supplier-side executor error holds sessions on
+    # its OWN pre-check, same slot, separate state from planner_rest above
+    # -- never counted as a rest or a no_plan.
+    from nanobot.runtime import open_increment as _open_increment_toplevel
+
+    _oi_precheck_run, _oi_precheck_reason = _open_increment_toplevel.precheck(STATE_DIR, _selfevo_repo_toplevel)
+    if not _oi_precheck_run:
+        _open_increment_toplevel.record_held_tick(STATE_DIR, '')
+        print(
+            f'bridge: open-increment pre-check held ({_oi_precheck_reason}); '
+            'no session, no repository preparation'
+        )
+        return 0
+
+    # #680 defense-in-depth (ADR-035 rest amendment, #1964): repository
+    # preparation now runs exactly ONCE per started cycle, here, before any
+    # request is even selected -- see `_prepare_repository_for_cycle`. This
+    # is what a stray branch/dirty tree left by a PRIOR bridge invocation
+    # gets cleaned up by, before anything (dedup checks, the opening diary
+    # entry) assumes the checkout is on a clean `main`. `_write_diary_open_entry`
+    # below does not itself checkout main -- it commits+pushes to whatever
+    # is checked out, so a stray branch here would silently land the diary
+    # commit off `main` (the "later work discarded" hazard the old in-loop
+    # precondition-check's own comment named).
+    #
+    # If the checkout still cannot be repaired, no request has been looked
+    # up yet -- there is no request to attribute a "blocked" result to, and
+    # nothing here should be marked handled; the next invocation's own
+    # pre-check/prep retries the same repair against the same queue.
+    _prep_result = _prepare_repository_for_cycle(_selfevo_repo_toplevel, STATE_DIR)
+    if _prep_result['restored'] is not True:
+        _prep_fail_reason = 'head_on_main_precondition_failed'
+        if isinstance(_prep_result['restored'], str):
+            _prep_fail_reason = f"dirty_tree: {_prep_result['restored']}"
+        print(
+            f'bridge: verify-clean precondition failed for {_selfevo_repo_toplevel} '
+            f'({_prep_fail_reason}); aborting run, no subagent spawned'
+        )
+        append_event(STATE_DIR, {
+            'phase': 'repo_preparation_failed',
+            'cycle_id': '',
+            'reason': _prep_fail_reason,
+        })
+        return 0
+
+    # ADR-035 rest amendment's drain rule (#1942): every queued proposer
+    # request is marked superseded so the old rotation path below never
+    # executes it -- its candidate keeps reaching the planner regardless,
+    # via llm_proposer.proposer_candidate_items. Idempotent and cheap
+    # (a glob + per-file read), safe to call unconditionally every cycle.
+    llm_proposer.drain_queued_proposer_requests(STATE_DIR)
+
+    # #707: the proposer's own candidate authoring keeps running, unconditional
+    # every cycle per its own docstring (system-map freshness rides along) --
+    # so a freshly-authored proposal is visible to THIS SAME planning session
+    # via llm_proposer.proposer_candidate_items below.
+    _selfevo_repo_for_proposer = STATE_DIR.parent / 'eeebot-self-evolving'
+    _proposer_title = llm_proposer.maybe_propose(STATE_DIR, _selfevo_repo_for_proposer)
+    if _proposer_title:
+        print(f'llm-proposer: queued {_proposer_title}')
+
+    # ADR-035 rule 1 (#1942): the planning session runs here, before any
+    # task exists for the cycle. provider/bus never depended on a specific
+    # request -- moved up from their old post-selection position.
+    #
+    # Round 4 external re-check, item P2-b (architect resolution
+    # 2026-09-26): the stale-attempt recovery check (D2) that used to
+    # live here has MOVED to before both pre-checks above -- see the
+    # comment there for why. `_planning_cycle_id` moved with it.
+    provider = _make_provider(config)
+    bus = MessageBus()
+
+    # D9 (ADR-035 Test Contract, external review finding #9): a `stopped`
+    # no_plan_recovery state blocks session start until the operator
+    # resumes manually (no_plan_recovery.resume) -- recording the state
+    # alone, as before, is the "unobservable guard" class; it must
+    # actually gate something. Placed here, not inside
+    # _run_planning_session, for the same reason as the kill-check above
+    # -- every _main_impl-level test in this file stubs that function
+    # wholesale, and this gate must still run.
+    try:
+        from nanobot.runtime import no_plan_recovery as _no_plan_recovery_gate
+
+        if _no_plan_recovery_gate.load_state(STATE_DIR).stopped:
+            print(
+                'bridge: planner stopped (6 consecutive planner-family no_plan outcomes) -- '
+                'no session until the operator resumes manually'
+            )
+            return 0
+    except Exception:
+        pass
+
+    _planner_model = resolve_model('executor', config_fallback=config.tools.subagent.model)
+    _planning_denied_paths = {(STATE_DIR / rel).resolve() for rel in _FITNESS_SIDECARS}
+    try:
+        _planning_result = await _run_planning_session(
+            provider=provider, bus=bus, config=config, model=_planner_model,
+            state_dir=STATE_DIR, selfevo_repo=_selfevo_repo_for_proposer,
+            denied_paths=_planning_denied_paths, cycle_id=_planning_cycle_id,
+        )
+    except Exception as _planning_exc:
+        print(f'planning-session: unexpected error ({_planning_exc})')
+        _planning_result = {
+            'ran': False, 'iterations_used': None, 'iterations_planned': None,
+            'tampered_files': [], 'plan': None,
+        }
+
+    _plan = _planning_result.get('plan')
+    if not _plan:
+        # Rule 1: "no plan is a recorded outcome, never an assignment" -- no
+        # fallback lane, no rotation pickup. _run_planning_session already
+        # journalled why (no_plan/malformed/refused/rest/rest_unchanged).
+        print('bridge: no plan produced this cycle; no task chosen, no subagent spawned')
+        return 0
+
+    # "The executor receives this plan as its task" -- req/task are built
+    # FROM the plan, never from a rotation-picked queue file. `candidate_id`
+    # (optional) links to one of the ranked candidates the planner was
+    # shown; its absence means a self-directed increment.
+    _candidate_id = _plan.get('candidate_id') if isinstance(_plan.get('candidate_id'), str) else None
+    _matched_candidate = None
+    if _candidate_id:
+        try:
+            _all_candidates = demand.collect_demand(STATE_DIR, _selfevo_repo_for_proposer)
+            _all_candidates = planner_candidates.merge_proposer_candidates(
+                _all_candidates, llm_proposer.proposer_candidate_items(STATE_DIR),
+            )
+            _matched_candidate = next(
+                (c for c in _all_candidates if c.get('id') == _candidate_id), None,
+            )
+        except Exception:
+            _matched_candidate = None
+
+    # ADR-035 rule 1 (#1942): "its plan is the executor's task" — the title
+    # always comes from the planner's OWN wording, never a matched
+    # candidate's summary (that would smuggle a proposer-authored title
+    # back in through candidate_id resolution). affected_path is plumbing,
+    # not a title, so it still resolves from the matched candidate when set.
+    _plan_text = str(_plan.get('plan') or '').strip()
+    _task_title = (_plan_text.splitlines()[0] if _plan_text else 'planner increment')[:120].strip()
+    _plan_target_path = _matched_candidate.get('affected_path') or '' if _matched_candidate else ''
+
+    # ADR-035 keep-work (#1942 B2): a `keep` decision on the pending open
+    # increment resumes ITS cycle_id (so `_setup_cycle_branch` computes the
+    # SAME branch name its checkpoint commits are already on), never a fresh
+    # one -- `request_id` stays this session's own id for handled-marker/
+    # telemetry bookkeeping, only `cycle_id` (branch-determining) changes.
+    _resume_branch = _planning_result.get('resume_branch')
+    _resume_cycle_id = _planning_result.get('resume_cycle_id')
+    _resume_skip_opening_entry = bool(_planning_result.get('resume_skip_opening_entry'))
+
+    req_path = None
+    req = {
+        'request_id': _planning_cycle_id,
+        'cycle_id': _resume_cycle_id or _planning_cycle_id,
+        'task_title': _task_title or 'planner increment',
+        'semantic_task_id': _task_title or 'planner increment',
+        'task': _plan_text,
+        'target_path': _plan_target_path,
+        'profile': FORCE_PROFILE or 'bounded_execution',
+        'budget': FORCE_BUDGET or 'standard',
+        'candidate_id': _candidate_id or '',
+        # #1280/#1765 (ADR-035 rule 1, #1942): the executor LLM-error
+        # retry-then-retire bound and the supplier-paused bypass both need
+        # a key that survives across cycles -- request_id/cycle_id no
+        # longer do (see _retry_key_for's docstring).
+        'retry_key': _retry_key_for(_candidate_id, _task_title),
+    }
+
+    while True:
         request_id = req.get('request_id') or req.get('verification_task_id') or str(req_path)
         # Issue #675: attribute every LLM call this cycle makes to this bridge
         # invocation. This process runs once per cycle (asyncio.run(main()) via
         # cli_main()) and exits afterward, so there is no need to reset the
         # context — it never outlives this process.
         set_call_context(req.get('cycle_id') or request_id, "bridge")
-        safe_id = request_id.replace('/', '_')[:120]
+        # #1280/#1765: the handled/retry bookkeeping keys on retry_key, not
+        # request_id -- see _retry_key_for.
+        _retry_key = req.get('retry_key') or request_id
+        safe_id = _retry_key.replace('/', '_')[:120]
         handled_marker = BRIDGE_STATE_DIR / f'handled_{safe_id}.txt'
-        if handled_marker.exists():
-            print('already_handled')
-            # #733 follow-up: don't cap the whole run on one already-marked
-            # request — the _seen_req_paths guard above now protects against
-            # find_pending_request re-returning the same request forever, so
-            # it's safe to step over this one and keep bulk-skipping.
-            continue
+        # A freshly-minted cycle id can never already be handled -- there is
+        # no rotation delivering the same planner-built request twice, so
+        # this marker is created here for the FIRST time, not checked.
 
         # #720: cycle_id resolved once, up front, so every ledger row for this
         # cycle (write-ahead start, dedup, gate, terminal outcome) joins on the
@@ -3632,81 +4380,23 @@ async def _main_impl_body():
         # matching terminal outcome row, a deterministic recovery signal.
         record_cycle_started(STATE_DIR, _cycle_id, request_id, None)
 
-        # ── #680 defense-in-depth: HEAD-on-main precondition ────────────────
-        # _restore_to_main() below only WARNs when it fails (see the `finally` in
-        # the cycle-branch block further down) — it does not abort the *current*
-        # cycle, because by the time it runs the cycle already happened. But if a
-        # PRIOR cycle's restore failed twice, the shared checkout is left sitting
-        # on a stray `selfevo/cycle-<id>` branch, and this (next) invocation would
-        # otherwise proceed straight into the pre-spawn checks below on that
-        # stray branch — later work could land on it and be silently
-        # discarded the moment _setup_cycle_branch() does its own
-        # `checkout -B ... origin/main`. Re-run _restore_to_main defensively here,
-        # before any git work happens, and hard-abort the cycle (no subagent
-        # spawn) if it still can't repair the checkout. A missing repo (not yet
-        # cloned) is not a stray-branch condition — leave that to
-        # _setup_cycle_branch's existing 'repo_missing' handling below.
-        # #733: this check verifies repo state, not the request, so it only
-        # needs to run once per bridge run — subsequent skip iterations reuse
-        # the already-verified state (no skip branch below moves HEAD off main).
+        # #680 defense-in-depth (HEAD-on-main precondition) used to be
+        # re-checked here, per request, with its own staged-promotions/
+        # pending-push calls right after it. ADR-035 rest amendment
+        # follow-up (#1942): repository preparation now runs exactly ONCE
+        # per started cycle, at the top of this function, before any
+        # request is even selected -- see `_prepare_repository_for_cycle`
+        # and its call site above. Re-running `_restore_to_main` here too
+        # was not a harmless safety net: a second restore could wipe
+        # whatever the top-level call already did in between, the "bridge
+        # resets curator outputs" defect class that ordering exists to
+        # keep closed (test_repo_preparation_preserves_staged_and_pending).
         _selfevo_repo_check = STATE_DIR.parent / 'eeebot-self-evolving'
-        if not _precondition_checked:
-            _precondition_checked = True
-            _restored = _restore_to_main(_selfevo_repo_check, STATE_DIR) if _selfevo_repo_check.is_dir() else True
-            if _restored is not True:
-                fail_reason = 'head_on_main_precondition_failed'
-                fail_summary = 'HEAD-on-main precondition failed: checkout could not be restored to main'
-                if isinstance(_restored, str):
-                    fail_reason = f'dirty_tree: {_restored}'
-                    fail_summary = f'dirty_tree precondition failed: unremovable untracked files block checkout\n{_restored}'
-
-                print(
-                    f'bridge: verify-clean precondition failed for {_selfevo_repo_check}; '
-                    'aborting cycle (blocked), no subagent spawned'
-                )
-                handled_marker.write_text(str(req_path), encoding='utf-8')
-                _write_bridge_completed_result(
-                    state_dir=STATE_DIR,
-                    req=req,
-                    request_id=request_id,
-                    cycle_id=req.get('cycle_id') or '',
-                    goal_id=goal_id,
-                    files_changed=[],
-                    commits_pushed=0,
-                    result_status='blocked',
-                    backlog_title='',
-                    key_learnings=[
-                        f'{fail_summary}. Aborting cycle without '
-                        'spawning a subagent to avoid running bookkeeping on a broken tree.',
-                    ],
-                    rollback={
-                        'integrated': False,
-                        'cycle_branch': None,
-                        'main_sha_before': None,
-                        'main_sha_after': None,
-                        'reason': fail_reason,
-                        'auto_committed': False,
-                    },
-                )
-                _v, _vr = _derive_cycle_verdict('failed', fail_reason)
-                record_cycle_outcome(
-                    STATE_DIR, _cycle_id, 'failed', fail_reason, [], None,
-                    verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
-                    real_result=_real_result_ledger_inputs('blocked'),
-                )
-                # #721: no cycle branch exists yet on this path — tag at current HEAD.
-                _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'failed')
-                _record_diary_fitness_marker(STATE_DIR, _cycle_id)
-                return 0
-
-        # #1001: pick up any curator-staged fact promotions at the safe cycle-start
-        # boundary — bridge lock held, HEAD on clean main. Fail-open: a pickup
-        # failure is printed and the cycle proceeds normally.
-        if _selfevo_repo_check.is_dir():
-            _pickup_staged_promotions(_selfevo_repo_check, STATE_DIR)
-            # #1709 increment 2: same safe boundary — finish any push a prior
-            # cycle's exhausted transient retries left as push_pending.
-            _finish_pending_pushes(_selfevo_repo_check, STATE_DIR)
+        # ADR-035 keep-work (#1942 B2): "one opening ... instead of writing a
+        # new opening entry per attempt" -- a `keep` resume's opening entry
+        # was already written before the interrupted attempt started
+        # (ADR-028 rule 2), so this cycle writes no second one.
+        if _selfevo_repo_check.is_dir() and not _resume_skip_opening_entry:
             # ADR-028 rules 2-3 (#1811): this cycle's opening diary entry,
             # written and pushed to origin/main HERE — before the cycle
             # branch is even cut — so it needs no protection from the gate
@@ -3802,23 +4492,17 @@ async def _main_impl_body():
             )
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-already-done')
             _record_diary_fitness_marker(STATE_DIR, _cycle_id)
-            # #733: bulk-skip — bookkeeping done for this duplicate; move on to
-            # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
-            _skips += 1
-            if _skips >= MAX_SKIPS_PER_RUN:
-                _maybe_propose_after_skip(_selfevo_repo_check)
-                # #1411 fallback lane trigger routes: already_done_tag /
-                # recent_duplicate_failure / existence_index_duplicate —
-                # the skip cap ends this run without ever spawning an
-                # executor. One fallback attempt, consumed next iteration.
-                if not _fallback_attempted:
-                    _fallback_attempted = True
-                    _fallback_result = llm_proposer.propose_fallback(STATE_DIR, _selfevo_repo_check)
-                    if _fallback_result is not None:
-                        _pending_fallback = _fallback_result
-                        continue
-                return 0
-            continue
+            # ADR-035 rest amendment (#1964): a duplicate is a recorded
+            # outcome, never a reason to substitute another item -- there is
+            # exactly one candidate per cycle now (the plan's own choice),
+            # so a dup match ends the run. The evidence reaches exactly the
+            # next planning session.
+            planner_dedup_evidence.record_rejected_duplicate(
+                STATE_DIR, _cycle_id, req.get('task_title') or '',
+                _safe_rev_parse(_selfevo_repo_check, 'HEAD'),
+                f'already_done_tag:{_cycle_success_tag}',
+            )
+            return 0
 
         # #713/#736: resolve the duplicate-check title and target path used by
         # the _recent_failure_match and existence-index gates below.
@@ -3886,23 +4570,13 @@ async def _main_impl_body():
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-recent-failure')
             _record_diary_fitness_marker(STATE_DIR, _cycle_id)
-            # #733: bulk-skip — bookkeeping done for this duplicate; move on to
-            # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
-            _skips += 1
-            if _skips >= MAX_SKIPS_PER_RUN:
-                _maybe_propose_after_skip(_selfevo_repo_check)
-                # #1411 fallback lane trigger routes: already_done_tag /
-                # recent_duplicate_failure / existence_index_duplicate —
-                # the skip cap ends this run without ever spawning an
-                # executor. One fallback attempt, consumed next iteration.
-                if not _fallback_attempted:
-                    _fallback_attempted = True
-                    _fallback_result = llm_proposer.propose_fallback(STATE_DIR, _selfevo_repo_check)
-                    if _fallback_result is not None:
-                        _pending_fallback = _fallback_result
-                        continue
-                return 0
-            continue
+            # ADR-035 rest amendment (#1964): recorded outcome, no substitute.
+            planner_dedup_evidence.record_rejected_duplicate(
+                STATE_DIR, _cycle_id, _dup_check_title,
+                _safe_rev_parse(_selfevo_repo_check, 'HEAD'),
+                f'recent_duplicate_failure:{_recent_failure_title}',
+            )
+            return 0
         # #750: the two checks above are exact/keyword title matching — they
         # miss SEMANTIC near-duplicates whose title shares no literal words
         # with the past commit/failure (e.g. "monitor RAM and memory usage"
@@ -3958,23 +4632,13 @@ async def _main_impl_body():
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-existence-duplicate')
             _record_diary_fitness_marker(STATE_DIR, _cycle_id)
-            # #733: bulk-skip — bookkeeping done for this duplicate; move on to
-            # the next pending request in the same run (bounded by MAX_SKIPS_PER_RUN).
-            _skips += 1
-            if _skips >= MAX_SKIPS_PER_RUN:
-                _maybe_propose_after_skip(_selfevo_repo_check)
-                # #1411 fallback lane trigger routes: already_done_tag /
-                # recent_duplicate_failure / existence_index_duplicate —
-                # the skip cap ends this run without ever spawning an
-                # executor. One fallback attempt, consumed next iteration.
-                if not _fallback_attempted:
-                    _fallback_attempted = True
-                    _fallback_result = llm_proposer.propose_fallback(STATE_DIR, _selfevo_repo_check)
-                    if _fallback_result is not None:
-                        _pending_fallback = _fallback_result
-                        continue
-                return 0
-            continue
+            # ADR-035 rest amendment (#1964): recorded outcome, no substitute.
+            planner_dedup_evidence.record_rejected_duplicate(
+                STATE_DIR, _cycle_id, _dup_check_title,
+                _safe_rev_parse(_selfevo_repo_check, 'HEAD'),
+                f'existence_index_duplicate:{_existence_match}',
+            )
+            return 0
 
         else:
             _record_guard_key_event(
@@ -4010,12 +4674,12 @@ async def _main_impl_body():
     except Exception:
         pass
 
-    bridge_model = _executor_model_for_request(
-        req, request_id, resolve_model('executor', config_fallback=config.tools.subagent.model), STATE_DIR,
-    )
+    # provider/bus were already created above, before the planning session --
+    # the executor reuses them; only its MODEL can still be a per-request/lane
+    # override (the planner used the plain default, since no request existed
+    # yet when it ran).
+    bridge_model = _executor_model_for_request(req, request_id, _planner_model, STATE_DIR)
     config.agents.defaults.model = bridge_model
-    provider = _make_provider(config)
-    bus = MessageBus()
     TARGET_WORKSPACE.mkdir(parents=True, exist_ok=True)
     (TARGET_WORKSPACE / '.nanobot' / 'subagents').mkdir(parents=True, exist_ok=True)
 
@@ -4027,9 +4691,31 @@ async def _main_impl_body():
     async def _evaluate_candidate(cand_cycle_id: str, do_integration: bool, meas_metric: str = "") -> dict:
         _cycle_id = cand_cycle_id
         _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
+        # A second, targeted _restore_to_main -- NOT a full
+        # _prepare_repository_for_cycle repeat (#1942 follow-up on the ADR-035
+        # rest amendment). Between the top-level prep call and here, the
+        # bulk-skip loop's "no request found" branch may have called
+        # llm_proposer.maybe_propose(), which fail-open-writes an UNCOMMITTED
+        # docs/SYSTEM_MAP.md into this same checkout "regardless of the
+        # kill-switch... every cycle" (llm_proposer.py's own docstring) --
+        # exactly the dirty tree _setup_cycle_branch below refuses to branch
+        # from. Nothing legitimate is left uncommitted at this point (the
+        # opening diary entry above already committed AND pushed), so
+        # discarding whatever is here is safe -- this is not the "second
+        # restore wipes curator work" hazard the single-call-site ordering
+        # in _prepare_repository_for_cycle guards against.
+        _restore_to_main(_selfevo_repo, STATE_DIR)
         # _cycle_id was already resolved up front (right after request_id, before
         # the write-ahead ledger marker) — reused here unchanged.
-        _cycle_setup = _setup_cycle_branch(_selfevo_repo, _cycle_id, STATE_DIR)
+        # ADR-035 keep-work (#1942 B2): a `keep` decision resumes its OWN
+        # cycle branch with checkpoint commits intact -- `_cycle_id` was
+        # already routed to `_resume_cycle_id` above, so a match here means
+        # this IS that resumed cycle, never a coincidence with an unrelated
+        # fresh cycle_id.
+        _reuse_branch = bool(_resume_branch and _resume_cycle_id and _cycle_id == _resume_cycle_id)
+        _cycle_setup = _setup_cycle_branch(
+            _selfevo_repo, _cycle_id, STATE_DIR, reuse_existing_branch=_reuse_branch,
+        )
         cycle_branch = _cycle_setup['branch']
         main_sha_before = _cycle_setup['main_sha']
         # #877: the real, unswitched origin/main sha observed at setup time —
@@ -4080,6 +4766,58 @@ async def _main_impl_body():
         # #721: pre-cycle tag at main_sha_before, right after cycle-branch setup
         # succeeds — the pre half of the pre/post bracket (see _tag_cycle_pre).
         _tag_cycle_pre(_selfevo_repo, _cycle_id, main_sha_before)
+
+        # D2 (ADR-035 Test Contract, #1942 B2): register the in-flight
+        # attempt BEFORE the executor can be killed -- cycle-branch setup
+        # just succeeded, the subagent has not spawned yet. Cleared only by
+        # a terminal outcome (record_cycle_outcome -> record_attempt_finished);
+        # a kill between here and that terminal write leaves this standing
+        # for the next cycle's kill-check to find.
+        try:
+            from nanobot.runtime import open_increment as _open_increment_register
+
+            # N1 (round 2 external re-check, architect resolution
+            # 2026-09-26): the attempt's OWN plan, so a later kill-recovery
+            # can hand it back verbatim instead of an explanatory placeholder.
+            _registration_persisted = _open_increment_register.record_attempt_started(
+                STATE_DIR, _cycle_id, cycle_branch, plan_text=req.get('task') or '',
+            )
+        except Exception:
+            _registration_persisted = False
+
+        if not _registration_persisted:
+            # N4 (round 2 external re-check, architect resolution
+            # 2026-09-26): this write is a correctness prerequisite, not
+            # optional telemetry -- an unwritable open-increment state
+            # destination means a kill during this attempt would leave NO
+            # resumable registration at all. Stop before the executor
+            # spawns, same shape as the cycle-setup-failed block above.
+            print('open-increment registration failed to persist; recording blocked result, no subagent spawned')
+            _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
+            handled_marker.write_text(str(req_path), encoding='utf-8')
+            _write_bridge_completed_result(
+                state_dir=STATE_DIR, req=req, request_id=request_id,
+                cycle_id=req.get('cycle_id') or '', goal_id=goal_id,
+                files_changed=[], commits_pushed=0, result_status='blocked',
+                backlog_title=backlog_title,
+                key_learnings=[
+                    'The open-increment running registration failed to persist; '
+                    f'{cycle_branch} left untouched, no subagent was spawned.'
+                ],
+                rollback={
+                    'integrated': False, 'cycle_branch': cycle_branch,
+                    'main_sha_before': main_sha_before, 'main_sha_after': main_sha_before,
+                    'reason': 'registration_failed',
+                },
+            )
+            _v, _vr = _derive_cycle_verdict('failed', 'registration_failed')
+            record_cycle_outcome(
+                STATE_DIR, _cycle_id, 'failed', 'registration_failed', [], cycle_branch,
+                verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                real_result=_real_result_ledger_inputs('blocked'),
+            )
+            _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
+            return {'status': 0}
 
         # #718: the subagent must write into the git checkout the bridge branches,
         # commits, gates, and integrates (_selfevo_repo) — not TARGET_WORKSPACE
@@ -4140,15 +4878,51 @@ async def _main_impl_body():
             # #939 Part E: suppress loop-irrelevant builtin skills.
             excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
             telemetry_component="executor",
+            # ADR-035 keep-work (#1942 B2): commit checkpoints to the cycle
+            # branch as the executor goes, so a kill loses minutes, not the
+            # whole attempt.
+            checkpoint_commits=True,
+            # D3 (ADR-035 Test Contract): bind checkpoints to THIS spawn's
+            # resolved branch, exactly -- never a prefix guess from HEAD.
+            expected_cycle_branch=cycle_branch,
             wall_deadline=_bridge_wall_deadline,
         )
 
         # Capture HEAD SHA before spawn so we can count subagent commits correctly,
         # even when the subagent pushes itself (harmless under isolation: the
         # checkout sits on the cycle branch, so a bare self-push can only publish
-        # that branch, never origin/main).
+        # that branch, never origin/main). ATTEMPT base -- the exact SHA HEAD sat
+        # at when THIS attempt's subagent was about to spawn.
         _pre_spawn_sha_file = STATE_DIR / 'bridge_pre_spawn.sha'
         _pre_spawn_sha = _capture_pre_spawn_sha(_selfevo_repo, _pre_spawn_sha_file)
+
+        # D5 (ADR-035 Test Contract, external review finding #5): the
+        # INCREMENT base, used for every "is there work" accounting question
+        # below (commit counts, files_changed, artificiality, test-weakening,
+        # closing-commit eligibility) -- deliberately NOT `_pre_spawn_sha`.
+        # For a `keep`-resumed attempt, `_pre_spawn_sha` is captured AFTER the
+        # branch is checked out with its retained checkpoints already on it,
+        # so counting from there makes those checkpoints invisible: a resumed
+        # executor that only verifies retained work (no new commit) would
+        # read as "no new commits, nothing to do", and a resumed executor
+        # that adds one finishing commit would have files_changed cover only
+        # that commit's paths, silently dropping the retained ones. The
+        # increment's own base -- merge-base(origin/main, cycle_branch) --
+        # is the SAME for a fresh cycle (nothing has diverged from main yet,
+        # so it equals main_sha_before) and correctly covers every commit on
+        # the branch, across every attempt, for a resumed one.
+        _increment_base = main_sha_before
+        if _reuse_branch:
+            import subprocess as _sp_increment_base
+            try:
+                _mb = _sp_increment_base.run(
+                    _git_cmd(_selfevo_repo) + ['merge-base', 'origin/main', cycle_branch],
+                    capture_output=True, text=True,
+                )
+                if _mb.returncode == 0 and _mb.stdout.strip():
+                    _increment_base = _mb.stdout.strip()
+            except Exception:
+                pass
 
         # #678 F2: baseline test count at origin/main, captured via git blobs (no
         # checkout needed — the shared checkout already moved to the cycle branch
@@ -4164,6 +4938,11 @@ async def _main_impl_body():
         cycle_commit_count = 0
         commits_pushed = 0
         _auto_committed = False
+        # D6 (ADR-035 Test Contract): set True only when the checkpoint-only
+        # closing-commit marker was ATTEMPTED and failed -- never for a
+        # branch that didn't need one (a real, non-artificial commit already
+        # exists).
+        _closing_commit_failed = False
         _cycle_tier = 'script'  # #812: 'script' | 'runtime' (set by surface classify below)
         _integrated = False
         _delivered = False
@@ -4187,6 +4966,15 @@ async def _main_impl_body():
         # completed (status "ok"), since the primary spawn's own answer can
         # be superseded by a later repair that fixed what the primary missed.
         _repair_task_ids: 'list[str]' = []
+        # Round 3 external re-check, item 1 (architect resolution
+        # 2026-09-26): "its commits integrate only if the repair session's
+        # OWN telemetry has status=ok. Otherwise the cycle is unfinished:
+        # interrupted, by error class. Same barrier as for the primary
+        # executor." Set the moment a repair attempt's own status is read
+        # as anything other than 'ok' -- checked once, right after the
+        # repair while-loop, below.
+        _repair_unfinished_status: 'str | None' = None
+        _repair_unfinished_task_id: 'str | None' = None
         _smoke_passed = True
         _smoke_ran = False
         try:
@@ -4287,6 +5075,19 @@ async def _main_impl_body():
             # has back to the telemetry file the subagent will write its raw
             # final answer into (see _executor_reported_outcome below).
             _subagent_task_id = next(iter(mgr._running_tasks), None)
+            if _subagent_task_id:
+                # D2 (ADR-035 Test Contract, architect resolution #1979):
+                # attach the task_id to the running-attempt registration
+                # now that it exists (record_attempt_started, before spawn,
+                # could not know it yet) -- check_running_for_kill reads it
+                # back to fetch the executor's own terminal telemetry
+                # status as evidence for a stale registration.
+                try:
+                    from nanobot.runtime import open_increment as _open_increment_taskid
+
+                    _open_increment_taskid.record_attempt_task_id(STATE_DIR, _cycle_id, _subagent_task_id)
+                except Exception:
+                    pass
             if mgr._running_tasks:
                 try:
                     # Limit subagent execution time to remaining bridge wall allocation.
@@ -4328,6 +5129,25 @@ async def _main_impl_body():
                     f"base_url={getattr(provider, 'api_base', '') or '<provider-default>'}; "
                     f"{_executor_llm_error_text}"
                 )
+            # D1 (ADR-035 Test Contract, external review finding #1;
+            # architect resolution, round 2 2026-09-26): session STATUS
+            # decides completeness, not commit count -- and completion is
+            # POSITIVE-only. A session is finished ONLY when its own
+            # terminal telemetry says the one status production ever
+            # writes on success, 'ok'. bounded_stop/blocked/cancelled/
+            # error and NO telemetry at all (a dead task_id, or a read
+            # failure) are all "not finished" -- read once, here, before
+            # the checkpoint-only closing marker (below) or the smoke/
+            # gate/integrate path (further down) can act as if a session
+            # that never reached a normal completion had actually
+            # finished. This replaces the round-1 `_session_errored`
+            # check (only `status == 'error'`) plus the checkpoint-gated
+            # `_any_checkpoint_commit_since` barrier below it (now
+            # removed): the barrier applies to ANY commit the session
+            # made -- ordinary, checkpoint or the #666 residual auto-
+            # commit -- not only a checkpoint.
+            _executor_status = _subagent_own_status(STATE_DIR, _subagent_task_id)
+            _session_unfinished = (_executor_status != 'ok')
             latest = TARGET_WORKSPACE / '.nanobot' / 'subagents' / 'latest.json'
             print(latest)
 
@@ -4335,7 +5155,7 @@ async def _main_impl_body():
             # SHA). No push here — origin/main only advances once the gate passes.
             if _selfevo_repo.is_dir():
                 _git_se = _git_cmd(_selfevo_repo)
-                _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+                _new_commits = _count_commits_since(_selfevo_repo, _increment_base)
                 if _new_commits == 0:
                     print(f'cycle-branch: no new commits on {cycle_branch}')
                 # Safety net (#666, unconditional since #717): the subagent may have
@@ -4362,19 +5182,71 @@ async def _main_impl_body():
                     )
                 if _auto['committed']:
                     _auto_committed = True
-                    _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+                    _new_commits = _count_commits_since(_selfevo_repo, _increment_base)
                     print(
                         f"auto-commit: {_auto['files_committed']} file(s) committed on "
                         f'{cycle_branch} (#666)'
                     )
                 if _new_commits > 0:
                     cycle_commit_count = _new_commits
+                    # ADR-035 keep-work architect addendum (#1942 B2): a cycle
+                    # entirely made of checkpoint (and/or residual) commits --
+                    # killed and fully resumed inside checkpoints, with no
+                    # separate closing commit -- has no real-work evidence for
+                    # self_dedup, the edit-budget counter, change_shape
+                    # telemetry, or the health activity metric: all four now
+                    # exclude artificial commits by pattern, so an
+                    # entirely-artificial branch would otherwise vanish from
+                    # every one of them once integrated. One empty,
+                    # task-titled closing commit maintains the invariant
+                    # those readers rely on: an integrated cycle branch
+                    # always carries at least one non-artificial commit.
+                    # `--allow-empty` because the tree is already clean --
+                    # every real file change is already captured by the
+                    # checkpoints themselves; this commit is a marker, not a
+                    # second copy of the diff.
+                    # D1: "the closing commit is created only for a finished
+                    # session" -- an unfinished session (any status other
+                    # than 'ok', including no telemetry at all) never gets
+                    # one, even when every commit so far is artificial.
+                    if _all_commits_are_artificial_since(_selfevo_repo, _increment_base) and not _session_unfinished:
+                        from nanobot.runtime.commit_markers import (
+                            MERGE_TRAILER_CYCLE_KEY, sanitize_trailer_value,
+                        )
+                        _closing_title = sanitize_trailer_value(req.get('task_title') or 'increment')
+                        _closing_subject = f"selfevo: {_closing_title}"[:120]
+                        _closing_trailers = [f'{MERGE_TRAILER_CYCLE_KEY}: {sanitize_trailer_value(_cycle_id)}']
+                        if req.get('candidate_id'):
+                            _closing_trailers.append(f"Selfevo-Demand: {sanitize_trailer_value(req.get('candidate_id'))}")
+                        _closing = _sp.run(
+                            _git_se + [
+                                'commit', '--allow-empty', '-m', _closing_subject,
+                                '-m', '\n'.join(_closing_trailers),
+                            ],
+                            capture_output=True, text=True,
+                        )
+                        if _closing.returncode == 0:
+                            cycle_commit_count = _count_commits_since(_selfevo_repo, _increment_base)
+                            print(f'cycle-branch: checkpoint-only branch closed with 1 marker commit ({_closing_subject!r})')
+                        else:
+                            # D6 (ADR-035 Test Contract, external review
+                            # finding #6): "no closing commit created -> no
+                            # integration." A branch whose only commits are
+                            # artificial (checkpoints/residual) has no
+                            # task-subject evidence for the readers that
+                            # invariant protects -- integrating it anyway
+                            # would be exactly the defect this blocks.
+                            _closing_commit_failed = True
+                            print(
+                                f'cycle-branch: closing-commit creation FAILED '
+                                f'({_closing.stderr.strip()[:200]!r}); blocking integration'
+                            )
                     # #678 F1/F3: initial changed-file set + violation split, for
                     # logging. This is RECOMPUTED after the repair loop (just before
                     # the gate decision) so the enforced lists reflect every commit,
                     # not only the first — see the recompute below.
                     files_changed, _blocked_pattern_violations, _mutation_violations, _cycle_tier = (
-                        _changed_files_and_violations(_selfevo_repo, _pre_spawn_sha)
+                        _changed_files_and_violations(_selfevo_repo, _increment_base)
                     )
                     _violations = _blocked_pattern_violations + _mutation_violations
                     if _violations:
@@ -4387,7 +5259,7 @@ async def _main_impl_body():
                     # #1119: test-weakening check, same recompute point as the
                     # mutation-surface classification above.
                     _test_weakening_blocked, _test_weakening_hard, _test_weakening_soft = (
-                        _check_test_weakening(_selfevo_repo, _pre_spawn_sha)
+                        _check_test_weakening(_selfevo_repo, _increment_base)
                     )
                     if _test_weakening_hard:
                         print(f'test-weakening: {len(_test_weakening_hard)} hard signal(s):')
@@ -4426,8 +5298,163 @@ async def _main_impl_body():
                 handled_marker, req_path,
                 llm_error=bool(_executor_llm_error_text and cycle_commit_count == 0),
                 supplier_paused=(_llm_error_class == 'paused-supplier'),
-                state_dir=STATE_DIR, cycle_id=_cycle_id,
+                state_dir=STATE_DIR, retry_key=req.get('retry_key'),
             )
+            # Architect resolution 2026-09-25 (ADR-035 rule 3 / ADR-031 rule
+            # 2): a supplier-side interruption is not retried or requeued --
+            # it becomes the pending open increment the next planning
+            # session must resolve (keep/edit/delete), and holds further
+            # sessions on a doubling backoff. Any OTHER outcome here (our
+            # own defect, or no error at all) is a completed model call and
+            # resets that backoff -- proof the supplier is reachable.
+            from nanobot.runtime import open_increment as _open_increment_exec
+
+            if _llm_error_class == 'paused-supplier':
+                _open_increment_exec.record_supply_interruption(
+                    STATE_DIR, _cycle_id,
+                    retry_key=req.get('retry_key') or '',
+                    plan_text=req.get('task') or '',
+                    candidate_id=req.get('candidate_id') or None,
+                    selfevo_repo=_selfevo_repo,
+                    # ADR-035 keep-work (#1942 B2): the branch this cycle's
+                    # checkpoint commits live on, so a later `keep` decision
+                    # can resume it instead of branching fresh off main.
+                    branch=cycle_branch,
+                )
+            else:
+                _open_increment_exec.record_model_call_completed(STATE_DIR)
+
+            # D1 (ADR-035 Test Contract, external review finding #1;
+            # architect resolution, round 2 2026-09-26): an UNFINISHED
+            # session with ANY commit -- ordinary, checkpoint, or the #666
+            # residual auto-commit -- gets its own classification,
+            # independent of the zero-commit one above. Gated on
+            # `_session_unfinished and cycle_commit_count > 0`, never on
+            # checkpoint presence: the round-1 `_any_checkpoint_commit_since`
+            # gate let an unfinished session with only ORDINARY commits (or
+            # only the #666 auto-commit) bypass this entirely and reach the
+            # normal smoke/gate/integrate path below, exactly the gap the
+            # external re-check reopened. This DOES supersede the
+            # #1280/#1281 contract for a dead-LLM-call auto-commit
+            # (previously: still integrates through the normal gate) --
+            # completion is positive-only now, so that case also becomes an
+            # interrupted open increment; see
+            # ``test_edit_then_dead_llm_becomes_interrupted_supply`` (was
+            # ``..._still_integrates_via_auto_commit_and_is_countable``).
+            # `_executor_llm_error_text` is narrowly gated on the literal
+            # "LLM execution failed" text -- when the status is anything
+            # other than 'error' (or the text is otherwise empty), the
+            # placeholder names the ACTUAL status so the classifier's
+            # (conservative, positive-match-only) default of 'failed' ->
+            # interrupted_defect is what a bounded_stop/blocked/cancelled/
+            # missing-telemetry session gets, never a manufactured supply
+            # classification it never earned.
+            _unfinished_error_class = (
+                _classify_llm_error(
+                    _executor_llm_error_text
+                    or f'(status: {_executor_status or "missing"}, no LLM-call text recorded)'
+                )
+                if (_session_unfinished and cycle_commit_count > 0) else ''
+            )
+            if _unfinished_error_class == 'paused-supplier':
+                _open_increment_exec.record_supply_interruption(
+                    STATE_DIR, _cycle_id,
+                    retry_key=req.get('retry_key') or '',
+                    plan_text=req.get('task') or '',
+                    candidate_id=req.get('candidate_id') or None,
+                    selfevo_repo=_selfevo_repo,
+                    branch=cycle_branch,
+                )
+            elif _unfinished_error_class == 'failed':
+                _open_increment_exec.record_defect_interruption(
+                    STATE_DIR, _cycle_id,
+                    retry_key=req.get('retry_key') or '',
+                    plan_text=req.get('task') or '',
+                    candidate_id=req.get('candidate_id') or None,
+                    branch=cycle_branch,
+                )
+
+            if _closing_commit_failed:
+                # D6 (ADR-035 Test Contract, external review finding #6):
+                # "no closing commit created -> no integration." Stop here,
+                # same shape as D1 below -- never reach smoke/repair/gate.
+                # The branch (all-artificial commits, no closing marker) is
+                # retained for forensics, main is left untouched.
+                _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
+                handled_marker.write_text(str(req_path), encoding='utf-8')
+                _write_bridge_completed_result(
+                    state_dir=STATE_DIR, req=req, request_id=request_id,
+                    cycle_id=req.get('cycle_id') or '', goal_id=goal_id,
+                    files_changed=files_changed, commits_pushed=0, result_status='blocked',
+                    backlog_title=backlog_title,
+                    key_learnings=[
+                        f'The required closing commit failed to be created; {cycle_branch} kept '
+                        'for forensics, main left unchanged.'
+                    ],
+                    rollback={
+                        'integrated': False, 'cycle_branch': cycle_branch,
+                        'main_sha_before': main_sha_before, 'main_sha_after': main_sha_before,
+                        'reason': 'closing_commit_failed',
+                    },
+                )
+                _v, _vr = _derive_cycle_verdict('failed', 'closing_commit_failed')
+                record_cycle_outcome(
+                    STATE_DIR, _cycle_id, 'failed', 'closing_commit_failed', files_changed, cycle_branch,
+                    verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                    real_result=_real_result_ledger_inputs('blocked'),
+                    retry_key=req.get('retry_key') or None,
+                )
+                _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
+                return {'status': 0}
+
+            if _session_unfinished and cycle_commit_count > 0:
+                # D1 (round 2, architect resolution 2026-09-26): "a session
+                # is finished ONLY if its terminal telemetry has a normal
+                # status (ok/completed) ... bounded_stop, blocked,
+                # cancelled, error and missing telemetry all mean NOT
+                # finished. The barrier applies to ANY commits of the
+                # session: ordinary commits, checkpoints and the residual
+                # auto-commit." Stop here -- never reach the smoke/repair/
+                # gate/integrate path below. The branch (with whatever
+                # commits it holds) is retained for forensics/resume, main
+                # is left untouched; the pending open increment set just
+                # above (supply or defect) is the next session's first item.
+                _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
+                handled_marker.write_text(str(req_path), encoding='utf-8')
+                _unfinished_reason = (
+                    LLM_SUPPLIER_PAUSED_REASON if _unfinished_error_class == 'paused-supplier'
+                    else 'interrupted_defect'
+                )
+                _write_bridge_completed_result(
+                    state_dir=STATE_DIR, req=req, request_id=request_id,
+                    cycle_id=req.get('cycle_id') or '', goal_id=goal_id,
+                    files_changed=files_changed, commits_pushed=0, result_status='blocked',
+                    backlog_title=backlog_title,
+                    key_learnings=[
+                        f"Executor session did not finish (status={_executor_status or 'missing'}, "
+                        f'{_unfinished_reason}) with {cycle_commit_count} commit(s) on the branch; '
+                        f'{cycle_branch} kept for forensics/resume, main left unchanged.'
+                    ],
+                    rollback={
+                        'integrated': False, 'cycle_branch': cycle_branch,
+                        'main_sha_before': main_sha_before, 'main_sha_after': main_sha_before,
+                        'reason': _unfinished_reason,
+                    },
+                )
+                _v, _vr = _derive_cycle_verdict('failed', _unfinished_reason)
+                record_cycle_outcome(
+                    STATE_DIR, _cycle_id, 'failed', _unfinished_reason, files_changed, cycle_branch,
+                    verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                    executor_llm_error=True,
+                    real_result=_real_result_ledger_inputs('blocked'),
+                    llm_error_classification=(
+                        {'class': _unfinished_error_class, 'raw_error': _executor_llm_error_text[:400]}
+                        if _executor_llm_error_text else None
+                    ),
+                    retry_key=req.get('retry_key') or None,
+                )
+                _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
+                return {'status': 0}
 
             # ── Closed-loop repair cycle (issue #526) ────────────────────────────
             # After the first commit, run smoke tests. If they fail, spawn a repair
@@ -4483,7 +5510,15 @@ async def _main_impl_body():
                         skill_fitness_cycle_base_sha=main_sha_before,
                         excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
                         telemetry_component="executor",
+                        # ADR-035 keep-work (#1942 B2): the repair turn also
+                        # writes to the committed cycle-branch repo -- same
+                        # per-step checkpointing as the main executor spawn.
+                        checkpoint_commits=True,
+                        # D3 (ADR-035 Test Contract): same binding as the
+                        # main executor spawn above.
+                        expected_cycle_branch=cycle_branch,
                     )
+                    _repair_tip_before = _current_tip_sha(_selfevo_repo)
                     await _repair_mgr.spawn(
                         task=_repair_prompt,
                         task_id=f'selfevo-repair-{_repair_attempts}',
@@ -4507,10 +5542,66 @@ async def _main_impl_body():
                     mgr._skill_reads_this_cycle.extend(_repair_mgr._skill_reads_this_cycle)
                     # Recount commits after repair — still relative to pre-spawn SHA,
                     # still on the same cycle branch (no push yet).
-                    _repair_new = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
-                    if _repair_new > cycle_commit_count:
+                    _repair_new = _count_commits_since(_selfevo_repo, _increment_base)
+                    _repair_added_commits = _repair_new > cycle_commit_count
+                    if _repair_added_commits:
                         print(f'cycle-branch: {_repair_new - cycle_commit_count} additional commit(s) (repair {_repair_attempts})')
                         cycle_commit_count = _repair_new
+                    # Round 4 external re-check, item P1-b (architect
+                    # resolution 2026-09-26): `git commit --amend` moves
+                    # the branch tip WITHOUT growing the commit count --
+                    # invisible to `_repair_added_commits` alone. Any tip
+                    # change at all is "the repair turn touched the
+                    # branch", whether by amend or by a fresh commit.
+                    #
+                    # Round 5 external re-check, item N1 (architect
+                    # resolution 2026-09-26): `_current_tip_sha` returns
+                    # `''` on a git failure or exception -- the OLD
+                    # comparison required BOTH reads truthy before calling
+                    # them different, so a single failed read read as
+                    # "unchanged", the exact same result as a genuinely
+                    # no-op repair. An unavailable snapshot is UNVERIFIABLE,
+                    # not a proof of no change: default to "changed" (block
+                    # a non-ok repair) unless both reads succeeded AND
+                    # agree.
+                    _repair_tip_after = _current_tip_sha(_selfevo_repo)
+                    _repair_tip_verified_unchanged = (
+                        bool(_repair_tip_before) and bool(_repair_tip_after)
+                        and _repair_tip_before == _repair_tip_after
+                    )
+                    _repair_tip_changed = not _repair_tip_verified_unchanged
+                    _repair_changed = _repair_added_commits or _repair_tip_changed
+                    if _repair_tip_changed and not _repair_added_commits:
+                        print(
+                            f'cycle-branch: tip changed or unverifiable (repair {_repair_attempts}), '
+                            'commit count unchanged'
+                        )
+                    # Round 3 external re-check, item 1 (architect
+                    # resolution 2026-09-26): the repair spawn's OWN
+                    # terminal telemetry must say 'ok', same positive-only
+                    # completion rule as the primary executor -- a repair
+                    # turn that commits a real (partial) fix and then ends
+                    # in 'error'/'bounded_stop'/'cancelled'/no telemetry is
+                    # not a finished session, however smoke reads after it.
+                    # Gated on the repair having actually CHANGED the
+                    # branch (a new commit OR an amended tip, item P1-b
+                    # above) -- a repair attempt that touched nothing (a
+                    # citation-only non-'ok' turn, e.g.) leaves the
+                    # cycle's real work exactly as the ALREADY-checked
+                    # primary executor left it, so its own bad status
+                    # carries no risk to block on.
+                    # Stop retrying immediately (no point repairing further
+                    # on an unfinished turn) -- the barrier after this loop
+                    # blocks the whole cycle from integrating.
+                    _repair_status = _subagent_own_status(STATE_DIR, _repair_spawn_id) if _repair_spawn_id else ''
+                    if _repair_changed and _repair_status != 'ok':
+                        _repair_unfinished_status = _repair_status
+                        _repair_unfinished_task_id = _repair_spawn_id
+                        print(
+                            f"repair turn {_repair_attempts}: unfinished "
+                            f"(status={_repair_status or 'missing'!r}); cycle will be treated as interrupted"
+                        )
+                        break
                     # #686: recompute the changed-file set before EVERY gate re-run,
                     # not just once — a repair turn can add/rename files, and the
                     # bounded gate must select tests against the CURRENT diff, the
@@ -4518,7 +5609,7 @@ async def _main_impl_body():
                     # the mutation-surface check. On git failure this keeps the
                     # last-known files_changed rather than gating on an empty set.
                     _rc_files, _rc_blocked, _rc_mut, _rc_tier = _changed_files_and_violations(
-                        _selfevo_repo, _pre_spawn_sha,
+                        _selfevo_repo, _increment_base,
                     )
                     if _rc_files or _rc_blocked or _rc_mut:
                         files_changed, _blocked_pattern_violations, _mutation_violations = (
@@ -4530,7 +5621,7 @@ async def _main_impl_body():
                     # (or introduce) a weakening; either way this reflects the
                     # latest state, same discipline as the mutation-surface recompute.
                     _test_weakening_blocked, _test_weakening_hard, _test_weakening_soft = (
-                        _check_test_weakening(_selfevo_repo, _pre_spawn_sha)
+                        _check_test_weakening(_selfevo_repo, _increment_base)
                     )
                     # Re-run smoke tests after repair. Re-applying the shrink guard
                     # on every retry (not just the first check) closes the path
@@ -4541,6 +5632,75 @@ async def _main_impl_body():
                         baseline_test_names=_baseline_test_names,
                     )
                     print(f'smoke (after repair {_repair_attempts}): {"PASS" if _smoke_passed else "FAIL"}')
+
+            if _repair_unfinished_status is not None:
+                # Round 3 external re-check, item 1 (architect resolution
+                # 2026-09-26): the repair session's own commits (and, by
+                # extension, the whole cycle -- nothing here distinguishes
+                # "repair's commits" from "primary's commits" once they
+                # share a branch) integrate only if the repair session
+                # itself finished. Same barrier shape as the primary
+                # executor's own unfinished-session block above, keyed on
+                # the repair spawn's telemetry instead -- never reaches
+                # smoke/gate/integrate below.
+                _repair_error_text = _executor_llm_error(STATE_DIR, _repair_unfinished_task_id)
+                _repair_error_class = _classify_llm_error(
+                    _repair_error_text
+                    or f'(status: {_repair_unfinished_status or "missing"}, no LLM-call text recorded)'
+                )
+                if _repair_error_class == 'paused-supplier':
+                    _open_increment_exec.record_supply_interruption(
+                        STATE_DIR, _cycle_id,
+                        retry_key=req.get('retry_key') or '',
+                        plan_text=req.get('task') or '',
+                        candidate_id=req.get('candidate_id') or None,
+                        selfevo_repo=_selfevo_repo,
+                        branch=cycle_branch,
+                    )
+                else:
+                    _open_increment_exec.record_defect_interruption(
+                        STATE_DIR, _cycle_id,
+                        retry_key=req.get('retry_key') or '',
+                        plan_text=req.get('task') or '',
+                        candidate_id=req.get('candidate_id') or None,
+                        branch=cycle_branch,
+                    )
+                _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
+                handled_marker.write_text(str(req_path), encoding='utf-8')
+                _repair_unfinished_reason = (
+                    LLM_SUPPLIER_PAUSED_REASON if _repair_error_class == 'paused-supplier'
+                    else 'interrupted_defect'
+                )
+                _write_bridge_completed_result(
+                    state_dir=STATE_DIR, req=req, request_id=request_id,
+                    cycle_id=req.get('cycle_id') or '', goal_id=goal_id,
+                    files_changed=files_changed, commits_pushed=0, result_status='blocked',
+                    backlog_title=backlog_title,
+                    key_learnings=[
+                        f"Repair session did not finish (status={_repair_unfinished_status or 'missing'}, "
+                        f'{_repair_unfinished_reason}) with {cycle_commit_count} commit(s) on the branch; '
+                        f'{cycle_branch} kept for forensics/resume, main left unchanged.'
+                    ],
+                    rollback={
+                        'integrated': False, 'cycle_branch': cycle_branch,
+                        'main_sha_before': main_sha_before, 'main_sha_after': main_sha_before,
+                        'reason': _repair_unfinished_reason,
+                    },
+                )
+                _v, _vr = _derive_cycle_verdict('failed', _repair_unfinished_reason)
+                record_cycle_outcome(
+                    STATE_DIR, _cycle_id, 'failed', _repair_unfinished_reason, files_changed, cycle_branch,
+                    verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                    executor_llm_error=True,
+                    real_result=_real_result_ledger_inputs('blocked'),
+                    llm_error_classification=(
+                        {'class': _repair_error_class, 'raw_error': _repair_error_text[:400]}
+                        if _repair_error_text else None
+                    ),
+                    retry_key=req.get('retry_key') or None,
+                )
+                _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
+                return {'status': 0}
             # #1546: the citation scan (see _read_executor_result/_record_lesson_citations
             # far below) must read whichever spawn's answer is actually authoritative for
             # this cycle, not always the primary. `_subagent_task_id` above stays fixed to
@@ -4560,7 +5720,7 @@ async def _main_impl_body():
             # from the FIRST commit above. files_changed also becomes the final set
             # used downstream (backlog-done message, structured lesson).
             if cycle_commit_count > 0 and _selfevo_repo.is_dir():
-                _fc, _bpv, _mv, _tier = _changed_files_and_violations(_selfevo_repo, _pre_spawn_sha)
+                _fc, _bpv, _mv, _tier = _changed_files_and_violations(_selfevo_repo, _increment_base)
                 if _fc or _bpv or _mv:
                     files_changed, _blocked_pattern_violations, _mutation_violations = _fc, _bpv, _mv
                     _cycle_tier = _tier  # #812: tier reflects the full commit set at gate time
@@ -4568,7 +5728,7 @@ async def _main_impl_body():
                 # against the full commit set (initial + every repair turn) —
                 # mirrors the mutation-surface final recompute directly above.
                 _test_weakening_blocked, _test_weakening_hard, _test_weakening_soft = (
-                    _check_test_weakening(_selfevo_repo, _pre_spawn_sha)
+                    _check_test_weakening(_selfevo_repo, _increment_base)
                 )
                 if _test_weakening_soft:
                     # Soft signals never block (v1 policy, issue #1119 non-goals) —
@@ -4927,6 +6087,9 @@ async def _main_impl_body():
                                 _integ = _integrate_cycle_to_main(
                                     _selfevo_repo, cycle_branch, main_sha_before,
                                     expected_origin_main=_origin_main_observed,
+                                    cycle_id=_cycle_id,
+                                    task_title=req.get('task_title') or None,
+                                    demand_id=req.get('candidate_id') or None,
                                 )
                             else:
                                 _integ = {'ok': False, 'reason': 'explore_candidate_deferred'}
@@ -4954,7 +6117,35 @@ async def _main_impl_body():
                                 except Exception:
                                     pass  # steering archive is non-blocking (#844)
                                 main_sha_after = _integ['main_sha_after']
-                                _cleanup_cycle_branch(_selfevo_repo, cycle_branch)
+                                # D1/D2 (ADR-035 Test Contract): a genuine
+                                # integration success is the ONE thing that
+                                # resolves a pending open increment for this
+                                # lineage -- a `keep`-resumed attempt that
+                                # finally succeeds must stop surfacing to the
+                                # planner. record_cycle_outcome's own
+                                # record_attempt_finished (below) never
+                                # clears `pending` itself -- only this does.
+                                # N3 (round 3 external re-check, architect
+                                # resolution 2026-09-26): the branch is
+                                # deleted only if the clear itself was saved
+                                # (or there was nothing pending for this
+                                # cycle) -- a failed save must not delete the
+                                # branch a retry would still need.
+                                try:
+                                    from nanobot.runtime import open_increment as _open_increment_integrated
+
+                                    _pending_cleared = _open_increment_integrated.clear_pending_on_integration(
+                                        STATE_DIR, _cycle_id,
+                                    )
+                                except Exception:
+                                    _pending_cleared = False
+                                if _pending_cleared:
+                                    _cleanup_cycle_branch(_selfevo_repo, cycle_branch)
+                                else:
+                                    print(
+                                        f'integrate: pending-clear save failed for {cycle_branch}; '
+                                        'branch kept (not cleaned up) for a retry'
+                                    )
                                 print(f'integrate: {cycle_branch} merged into main and pushed ({cycle_commit_count} commit(s))')
                                 # #877: record this generation in the evolution tree
                                 # (population = branches, generation = commit).
@@ -5191,27 +6382,12 @@ async def _main_impl_body():
         }
 
 
-    # #1852 (ADR-031 rule 5, ADR-032 rule 2): the planning session runs once
-    # per bridge invocation, between cycles -- after this cycle's own
-    # opening diary anchor and demand selection (both already settled by
-    # this point) and before the executor spawns below, so its plan is
-    # written to the SAME diary the executor is about to read as its own
-    # first action. Fail-open: any outcome here (including "did not run")
-    # leaves the rest of this cycle completely unaffected -- this PR does
-    # not yet change how a cycle's task is chosen (ADR-032 rule 1, #1857/
-    # #1859's scope), only that the session runs and its plan reaches the
-    # diary.
-    _planning_selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
-    _planning_denied_paths = {(STATE_DIR / rel).resolve() for rel in _FITNESS_SIDECARS}
-    try:
-        _planning_result = await _run_planning_session(
-            provider=provider, bus=bus, config=config, model=bridge_model,
-            state_dir=STATE_DIR, selfevo_repo=_planning_selfevo_repo,
-            denied_paths=_planning_denied_paths, cycle_id=_cycle_id,
-        )
-    except Exception as _planning_exc:
-        print(f'planning-session: unexpected error ({_planning_exc})')
-        _planning_result = {'ran': False, 'iterations_used': None, 'iterations_planned': None, 'tampered_files': []}
+    # ADR-035 rule 1 (#1942): the planning session already ran, before
+    # selection, above -- `_planning_result` (and the plan this whole cycle
+    # was built from) is already in scope. This used to be a second call
+    # site, positioned here per ADR-031 rule 5's original ("after selection,
+    # before the executor spawns") ordering; rule 1 supersedes that ordering
+    # entirely, so this is no longer a second planning session.
 
     _explore_n, _explore_metric = _parse_explore_mode(req)
     if _explore_n > 1:
@@ -5299,12 +6475,28 @@ async def _main_impl_body():
                         STATE_DIR.parent / 'eeebot-self-evolving',
                         _winner['cycle_branch'],
                         _winner['main_sha_before'],
-                        expected_origin_main=_winner['origin_main_observed']
+                        expected_origin_main=_winner['origin_main_observed'],
+                        cycle_id=_cycle_id,
+                        task_title=req.get('task_title') or None,
+                        demand_id=req.get('candidate_id') or None,
                     )
                     if _integ['ok']:
                         _winner['integrated'] = True
                         _winner['rollback_reason'] = ''
                         _winner['main_sha_after'] = _integ.get('main_sha_after', _winner['main_sha_before'])
+                        # N3 (round 3 external re-check, architect
+                        # resolution 2026-09-26): the explore-winner path
+                        # is ALSO a genuine integration success -- must
+                        # clear a pending open increment for this
+                        # cycle_id, same as the normal gate path and the
+                        # late-push path. No separate branch-cleanup call
+                        # exists at this specific site to gate.
+                        try:
+                            from nanobot.runtime import open_increment as _open_increment_explore
+
+                            _open_increment_explore.clear_pending_on_integration(STATE_DIR, _cycle_id)
+                        except Exception:
+                            pass
                         try:
                             from nanobot.runtime import archive as _archive_mod
                             _archive_mod.record_stepping_stone(
@@ -5542,14 +6734,51 @@ async def _main_impl_body():
     change_shape = None
     if _integrated and _selfevo_repo.is_dir():
         try:
+            # ADR-035 keep-work architect addendum (#1942 B2): two bugs fixed
+            # together here.
+            #
+            # (1) `cycle_branch` is ALREADY DELETED by `_cleanup_cycle_branch`
+            # (called right after a successful integration, well before this
+            # point) -- querying it by name always failed and silently fell
+            # to the `except` branch below, REGARDLESS of checkpoints. The
+            # commits are not gone (the `--no-ff` merge keeps full history,
+            # never a squash), only the branch NAME is; querying
+            # `main_sha_before..HEAD` (HEAD sits on `main`, post-merge, at
+            # this point) reads the same commits by their now-current
+            # reachability instead.
+            #
+            # (2) The branch's raw HEAD may itself be a checkpoint commit
+            # (the executor's own last action, with no separate wrap-up
+            # commit) -- classify the latest NON-artificial, non-merge
+            # commit's subject instead, or telemetry would read "selfevo:
+            # checkpoint -- ..." as the cycle's shape. `^merge:` is excluded
+            # too (bridge's own mechanical integration subject), matching
+            # `_recent_activity_context`'s existing `merge:` filter.
+            #
+            # A cycle whose ONLY commits are checkpoints (killed and resumed
+            # entirely inside checkpoints, no real closing commit) has
+            # nothing left to classify here -- `change_shape` is explicitly
+            # "unknown" rather than "unclassified", which `record_cycle_outcome`
+            # drops from the row entirely (not in its known-values set) rather
+            # than persisting a wrong-but-plausible-looking classification.
+            from nanobot.runtime.commit_markers import ARTIFICIAL_COMMIT_GREP_PATTERNS
             subject_result = _sp.run(
-                _git_cmd(_selfevo_repo) + ["log", "-1", "--format=%s", cycle_branch],
+                _git_cmd(_selfevo_repo) + [
+                    "log", "-1", "--format=%s", "--invert-grep", "-i",
+                    "--grep=^merge:",
+                    # #1857: the post-integration skills/index.md regeneration
+                    # commit -- bridge-mechanical bookkeeping, same category
+                    # as the merge commit, not this cycle's own work.
+                    "--grep=^chore: regenerate skills/index.md",
+                    *(f"--grep={p}" for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
+                    f"{main_sha_before}..HEAD",
+                ],
                 capture_output=True, text=True, check=True,
             )
             change_subject = subject_result.stdout.strip()
-            change_shape = classify_subject(change_subject)
+            change_shape = classify_subject(change_subject) if change_subject else "unknown"
         except Exception:
-            change_shape = "unclassified"
+            change_shape = "unknown"
     # #1850: capture iterations consumed by the executor subagent against the
     # cycle's active limit.
     _iterations_used: int | None = None
@@ -5585,10 +6814,15 @@ async def _main_impl_body():
         lane=req.get('lane') or None,
         prompt_fit_rung=_res.get('prompt_fit_rung'),
         change_shape=change_shape,
+        retry_key=req.get('retry_key') or None,
         iterations_used=_iterations_used,
         iterations_limit=resolved_iterations,
-        # iterations_predicted remains None until forecast is implemented
-        iterations_predicted=None,
+        # ADR-035 rule 1: "the plan carries its own size ... the harness
+        # records the actual count [iterations_used, above] beside it."
+        # `_planning_result` is this same cycle's planning-session output,
+        # set unconditionally earlier in this function before the explore-
+        # mode branch.
+        iterations_predicted=_planning_result.get('iterations_planned'),
         max_call_gap_s=_max_call_gap_s,
         # #1709 increment 2: only a push_pending row needs the base it
         # merged against — _finish_pending_pushes reads this back to tell
@@ -5693,6 +6927,7 @@ async def _main_impl_body():
                         violated_check=_rollback_reason,
                         budget_used={},
                         backlog_title=backlog_title,
+                        retry_key=req.get('retry_key'),
                     )
                     _rec_write_status = _write_result.get("status")
                     if _rec_write_status == "already_recorded":
@@ -5760,12 +6995,14 @@ async def _main_impl_body():
             pass  # fail-open
 
         # #1710: name the attempt (e.g. "2/3") when this rollback is an
-        # executor-LLM-error retry of the same cycle_id -- the same counter
+        # executor-LLM-error retry of the same retry_key (ADR-035 rule 1,
+        # #1942: cycle_id is a fresh uuid every cycle, retry_key is the
+        # cross-cycle-stable id -- see _retry_key_for) -- the same counter
         # `_decide_handled_marker` above just wrote/read. Absent for every
         # other rollback reason, which has no retry structure to name.
         _rec_attempt: str | None = None
         try:
-            _retry_path = _llm_error_retry_path(request_id)
+            _retry_path = _llm_error_retry_path(req.get('retry_key'))
             if _retry_path is not None and _retry_path.exists():
                 _retry_data = json.loads(_retry_path.read_text(encoding='utf-8'))
                 _retry_count = int(_retry_data.get('count') or 0)
@@ -5828,7 +7065,13 @@ from nanobot.runtime.gate import _git_cmd, _is_runtime_deny
 
 # Compatibility mirrors retained for AST/external callers. The mutation policy
 # itself is authoritative; these mirrors are projections only.
-_BLOCKED_FILE_PATTERNS = ('.env', '.git', '.npmrc', 'package-lock', 'yarn.lock', 'id_rsa', 'private_key')
+# ADR-035 keep-work (#1942 B2): _BLOCKED_FILE_PATTERNS now imported from
+# commit_markers.py, the single source shared with the checkpoint commit
+# writer (nanobot.agent.subagent) -- kept as a plain name here (not a
+# re-export alias) so tests/test_mutation_surfaces.py's AST scan, which
+# looks for a module-level assignment mentioning this name, still needs its
+# own fix (see that file); a bare `from ... import X` is not an Assign node.
+from nanobot.runtime.commit_markers import BLOCKED_FILE_PATTERNS as _BLOCKED_FILE_PATTERNS
 _BLOCKED_WORD_PATTERNS = frozenset({'secret', 'credential', 'token'})
 _SENSITIVE_WORDS = _BLOCKED_WORD_PATTERNS
 _ALLOWED_SENSITIVE_BASENAMES = frozenset({'token_report.py', 'summarize_token_costs.py', 'token_budget_check.py', 'analyze_token_usage.py', 'check_token_budget.py', 'validate_no_secrets.py', 'count_tokens.py'})
@@ -6110,6 +7353,14 @@ _INCONCLUSIVE_REASONS = frozenset({
     # #1765: a supplier outage is infra trouble by definition — never
     # upgraded to accept/reject.
     LLM_SUPPLIER_PAUSED_REASON,
+    # D1 (ADR-035 Test Contract, #1942 B2): our own defect while
+    # checkpoints exist — the session never finished, ambiguous by
+    # construction, same treatment as a supplier outage.
+    'interrupted_defect',
+    # D6 (ADR-035 Test Contract, #1942 B2): a required closing commit that
+    # failed to be created is harness/infra trouble, never a verdict on the
+    # work itself.
+    'closing_commit_failed',
 })
 
 
@@ -6159,62 +7410,15 @@ def _authoritative_subagent_task_id(
     return primary_task_id
 
 
-# #1765: patterns that mean "the supplier could not serve us" — connection
-# refused/reset, a timeout with no response, HTTP 429/500/502/503/504, "no
-# deployments available", or a route missing for a configured model. Matched
-# case-insensitively against the raw LLM-call error text. Deliberately an
-# ALLOWLIST, not a denylist: only these positive signals promote a cycle to
-# 'paused-supplier'; everything else (context length exceeded, malformed
-# tool-call payload, invalid model parameters, our own schema errors) stays
-# 'failed' by falling through to the default — the conservative direction
-# the issue asks for, and the only way this stays a real distinction instead
-# of a catch-all.
-_SUPPLIER_UNAVAILABLE_RX = re.compile(
-    r'connection (?:refused|reset|error)'
-    r'|connect(?:ion)? timed? ?out'
-    r'|\btimed? ?out\b'
-    r'|\btimeout\b'
-    r'|\bread timeout\b'
-    r'|\berror code:\s*(?:429|500|502|503|504)\b'
-    r'|\b(?:429|500|502|503|504)\b.{0,20}\berror\b'
-    r'|ratelimiterror'
-    r'|internalservererror'
-    r'|serviceunavailableerror'
-    r'|apiconnectionerror'
-    r'|notfounderror'
-    r'|no deployments available'
-    r'|no healthy deployment'
-    r'|try again in \d'
-    # #1765 review: a genuine supplier-side unavailability observed in the
-    # wild carries HTTP 400 (litellm.BadRequestError) — the local gateway's
-    # own model daemon has no model loaded yet, not a malformed request of
-    # ours. Classified on the MESSAGE, never on the status code alone (a
-    # bare "400" stays unmatched — see the client-defect test fixtures) —
-    # this is exactly why the allowlist below matches phrasing, not codes.
-    r'|model.{0,20}not loaded'
-    r'|/inference/load\b'
-    r'|load first\b',
-    re.IGNORECASE,
+# #1765/round-2 item 2 (external re-check, architect resolution
+# 2026-09-26): the classifier now lives in its own leaf module
+# (nanobot/runtime/llm_error_classification.py) so open_increment.py's
+# check_running_for_kill (D2) can classify a stale error registration
+# immediately, without importing bridge.py -- see that module's docstring.
+from nanobot.runtime.llm_error_classification import (
+    SUPPLIER_UNAVAILABLE_RX as _SUPPLIER_UNAVAILABLE_RX,
+    classify_llm_error as _classify_llm_error,
 )
-
-
-def _classify_llm_error(error_text: str) -> str:
-    """#1765: 'paused-supplier' (the gateway/model provider could not serve
-    us) or 'failed' (the supplier rejected OUR request — our own defect,
-    must keep failing loudly), from the raw executor LLM-call error text.
-
-    Positive-match only (see :data:`_SUPPLIER_UNAVAILABLE_RX`) — when the
-    text does not clearly say "supplier unavailable", this returns 'failed',
-    the conservative default the issue specifies. The raw text is recorded
-    alongside this decision on the ledger row (see
-    ``cycle_ledger.record_cycle_outcome``'s ``llm_error_classification``)
-    so a misclassification is auditable after the fact, never silently lost.
-    """
-    if not error_text:
-        return 'failed'
-    if _SUPPLIER_UNAVAILABLE_RX.search(error_text):
-        return 'paused-supplier'
-    return 'failed'
 
 
 def _executor_llm_error(state_dir: Path, task_id: 'str | None') -> str:
@@ -6244,6 +7448,30 @@ def _executor_llm_error(state_dir: Path, task_id: 'str | None') -> str:
         return text.strip()[:400]
     except Exception:
         return ''
+
+
+def _retry_key_for(candidate_id: 'str | None', task_title: str) -> str:
+    """Stable key for the executor LLM-error retry/handled bookkeeping and
+    the #1765 supplier-paused bypass, surviving across cycles even though
+    ``request_id``/``cycle_id`` are freshly minted every cycle now (ADR-035
+    rule 1, #1942: req/task come from the planning session's own plan, not
+    a rotation-picked queue file — the old stable-by-construction queue
+    filename this bookkeeping used to key on is gone). ``candidate_id``
+    when the plan resolved one against ``demand.collect_demand``/the
+    proposer's ranked list; otherwise a stable hash of the plan's own
+    title, so a self-directed increment the planner keeps re-proposing is
+    still recognized as the same underlying attempt. Fail-open by
+    construction: never raises, worst case collapses two different titles
+    onto the same key (indistinguishable from #1280's pre-#1765 behavior of
+    treating every LLM-dead request the same way).
+    """
+    if candidate_id:
+        return str(candidate_id)
+    import hashlib as _hashlib
+    digest = _hashlib.sha256(
+        (task_title or '').strip().encode('utf-8', errors='replace')
+    ).hexdigest()
+    return f'self-{digest[:16]}'
 
 
 def _llm_error_retry_path(request_id: 'str | None') -> 'Path | None':
@@ -6279,17 +7507,23 @@ def _llm_error_retries_exhausted(request_id: 'str | None') -> bool:
         return True
 
 
-def _recorded_llm_error_attempts(state_dir: 'Path | str', cycle_id: 'str | None') -> int:
-    """#1280 review: the durable witness that a request was previously live.
-    Counts this cycle's ``outcome`` rows with ``reason == executor_llm_error``
-    in the ledger (live + archives, via ``state_access.ledger_window``). The
+def _recorded_llm_error_attempts(state_dir: 'Path | str', retry_key: 'str | None') -> int:
+    """#1280 review: the durable witness that THIS candidate was previously
+    live. Counts ``outcome`` rows carrying this ``retry_key`` (see
+    :func:`_retry_key_for`) with ``reason == executor_llm_error`` in the
+    ledger (live + archives, via ``state_access.ledger_window``). The
     ledger is append-only and rotated, never pruned inside the retention
     window — unlike ``subagents/results``, which the archiver migrates and
     prunes within a cycle, and unlike the ``retry_<id>.json`` counter, which
     is one file. Fail-open to 0 (reads as "first attempt"): a ledger-read
     failure must not retire a request that nothing says was offered before.
+
+    ADR-035 rule 1 (#1942): keyed on ``retry_key``, not ``cycle_id`` — a
+    fresh cycle_id every cycle would make this always read 0 (no row can
+    exist yet for an id that was just minted this same run), silently
+    disabling the state-lost fallback below it.
     """
-    if not cycle_id:
+    if not retry_key:
         return 0
     try:
         from nanobot.runtime.state_access import ledger_window
@@ -6298,7 +7532,7 @@ def _recorded_llm_error_attempts(state_dir: 'Path | str', cycle_id: 'str | None'
         return sum(
             1 for row in window.rows
             if isinstance(row, dict)
-            and str(row.get('cycle_id') or '') == str(cycle_id)
+            and str(row.get('retry_key') or '') == str(retry_key)
             and str(row.get('reason') or '') == 'executor_llm_error'
         )
     except Exception:
@@ -6308,7 +7542,7 @@ def _recorded_llm_error_attempts(state_dir: 'Path | str', cycle_id: 'str | None'
 def _decide_handled_marker(
     handled_marker: Path, req_path: 'Path | str', *, llm_error: bool,
     supplier_paused: bool = False,
-    state_dir: 'Path | str | None' = None, cycle_id: 'str | None' = None,
+    state_dir: 'Path | str | None' = None, retry_key: 'str | None' = None,
 ) -> str:
     """#1280: write the ``handled_`` marker — retiring the request forever —
     unless the subagent died on its LLM call without producing anything, in
@@ -6332,9 +7566,15 @@ def _decide_handled_marker(
     defect) bypasses all of the above unconditionally — no marker, no retry
     counter touched at all. A supplier outage must not spend the request's
     bounded retry budget (that budget exists for OUR bugs, not the
-    supplier's uptime) and must not retire the request either: every later
-    cycle's ``find_pending_request`` finds this exact request again,
-    unchanged, for as long as the outage lasts, with zero bookkeeping cost.
+    supplier's uptime) and must not retire the request either. ADR-035 rule
+    1 (#1942) retired the rotation queue this docstring used to describe
+    ("every later cycle's find_pending_request finds this exact request
+    again, unchanged") — every cycle now mints its own plan/request_id, so
+    "unchanged" is enforced by keying ``handled_marker`` on the caller's
+    stable ``retry_key`` (see :func:`_retry_key_for`) instead: an outage
+    leaves that key's marker/counter untouched, so the same underlying
+    candidate is neither retired nor charged retry budget, for as long as
+    the outage lasts.
 
     Returns ``"handled"``, ``"retry"``, ``"retired_after_retries"``,
     ``"retired_state_lost"`` or ``"supplier_paused"`` for the journal, and
@@ -6361,7 +7601,7 @@ def _decide_handled_marker(
             except Exception:
                 state_lost = 'unreadable'
         else:
-            prior = _recorded_llm_error_attempts(state_dir, cycle_id) if state_dir is not None else 0
+            prior = _recorded_llm_error_attempts(state_dir, retry_key) if state_dir is not None else 0
             if prior >= 1:
                 state_lost = f'missing after {prior} recorded attempt(s)'
         if state_lost:
@@ -6661,7 +7901,12 @@ def _recent_failure_match(
                 continue
             if not reason and status not in ('blocked', 'no_commit'):
                 continue
-            if reason == 'executor_llm_error' and not _llm_error_retries_exhausted(data.get('request_id')):
+            # #1280/#1765: retry_key is the cross-cycle-stable key (ADR-035
+            # rule 1, #1942 broke request_id's stability); request_id stays
+            # as a fallback for result rows written before this field existed.
+            if reason == 'executor_llm_error' and not _llm_error_retries_exhausted(
+                data.get('retry_key') or data.get('request_id')
+            ):
                 # #1280: a cycle that died on the LLM call says nothing about
                 # the proposal, so while its request still has retry budget
                 # the row must not feed suppression — otherwise this branch
@@ -6676,7 +7921,10 @@ def _recent_failure_match(
                 break
 
         for data in failures:
-            title = data.get('backlog_title') or data.get('task_title') or ''
+            # ADR-035 rule 1 (#1942): semantic_task_id is the only title
+            # field a plan-driven result row carries -- see the identical
+            # fallback added to _recent_activity_context above.
+            title = data.get('backlog_title') or data.get('task_title') or data.get('semantic_task_id') or ''
             if not title:
                 continue
             # #798: the entry's own recorded target path (written since #798
@@ -6916,6 +8164,7 @@ def _write_structured_error(
     violated_check: str = "",
     budget_used: dict | None = None,
     backlog_title: str = "",
+    retry_key: 'str | None' = None,
 ) -> dict:
     """Record a failed cycle / gate rejection into lessons/errors.yaml and rotate (#1041).
 
@@ -6983,11 +8232,16 @@ def _write_structured_error(
             wrapper_key = None
 
     date_str = _dt.date.today().isoformat()
-    short_cycle = (cycle_id or '')[-12:].replace('cycle-', '')
+    # ADR-035 rule 1 (#1942): cycle_id is a fresh uuid every cycle now, so
+    # the dedup id keys on retry_key (bridge._retry_key_for) instead --
+    # cycle_id alone can never repeat across an executor-LLM-error retry
+    # any more. Falls back to cycle_id when no retry_key is given (older
+    # call sites, e.g. gate rejections outside the executor retry path).
+    short_cycle = (retry_key or cycle_id or '')[-12:].replace('cycle-', '')
     error_id = f'ERR-{date_str.replace("-", "")}-{short_cycle[:8]}'
 
     if any(e.get('id') == error_id for e in existing_list):
-        # #1710: an executor retry re-running the same cycle_id finds the
+        # #1710: an executor retry re-running the same retry_key finds the
         # prior attempt's card already committed and pushed to origin/main
         # (this isolated checkout is fresh off that ref) -- this is not a
         # failed write, it is proof the retry ran and found the card.
@@ -7332,6 +8586,10 @@ def _write_bridge_completed_result(
         # _extract_target_path is fail-open by construction.
         'target_path': _extract_target_path(req),
         'rollback': rollback,
+        # #1280/#1765 (ADR-035 rule 1, #1942): the stable cross-cycle key
+        # _recent_failure_match's executor_llm_error exemption reads,
+        # since request_id no longer survives across cycles.
+        'retry_key': req.get('retry_key') or '',
     }
 
     try:

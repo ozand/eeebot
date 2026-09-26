@@ -4,10 +4,8 @@ Covers the kill-switch (default OFF), the invocation policy
 (``should_propose``), the bounded context builder (``build_context``), the
 pre-spawn sizing gate (``validate_sizing``), the C1 request-schema
 invariant (``write_request`` emits the canonical ``subagent-request-v1``
-shape the bridge consumes; #747 deleted the deterministic planner, leaving
-the proposer as the sole request writer), the mocked-LLM ``propose``
-parsing, and an end-to-end check that a proposer-written request is picked
-up by the bridge's real ``find_pending_request``.
+shape; #747 deleted the deterministic planner, leaving the proposer as the
+sole request writer), and the mocked-LLM ``propose`` parsing.
 """
 from __future__ import annotations
 
@@ -1916,24 +1914,6 @@ class TestWriteRequestSchemaEquality:
         assert set(written.keys()) == self._CANONICAL_REQUEST_KEYS
         assert written["request_status"] == "queued"
 
-    def test_bridge_find_pending_request_accepts_it(self, tmp_path, monkeypatch):
-        state_dir = _state_dir(tmp_path)
-        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
-        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
-
-        proposal = {
-            "task_title": "Add a helper doc",
-            "rationale": "helps operators",
-            "target_path": "docs/helper.md",
-            "serves": "priority 1",
-        }
-        written_path = llm_proposer.write_request(state_dir, proposal)
-
-        found_path, found_req = bridge.find_pending_request()
-        assert found_path is not None
-        assert str(found_path) == written_path
-        assert found_req.get("request_status") == "queued"
-
     def test_ledger_proposed_row_appended(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         proposal = {
@@ -2333,9 +2313,6 @@ class TestWriteRequestLessonsContext:
         assert "lessons_context" not in proposed_rows[0]
 
 
-# ─── integration: maybe_propose -> bridge.find_pending_request handoff ─────
-
-
 # ─── #749: maybe_propose keeps SYSTEM_MAP.md fresh every call ─────────────
 
 
@@ -2411,15 +2388,17 @@ class TestIntegrationHandoff:
         assert result is not None
         assert result.endswith("loop metrics report")
 
-        found_path, found_req = bridge.find_pending_request()
-        assert found_path is not None
-        assert found_req.get("task_title", "").endswith("loop metrics report")
-        assert found_req.get("request_status") == "queued"
-        assert found_req.get("task_title") == result
+        written = [
+            json.loads(p.read_text(encoding="utf-8"))
+            for p in (state_dir / "subagents" / "requests").glob("*.json")
+        ]
+        assert len(written) == 1
+        assert written[0].get("task_title", "").endswith("loop metrics report")
+        assert written[0].get("request_status") == "queued"
+        assert written[0].get("task_title") == result
 
 
-# ─── #741: bridge must log maybe_propose's own return value, not a stale ───
-# ─── post-write find_pending_request lookup                              ───
+# ─── #741: maybe_propose's return value is the request it just wrote ──────
 
 
 class TestJournalLineUsesOwnReturnValue:
@@ -2452,64 +2431,6 @@ class TestJournalLineUsesOwnReturnValue:
         # request is now queued) -> must return exactly None, not False.
         result2 = llm_proposer.maybe_propose(state_dir, None)
         assert result2 is None
-
-    def test_bridge_after_skip_logs_own_title_not_stale_queue_tail(self, tmp_path, monkeypatch, capsys):
-        """#741 regression: seed an OLDER stale request that stays queued
-        (unhandled) after the bulk-skip loop's cap ends the run — exactly
-        the ``test_cap_enforced_remainder_stays_queued`` scenario — then
-        drive ``_maybe_propose_after_skip`` directly with a mocked LLM reply.
-        Before the fix, the bridge re-derived the logged title via a
-        post-write ``find_pending_request()`` call, which is oldest-first
-        and so returned the STALE request's title (mtime-sorted ahead of the
-        proposer's brand-new file). The fix logs ``maybe_propose``'s own
-        return value instead.
-        """
-        monkeypatch.setenv(ENV_VAR, "1")
-        state_dir = _state_dir(tmp_path)
-        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
-        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
-
-        _write_goal_text(state_dir, "no priority section, so should_propose is True")
-
-        # An older, still-queued (never handled) stale request — sorted first
-        # by find_pending_request's oldest-first (mtime) ordering.
-        req_dir = state_dir / "subagents" / "requests"
-        req_dir.mkdir(parents=True)
-        stale_path = req_dir / "request-stale.json"
-        stale_path.write_text(
-            json.dumps(
-                {
-                    "request_status": "queued",
-                    "request_id": "cycle-stale-old",
-                    "task_title": "STALE OLDEST TITLE — should never be logged",
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
-            return {
-                "task_title": "Add a smoke test for the loop metrics report",
-                "rationale": "Closes a coverage gap.",
-                "target_path": "tests/test_loop_metrics_extra.py",
-                "serves": "priority 1",
-            }
-
-        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
-
-        bridge._maybe_propose_after_skip(None)
-
-        captured = capsys.readouterr()
-        assert "llm-proposer: queued" in captured.out
-        assert "STALE OLDEST TITLE" not in captured.out
-        assert "loop metrics report" in captured.out
-
-        # Confirm the stale request is indeed still the oldest queued
-        # candidate find_pending_request would return — proving this test
-        # actually exercises the bug's precondition, not a no-op.
-        found_path, found_req = bridge.find_pending_request()
-        assert found_path == stale_path
-        assert found_req.get("task_title") == "STALE OLDEST TITLE — should never be logged"
 
 
 # ─── #751: honest no-op (no_valuable_task) ─────────────────────────────────
@@ -3423,6 +3344,130 @@ class TestTargetPathState:
         sha, subject = result
         assert len(sha) == 12
         assert subject == "feat: latest real target change"
+
+    def test_checkpoint_only_cycle_merged_is_visible_exactly_once(self, tmp_path):
+        """ADR-035 keep-work architect resolution (#1942 B2), point 1: a
+        cycle whose entire work happened inside checkpoints, once merged
+        via --no-ff, is visible to self_dedup evidence exactly once --
+        via the Selfevo-Task trailer on the merge commit itself."""
+        import subprocess as _sp
+
+        repo = _init_instance_repo(
+            tmp_path, subject="init", script_rel="scripts/existing_target.py",
+        )
+        _sp.run(["git", "-C", str(repo), "checkout", "-b", "selfevo/cycle-ckpt-02"],
+                check=True, capture_output=True)
+        for i in range(3):
+            (repo / "scripts" / "existing_target.py").write_text(f"# rev {i}\n")
+            _sp.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+            _sp.run(
+                ["git", "-C", str(repo), "commit", "-m",
+                 f"selfevo: checkpoint — scripts/existing_target.py ({i})",
+                 "-m", "Selfevo-Checkpoint: true"],
+                check=True, capture_output=True,
+            )
+        _sp.run(["git", "-C", str(repo), "checkout", "main"], check=True, capture_output=True)
+        _sp.run(
+            ["git", "-C", str(repo), "merge", "--no-ff", "selfevo/cycle-ckpt-02",
+             "-m", "merge: integrate selfevo/cycle-ckpt-02",
+             "-m", "close the checkpoint-only increment\n\n"
+                   "Selfevo-Cycle: ckpt-02\nSelfevo-Task: close the checkpoint-only increment"],
+            check=True, capture_output=True,
+        )
+
+        result = llm_proposer._latest_non_residual_commit_for_path(
+            repo, "scripts/existing_target.py",
+        )
+        assert result is not None
+        sha, subject = result
+        assert subject == "close the checkpoint-only increment"
+
+        count = llm_proposer._git_commit_count_for_path(repo, "scripts/existing_target.py", None)
+        # init (creation) + 1 integration = 2 first-parent commits touching
+        # the path, never 4 (init + 3 checkpoints).
+        assert count == 2, f"expected 2 first-parent commits, got {count}"
+
+    def test_old_format_merge_falls_back_to_branch_tip(self, tmp_path):
+        """A merge predating the Selfevo-Task trailer (no trailer in its
+        body) falls back to merge^2's own latest non-artificial commit."""
+        import subprocess as _sp
+
+        repo = _init_instance_repo(
+            tmp_path, subject="init", script_rel="scripts/existing_target.py",
+        )
+        _sp.run(["git", "-C", str(repo), "checkout", "-b", "selfevo/cycle-old-01"],
+                check=True, capture_output=True)
+        (repo / "scripts" / "existing_target.py").write_text("# real work\n")
+        _sp.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+        _sp.run(["git", "-C", str(repo), "commit", "-m", "feat: old-format real work"],
+                check=True, capture_output=True)
+        _sp.run(["git", "-C", str(repo), "checkout", "main"], check=True, capture_output=True)
+        _sp.run(
+            ["git", "-C", str(repo), "merge", "--no-ff", "selfevo/cycle-old-01",
+             "-m", "merge: integrate selfevo/cycle-old-01"],
+            check=True, capture_output=True,
+        )
+
+        result = llm_proposer._latest_non_residual_commit_for_path(
+            repo, "scripts/existing_target.py",
+        )
+        assert result is not None
+        _sha, subject = result
+        assert subject == "feat: old-format real work"
+
+    def test_git_error_returns_sentinel_not_none(self, tmp_path, monkeypatch):
+        """ADR-035 keep-work architect resolution (#1942 B2), point 4: a
+        git error/timeout must be distinguishable from "genuinely no
+        evidence" -- None already means the latter."""
+        from nanobot.runtime.commit_markers import GIT_UNAVAILABLE
+
+        repo = _init_instance_repo(
+            tmp_path, subject="feat: x", script_rel="scripts/existing_target.py",
+        )
+
+        import subprocess as _sp
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("git not found")
+
+        monkeypatch.setattr(_sp, "run", _boom)
+        result = llm_proposer._latest_non_residual_commit_for_path(repo, "scripts/existing_target.py")
+        assert result == GIT_UNAVAILABLE
+        assert result is not None
+
+    def test_direct_to_main_residual_commit_is_skipped_for_the_real_prior_one(self, tmp_path):
+        """pG review (0cf0a6f7): --first-parent alone is NOT sufficient --
+        a residual auto-commit or a direct-to-main writer (bridge-memory,
+        the knowledge curator) commits ON first-parent directly, so a
+        residual-shaped commit sitting there must still be skipped, the
+        same #1785 class the self_dedup exclusion exists to prevent.
+        """
+        import subprocess as _sp
+
+        repo = _init_instance_repo(
+            tmp_path, subject="feat: real prior change",
+            script_rel="scripts/existing_target.py",
+        )
+        (repo / "scripts" / "existing_target.py").write_text("# residual edit\n")
+        _sp.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+        _sp.run(
+            ["git", "-C", str(repo), "commit", "-m",
+             "selfevo: auto-commit residual state — scripts/existing_target.py",
+             "-m", "Selfevo-Residual: true"],
+            check=True, capture_output=True,
+        )
+
+        result = llm_proposer._latest_non_residual_commit_for_path(
+            repo, "scripts/existing_target.py",
+        )
+        assert result is not None
+        sha, subject = result
+        assert subject == "feat: real prior change"
+
+        count = llm_proposer._git_commit_count_for_path(repo, "scripts/existing_target.py", None)
+        # Only the creation commit ("feat: real prior change") counts --
+        # the residual commit must not be counted at all.
+        assert count == 1, f"expected 1 (residual excluded), got {count}"
 
     def test_existing_path_dedup_passes_commit_as_evidence(self, tmp_path, monkeypatch):
         repo = _init_instance_repo(

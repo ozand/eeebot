@@ -173,6 +173,23 @@ class SubagentManager:
         denied_paths: "set[Path] | None" = None,
         release_root: "Path | None" = None,
         role_system_prompt: "str | None" = None,
+        # ADR-035 keep-work (#1942 B2): commit the workspace's dirty tree to
+        # the current branch after every completed tool-execution step, so a
+        # kill between steps loses only the in-flight one, not every
+        # checkpoint before it. Opt-in (default False, matching every other
+        # instrumentation param here) -- only the eeebot executor spawn site
+        # passes True; the planner spawn and every other caller are
+        # unaffected.
+        checkpoint_commits: bool = False,
+        # D3 (ADR-035 Test Contract, external review finding #3): the exact
+        # branch the bridge resolved for THIS spawn (via
+        # `_setup_cycle_branch`). `_maybe_checkpoint_commit` binds to this
+        # value with an exact comparison, never a `selfevo/cycle-` prefix
+        # test -- a workspace checked out on a DIFFERENT cycle's branch
+        # (stray checkout, race) must never receive this executor's
+        # checkpoint. Required (fail-closed) whenever `checkpoint_commits`
+        # is True; `None` skips checkpointing entirely rather than guessing.
+        expected_cycle_branch: str | None = None,
         wall_deadline: float | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
@@ -246,6 +263,8 @@ class SubagentManager:
         self._excluded_skill_names: list[str] = list(excluded_skill_names or [])
         self._telemetry_component = str(telemetry_component or "").strip()
         self.web_tools_enabled = bool(web_tools_enabled)
+        self._checkpoint_commits = bool(checkpoint_commits)
+        self._expected_cycle_branch = (expected_cycle_branch or "").strip() or None
 
     async def spawn(
         self,
@@ -680,7 +699,13 @@ class SubagentManager:
                             "name": tool_call.name,
                             "content": result,
                         })
-                        _watchdog.record_step_completed()
+                    # ADR-035 keep-work (#1942 B2): this iteration's tool
+                    # calls just finished -- checkpoint now, before whatever
+                    # comes next (another provider call, a break) can be the
+                    # thing that gets killed.
+                    if self._checkpoint_commits:
+                        self._maybe_checkpoint_commit()
+                    _watchdog.record_step_completed()
                     if memory_unavailable_reason:
                         stop_reason = "memory_search_unavailable"
                         break
@@ -848,6 +873,202 @@ class SubagentManager:
             )
             logger.error("Subagent [{}] failed: {}", task_id, e)
             await self._announce_result(task_id, label, task, error_msg, origin, "error")
+
+    def _maybe_checkpoint_commit(self) -> None:
+        """ADR-035 keep-work (#1942 B2): commit the workspace's dirty tree
+        to the current branch after a completed tool-execution step --
+        ONLY when that branch is a ``selfevo/cycle-*`` cycle branch. "The
+        executor's work is committed to the cycle branch as it goes, at
+        least at every completed step that changed files ... a kill loses
+        minutes, not the attempt."
+
+        The branch guard matters because ``bridge._setup_cycle_branch`` can
+        fail open and leave the checkout on ``main`` (dirty_tree/
+        checkout_failed) while the executor still spawns -- committing a
+        checkpoint straight to the SHARED local ``main`` there would be the
+        "workspace main diverges" defect class, not a harmless checkpoint.
+        A branch this loose check cannot see (renamed, detached HEAD) is
+        treated the same as ``main``: skip, never guess.
+
+        Never pushed here -- push happens once, at integration or gate
+        time, the same as every other cycle-branch commit; a checkpoint's
+        only job is to exist locally so a kill doesn't lose it. Fail-open
+        and silent: only called when ``self._checkpoint_commits`` is True
+        (the eeebot executor spawn only), and a checkpoint failure must
+        never abort or even flag the loop turn it rides along on -- the
+        end-of-turn commit/gate path is unaffected either way. Every git
+        call is timeout-bounded so a stuck index.lock cannot hang the
+        executor's own loop.
+
+        D3 (ADR-035 Test Contract, external review finding #3; architect
+        resolution on #1979 external-review followups): the branch guard
+        below is an EXACT comparison against ``self._expected_cycle_branch``
+        (what the bridge resolved for this spawn via
+        ``_setup_cycle_branch``), read via ``symbolic-ref HEAD`` (never a
+        ``selfevo/cycle-`` prefix test, and never ``rev-parse
+        --abbrev-ref``, which also answers for a detached HEAD) -- a
+        workspace sitting on a DIFFERENT cycle's branch (stray checkout
+        left by another process, a race) is a real ``selfevo/cycle-*``
+        branch too, so a prefix match would silently commit this
+        executor's work onto it. ``expected_cycle_branch`` being unset
+        (``None``) skips checkpointing entirely; it never falls back to
+        guessing from HEAD.
+
+        No private/temporary index: this stages the workspace's ORDINARY
+        index with ``git add``, exactly like a normal commit would -- the
+        architect's #1979 resolution retired an earlier private-index
+        design as unnecessary complexity. The commit is still written
+        through plumbing (``write-tree`` / ``commit-tree`` / ``update-ref``)
+        rather than ``git commit``, so it never reads or writes ``HEAD``
+        itself: ``update-ref refs/heads/<expected_cycle_branch> <new>
+        <old>`` targets the branch ref directly, with the ref's tip at the
+        START of this call passed as the compare-and-swap old-value.
+        Because ``write-tree`` builds the new commit FROM the same index
+        ``git add`` just staged, the index already equals the committed
+        tree once this succeeds -- no follow-up sync step, no desync.
+
+        HEAD is re-checked (same ``symbolic-ref`` test) after ``write-tree``
+        but before ``commit-tree`` -- a checkout racing in between the
+        first check and here must not let this commit land at all, even
+        onto the still-nominally-correct expected branch: the working tree
+        it just staged from may no longer coherently represent that
+        branch's state. Any failed check, or a rejected CAS (the branch
+        moved between capturing ``old`` and ``update-ref`` -- e.g. another
+        writer, or the same race from a different angle), unstages via
+        ``git reset -q`` (never ``--hard``: it must not touch the working
+        tree, only the index) and skips -- the fail-open, silent contract
+        below is unchanged; a debug log line records why for anyone
+        reading logs, but nothing here can fail the loop turn it rides
+        along on.
+        """
+        import subprocess as _sp_ckpt
+
+        from nanobot.runtime.commit_markers import (
+            CHECKPOINT_SUBJECT_PREFIX, CHECKPOINT_TRAILER, is_blocked_checkpoint_filename,
+        )
+
+        expected_branch = self._expected_cycle_branch
+        if not expected_branch:
+            return
+        expected_ref = f"refs/heads/{expected_branch}"
+        repo_root = self.workspace
+        git = ["git", "-c", f"safe.directory={repo_root}", "-C", str(repo_root)]
+
+        def _on_expected_branch() -> bool:
+            symref = _sp_ckpt.run(
+                git + ["symbolic-ref", "-q", "HEAD"], capture_output=True, text=True, timeout=10,
+            )
+            return symref.returncode == 0 and symref.stdout.strip() == expected_ref
+
+        def _abandon(reason: str) -> None:
+            # Unstage only -- never touch the working tree (`-q`, no
+            # `--hard`). Best-effort: a failure here is still fail-open,
+            # the checkpoint was already being skipped either way.
+            _sp_ckpt.run(git + ["reset", "-q"], capture_output=True, text=True, timeout=10)
+            logger.debug("Subagent checkpoint skipped ({}): {}", expected_branch, reason)
+
+        try:
+            if not _on_expected_branch():
+                _abandon("HEAD not on expected branch")
+                return
+            old_tip = _sp_ckpt.run(
+                git + ["rev-parse", expected_ref], capture_output=True, text=True, timeout=10,
+            )
+            if old_tip.returncode != 0 or not old_tip.stdout.strip():
+                return
+            old_sha = old_tip.stdout.strip()
+
+            # Codex review of 984a133f (nanobot/agent/subagent.py:1015):
+            # an executor tool may have staged files itself (a bare `git
+            # add` covering a blocked file alongside an allowed edit,
+            # say) BEFORE this routine ever runs. The status-filter loop
+            # below only ADDS approved paths on top of whatever the
+            # shared index already holds -- it never clears a
+            # pre-existing stage -- so `write-tree` would serialize the
+            # WHOLE index, blocked file included, regardless of what the
+            # loop chose to `git add`. Reset the index to `old_sha`
+            # (mixed reset, working tree untouched -- `old_sha` IS HEAD,
+            # already confirmed by `_on_expected_branch()` above) so
+            # selective staging starts from a clean baseline every time.
+            reset_index = _sp_ckpt.run(
+                git + ["reset", "-q"], capture_output=True, text=True, timeout=10,
+            )
+            if reset_index.returncode != 0:
+                _abandon("pre-staging index reset failed")
+                return
+
+            status = _sp_ckpt.run(
+                git + ["status", "--porcelain", "-uall"], capture_output=True, text=True, timeout=10,
+            )
+            if status.returncode != 0 or not status.stdout.strip():
+                return
+            changed: list[str] = []
+            for line in status.stdout.splitlines():
+                if not line.strip():
+                    continue
+                path = line[3:].strip()
+                if " -> " in path:
+                    path = path.split(" -> ", 1)[1]
+                path = path.strip('"')
+                if path and not is_blocked_checkpoint_filename(path):
+                    changed.append(path)
+            if not changed:
+                return
+            for path in changed:
+                add_result = _sp_ckpt.run(git + ["add", "--", path], capture_output=True, text=True, timeout=10)
+                if add_result.returncode != 0:
+                    # Round 2 external re-check, item 3 (architect
+                    # resolution 2026-09-26): a staging failure must never
+                    # be followed by write-tree/commit-tree/update-ref.
+                    _abandon(f"git add failed for {path!r}")
+                    return
+            if len(changed) == 1:
+                paths_desc = changed[0]
+            else:
+                joined = ", ".join(changed)
+                paths_desc = joined if len(joined) <= 60 and len(changed) <= 3 else f"{len(changed)} paths"
+            subject = f"{CHECKPOINT_SUBJECT_PREFIX} — {paths_desc}"
+
+            tree = _sp_ckpt.run(
+                git + ["write-tree"], capture_output=True, text=True, timeout=10,
+            )
+            if tree.returncode != 0 or not tree.stdout.strip():
+                _abandon("write-tree failed")
+                return
+
+            if not _on_expected_branch():
+                _abandon("HEAD moved during staging")
+                return
+
+            commit = _sp_ckpt.run(
+                git + ["commit-tree", tree.stdout.strip(), "-p", old_sha, "-m", subject, "-m", CHECKPOINT_TRAILER],
+                capture_output=True, text=True, timeout=10,
+            )
+            if commit.returncode != 0 or not commit.stdout.strip():
+                _abandon("commit-tree failed")
+                return
+            new_sha = commit.stdout.strip()
+
+            cas = _sp_ckpt.run(
+                git + ["update-ref", expected_ref, new_sha, old_sha],
+                capture_output=True, text=True, timeout=10,
+            )
+            if cas.returncode != 0:
+                _abandon("update-ref CAS rejected (branch moved concurrently)")
+                return
+        except Exception as exc:
+            # Round 2 external re-check, item 3 (architect resolution
+            # 2026-09-26): any exception after staging may have started
+            # (a write-tree timeout, for example) must still reset the
+            # index -- a bare `except: pass` here left it staged with no
+            # reset at all. `_abandon` is itself a no-op when nothing was
+            # staged yet (the branch-mismatch case), so this is safe to
+            # call unconditionally; wrapped again so a failure in the
+            # reset itself cannot escape this fail-open, silent contract.
+            try:
+                _abandon(f"unexpected exception: {exc}")
+            except Exception:
+                pass
 
     async def _announce_result(
         self,

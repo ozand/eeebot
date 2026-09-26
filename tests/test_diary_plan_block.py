@@ -55,7 +55,12 @@ def test_plan_block_creates_a_fresh_day_file_and_pushes_it(tmp_path: Path):
     assert _git(repo, "status", "--porcelain") == ""
 
 
-def test_plan_block_replaces_a_prior_plan_on_the_second_run(tmp_path: Path):
+def test_plan_block_appends_a_prior_plan_on_the_second_run(tmp_path: Path):
+    """ADR-035 rule 1 supersedes ADR-031 rule 5's "replace" behavior this
+    test used to assert: "the plan is appended, never overwritten ... a
+    planner learns that it 'named the same follow-up twice' only by reading
+    commits" is exactly the failure mode a REPLACE write causes. Both plans
+    must survive in one block, most recent first, with cycle ids."""
     repo, _origin = _init_repo_with_origin(tmp_path)
     state = tmp_path / "state"
     _write_diary_plan_block(repo, state, "cycle-1", "first plan text")
@@ -65,7 +70,10 @@ def test_plan_block_replaces_a_prior_plan_on_the_second_run(tmp_path: Path):
     pushed = _origin_main_show(repo, diary_relpath())
     assert pushed is not None
     assert "second plan text" in pushed
-    assert "first plan text" not in pushed
+    assert "first plan text" in pushed
+    assert pushed.index("second plan text") < pushed.index("first plan text")
+    assert "cycle-1" in pushed
+    assert "cycle-2" in pushed
     assert pushed.count(PLAN_BEGIN) == 1
 
 

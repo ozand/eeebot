@@ -23,7 +23,6 @@ from nanobot.runtime.bridge import _recent_failure_match
 from tests.test_cycle_ledger import (
     _init_selfevo_repo,
     _read_ledger,
-    _seed_bridge_request,
 )
 
 
@@ -415,14 +414,25 @@ def test_ledger_matched_against_is_historical_title(
     monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
     monkeypatch.setattr(bridge, "SubagentManager", _ExplodingSubagentManager)
     monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
-
-    _seed_bridge_request(
-        state_dir,
-        "req-recent-failure",
-        "cycle-recent-failure",
-        task_title="Wire host_metrics dashboard integration panel",
-        task="Wire host_metrics dashboard integration panel.\n",
+    (state_dir / "goals").mkdir(parents=True, exist_ok=True)
+    (state_dir / "goals" / "goal_text.json").write_text(
+        json.dumps({"schema_version": "goal-text-v1", "goal_id": "goal-1", "text": "test goal"}),
+        encoding="utf-8",
     )
+
+    # ADR-035 rule 1 (#1942): req/task now come from the planning session's
+    # own plan, never from a rotation-picked queue file -- stand in a plan
+    # whose title/text reproduce the same title the historical failure was
+    # recorded under, so the recent-failure gate still matches it.
+    async def _fake_planning_session(**_kwargs):
+        return {
+            'ran': True, 'iterations_used': 1, 'iterations_planned': 1,
+            'tampered_files': [], 'plan': {
+                'plan': "Wire host_metrics dashboard integration panel", 'candidate_id': None,
+            },
+        }
+
+    monkeypatch.setattr(bridge, "_run_planning_session", _fake_planning_session)
 
     result = asyncio.run(bridge._main_impl())
     assert result == 0

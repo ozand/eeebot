@@ -16,6 +16,7 @@ import pytest
 from nanobot import crash_record
 from nanobot.agent.context import SystemPromptOverflowError
 from nanobot.runtime import bridge
+from tests.test_bridge_executor_llm_error import _stub_planning_session
 from tests.test_cycle_ledger import (
     _FakeSubagentManager,
     _init_selfevo_repo,
@@ -91,8 +92,12 @@ def _wire(tmp_path, monkeypatch, manager_cls):
     return state_dir
 
 
-def _result_for(state_dir, request_id):
-    matches = list((state_dir / "subagents").rglob(f"result-{request_id}.json"))
+def _result_for(state_dir, request_id=None):
+    """ADR-035 rule 1 (#1942): result files are keyed by the per-cycle
+    uuid, not a stable seeded id -- ``request_id`` is accepted and ignored
+    for call-site compatibility."""
+    del request_id
+    matches = list((state_dir / "subagents").rglob("result-*.json"))
     assert len(matches) == 1, matches
     return json.loads(matches[0].read_text(encoding="utf-8"))
 
@@ -101,11 +106,12 @@ def test_overflow_is_a_failed_unspawned_cycle_with_its_own_exit_code(tmp_path, m
     state_dir = _wire(tmp_path, monkeypatch, _OverflowingManager)
     _OverflowingManager.spawned = False
     _seed_bridge_request(state_dir, "req-over", "cycle-over", task_title="Extend a skill")
+    _stub_planning_session(monkeypatch, "Extend a skill")
 
     rc = asyncio.run(bridge._main_impl())
 
     assert _OverflowingManager.spawned is False, "no executor runs on a prompt missing its standing instructions"
-    res = _result_for(state_dir, "req-over")
+    res = _result_for(state_dir)
     assert res["result_status"] == "blocked"
     assert res["rollback"]["reason"] == "system_prompt_overflow"
     assert res["commits_pushed"] == 0
@@ -136,6 +142,7 @@ def test_overflow_is_a_failed_unspawned_cycle_with_its_own_exit_code(tmp_path, m
 def test_fitting_prompt_journals_what_the_cap_dropped(tmp_path, monkeypatch):
     state_dir = _wire(tmp_path, monkeypatch, _FittingManager)
     _seed_bridge_request(state_dir, "req-fit", "cycle-fit", task_title="Extend a skill")
+    _stub_planning_session(monkeypatch, "Extend a skill")
 
     rc = asyncio.run(bridge._main_impl())
 
@@ -143,7 +150,9 @@ def test_fitting_prompt_journals_what_the_cap_dropped(tmp_path, monkeypatch):
     rows = _read_ledger(state_dir)
     fit_rows = [r for r in rows if r["phase"] == "system_prompt"]
     assert len(fit_rows) == 1
-    assert fit_rows[0]["cycle_id"] == "cycle-fit"
+    # ADR-035 rule 1 (#1942): cycle_id is a fresh uuid every cycle now.
+    outcome = [r for r in rows if r["phase"] == "outcome"][-1]
+    assert fit_rows[0]["cycle_id"] == outcome["cycle_id"]
     assert fit_rows[0]["chars"] == 23_500 and fit_rows[0]["cap"] == 24_000
     assert fit_rows[0]["dropped"] == [{"section": "## Optional appendix", "chars": 900, "how": "declared-droppable"}]
     assert fit_rows[0]["droppable_reserve_chars"] == 1_200, "#1313: what remains droppable is a ledger-visible number, not a re-derived estimate"

@@ -94,25 +94,6 @@ ENABLED_ENV = "SELFEVO_LLM_PROPOSER_ENABLED"
 _RELEASE_ROOT_DEFAULT = "/opt/eeepc-agent/runtimes/self-evolving-agent/current"
 _TRUTHY = {"1", "true", "yes", "on"}
 
-# #1411: third mode, additive to #760 demand-driven mode — NOT
-# SELFEVO_DEMAND_DRIVEN_ENABLED (that switch restores the pre-#760
-# supply-driven proposer WHOLESALE, replacing demand-driven mode entirely).
-# This is a same-cycle fallback that fires only when the bridge would
-# otherwise end the cycle without ever spawning an executor. Default ON,
-# mirroring SELFEVO_DEMAND_DRIVEN_ENABLED's own default — the operator
-# decision (#1411) is that the executor always runs, PROVIDED the parent
-# ENABLED_ENV kill switch (SELFEVO_LLM_PROPOSER_ENABLED, default OFF) is
-# itself on. Gating on the parent switch too (not just this one) keeps the
-# whole state-light-proposer feature area under one master off switch — and
-# keeps every existing bridge test, which never touches ENABLED_ENV, exactly
-# as fast and side-effect-free as before this issue (no new LLM attempt, no
-# new ledger row) without needing to individually disable this lane.
-FALLBACK_LANE_ENABLED_ENV = "SELFEVO_FALLBACK_LANE_ENABLED"
-
-
-def fallback_lane_enabled() -> bool:
-    return _enabled() and os.environ.get(FALLBACK_LANE_ENABLED_ENV, "1").strip().lower() in _TRUTHY
-
 # Compatibility projections retained for callers/tests. Prompt text and sizing
 # both use the authoritative read/commit policy below.
 _ALLOWED_PATH_PREFIXES = MUTATION_POLICY.commit_path_prefixes
@@ -533,6 +514,98 @@ def _queue_effectively_empty(state_dir: Path) -> bool:
             pass
         return False
     return True
+
+
+#: ADR-035 rule 2 ("the proposer offers, it does not assign") + the rest
+#: amendment's drain rule. Distinct from #745's invariant (a request's
+#: ``request_status`` is never rewritten to reflect EXECUTION handledness --
+#: marker files own that): this is a new, one-time, terminal label the ADR
+#: itself names, applied exactly once per file, never toggled back.
+_SUPERSEDED_STATUS = "superseded (ADR-035)"
+
+
+def proposer_candidate_items(state_dir: Path) -> list[dict[str, str]]:
+    """Every still-live proposer-authored request as a
+    :func:`nanobot.runtime.demand`-shaped candidate item (``kind="proposer"``).
+
+    "Still live" = a proposer-written file (:func:`_is_proposer_request`)
+    that is not yet handled (:func:`_is_request_handled`) -- regardless of
+    its ``request_status`` (queued, pending, or already drained to
+    :data:`_SUPERSEDED_STATUS`). This is why the drain rule
+    (:func:`drain_queued_proposer_requests`) can flip a file's status
+    without the candidate it represents disappearing from the ranked list
+    the planner reads: "its candidate re-enters the ranked list."
+
+    Read-only, no LLM call -- this is the harness rendering an EXISTING
+    proposal, never inventing or refining one (that remains
+    :func:`maybe_propose`'s job, unchanged).
+    """
+    from nanobot.runtime.demand import _make_item
+
+    req_dir = _requests_dir(state_dir)
+    if not req_dir.is_dir():
+        return []
+    items: list[dict[str, str]] = []
+    for path in sorted(req_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
+        try:
+            req = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(req, dict) or not _is_proposer_request(req):
+            continue
+        try:
+            if _is_request_handled(state_dir, req, path):
+                continue
+        except Exception:
+            continue
+        title = str(req.get("task_title") or req.get("recommended_next_action") or "").strip()
+        if not title:
+            continue
+        items.append(_make_item(
+            "proposer", title, str(req.get("task") or ""),
+            affected_path=str(req.get("target_path") or ""),
+            provenance="proposer",
+        ))
+    return items
+
+
+def drain_queued_proposer_requests(state_dir: Path) -> int:
+    """ADR-035 rest amendment's drain rule: every currently queued/pending
+    proposer-authored request is marked :data:`_SUPERSEDED_STATUS` -- never
+    executed via the old rotation path (:func:`find_pending_request`'s own
+    status filter then skips it) -- while :func:`proposer_candidate_items`
+    keeps surfacing it as a candidate regardless.
+
+    Idempotent: a file already at :data:`_SUPERSEDED_STATUS`, or already
+    handled, is left untouched. Returns the number of files drained this
+    call (0 on every call after the first, in steady state).
+    """
+    req_dir = _requests_dir(state_dir)
+    if not req_dir.is_dir():
+        return 0
+    drained = 0
+    for path in req_dir.glob("*.json"):
+        try:
+            req = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(req, dict) or not _is_proposer_request(req):
+            continue
+        status = str(req.get("request_status") or req.get("status") or "").strip().lower()
+        if status not in ("queued", "pending"):
+            continue
+        try:
+            if _is_request_handled(state_dir, req, path):
+                continue
+        except Exception:
+            pass
+        req["request_status"] = _SUPERSEDED_STATUS
+        try:
+            path.write_text(json.dumps(req, indent=2, ensure_ascii=False), encoding="utf-8")
+            drained += 1
+        except Exception:
+            continue
+    return drained
 
 
 def _release_root_from_env() -> Path:
@@ -2475,37 +2548,110 @@ def _proposal_creates_new_file(selfevo_repo: Path | None, proposal: dict[str, An
 
 def _latest_non_residual_commit_for_path(
     selfevo_repo: Path | None, target_path: str,
-) -> tuple[str, str] | None:
-    """Return the latest non-residual commit touching ``target_path``."""
+) -> "tuple[str, str] | None | str":
+    """Return the latest INTEGRATION touching ``target_path`` as evidence
+    for self_dedup.
+
+    ADR-035 keep-work architect resolution (#1942 B2): reads
+    ``--first-parent main`` -- a ``--no-ff`` merge is compared against its
+    first parent, so one integration is one log entry carrying the whole
+    cycle branch's diff; a cycle branch's own checkpoint/residual commits
+    (second-parent side) are structurally invisible to this traversal.
+    pG review (0cf0a6f7): first-parent alone is NOT sufficient, though --
+    a residual auto-commit or a direct-to-main writer (bridge-memory, the
+    knowledge curator) commits ON first-parent directly, so
+    ``--invert-grep`` (:data:`commit_markers.ARTIFICIAL_COMMIT_GREP_PATTERNS`)
+    is kept on this query too: a residual-shaped commit is skipped
+    entirely, falling through to the previous REAL first-parent commit,
+    the same #1785 class the self_dedup exclusion elsewhere in this
+    module exists to prevent.
+
+    The latest first-parent commit touching the path is either a
+    direct-to-main commit (bridge-memory/curator writers -- use its own
+    subject) or a merge commit. A merge's own subject is the fixed
+    ``"merge: integrate <cycle_branch>"`` (never changed -- several
+    readers match it verbatim), so real evidence comes from its
+    ``Selfevo-Task`` trailer when present (new-format merges), falling
+    back to ``merge^2`` (the cycle branch tip)'s own latest non-artificial
+    commit for an OLD merge that predates the trailer.
+
+    Returns ``(sha, subject)`` on evidence, ``None`` when genuinely
+    nothing is found (a real, checked answer), or
+    :data:`commit_markers.GIT_UNAVAILABLE` on a git error/timeout -- the
+    caller must not treat that the same as "no evidence".
+    """
     if not selfevo_repo or not target_path:
         return None
     import subprocess as _sp
 
+    from nanobot.runtime.commit_markers import (
+        ARTIFICIAL_COMMIT_GREP_PATTERNS, GIT_UNAVAILABLE, is_artificial_commit_subject,
+    )
+
     repo = Path(selfevo_repo)
     try:
-        raw = _sp.check_output(
+        raw = _sp.run(
+            [
+                "git", "-c", f"safe.directory={repo}", "-C", str(repo),
+                "log", "--first-parent", "main", "-n1", "--format=%H%x1f%s",
+                "--invert-grep", "-i",
+                *(f"--grep={p}" for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
+                "--", target_path,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        return GIT_UNAVAILABLE
+    if raw.returncode != 0:
+        return GIT_UNAVAILABLE
+    line = raw.stdout.strip()
+    if not line:
+        return None
+    sha, _sep, subject = line.partition("\x1f")
+    if not sha:
+        return None
+    if not subject.lower().startswith("merge:"):
+        return sha[:12], subject
+
+    try:
+        trailer = _sp.run(
+            [
+                "git", "-c", f"safe.directory={repo}", "-C", str(repo),
+                "log", "-n1", "--format=%(trailers:key=Selfevo-Task,valueonly)", sha,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        return GIT_UNAVAILABLE
+    if trailer.returncode != 0:
+        return GIT_UNAVAILABLE
+    trailer_value = trailer.stdout.strip()
+    if trailer_value:
+        return sha[:12], trailer_value
+
+    # Old-format merge, no Selfevo-Task trailer yet: fall back to the
+    # cycle branch tip's own latest non-artificial commit.
+    try:
+        branch_raw = _sp.run(
             [
                 "git", "-c", f"safe.directory={repo}", "-C", str(repo),
                 "log", "-n1", "--format=%H%x1f%s", "--invert-grep", "-i",
-                "--grep=^Selfevo-Residual: true",
-                "--grep=^selfevo: auto-commit uncommitted subagent work",
-                "--grep=^selfevo: auto-commit residual state",
-                "--", target_path,
+                *(f"--grep={p}" for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
+                f"{sha}^2",
             ],
-            stderr=_sp.DEVNULL,
-            timeout=10,
-        ).decode(errors="replace").strip()
-        if not raw:
-            return None
-        sha, subject = raw.split("\x1f", 1)
-        if subject.lower().startswith((
-            "selfevo: auto-commit uncommitted subagent work",
-            "selfevo: auto-commit residual state",
-        )):
-            return None
-        return sha[:12], subject
+            capture_output=True, text=True, timeout=10,
+        )
     except Exception:
+        return GIT_UNAVAILABLE
+    if branch_raw.returncode != 0:
+        return GIT_UNAVAILABLE
+    branch_line = branch_raw.stdout.strip()
+    if not branch_line:
         return None
+    b_sha, _sep2, b_subject = branch_line.partition("\x1f")
+    if not b_sha or is_artificial_commit_subject(b_subject):
+        return None
+    return b_sha[:12], b_subject
 
 
 def _dedup_evidence_context(
@@ -2515,11 +2661,20 @@ def _dedup_evidence_context(
     matched_against: str,
 ) -> tuple[str, str | None]:
     """Add non-verdict evidence for existing-path dedup rejections."""
+    from nanobot.runtime.commit_markers import GIT_UNAVAILABLE
+
     reason = _dedup_reject_reason(matched_against)
     if reason != "self_dedup" or _proposal_creates_new_file(selfevo_repo, proposal):
         return feedback, None
     target = str(proposal.get("target_path") or "").strip()
     commit = _latest_non_residual_commit_for_path(selfevo_repo, target)
+    # ADR-035 keep-work architect resolution (#1942 B2), point 4: a git
+    # error/timeout is explicitly NOT the same as "no evidence found" --
+    # this evidence enrichment is best-effort either way (the caller's own
+    # self_dedup verdict already stands), so both degrade the same way
+    # here, but as an explicit branch, not a silent fall-through.
+    if commit == GIT_UNAVAILABLE:
+        return feedback, None
     if commit is None:
         return feedback, None
     sha, subject = commit
@@ -2672,26 +2827,49 @@ def _edit_budget_m() -> int:
         return _DEFAULT_EDIT_BUDGET_M
 
 
-def _git_commit_count_for_path(repo_root: Path, rel_path: str, since_iso: str | None) -> int:
-    """#903: count commits touching ``rel_path`` in ``repo_root``, since
-    ``since_iso`` (``None`` -> full history). Matches the subprocess style of
-    :func:`goal_text_utils._recent_git_log` (10s timeout, stderr discarded).
-    Fail-open: ``0`` (never blocks a cycle) on any subprocess error/timeout.
+def _git_commit_count_for_path(repo_root: Path, rel_path: str, since_iso: str | None) -> "int | None":
+    """#903: count INTEGRATIONS (not raw commits) touching ``rel_path`` in
+    ``repo_root``, since ``since_iso`` (``None`` -> full history).
+
+    ADR-035 keep-work architect resolution (#1942 B2): reads
+    ``--first-parent main`` -- a ``--no-ff`` merge is one log entry per
+    integration, and a cycle branch's own checkpoint/residual commits
+    (second-parent side) are structurally invisible to this traversal:
+    one logical edit spread across several checkpointed steps counts as
+    one commit (the integration), not several.
+
+    pG review (0cf0a6f7): first-parent alone is NOT sufficient, though --
+    a residual auto-commit or a direct-to-main writer (bridge-memory, the
+    knowledge curator) commits ON first-parent directly, so
+    ``--invert-grep`` (:data:`commit_markers.ARTIFICIAL_COMMIT_GREP_PATTERNS`)
+    stays on this query too: a residual-shaped commit must not inflate
+    this budget counter as "real" work either.
+
+    Returns ``None`` (never ``0``) on a git error/timeout -- ``0`` must
+    mean "confirmed zero integrations since the window started", not
+    "couldn't tell". Callers must treat ``None`` as unknown: never as
+    "under budget" or "over budget".
     """
     import subprocess as _sp
 
+    from nanobot.runtime.commit_markers import ARTIFICIAL_COMMIT_GREP_PATTERNS
+
     git_cmd = [
         "git", "-c", f"safe.directory={repo_root}", "-C", str(repo_root),
-        "log", "--oneline",
+        "log", "--first-parent", "main", "--oneline",
+        "--invert-grep", "-i",
+        *(f"--grep={p}" for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
     ]
     if since_iso:
         git_cmd.append(f"--since={since_iso}")
     git_cmd += ["--", rel_path]
     try:
-        out = _sp.check_output(git_cmd, stderr=_sp.DEVNULL, timeout=10).decode(errors="replace")
+        result = _sp.run(git_cmd, capture_output=True, text=True, timeout=10)
     except Exception:
-        return 0
-    return sum(1 for line in out.splitlines() if line.strip())
+        return None
+    if result.returncode != 0:
+        return None
+    return sum(1 for line in result.stdout.splitlines() if line.strip())
 
 
 def _edit_budget_match(
@@ -2737,6 +2915,12 @@ def _edit_budget_match(
         last_used_ts = _parse_inventory_ts(last_used_raw) if last_used_raw else None
         since_iso = last_used_ts.isoformat() if last_used_ts else None
         count = _git_commit_count_for_path(Path(selfevo_repo), target, since_iso)
+        # ADR-035 keep-work architect resolution (#1942 B2), point 4: a git
+        # error/timeout is unknown, not zero -- never block on it, and say
+        # so (the caller decides explicitly, per the architect's wording).
+        if count is None:
+            print(f"edit-budget: git unavailable for {target}; treating as unknown, not blocking (#903)")
+            return "", 0, ""
         if since_iso is None:
             count = max(0, count - 1)  # exclude the creation commit itself
         if count >= m:
@@ -3815,115 +3999,3 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         if context_token is not None:
             reset_call_context(context_token)
 
-
-def propose_fallback(state_dir: Path, selfevo_repo: Path | None) -> "tuple[Path, dict[str, Any]] | None":
-    """#1411 fallback lane: one same-cycle proposal attempt for a bridge run
-    that would otherwise end without ever spawning an executor — no demand,
-    every queued request pre-spawn-suppressed, or the demand-driven proposer
-    rejecting its own output. The BRIDGE decides WHEN to call this
-    (deterministically, from its own control flow — never an LLM call); this
-    function is the one LLM call that decision buys.
-
-    Reuses :data:`_PROPOSER_SYSTEM_PROMPT` (the pre-#760 prompt, unmodified)
-    rather than editing :data:`_DEMAND_PROPOSER_SYSTEM_PROMPT` or stripping
-    its "MUST NOT invent" sentence — two separate, unedited prompts, chosen
-    by lane. Reuses :func:`build_context`'s no-demand shape (the same
-    ledger-digest "recent iteration history" every proposal already gets)
-    and the existing sizing/self-dedup/futile-surface gates
-    (:func:`validate_sizing`/:func:`_is_duplicate_proposal`, the latter
-    including the #1184 futile-surface refusal) — a fallback proposal is
-    suppressed by the SAME rules a demand-driven one is, never a lesser bar.
-    Its self-dedup search space (recent git log, recent proposed/failed
-    titles) is shared with the demand-driven lane, so a fallback proposal
-    that duplicates recent work — demand-driven or fallback — is refused
-    here, before it ever reaches the bridge's own tag/recent-failure/
-    existence-index gates.
-
-    At most ONE LLM call — no retry-with-feedback loop (unlike
-    :func:`maybe_propose`'s up-to-3-call budget): this lane is deliberately
-    the cheapest possible attempt. "At most one fallback proposal per cycle"
-    is enforced by the CALLER (bridge.py calls this at most once per bridge
-    run); this function does not track that itself.
-
-    Returns ``(request_path, request_payload)`` — the same shape
-    ``find_pending_request()`` hands back — on success, so the caller can
-    treat it exactly like a freshly-discovered queued request, still
-    subject to the bridge's own duplicate/futility suppression before ever
-    being spawned. Returns ``None`` on any rejection, dedup hit, disabled
-    kill switch, or error — fail-open: the caller's cycle then ends exactly
-    as it would have without this lane. Never raises.
-    """
-    if not fallback_lane_enabled():
-        return None
-    cycle_id = ""
-    context_token = None
-    try:
-        cycle_id = f"fallback-{uuid.uuid4().hex[:12]}"
-        context_token = set_call_context(cycle_id, "proposer")
-
-        context = build_context(
-            state_dir, selfevo_repo, force_proposal=False, demand_items=None, assigned=False,
-        )
-        if not context:
-            _record_proposer_reject(state_dir, "empty_context")
-            return None
-
-        proposal = propose(context, system_prompt=_PROPOSER_SYSTEM_PROMPT)
-
-        if isinstance(proposal, dict):
-            noop = proposal.get("no_valuable_task")
-            is_noop = noop is True or noop == 1 or (
-                isinstance(noop, str) and noop.strip().lower() in ("true", "yes", "1")
-            )
-            if is_noop:
-                _record_noop_skip(state_dir, str(proposal.get("reason") or ""))
-                return None
-
-        ok, reason = validate_sizing(proposal)
-        if not ok:
-            reject_reason = (
-                "llm_unavailable" if _last_propose_failure
-                else ("operator_owned_path" if reason == "operator_owned_path" else "sizing_rejected")
-            )
-            if _last_propose_failure:
-                detail = _last_propose_failure
-            else:
-                try:
-                    snippet = (
-                        json.dumps(proposal, ensure_ascii=False)[:120]
-                        if isinstance(proposal, dict) else repr(proposal)[:120]
-                    )
-                except Exception:
-                    snippet = "<unserializable>"
-                detail = f"{reason}; reply={snippet}"
-            _record_proposer_reject(
-                state_dir,
-                reject_reason,
-                task_title=str(proposal.get("task_title") or "") if isinstance(proposal, dict) else "",
-                target_path=str(proposal.get("target_path") or "") if isinstance(proposal, dict) else "",
-                detail=detail,
-            )
-            return None
-
-        dup, dup_reason, dup_matched = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
-        if dup:
-            reject_reason = _dedup_reject_reason(dup_matched)
-            _record_proposer_reject(
-                state_dir,
-                reject_reason,
-                task_title=str(proposal.get("task_title") or ""),
-                target_path=str(proposal.get("target_path") or ""),
-                matched_against=dup_matched,
-                detail=dup_reason if reject_reason == enhancement_gate.REASON else "",
-            )
-            return None
-
-        request_path = write_request(state_dir, proposal, selfevo_repo, cycle_id=cycle_id, lane="fallback")
-        request_payload = json.loads(Path(request_path).read_text(encoding="utf-8"))
-        return Path(request_path), request_payload
-    except Exception as exc:
-        _record_proposer_reject(state_dir, "error", detail=f"{type(exc).__name__}: {exc}")
-        return None
-    finally:
-        if context_token is not None:
-            reset_call_context(context_token)

@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from nanobot.runtime import bridge
+from tests.test_bridge_executor_llm_error import _stub_planning_session
 from tests.test_cycle_ledger import (
     _FakeSubagentManager,
     _init_selfevo_repo,
@@ -122,11 +123,14 @@ class TestEndToEndAgreement:
         monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
         monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
         monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        _stub_planning_session(monkeypatch, "add feature")
 
         _seed_bridge_request(state_dir, "req-green", "cycle-green")
         assert asyncio.run(bridge._main_impl()) == 0
 
-        result_path = state_dir / "subagents" / "results" / "result-req-green.json"
+        # ADR-035 rule 1 (#1942): result files are keyed by the per-cycle
+        # uuid, not the retired queue's literal request id.
+        result_path = next((state_dir / "subagents" / "results").glob("result-*.json"))
         artifact = json.loads(result_path.read_text(encoding="utf-8"))
 
         outcome_rows = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"]
@@ -170,16 +174,16 @@ class TestEndToEndAgreement:
             state_dir, "req-dup", "cycle-dup",
             task_title=f"Implement and commit: {title}",
         )
+        # ADR-035 rule 1 (#1942): the plan's own title is what the dedup
+        # gate matches against now -- reproduce the seeded title exactly.
+        _stub_planning_session(monkeypatch, f"Implement and commit: {title}")
         assert asyncio.run(bridge._main_impl()) == 0
 
-        result_path = state_dir / "subagents" / "results" / "result-req-dup.json"
+        result_path = next(p for p in results_dir.glob("result-*.json") if p.name != "result-req-prior.json")
         artifact = json.loads(result_path.read_text(encoding="utf-8"))
         assert artifact["result_status"] == "blocked"
 
-        outcome_rows = [
-            r for r in _read_ledger(state_dir)
-            if r["phase"] == "outcome" and r.get("cycle_id") == "cycle-dup"
-        ]
+        outcome_rows = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"]
         row = outcome_rows[-1]
         assert row["real_result"]["is_real_result"] == bridge._is_real_result(artifact)
         assert row["real_result"]["is_real_result"] is False
