@@ -3888,6 +3888,7 @@ async def _main_impl_body():
                 commits_pushed=0,
                 result_status='blocked',
                 backlog_title=backlog_title,
+                delivered=False,
                 key_learnings=[
                     f'Task "{_dup_check_title[:60]}" matches recently-failed/rejected proposal '
                     f'"{_recent_failure_title[:60]}" (within {FAILURE_SUPPRESS_HOURS}h); suppressed '
@@ -3960,6 +3961,7 @@ async def _main_impl_body():
                 commits_pushed=0,
                 result_status='blocked',
                 backlog_title=backlog_title,
+                delivered=False,
                 key_learnings=[
                     f'Task "{_dup_check_title[:60]}" matched an existing artifact '
                     f'({_existence_match}) via the #750 existence index (semantic '
@@ -4080,6 +4082,7 @@ async def _main_impl_body():
                 commits_pushed=0,
                 result_status='blocked',
                 backlog_title=backlog_title,
+                delivered=False,
                 key_learnings=[
                     f"Cycle-branch setup failed ({_cycle_setup['reason']}); "
                     'the eeebot-self-evolving checkout was left untouched, no subagent was spawned.',
