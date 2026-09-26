@@ -211,7 +211,6 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
                 # other terminal outcome (this branch counts capacity spent
                 # regardless of success/failure).
                 and str(row.get("outcome")) not in _NOT_YET_TERMINAL
-                and row.get("reason") != "service_only"
             ):
                 terminal.add(cycle)
         return len(proposed & terminal)
@@ -235,7 +234,6 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
             and row.get("outcome")
             # #1709: not yet terminal — see the sibling branch above.
             and str(row.get("outcome")) not in _NOT_YET_TERMINAL
-            and row.get("reason") != "service_only"
         ):
             terminal_outcomes[cycle] = str(row.get("outcome"))
             if ts is not None:
