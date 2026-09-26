@@ -203,8 +203,12 @@ def record_llm_call(
             "cycle_id": cycle_id,
             "component": component,
             "seq": seq,
-            "system_prompt_chars": int(system_prompt_chars) if system_prompt_chars is not None else None,
-            "context_window": int(context_window) if context_window is not None else None,
+            "system_prompt_chars": (
+                int(system_prompt_chars) if system_prompt_chars is not None else None
+            ),
+            "context_window": (
+                int(context_window) if context_window is not None else None
+            ),
         }
 
         out_dir = _llm_calls_dir()
