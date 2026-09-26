@@ -119,6 +119,8 @@ class TestFinishPendingPushes:
         assert pushed["files_changed"] == []
         assert pushed["outcome"] == "pushed_late"
         assert pushed["reason"] == "delivery_unknown"
+        assert pushed["verdict"] == "inconclusive"
+        assert pushed["verdict_reason"] == "delivery_unknown"
         assert pushed["delivered"] is False
         assert pushed["delivery_state"] == "unknown"
         (staged["state_dir"] / "demand").mkdir(parents=True, exist_ok=True)

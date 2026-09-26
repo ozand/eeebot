@@ -1534,6 +1534,18 @@ class TestCompletedSidecar:
         assert "priority-normal123" in entries
         assert "fallback:normal-cycle" not in entries
 
+    def test_legacy_success_with_normalized_empty_paths_still_folds(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "legacy-empty-success", "priority-legacy-empty", ts=_now_iso(2))
+        # Historical writers commonly normalized unknown paths to [] rather
+        # than omitting the field altogether.
+        _append_outcome(
+            state_dir, "legacy-empty-success", "success", ts=_now_iso(1), files_changed=[],
+        )
+
+        assert demand._fold_completed(state_dir) == {"priority-legacy-empty"}
+        assert "priority-legacy-empty" in _completed_sidecar(state_dir)["entries"]
+
     def test_pushed_late_folds_the_same_as_success(self, tmp_path):
         """#1709 increment 2: 'pushed_late' is a genuine success delayed by
         one cycle (a gate-passed cycle whose push exhausted its transient
