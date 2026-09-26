@@ -3031,6 +3031,35 @@ def test_planner_rest_resets_supply_streak(tmp_path: Path, monkeypatch):
     )
 
 
+def test_planner_rest_snapshot_checks_returncode(tmp_path: Path, monkeypatch):
+    """Small item (ADR-035 Test Contract, #1962): ``planner_rest``'s
+    version snapshot must check the returncode of ``git rev-parse``, not
+    just its stdout -- a failing rev-parse can still print something to
+    stdout (e.g. an ambiguous-ref echo) despite a nonzero exit. Ignoring
+    the returncode would store that literal as a "version"; repeating the
+    same failed read then looks unchanged forever, holding instead of
+    waking on an unreadable input.
+    """
+    import subprocess
+
+    from nanobot.runtime import planner_rest
+
+    real_run = subprocess.run
+
+    def _fake_failing_rev_parse(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and cmd[-2:] == ["rev-parse", "origin/main"]:
+            return subprocess.CompletedProcess(cmd, 128, stdout="origin/main\n", stderr="fatal: ambiguous argument\n")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _fake_failing_rev_parse)
+
+    wc = planner_rest.WakeCondition(kind="main_commit", ref="")
+    version = planner_rest.snapshot_version(tmp_path, tmp_path, wc)
+    assert version is None, (
+        f"a failing rev-parse (nonzero returncode) must read as unknown (None), got {version!r}"
+    )
+
+
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
 # architect addendum, #1942 B2) -----------------------------------------------
 
