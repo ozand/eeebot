@@ -2684,7 +2684,20 @@ def _fold_completed(
                 # cycle that did the work) — folds into completed the same as
                 # 'success' so the demand is not re-proposed as unfinished.
                 if str(row.get("outcome") or "").strip().lower() in ("success", "pushed_late"):
-                    if not is_service_only(row.get("files_changed")):
+                    changed_files = row.get("files_changed")
+                    if row.get("delivered") is False or row.get("delivery_state") == "unknown":
+                        continue
+                    # Legacy success rows may omit paths; retain prior folding
+                    # behavior for those, but never infer success for a late push
+                    # whose paths were lost before delivery truth was recorded.
+                    if changed_files is None:
+                        if row.get("outcome") == "pushed_late":
+                            continue
+                        success_by_cycle[cycle_id] = row
+                        continue
+                    if not isinstance(changed_files, list) or not changed_files:
+                        continue
+                    if not is_service_only(changed_files):
                         success_by_cycle[cycle_id] = row
         changed = False
         for cycle_id in fallback_cycles:
