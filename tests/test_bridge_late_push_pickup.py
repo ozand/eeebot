@@ -108,3 +108,32 @@ class TestFinishPendingPushes:
         origin, work = _init_repo(tmp_path)
         state_dir = tmp_path / "state"
         assert bridge._finish_pending_pushes(work, state_dir) == 0
+
+    def test_pending_open_increment_cleared_on_late_push_success(self, tmp_path):
+        """N3 (round 2 external re-check, architect resolution
+        2026-09-26): a late push is a genuine integration success --
+        exactly like the immediate ``_integrate_cycle_to_main`` path,
+        it must clear a pending open increment for the SAME cycle_id.
+        Without this, a kept increment that finishes via late push
+        still reads as pending forever, and the next ``keep`` fails
+        with ``resume_branch_missing`` although the work already
+        integrated.
+        """
+        from nanobot.runtime import open_increment
+
+        origin, work = _init_repo(tmp_path)
+        staged = _stage_push_pending(tmp_path, work, "cid-late-pending")
+
+        open_increment.record_supply_interruption(
+            staged["state_dir"], "cid-late-pending",
+            retry_key="n3-late-push-test", plan_text="finish the kept increment",
+            candidate_id=None, selfevo_repo=work, branch=staged["branch"],
+        )
+        assert open_increment.pending_open_increment(staged["state_dir"]) is not None
+
+        resolved = bridge._finish_pending_pushes(work, staged["state_dir"])
+        assert resolved == 1
+
+        assert open_increment.pending_open_increment(staged["state_dir"]) is None, (
+            "a successful late push must clear the pending open increment for this cycle"
+        )
