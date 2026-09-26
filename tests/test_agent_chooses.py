@@ -2083,6 +2083,89 @@ def test_unfinished_session_never_integrates(tmp_path: Path, monkeypatch):
     assert pending["branch"] == branches[0]
 
 
+@pytest.mark.parametrize("executor_status", ["bounded_stop", "blocked", "cancelled", None, "error"])
+def test_unfinished_session_with_ordinary_commit_never_integrates(tmp_path: Path, monkeypatch, executor_status):
+    """Round 2 external re-check, item 1 (architect resolution 2026-09-26):
+    completion is POSITIVE-only -- a session is finished ONLY when its own
+    terminal telemetry says ``ok``, exactly as production writes it on
+    success. ``bounded_stop``/``blocked``/``cancelled``/``error`` and no
+    telemetry at all are all "not finished", and the barrier applies to
+    ANY commit the session made, not only a checkpoint.
+
+    D1's original fix (``test_unfinished_session_never_integrates`` above)
+    only blocked integration when the session errored AND held an actual
+    checkpoint commit (``_any_checkpoint_commit_since``) -- an ORDINARY
+    commit, or a session that stopped for any other non-``ok`` reason, or
+    wrote no telemetry at all, still reached the normal smoke/gate/
+    integrate path unguarded. Drives a real cycle whose fake executor
+    makes one ordinary (non-checkpoint) commit and then writes -- or, for
+    ``executor_status is None``, omits entirely -- terminal telemetry with
+    the given status; none of these must ever integrate.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge, open_increment
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    class _OrdinaryCommitThenStatusManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            if self._telemetry_component == "planner":
+                return "fake planner spawned (noop)"
+            (self.workspace / "scripts").mkdir(exist_ok=True)
+            (self.workspace / "scripts" / "partial.py").write_text(
+                "def partial():\n    return 'wip'\n", encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "-C", str(self.workspace), "add", "scripts/partial.py"],
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(self.workspace), "commit", "-m", "feat: partial work"],
+                check=True, capture_output=True,
+            )
+            if executor_status is not None:
+                task_id = f"unfinished-{executor_status}"
+                (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+                (state_dir / "subagents" / f"{task_id}.json").write_text(
+                    json.dumps({"status": executor_status, "summary": "stopped", "result": "stopped"}),
+                    encoding="utf-8",
+                )
+
+                async def _noop():
+                    return None
+
+                self._running_tasks[task_id] = asyncio.create_task(_noop())
+            return "fake subagent spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _OrdinaryCommitThenStatusManager)
+    _stub_planning_session(monkeypatch, "finish the wip feature (non-checkpoint, non-ok status)")
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    main_tree = subprocess.run(
+        ["git", "-C", str(work), "ls-tree", "-r", "--name-only", "main"], capture_output=True, text=True,
+    ).stdout
+    assert "scripts/partial.py" not in main_tree, (
+        f"an ordinary commit from a session with status={executor_status!r} must never integrate"
+    )
+
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is not None, f"status={executor_status!r} with commits must leave a pending open increment"
+    assert pending["reason"] == "interrupted_defect"
+
+
 # --- keep-work: a resumed increment keeps one opening entry (ADR-035,
 # #1942 B2) --------------------------------------------------------------------
 
