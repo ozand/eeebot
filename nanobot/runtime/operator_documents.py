@@ -599,8 +599,16 @@ def _completed_prose_entries(raw_text: str) -> tuple[PriorityEntry, ...]:
         return ()
     tail = raw_text[idx + len(marker):]
     entries: list[PriorityEntry] = []
-    matches = list(_COMPLETED_EM_DASH_RE.finditer(tail))
-    matches += list(_COMPLETED_PAREN_PRIORITY_RE.finditer(tail))
+    # Completed prose ends at the next operator-document section, if any;
+    # never scan Current priorities (or an unrelated section) for more items.
+    section_end = len(tail)
+    for section_marker in ("Current priority targets:",):
+        marker_at = tail.find(section_marker)
+        if marker_at >= 0:
+            section_end = min(section_end, marker_at)
+    completed_text = tail[:section_end]
+    matches = list(_COMPLETED_EM_DASH_RE.finditer(completed_text))
+    matches += list(_COMPLETED_PAREN_PRIORITY_RE.finditer(completed_text))
     for match in matches:
         try:
             number = int(match.group(1))

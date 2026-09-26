@@ -1819,6 +1819,19 @@ def build_context(
         max_guardrail = max(0, _MAX_CONTEXT_CHARS - len(surface_rule) - 2)
         if len(guardrail_tail) > max_guardrail:
             guardrail_tail = guardrail_tail[:max_guardrail]
+        # Reserve room for the fixed priority oversize marker even when
+        # guardrails alone would otherwise consume the full blob budget.
+        # This preserves the hard cap and keeps the priority state atomic.
+        from nanobot.runtime.operator_documents import _PRIORITIES_BLOCK_OVERSIZE_TEXT
+        _priority_marker_reserve = min(
+            len(_PRIORITIES_BLOCK_OVERSIZE_TEXT),
+            max(0, _MAX_CONTEXT_CHARS - len(surface_rule) - 2),
+        )
+        if len(guardrail_tail) + len(surface_rule) + 2 + _priority_marker_reserve > _MAX_CONTEXT_CHARS:
+            available_guardrail = max(
+                0, _MAX_CONTEXT_CHARS - len(surface_rule) - 2 - _priority_marker_reserve
+            )
+            guardrail_tail = guardrail_tail[:available_guardrail]
         reserved = len(guardrail_tail) + len(surface_rule) + 2  # two joining "\n"
         blob = "\n".join(blob_parts)
         budget = max(0, _MAX_CONTEXT_CHARS - reserved)
@@ -1833,14 +1846,14 @@ def build_context(
                 # replace it with its fixed oversize/unavailable marker.
                 from nanobot.runtime.operator_documents import _PRIORITIES_BLOCK_OVERSIZE_TEXT
 
-                priority_fallback = (
-                    operator_priorities_block
-                    if len(operator_priorities_block) <= budget
-                    else _PRIORITIES_BLOCK_OVERSIZE_TEXT
-                )
-                marker = "\n[priorities truncated]\n"
-                keep = max(0, budget - len(marker))
-                blob = priority_fallback[:keep] + marker[:budget - keep]
+                if len(operator_priorities_block) <= budget:
+                    blob = operator_priorities_block
+                elif len(_PRIORITIES_BLOCK_OVERSIZE_TEXT) <= budget:
+                    blob = _PRIORITIES_BLOCK_OVERSIZE_TEXT
+                else:
+                    # Zero/small residual budget: reserve marker characters
+                    # ahead of guardrail trimming above, then never slice it.
+                    blob = _PRIORITIES_BLOCK_OVERSIZE_TEXT[:budget]
         context = blob + "\n" + guardrail_tail + "\n" + surface_rule
 
         # #844: PROTECTED (never-truncated) stepping-stones section — optional
