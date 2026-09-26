@@ -338,7 +338,44 @@ def pending_open_increment(state_dir: "Path") -> "dict[str, Any] | None":
     return load_state(state_dir).pending
 
 
-def resolve(state_dir: "Path", cycle_id: str, decision: str, *, reason: str = "") -> OpenIncrementState:
+def _create_inspection_ref(selfevo_repo: "Path", pending: "dict[str, Any] | None") -> None:
+    """D7 (ADR-035 Test Contract, external review finding #7): ``delete``
+    must not silently hand the branch to the next prune sweep --
+    ``refs/selfevo/inspect/<cycle_id>`` pins the branch's current tip
+    under a ref namespace pruning never looks at
+    (:func:`nanobot.runtime.bridge._prune_stale_cycle_branches` only ever
+    queries ``refs/heads/selfevo/cycle-*``), so the commit stays
+    reachable and named for inspection even after the original branch
+    ref is eventually pruned as ordinary forensic history. Retention on
+    the inspection ref itself (14 days) is a separate, not-yet-built
+    cleanup -- out of scope here. Fail-open, silent: a failed ref write
+    must never block the delete decision itself."""
+    if not pending:
+        return
+    branch = str(pending.get("branch") or "").strip()
+    cycle_id = str(pending.get("cycle_id") or "").strip()
+    if not branch or not cycle_id:
+        return
+    import subprocess
+
+    try:
+        git = ["git", "-c", f"safe.directory={selfevo_repo}", "-C", str(selfevo_repo)]
+        tip = subprocess.run(
+            git + ["rev-parse", f"refs/heads/{branch}"], capture_output=True, text=True, timeout=10,
+        )
+        if tip.returncode == 0 and tip.stdout.strip():
+            subprocess.run(
+                git + ["update-ref", f"refs/selfevo/inspect/{cycle_id}", tip.stdout.strip()],
+                capture_output=True, text=True, timeout=10,
+            )
+    except Exception:
+        pass
+
+
+def resolve(
+    state_dir: "Path", cycle_id: str, decision: str, *, reason: str = "",
+    selfevo_repo: "Path | None" = None,
+) -> OpenIncrementState:
     """The planning session's keep/edit/delete decision on the pending open
     increment (ADR-035 rule 3, "I").
 
@@ -356,6 +393,12 @@ def resolve(state_dir: "Path", cycle_id: str, decision: str, *, reason: str = ""
     77ca scenario B2 exists for. ``pending`` is instead annotated
     ``resumed_by`` with the deciding cycle; only :func:`record_attempt_finished`
     (a REAL terminal outcome for this increment's ``cycle_id``) removes it.
+
+    D7 (ADR-035 Test Contract, external review finding #7): ``delete``,
+    given ``selfevo_repo``, pins the pending increment's branch under
+    ``refs/selfevo/inspect/<cycle_id>`` (see :func:`_create_inspection_ref`)
+    BEFORE ``pending`` is cleared below -- the branch's own pending-increment
+    pruning exemption disappears the instant this call returns.
     """
     from nanobot.runtime.cycle_ledger import append_event
 
@@ -365,6 +408,8 @@ def resolve(state_dir: "Path", cycle_id: str, decision: str, *, reason: str = ""
         )
     state = load_state(state_dir)
     retry_key = (state.pending or {}).get("retry_key", "")
+    if decision == "delete" and selfevo_repo is not None:
+        _create_inspection_ref(selfevo_repo, state.pending)
     if decision == "keep":
         if state.pending is not None:
             state.pending = {**state.pending, "resumed_by": cycle_id or ""}

@@ -3675,7 +3675,7 @@ async def _run_planning_session(
                     _resume_branch = _pending_open_increment.get('branch') or None
                     _resume_cycle_id = _pending_open_increment.get('cycle_id') or None
                     _resume_skip_opening_entry = bool(_pending_open_increment.get('opening_entry_written'))
-                _open_increment_mod.resolve(state_dir, cycle_id, _oi_decision)
+                _open_increment_mod.resolve(state_dir, cycle_id, _oi_decision, selfevo_repo=selfevo_repo)
                 plan_lines.append(f'Open increment: {_oi_decision}')
             except Exception:
                 pass
