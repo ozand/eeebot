@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 _CALL_CONTEXT: ContextVar[dict[str, str] | None] = ContextVar("_llm_call_context", default=None)
+_CALL_SEQ: ContextVar[int | None] = ContextVar("_llm_call_seq", default=None)
 
 # Monotonic within-process sequence per cycle_id, used to order prompt
 # captures belonging to the same self-evolving cycle. Process-local is
@@ -66,20 +67,27 @@ def _redact_secrets(text: str) -> str:
     return text
 
 
-def set_call_context(cycle_id: str | None, component: str | None) -> Token:
+def set_call_context(cycle_id: str | None, component: str | None) -> tuple[Token, Token]:
     """Set the current (cycle_id, component) attribution context.
 
     Returns a token that must be passed to :func:`reset_call_context` to
     restore whatever context was active before (so nested calls don't leak
     into the caller's context once they finish).
     """
-    return _CALL_CONTEXT.set({"cycle_id": cycle_id or "", "component": component or ""})
+    # A cached duration sequence belongs only to the active call context; never
+    # let it leak into a later prompt-only call after this boundary.
+    seq_token = _CALL_SEQ.set(None)
+    context_token = _CALL_CONTEXT.set({"cycle_id": cycle_id or "", "component": component or ""})
+    return context_token, seq_token
 
 
-def reset_call_context(token: Token) -> None:
-    """Restore the call context captured by the matching ``set_call_context``."""
+def reset_call_context(token: tuple[Token, Token]) -> None:
+    """Restore call attribution and the sequence captured at context entry."""
+    context_token, seq_token = token
     with contextlib.suppress(Exception):
-        _CALL_CONTEXT.reset(token)
+        _CALL_CONTEXT.reset(context_token)
+    with contextlib.suppress(Exception):
+        _CALL_SEQ.reset(seq_token)
 
 
 def current_cycle_id(component: str | None = None) -> str:
@@ -145,6 +153,11 @@ def system_chars(messages: list[dict[str, Any]] | None) -> int | None:
     return None
 
 
+def _next_call_seq(cycle_id: str, component: str) -> int:
+    """Next per-(cycle_id, component) sequence shared by call and prompt rows."""
+    return next(_PROMPT_SEQ.setdefault((cycle_id, component), count(1)))
+
+
 def record_llm_call(
     *,
     model: str | None,
@@ -179,6 +192,11 @@ def record_llm_call(
     try:
         ctx = _CALL_CONTEXT.get() or {}
         usage = usage or {}
+        cycle_id = ctx.get("cycle_id") or ""
+        component = ctx.get("component") or ""
+        # Allocate the call sequence before writing duration and prompt rows.
+        seq = _next_call_seq(cycle_id, component)
+        _CALL_SEQ.set(seq)
         record = {
             "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "model": model or "",
@@ -189,8 +207,9 @@ def record_llm_call(
             "total_tokens": int(usage.get("total_tokens") or 0),
             "finish_reason": finish_reason or "",
             "retries": int(retries),
-            "cycle_id": ctx.get("cycle_id") or "",
-            "component": ctx.get("component") or "",
+            "cycle_id": cycle_id,
+            "component": component,
+            "seq": seq,
             "system_prompt_chars": (
                 int(system_prompt_chars) if system_prompt_chars is not None else None
             ),
@@ -498,18 +517,19 @@ def record_llm_prompt(
     try:
         toggle = os.environ.get("LLM_CAPTURE_PROMPTS")
         if toggle is not None and toggle.strip().lower() in ("0", "false", ""):
+            _CALL_SEQ.set(None)
             return
 
         ctx = _CALL_CONTEXT.get() or {}
         cycle_id = ctx.get("cycle_id") or ""
         component = ctx.get("component") or ""
 
-        # #1374: keyed by (cycle_id, component) — the proposer's prompts and
-        # the executor's prompts for one cycle are recorded by different
-        # processes, each restarting at 1; sharing one key would interleave
-        # two independent sequences under one cycle.
-        counter = _PROMPT_SEQ.setdefault((cycle_id, component), count(1))
-        seq = next(counter)
+        # The duration writer allocates this call's sequence first. Direct
+        # prompt-only callers still allocate their own sequence.
+        seq = _CALL_SEQ.get()
+        if seq is None:
+            seq = _next_call_seq(cycle_id, component)
+        _CALL_SEQ.set(None)
 
         record = {
             "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
