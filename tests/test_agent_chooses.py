@@ -3507,6 +3507,127 @@ def test_delete_with_inspection_ref_failure_hands_over_no_new_plan(tmp_path: Pat
     )
 
 
+def test_edit_with_persistence_failure_hands_over_no_new_plan(tmp_path: Path, monkeypatch):
+    """Codex review of 984a133f (`nanobot/runtime/open_increment.py:499`):
+    ``resolve``'s ``edit``/``delete`` branch clears ``pending`` in memory
+    and calls ``_save_state``, but never checks its result -- unlike the
+    ``delete`` branch's own inspection-ref protection failure (which
+    early-returns before touching ``pending`` at all), a generic
+    ``_save_state`` failure here left the CALLER with no way to tell the
+    decision didn't actually persist. The caller would accept an
+    unrelated brand-new plan while the OLD increment's pending record
+    is still sitting on disk, unresolved. Same shape as 7/A's
+    delete-inspection-ref-failure test and N2's keep+edit test, but for
+    the plain ``edit`` decision's own save call.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge, no_plan_recovery, open_increment
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    _task_writing_dir = bridge.RELEASE_ROOT / "nanobot" / "skills" / "task-writing"
+    _task_writing_dir.mkdir(parents=True, exist_ok=True)
+    (_task_writing_dir / "SKILL.md").write_text("task-writing contract (test stub)\n", encoding="utf-8")
+
+    old_cycle_id = "cycle-edit-savefail"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", old_branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "edit_savefail.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/edit_savefail.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/edit_savefail.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id,
+        retry_key="edit-savefail-test", plan_text="finish the wip feature", candidate_id=None,
+        selfevo_repo=work, branch=old_branch,
+    )
+    _oi_state = open_increment.load_state(state_dir)
+    _oi_state.hold["deadline"] = "2000-01-01T00:00:00Z"
+    open_increment._save_state(state_dir, _oi_state)
+    pending_before = open_increment.pending_open_increment(state_dir)
+    assert pending_before is not None
+
+    class _PlannerChoosesEditManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            if self._telemetry_component != "planner":
+                return "fake subagent spawned"
+            task_id = "planner-edit-savefail-01"
+            raw_plan = json.dumps({
+                "insight": "start fresh on an unrelated task",
+                "plan": "a brand new, unrelated task",
+                "iterations_planned": 1,
+                "open_increment_decision": "edit",
+            })
+            (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+            (state_dir / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({
+                    "status": "ok",
+                    "result": raw_plan,
+                    "context_usage": {"iterations": [{}]},
+                }),
+                encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
+            return "fake planner spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _PlannerChoosesEditManager)
+    # Only resolve()'s OWN persistence write fails -- a blanket
+    # `_save_state` stub also fails `record_model_call_completed`'s
+    # earlier reset call (harmless) AND the NEW cycle's
+    # `record_attempt_started` registration (N4, not what this test
+    # targets). resolve()'s is the first call whose state has
+    # ``pending is None`` (the edit decision clearing it) -- fail exactly
+    # that one, once.
+    _real_save_state = open_increment._save_state
+    _failed_once = {"done": False}
+
+    def _fake_save_state(sd, st):
+        if not _failed_once["done"] and st.pending is None:
+            _failed_once["done"] = True
+            return False
+        return _real_save_state(sd, st)
+
+    monkeypatch.setattr(open_increment, "_save_state", _fake_save_state)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    pending_after = open_increment.pending_open_increment(state_dir)
+    assert pending_after is not None, (
+        "a failed edit (save_failed) must leave pending untouched"
+    )
+    assert pending_after["cycle_id"] == old_cycle_id, (
+        "the ORIGINAL increment must still be pending -- the caller must not accept "
+        "the unrelated new plan while a failed edit leaves it unresolved"
+    )
+
+    no_plan_state = no_plan_recovery.load_state(state_dir)
+    assert no_plan_state.consecutive_planner >= 1, (
+        "a rejected edit (save_failed) must count as a planner-family no_plan outcome"
+    )
+
+
 def test_stopped_and_minimal_mode_are_enforced(tmp_path: Path, monkeypatch):
     """D9 (ADR-035 Test Contract, external review finding #9): both
     ``no_plan_recovery`` states are WIRED, not merely recorded --
