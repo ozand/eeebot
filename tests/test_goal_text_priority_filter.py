@@ -375,7 +375,7 @@ def test_verbatim_label_survives_checkpoints_via_the_closing_commit(tmp_path: Pa
 
     repo = tmp_path / "eeebot-self-evolving"
     repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
     (repo / "f.txt").write_text("0", encoding="utf-8")
