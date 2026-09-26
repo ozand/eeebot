@@ -84,37 +84,9 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
-
-#: Rule C service paths (#1903 amendment, 2026-09-25), taken from the code
-#: of their writers, not from observed commits: ``diary/**`` (harness,
-#: ``day_diary`` via the bridge's open-entry and plan-block writers);
-#: ``memory/MEMORY.md`` and ``memory/HISTORY.md`` (harness,
-#: ``nanobot.agent.memory.MemoryStore`` and the bridge's backlog [Done]
-#: safety-net); the three JSON files are the instance repo's own
-#: ``TRACKED_MEMORY_FILES`` in ``scripts/run_all_tests.py`` -- default
-#: outputs of ``check_confirmation_ratio.py`` / ``analyze_repeat_failures.py``
-#: that a residual auto-commit sweeps in.
-SERVICE_PATH_PREFIXES = ("diary/",)
-SERVICE_PATH_EXACT = frozenset({
-    "memory/MEMORY.md",
-    "memory/HISTORY.md",
-    "memory/confirmation_status.json",
-    "memory/prevent_repeats.json",
-    "memory/repeat_failures.json",
-})
+from nanobot.runtime.service_paths import is_service_only
 
 _MERGE_SUBJECT_PREFIX = "merge: integrate selfevo/cycle-"
-
-
-def is_service_path(path: str) -> bool:
-    p = path.replace("\\", "/")
-    return p in SERVICE_PATH_EXACT or p.startswith(SERVICE_PATH_PREFIXES)
-
-
-def is_service_only(files: "list[str] | None") -> bool:
-    """True when *files* is non-empty and every path is a service path."""
-    return bool(files) and all(is_service_path(f) for f in files)
-
 
 def load_branch_files(repo: Path, cycle_ids, ref: str = "origin/main") -> dict[str, list[str]]:
     """cycle_id -> files its branch changed, from the newest

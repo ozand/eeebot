@@ -763,7 +763,7 @@ def _loop_section(
                 # are not failures and must not feed repeat_failure_rate.
                 if str(row.get("reason") or "").strip() == "recent_duplicate_failure":
                     duplicate_failure_skips += 1
-            elif outcome == "failed":
+            elif outcome == "failed" or (outcome == "partial" and str(row.get("reason") or "") == "service_only"):
                 failed_outcomes += 1
                 task_id = proposed_task_by_cycle.get(cycle_id) or str(row.get("task_id") or row.get("demand_id") or "").strip()
                 if task_id:

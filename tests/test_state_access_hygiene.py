@@ -22,6 +22,10 @@ ALLOW = {
     # directly (not state_access) so its own verified reproduction of the
     # recorded baselines (see PR #1928 / the #1903 comment) stays exact.
     "scripts/measure_package_1903.py",
+    # #1959: read-only host exporter for the fixed #1903 base fixture; it
+    # reads raw ledger/llm_calls files and the instance repo diff so the
+    # fixture can be independently reproduced outside runtime readers.
+    "scripts/export_package_1903_base_fixture.py",
     "nanobot/runtime/action_index.py",
     "nanobot/runtime/bridge.py",
     "nanobot/runtime/existence_index.py",
