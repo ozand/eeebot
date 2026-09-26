@@ -120,7 +120,7 @@ def test_real_prompt_tokens_trigger_when_chars_estimate_is_under_threshold(tmp_p
         window_tokens=98_304,
         prompt_tokens=96_116,
     )
-    assert cc._OMIT_MARKER in result[3]["content"]
+    assert result[3]["content"].startswith("[Compaction summary")
 
 
 def test_missing_prompt_tokens_falls_back_to_whole_history_estimate(tmp_path):
@@ -129,7 +129,7 @@ def test_missing_prompt_tokens_falls_back_to_whole_history_estimate(tmp_path):
         messages, "fallback", 1, tmp_path,
         threshold=0.01, keep_tokens=1, window_tokens=98_304,
     )
-    assert cc._OMIT_MARKER in result[3]["content"]
+    assert result[3]["content"].startswith("[Compaction summary")
 
 
 def test_below_threshold_messages_are_byte_identical_with_usage(tmp_path):
@@ -168,7 +168,7 @@ def test_delta_triggers_compaction_when_base_prompt_is_under_threshold(tmp_path)
         prompt_tokens=70_000,
         prompt_token_delta=3_000,
     )
-    assert cc._OMIT_MARKER in result[3]["content"]
+    assert result[3]["content"].startswith("[Compaction summary")
 
 
 def test_reserve_tokens_parameter_affects_trigger_threshold(tmp_path):
@@ -185,7 +185,7 @@ def test_reserve_tokens_parameter_affects_trigger_threshold(tmp_path):
         reserve_tokens=20_000,
         prompt_tokens=65_000,
     )
-    assert cc._OMIT_MARKER in result[3]["content"]
+    assert result[3]["content"].startswith("[Compaction summary")
 
     result_no_reserve = cc.compact_messages(
         messages,
@@ -227,7 +227,7 @@ def test_above_threshold_compacts_old_tool_results(tmp_path):
     assert len(tool_results) == 4
     assert tool_results[-1]["content"] == big, "the newest result fits the keep-token span"
     for tr in tool_results[:-1]:
-        assert cc._OMIT_MARKER in tr["content"], (
+        assert tr["content"].startswith("[Compaction summary") or cc._OMIT_MARKER in tr["content"], (
             f"Expected omit marker in compacted content, got: {tr['content'][:100]!r}"
         )
 
@@ -250,6 +250,106 @@ def test_compacted_messages_not_recompacted_on_next_call(tmp_path):
     compacted_content_2 = [m["content"] for m in result2 if m.get("role") == "tool"]
 
     assert compacted_content_1 == compacted_content_2
+    assert any(text.startswith("[Compaction summary") for text in compacted_content_2)
+    # A real second pass consumes a new tool result; the cumulative summary
+    # retained in history must still contain the first pass's summary text.
+    assert compacted_content_1[0] in "\n".join(compacted_content_2)
+
+
+def test_second_real_compaction_incorporates_newly_dropped_evidence(tmp_path):
+    """#1776 item 2's cumulative requirement, exercised through the actual
+    public entry point rather than by calling `_structural_summary` in
+    isolation with hand-picked args (a prior version of this test did that,
+    and it passed while the real second-compaction path had a bug: it
+    reused the first round's frozen summary text unchanged and any newly
+    dropped content in the second round silently reverted to a plain
+    head/tail excerpt -- the exact "bytes dropped, meaning not carried"
+    defect #1776 exists to fix, recurring on every compaction after the
+    first). This drives two genuine `compact_messages` calls and checks the
+    SECOND round's summary contains both the first round's evidence and
+    genuinely new evidence dropped only in the second round.
+
+    FAILS on origin/main: `_structural_summary` / the "[Compaction summary"
+    marker don't exist there -- only #1776 item 1 (the token-span cut) has
+    landed; items 2-3 (this PR) have not.
+    """
+    big = _long_content(30_000)
+    messages = _make_messages([big, big, big, big])
+
+    result1 = cc.compact_messages(
+        messages, cycle_id="acc", iteration=1, state_root=tmp_path,
+        threshold=0.01, keep_tokens=8_000, window_tokens=98_304,
+    )
+    round1_tool_texts = [m["content"] for m in result1 if m.get("role") == "tool"]
+    assert any(t.startswith("[Compaction summary") for t in round1_tool_texts)
+
+    # New work happens after round 1: a decision and a file write neither
+    # round 1's summary nor its excerpts could possibly know about. A
+    # further filler pair pushes this new pair out of the protected recent
+    # span so round 2 actually drops (and must summarize) it, rather than
+    # leaving it sitting verbatim in the still-protected tail.
+    grown = result1 + [
+        {"role": "assistant", "content": "decision: switch to plan B",
+         "tool_calls": [{"id": "tc-new", "type": "function",
+                          "function": {"name": "write_file",
+                                       "arguments": '{"path": "src/new_module_round2.py"}'}}]},
+        {"role": "tool", "tool_call_id": "tc-new", "name": "write_file",
+         "content": _long_content(1_000) + " round2 evidence marker"},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "tc-filler", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "tc-filler", "name": "bash", "content": _long_content(40_000)},
+    ]
+
+    result2 = cc.compact_messages(
+        grown, cycle_id="acc", iteration=2, state_root=tmp_path,
+        threshold=0.01, keep_tokens=8_000, window_tokens=98_304,
+    )
+    round2_texts = [m["content"] for m in result2 if m.get("role") in ("tool", "assistant")]
+    carrier_texts = [t for t in round2_texts if isinstance(t, str) and t.startswith("[Compaction summary")]
+    assert carrier_texts, "round 2 must still carry a structural summary"
+    carrier = "\n".join(carrier_texts)
+
+    assert round1_tool_texts[0] in carrier or any(
+        line in carrier for line in round1_tool_texts[0].splitlines() if line.startswith("Goal:")
+    ), "round 1's summary must still be present after round 2 (cumulative, not overwritten)"
+    assert "src/new_module_round2.py" in carrier, (
+        "round 2's newly dropped file path must appear in the updated summary, "
+        "not silently vanish into a plain excerpt"
+    )
+    assert "switch to plan B" in carrier, (
+        "round 2's newly dropped decision must appear in the updated summary"
+    )
+
+
+def test_cumulative_summary_growth_is_bounded_across_many_compactions(tmp_path):
+    """#1776 item 2: 'retained verbatim' must not mean 'grows without bound'
+    -- a cycle that compacts repeatedly (the issue's own telemetry: one
+    cycle compacted 3 times and reached iteration 56) must not carry an
+    ever-growing summary into every subsequent prompt forever."""
+    messages = _make_messages([_long_content(20_000)] * 2)
+    for round_n in range(15):
+        messages = messages + [
+            {"role": "assistant", "content": f"decision: round {round_n} note",
+             "tool_calls": [{"id": f"tc-r{round_n}", "type": "function",
+                              "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": f"tc-r{round_n}", "name": "bash",
+             "content": _long_content(20_000) + f" marker_round_{round_n}"},
+        ]
+        messages = cc.compact_messages(
+            messages, cycle_id="bounded", iteration=round_n, state_root=tmp_path,
+            threshold=0.01, keep_tokens=8_000, window_tokens=98_304,
+        )
+
+    carrier_texts = [
+        m["content"] for m in messages
+        if m.get("role") in ("tool", "assistant") and isinstance(m.get("content"), str)
+        and m["content"].startswith("[Compaction summary")
+    ]
+    assert carrier_texts
+    assert max(len(t) for t in carrier_texts) <= cc.MAX_SUMMARY_CHARS + 3_000, (
+        "the structural summary must stay roughly bounded across many "
+        "compactions in one cycle, not grow linearly forever"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +373,7 @@ def test_recent_token_span_protects_by_size_not_count(tmp_path):
     for tr in tool_results[-3:]:
         assert tr["content"] == big, "the last ~3 messages fit the 15,000-token span"
     for tr in tool_results[:3]:
-        assert cc._OMIT_MARKER in tr["content"], "older results should be compacted"
+        assert tr["content"].startswith("[Compaction summary") or cc._OMIT_MARKER in tr["content"], "older results should be compacted"
 
 
 def test_single_oversized_recent_tool_result_is_still_compactable(tmp_path):
@@ -344,7 +444,55 @@ def test_tool_call_and_result_pairing_survives_compaction(tmp_path):
     assert after_ids == before_ids, "message order/identity must be unchanged by compaction"
     assert len(result) == len(messages), "compaction replaces content, never removes messages"
     # Confirm compaction actually ran (not a no-op that trivially preserves pairing).
-    assert any(cc._OMIT_MARKER in m["content"] for m in result if m.get("role") == "tool")
+    assert any(m["content"].startswith("[Compaction summary") for m in result if m.get("role") == "tool")
+
+
+def test_pairing_survives_when_the_cut_falls_between_a_call_and_its_own_result(tmp_path):
+    """The general pairing test above proves ids/order/count survive
+    compaction for ANY cut position. This test targets the specific case
+    the AC calls out by name: the cut lands strictly between one tool
+    call's assistant message and that same call's tool-result message --
+    the call becomes compactable (older side of the cut) while its own
+    result stays fully protected (newer side). Even straddling the exact
+    pair like this, the two must still resolve to each other afterward."""
+    tool_content = _long_content(5_000)
+    # Long enough to clear the worth-compacting size floor on its own, so
+    # the assertion below actually exercises the straddle instead of the
+    # (also-correct, separately tested) "too small to bother" no-op path.
+    assistant_content = "reasoning about the next step. " * 40
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": assistant_content,
+         "tool_calls": [{"id": "tc0", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "tc0", "name": "bash", "content": tool_content},
+        {"role": "assistant", "content": assistant_content,
+         "tool_calls": [{"id": "tc1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "tc1", "name": "bash", "content": tool_content},
+        {"role": "assistant", "content": assistant_content,
+         "tool_calls": [{"id": "tc2", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "tc2", "name": "bash", "content": tool_content},
+    ]
+    # keep_tokens sized to exactly cover the newest tool result alone: the
+    # walk-back includes tool@7 (fits exactly), then breaks on assistant@6
+    # (any nonzero token cost pushes the running total past keep_tokens) --
+    # so assistant@6 (the call) is compactable while tool@7 (its result)
+    # is protected, straddling the tc2 pair across the cut.
+    keep_tokens = cc._message_tokens(messages[7])
+
+    result = cc.compact_messages(
+        messages, cycle_id="straddle", iteration=1, state_root=tmp_path,
+        threshold=0.01, keep_tokens=keep_tokens, window_tokens=98_304,
+    )
+
+    assert result[7]["content"] == tool_content, "tc2's result must stay protected/verbatim"
+    assert result[6]["content"] != assistant_content, (
+        "tc2's call must actually be on the compactable side of this cut "
+        "(otherwise this test isn't exercising the straddle at all)"
+    )
+    assert result[6]["tool_calls"][0]["id"] == "tc2"
+    assert result[7]["tool_call_id"] == "tc2"
+    assert len(result) == len(messages)
 
 
 # ---------------------------------------------------------------------------
@@ -379,8 +527,14 @@ def test_system_and_user_always_protected(tmp_path):
     assert result[1]["content"] == user_content
 
 
-def test_assistant_messages_are_never_compacted(tmp_path):
-    """#1776 item 3 is deferred: assistant turns still accumulate unbounded."""
+def test_assistant_message_content_is_compactable_but_pairing_survives(tmp_path):
+    """#1776 item 3 (AC5): assistant turns are no longer exempt from
+    compaction — a long-accumulating assistant turn was exactly the "never
+    touched" gap item 3 named. This used to assert the opposite (assistant
+    content must be byte-identical); that was the pre-#1776-item-3 contract,
+    and it's now wrong on purpose. What must still hold, and is asserted
+    below: only `content` changes — `tool_calls`/`tool_call_id` (the pairing
+    key) are untouched, and message order/count don't change either."""
     big_assistant_text = "a" * 100_000
     messages = [
         {"role": "system", "content": "sys"},
@@ -393,13 +547,25 @@ def test_assistant_messages_are_never_compacted(tmp_path):
         messages.append({"role": "tool", "tool_call_id": f"tc{i}", "name": "bash",
                           "content": _long_content(40_000)})
 
+    before_tool_calls = [m["tool_calls"] for m in messages if m.get("role") == "assistant"]
+
     result = cc.compact_messages(
-        messages, cycle_id="assistant-protected", iteration=1, state_root=tmp_path,
+        messages, cycle_id="assistant-compactable", iteration=1, state_root=tmp_path,
         threshold=0.01, keep_tokens=1, window_tokens=98_304,
     )
-    for m in result:
-        if m.get("role") == "assistant":
-            assert m["content"] == big_assistant_text, "assistant content must be untouched"
+
+    assistant_msgs = [m for m in result if m.get("role") == "assistant"]
+    assert len(assistant_msgs) == 4
+    assert [m["tool_calls"] for m in assistant_msgs] == before_tool_calls, (
+        "tool_calls (the pairing key) must be untouched even when content is compacted"
+    )
+    assert any(
+        m["content"] != big_assistant_text for m in assistant_msgs
+    ), "at least one oversized assistant turn should actually be compacted"
+    for m in assistant_msgs:
+        assert m["content"] == big_assistant_text or cc._OMIT_MARKER in m["content"] or m["content"].startswith(
+            "[Compaction summary"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +723,7 @@ def test_already_compact_decline_is_journalled(tmp_path):
     )
     ev = _last_journal_event(tmp_path)
     assert ev["reason"] == "already_compact"
+    assert ev["compacted_details"] == []
     assert ev["results_compacted"] == 0
 
 
@@ -613,9 +780,30 @@ def test_estimate_tokens_heuristic():
 # Edge: all messages are system/user only (no tool results to compact)
 # ---------------------------------------------------------------------------
 
-def test_no_tool_results_declines_with_reason(tmp_path):
-    """If there are no tool results, compaction is a no-op -- now journalled
+def test_nothing_past_the_cut_declines_with_reason(tmp_path):
+    """If there is nothing at all past system/user, decline is journalled
     with reason='nothing_older_than_cut' rather than silently."""
+    messages = [
+        {"role": "system", "content": "x" * 400_000},  # huge system prompt
+        {"role": "user", "content": "task"},
+    ]
+    result = cc.compact_messages(
+        messages, cycle_id="notool", iteration=1, state_root=tmp_path,
+        threshold=0.0, keep_tokens=0, window_tokens=1,
+    )
+    assert result is messages
+    ev = _last_journal_event(tmp_path)
+    assert ev["reason"] == "nothing_older_than_cut"
+
+
+def test_single_trivial_assistant_message_declines_as_already_compact(tmp_path):
+    """A lone short assistant message past the cut IS a candidate now that
+    assistant turns are compactable (#1776 item 3) -- it's just too small to
+    be worth touching. Before item 3, this declined as
+    'nothing_older_than_cut' (assistant wasn't eligible at all); now the
+    correct reason is 'already_compact' (something WAS past the cut, it
+    just isn't worth compacting). Distinguishing the two still matters for
+    telemetry, so both reasons keep their own test."""
     messages = [
         {"role": "system", "content": "x" * 400_000},  # huge system prompt
         {"role": "user", "content": "task"},
@@ -627,7 +815,7 @@ def test_no_tool_results_declines_with_reason(tmp_path):
     )
     assert result is messages
     ev = _last_journal_event(tmp_path)
-    assert ev["reason"] == "nothing_older_than_cut"
+    assert ev["reason"] == "already_compact"
 
 
 # ---------------------------------------------------------------------------
@@ -703,11 +891,18 @@ def test_compactable_indices_empty_when_everything_fits():
     assert cc._compactable_indices(messages, keep_tokens=1_000_000) == set()
 
 
-def test_compactable_indices_excludes_assistant_and_system_and_user():
+def test_compactable_indices_includes_assistant_excludes_system_and_user():
+    """#1776 item 3 (AC5): assistant is no longer excluded. This test used
+    to assert the opposite contract (candidates are tool-only); that was
+    exactly the gap item 3 was filed to close, so the contract itself was
+    wrong, not just this test. system/user remain the only exemptions."""
     messages = _make_messages([_long_content(40_000)] * 2)
     candidates = cc._compactable_indices(messages, keep_tokens=0)
+    assert candidates, "assistant + tool messages older than the cut must be candidates"
     for i in candidates:
-        assert messages[i]["role"] == "tool"
-    # every non-tool message index must be absent regardless of the cut
-    non_tool_indices = {i for i, m in enumerate(messages) if m["role"] != "tool"}
-    assert candidates.isdisjoint(non_tool_indices)
+        assert messages[i]["role"] in ("assistant", "tool")
+    # system/user must be absent regardless of the cut
+    system_or_user_indices = {i for i, m in enumerate(messages) if m["role"] in ("system", "user")}
+    assert candidates.isdisjoint(system_or_user_indices)
+    # at least one assistant index must actually be a candidate here
+    assert any(messages[i]["role"] == "assistant" for i in candidates)
