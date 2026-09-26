@@ -632,7 +632,10 @@ def _completed_prose_entries(raw_text: str) -> tuple[PriorityEntry, ...]:
             number = int(match.group(1))
         except ValueError:
             continue
-        title = match.group(2).strip().rstrip(".; ")
+        # Completed prose uses the same `title: instructions` boundary as
+        # current priority entries. Only the title participates in rendering
+        # and deduplication; never leak the instruction tail into either.
+        title = match.group(2).split(":", 1)[0].strip().rstrip(".; ")
         if number > 0 and title:
             entries.append(PriorityEntry(number=number, source=SOURCE_OPERATOR, title=title, instructions=""))
     return tuple(entries)
