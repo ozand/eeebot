@@ -508,6 +508,40 @@ def _all_commits_are_artificial_since(selfevo_repo: 'Path', pre_spawn_sha: str) 
         return False
 
 
+def _any_checkpoint_commit_since(selfevo_repo: 'Path', base_sha: str) -> bool:
+    """D1 (ADR-035 Test Contract, external review finding #1): True iff at
+    least one commit in ``base_sha..HEAD`` is a per-step checkpoint
+    (``commit_markers.CHECKPOINT_SUBJECT_PREFIX``) -- narrower than
+    :func:`_all_commits_are_artificial_since`, which ALSO matches the
+    #666 residual auto-commit safety net. D1's "our error while
+    checkpoints exist" scope is specifically about checkpoints: the
+    #1280/#1281 contract (a dead LLM call whose edits the auto-commit
+    net rescues still integrates through the normal gate,
+    ``executor_llm_error=True`` recorded but not blocked) is UNCHANGED
+    and must not be swept into D1's new interrupted(defect)/interrupted
+    (supply) early-return just because ``cycle_commit_count`` is
+    nonzero -- an auto-commit is not a checkpoint. False on an empty
+    range, an unreadable sha, or any git error.
+    """
+    if not base_sha:
+        return False
+    import subprocess as _sp_ckpt_since
+    from nanobot.runtime.commit_markers import CHECKPOINT_SUBJECT_PREFIX
+    try:
+        r = _sp_ckpt_since.run(
+            ['git', '-c', f'safe.directory={selfevo_repo}', '-C', str(selfevo_repo),
+             'log', '--format=%s', f'{base_sha}..HEAD'],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return False
+        subjects = [ln for ln in r.stdout.splitlines() if ln.strip()]
+        prefix = CHECKPOINT_SUBJECT_PREFIX.lower()
+        return any(s.strip().lower().startswith(prefix) for s in subjects)
+    except Exception:
+        return False
+
+
 def _count_commits_since(selfevo_repo: 'Path', pre_spawn_sha: str) -> int:
     """Count commits in selfevo_repo made since pre_spawn_sha.
 
@@ -2155,7 +2189,11 @@ def _recent_activity_context(
     try:
         lines: list[str] = []
 
-        if selfevo_repo_root is not None:
+        # A repo path that does not exist at all is a config/setup gap, not
+        # a git failure worth flagging as "unknown" -- stays silent, same
+        # as before the small item below distinguished the two. Only a
+        # git command failing against a repo that IS there gets "unknown".
+        if selfevo_repo_root is not None and Path(selfevo_repo_root).is_dir():
             commits = _recent_commits_with_paths(selfevo_repo_root, since="7 days ago")
             # #1727: 4 of 8 subjects on the recorded prompts were
             # `merge: integrate selfevo/cycle-...` — the bridge's own
@@ -5089,15 +5127,24 @@ async def _main_impl_body():
             # architect resolution): the checkpoints-exist case gets its OWN
             # classification, independent of the zero-commit one above --
             # an executor that died AFTER checkpointing real work must
-            # never be silently treated as "model call completed fine" just
-            # because `cycle_commit_count > 0`. `_session_errored` is
-            # broader than `_executor_llm_error_text` (that reader is
-            # narrowly gated on the literal "LLM execution failed" text) --
-            # deliberately so: a real error status with a DIFFERENT message
-            # is still not a finished session.
+            # never be silently treated as "model call completed fine".
+            # Gated on an ACTUAL checkpoint commit existing in the range
+            # (_any_checkpoint_commit_since), never on `cycle_commit_count
+            # > 0` alone -- the #666 auto-commit safety net can ALSO make
+            # that count positive for a dead LLM call with no checkpoints
+            # at all, and the #1280/#1281 contract for exactly that case
+            # (still integrates through the normal gate) must be
+            # unaffected. `_session_errored` is broader than
+            # `_executor_llm_error_text` (that reader is narrowly gated on
+            # the literal "LLM execution failed" text) -- deliberately so:
+            # a real error status with a DIFFERENT message is still not a
+            # finished session.
+            _has_checkpoint_commit = (
+                _any_checkpoint_commit_since(_selfevo_repo, _increment_base) if _session_errored else False
+            )
             _checkpoint_error_class = (
                 _classify_llm_error(_executor_llm_error_text or '(status: error, no LLM-call text recorded)')
-                if (_session_errored and cycle_commit_count > 0) else ''
+                if (_session_errored and _has_checkpoint_commit) else ''
             )
             if _checkpoint_error_class == 'paused-supplier':
                 _open_increment_exec.record_supply_interruption(
@@ -5150,7 +5197,7 @@ async def _main_impl_body():
                 _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
                 return {'status': 0}
 
-            if _session_errored and cycle_commit_count > 0:
+            if _session_errored and _has_checkpoint_commit:
                 # D1: "a session with status=error ... is not finished. It
                 # is never integrated." Stop here -- never reach the
                 # smoke/repair/gate/integrate path below. The branch (with

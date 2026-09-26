@@ -526,17 +526,26 @@ def _read_executor_terminal_status(state_dir: "Path", task_id: str) -> "str | No
     :func:`check_running_for_kill` treats them the same as any other
     non-error status.
 
-    Delegates to :func:`nanobot.runtime.bridge._subagent_own_status`
-    (#1546) rather than re-reading the same telemetry file with its own
-    parsing -- the asymmetric-readers class of defect (two call sites
-    independently reading the same "did the subagent finish" question,
-    one of them drifting) is exactly what a second, divergent
-    implementation here would risk."""
+    Deliberately does NOT import :func:`nanobot.runtime.bridge._subagent_own_status`
+    (#1546) even though the read is identical -- ``open_increment`` is a
+    low-level state module reachable from the trainer call graph
+    (``tests/test_trainer_no_direct_mutation.py``'s reachability check),
+    and importing ``bridge`` from here would make bridge.py's entire git-
+    mutating call graph transitively "reachable" from every trainer
+    module that merely reads an open increment. A tiny, independently
+    read-only duplicate is the cheaper risk here than that layering
+    violation; keep this in sync with ``_subagent_own_status`` by hand if
+    its shape ever changes."""
     if not task_id:
         return None
-    from nanobot.runtime.bridge import _subagent_own_status
-
-    return _subagent_own_status(state_dir, task_id) or None
+    try:
+        payload = json.loads((Path(state_dir) / "subagents" / f"{task_id}.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    status = payload.get("status")
+    return str(status) if status else None
 
 
 def record_attempt_finished(state_dir: "Path", cycle_id: str) -> OpenIncrementState:

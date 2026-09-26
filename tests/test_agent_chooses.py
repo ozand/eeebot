@@ -983,10 +983,17 @@ def test_supply_interruption_carries_open_increment(tmp_path: Path):
     assert run is False
     assert reason == "unchanged"
 
-    # The next session resolves it (keep/edit/delete) -- clears pending and
-    # the hold, resets the streak.
+    # The next session resolves it. `keep` clears the hold/streak but
+    # deliberately does NOT clear `pending` -- D2 (ADR-035 Test Contract,
+    # #1942 B2, architect resolution on #1979 external-review followups):
+    # only a terminal outcome for this lineage does that (a kill in the
+    # gap between this decision and the resumed attempt's own
+    # re-registration must not lose the increment). It IS annotated with
+    # which cycle is resuming it.
     open_increment.resolve(state, "cycle-2", "keep")
-    assert open_increment.pending_open_increment(state) is None
+    still_pending = open_increment.pending_open_increment(state)
+    assert still_pending is not None
+    assert still_pending["resumed_by"] == "cycle-2"
     run, reason = open_increment.precheck(state, None)
     assert run is True
     assert reason == "no_active_hold"
