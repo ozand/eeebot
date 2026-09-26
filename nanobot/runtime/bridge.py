@@ -4676,11 +4676,45 @@ async def _main_impl_body():
             # N1 (round 2 external re-check, architect resolution
             # 2026-09-26): the attempt's OWN plan, so a later kill-recovery
             # can hand it back verbatim instead of an explanatory placeholder.
-            _open_increment_register.record_attempt_started(
+            _registration_persisted = _open_increment_register.record_attempt_started(
                 STATE_DIR, _cycle_id, cycle_branch, plan_text=req.get('task') or '',
             )
         except Exception:
-            pass
+            _registration_persisted = False
+
+        if not _registration_persisted:
+            # N4 (round 2 external re-check, architect resolution
+            # 2026-09-26): this write is a correctness prerequisite, not
+            # optional telemetry -- an unwritable open-increment state
+            # destination means a kill during this attempt would leave NO
+            # resumable registration at all. Stop before the executor
+            # spawns, same shape as the cycle-setup-failed block above.
+            print('open-increment registration failed to persist; recording blocked result, no subagent spawned')
+            _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
+            handled_marker.write_text(str(req_path), encoding='utf-8')
+            _write_bridge_completed_result(
+                state_dir=STATE_DIR, req=req, request_id=request_id,
+                cycle_id=req.get('cycle_id') or '', goal_id=goal_id,
+                files_changed=[], commits_pushed=0, result_status='blocked',
+                backlog_title=backlog_title,
+                key_learnings=[
+                    'The open-increment running registration failed to persist; '
+                    f'{cycle_branch} left untouched, no subagent was spawned.'
+                ],
+                rollback={
+                    'integrated': False, 'cycle_branch': cycle_branch,
+                    'main_sha_before': main_sha_before, 'main_sha_after': main_sha_before,
+                    'reason': 'registration_failed',
+                },
+            )
+            _v, _vr = _derive_cycle_verdict('failed', 'registration_failed')
+            record_cycle_outcome(
+                STATE_DIR, _cycle_id, 'failed', 'registration_failed', [], cycle_branch,
+                verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                real_result=_real_result_ledger_inputs('blocked'),
+            )
+            _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
+            return {'status': 0}
 
         # #718: the subagent must write into the git checkout the bridge branches,
         # commits, gates, and integrates (_selfevo_repo) — not TARGET_WORKSPACE

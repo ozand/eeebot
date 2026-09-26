@@ -127,10 +127,16 @@ def load_state(state_dir: "Path") -> OpenIncrementState:
         return OpenIncrementState()
 
 
-def _save_state(state_dir: "Path", state: OpenIncrementState) -> None:
+def _save_state(state_dir: "Path", state: OpenIncrementState) -> bool:
+    """Returns True only when the write actually landed (N4, round 2
+    external re-check, architect resolution 2026-09-26) -- most callers
+    still ignore this (fail-open bookkeeping), but
+    :func:`record_attempt_started` uses it as a correctness precondition
+    for spawning the executor at all."""
     path = _state_path(state_dir)
     payload = {"schema": _SCHEMA, **state.as_dict()}
     tmp_name: "str | None" = None
+    ok = False
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
@@ -141,6 +147,7 @@ def _save_state(state_dir: "Path", state: OpenIncrementState) -> None:
         os.chmod(tmp_name, 0o644)
         os.replace(tmp_name, path)
         tmp_name = None
+        ok = True
     except Exception:
         pass
     finally:
@@ -149,6 +156,7 @@ def _save_state(state_dir: "Path", state: OpenIncrementState) -> None:
                 os.unlink(tmp_name)
             except OSError:
                 pass
+    return ok
 
 
 def _now_iso() -> str:
@@ -508,7 +516,7 @@ def operator_clear_flag(state_dir: "Path", cycle_id: str) -> OpenIncrementState:
 
 def record_attempt_started(
     state_dir: "Path", cycle_id: str, branch: str, attempt: int = 1, plan_text: str = "",
-) -> OpenIncrementState:
+) -> bool:
     """Register the in-flight attempt BEFORE the executor can be killed --
     called once cycle-branch setup succeeds, before the subagent spawns.
     This is the durable proof a kill needs: if the process dies before a
@@ -528,7 +536,17 @@ def record_attempt_started(
     ``record_kill_interruption``/``record_supply_interruption``/
     ``record_defect_interruption`` instead of a generic explanatory
     placeholder. A subsequent ``keep``-confirm then hands the executor
-    back its actual task, not a description of the kill."""
+    back its actual task, not a description of the kill.
+
+    N4 (round 2 external re-check, architect resolution 2026-09-26):
+    returns True only when the registration write was VERIFIED to have
+    persisted (read back from disk, not merely "no exception raised") --
+    this write is now a correctness prerequisite, not optional telemetry.
+    The caller (``bridge.py``, right before the executor spawns) must
+    stop the attempt when this is False (reason ``registration_failed``),
+    or a kill with an unwritable open-increment state destination leaves
+    no resumable registration at all.
+    """
     from nanobot.runtime.cycle_ledger import append_event
 
     state = load_state(state_dir)
@@ -541,14 +559,16 @@ def record_attempt_started(
         "task_id": None,
         "plan_text": plan_text or "",
     }
-    _save_state(state_dir, state)
+    persisted = _save_state(state_dir, state) and load_state(state_dir).running == state.running
+    if not persisted:
+        return False
     append_event(state_dir, {
         "phase": "open_increment_running_registered",
         "cycle_id": cycle_id or "",
         "branch": branch or "",
         "attempt": int(attempt),
     })
-    return state
+    return True
 
 
 def record_attempt_task_id(state_dir: "Path", cycle_id: str, task_id: str) -> OpenIncrementState:
