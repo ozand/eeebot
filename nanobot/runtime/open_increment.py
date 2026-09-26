@@ -93,6 +93,15 @@ class OpenIncrementState:
     consecutive_supply_interrupts: int = 0
     #: Non-auto-clearing operator-facing flag (architect resolution point 3).
     operator_flagged: bool = False
+    #: D2 (ADR-035 Test Contract, #1942 B2): the in-flight attempt
+    #: registration ({"cycle_id", "branch", "attempt", "started_at",
+    #: "resumed_by"}), written BEFORE the executor can be killed and
+    #: cleared ONLY by a terminal outcome (record_attempt_finished) --
+    #: never by resolve()/keep, which only annotates it. A registration
+    #: still standing for a DIFFERENT cycle_id than the one about to run
+    #: is exactly the durable proof a hard kill needs: the process that
+    #: wrote it died before reaching a terminal outcome.
+    running: "dict[str, Any] | None" = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -331,11 +340,23 @@ def pending_open_increment(state_dir: "Path") -> "dict[str, Any] | None":
 
 def resolve(state_dir: "Path", cycle_id: str, decision: str, *, reason: str = "") -> OpenIncrementState:
     """The planning session's keep/edit/delete decision on the pending open
-    increment (ADR-035 rule 3, "I"). Clears ``pending``/``hold``/
-    ``held_ticks`` and resets the consecutive-interruption streak to 0 --
-    but NEVER clears ``operator_flagged``; only :func:`operator_clear_flag`
-    does (mirrors ``no_plan_recovery.resume`` leaving ``planner_degraded``
-    untouched)."""
+    increment (ADR-035 rule 3, "I").
+
+    ``edit``/``delete`` clear ``pending``/``hold``/``held_ticks`` and reset
+    the consecutive-interruption streak to 0, same as before B2 -- but
+    NEVER clear ``operator_flagged``; only :func:`operator_clear_flag` does
+    (mirrors ``no_plan_recovery.resume`` leaving ``planner_degraded``
+    untouched).
+
+    D2 (ADR-035 Test Contract, #1942 B2): ``keep`` does NOT clear
+    ``pending`` -- it is the only durable proof this increment still needs
+    a terminal outcome. Clearing it here, before the resumed attempt has
+    even re-registered itself (:func:`record_attempt_started`), would make
+    a kill in that exact hand-off gap invisible to the next cycle -- the
+    77ca scenario B2 exists for. ``pending`` is instead annotated
+    ``resumed_by`` with the deciding cycle; only :func:`record_attempt_finished`
+    (a REAL terminal outcome for this increment's ``cycle_id``) removes it.
+    """
     from nanobot.runtime.cycle_ledger import append_event
 
     if decision not in _VALID_DECISIONS:
@@ -344,10 +365,17 @@ def resolve(state_dir: "Path", cycle_id: str, decision: str, *, reason: str = ""
         )
     state = load_state(state_dir)
     retry_key = (state.pending or {}).get("retry_key", "")
-    state.pending = None
-    state.hold = None
-    state.held_ticks = 0
-    state.consecutive_supply_interrupts = 0
+    if decision == "keep":
+        if state.pending is not None:
+            state.pending = {**state.pending, "resumed_by": cycle_id or ""}
+        state.hold = None
+        state.held_ticks = 0
+        state.consecutive_supply_interrupts = 0
+    else:
+        state.pending = None
+        state.hold = None
+        state.held_ticks = 0
+        state.consecutive_supply_interrupts = 0
     _save_state(state_dir, state)
     append_event(state_dir, {
         "phase": "open_increment_resolved",
@@ -369,4 +397,131 @@ def operator_clear_flag(state_dir: "Path", cycle_id: str) -> OpenIncrementState:
         state.operator_flagged = False
         _save_state(state_dir, state)
         append_event(state_dir, {"phase": "open_increment_operator_flag_cleared", "cycle_id": cycle_id or ""})
+    return state
+
+
+# --- D2 (ADR-035 Test Contract, #1942 B2): register before the execution
+# can be killed ---------------------------------------------------------
+
+
+def record_attempt_started(
+    state_dir: "Path", cycle_id: str, branch: str, attempt: int = 1,
+) -> OpenIncrementState:
+    """Register the in-flight attempt BEFORE the executor can be killed --
+    called once cycle-branch setup succeeds, before the subagent spawns.
+    This is the durable proof a kill needs: if the process dies before a
+    terminal outcome is ever recorded for ``cycle_id``
+    (:func:`record_attempt_finished`, wired into
+    :func:`nanobot.runtime.cycle_ledger.record_cycle_outcome` so every
+    exit path is covered), the next cycle's :func:`check_running_for_kill`
+    finds this registration still standing and converts it into a pending
+    open increment (``reason: interrupted_kill``) instead of losing the
+    attempt silently."""
+    from nanobot.runtime.cycle_ledger import append_event
+
+    state = load_state(state_dir)
+    state.running = {
+        "cycle_id": cycle_id or "",
+        "branch": branch or "",
+        "attempt": int(attempt),
+        "started_at": _now_iso(),
+        "resumed_by": None,
+    }
+    _save_state(state_dir, state)
+    append_event(state_dir, {
+        "phase": "open_increment_running_registered",
+        "cycle_id": cycle_id or "",
+        "branch": branch or "",
+        "attempt": int(attempt),
+    })
+    return state
+
+
+def record_attempt_finished(state_dir: "Path", cycle_id: str) -> OpenIncrementState:
+    """A terminal outcome was recorded for ``cycle_id``
+    (:func:`nanobot.runtime.cycle_ledger.record_cycle_outcome` calls this
+    for every cycle, so this is the ONE place that clears the running
+    registration and any pending increment for the SAME lineage --
+    whatever the many outcome-writing call sites upstream are). A
+    registration/pending record for a DIFFERENT, not-yet-resolved
+    cycle_id is left untouched; only its own terminal outcome removes
+    it."""
+    state = load_state(state_dir)
+    changed = False
+    if state.running and state.running.get("cycle_id") == (cycle_id or ""):
+        state.running = None
+        changed = True
+    if state.pending and state.pending.get("cycle_id") == (cycle_id or ""):
+        state.pending = None
+        state.hold = None
+        state.held_ticks = 0
+        state.consecutive_supply_interrupts = 0
+        changed = True
+    if changed:
+        _save_state(state_dir, state)
+    return state
+
+
+def check_running_for_kill(state_dir: "Path", current_cycle_id: str) -> "dict[str, Any] | None":
+    """Called once per bridge tick, before THIS tick's own attempt is
+    registered (and before the planning session reads
+    :func:`pending_open_increment`, so a detected kill is surfaced to it
+    like any other open increment). Returns the stale running record when
+    it belongs to a DIFFERENT cycle_id than the one about to run -- proof
+    the process that wrote it died before a terminal outcome -- or
+    ``None`` when there is nothing stale (no running record, it already
+    belongs to the cycle about to start, or an increment is already
+    pending for it, which already covers this attempt without needing a
+    second classification)."""
+    state = load_state(state_dir)
+    if state.pending:
+        return None
+    running = state.running
+    if not running or running.get("cycle_id") == (current_cycle_id or ""):
+        return None
+    return running
+
+
+def record_kill_interruption(
+    state_dir: "Path",
+    cycle_id: str,
+    *,
+    retry_key: str,
+    plan_text: str,
+    candidate_id: "str | None",
+    branch: str = "",
+) -> OpenIncrementState:
+    """The running-attempt registration for ``cycle_id`` (see
+    :func:`record_attempt_started`) had no terminal outcome by the time a
+    fresh cycle started -- a hard kill, or an exact imitation of one.
+    Recorded as the pending open increment with ``reason:
+    interrupted_kill`` -- same keep/edit/delete contract as
+    ``interrupted_supply``, but with NO backoff hold: a kill is not
+    evidence the supplier is unavailable, so the very next session may
+    resolve it immediately. Does not touch ``running`` -- :func:`resolve`
+    (``keep``) and :func:`record_attempt_finished` own its lifecycle from
+    here."""
+    from nanobot.runtime.cycle_ledger import append_event
+
+    state = load_state(state_dir)
+    state.pending = {
+        "retry_key": retry_key,
+        "cycle_id": cycle_id or "",
+        "plan_text": plan_text,
+        "candidate_id": candidate_id or None,
+        "reason": "interrupted_kill",
+        "interrupted_at": _now_iso(),
+        "branch": branch or "",
+        "opening_entry_written": True,
+    }
+    state.hold = None
+    state.held_ticks = 0
+    _save_state(state_dir, state)
+    append_event(state_dir, {
+        "phase": "open_increment",
+        "cycle_id": cycle_id or "",
+        "status": "interrupted_kill",
+        "retry_key": retry_key,
+        "branch": branch or "",
+    })
     return state

@@ -1783,6 +1783,118 @@ def test_resumed_increment_keeps_one_opening(tmp_path: Path, monkeypatch):
     )
 
 
+# --- keep-work: D2 -- register before the execution can be killed
+# (ADR-035 Test Contract, #1942 B2) --------------------------------------------
+
+def test_killed_attempt_becomes_interrupted_kill(tmp_path: Path, monkeypatch):
+    """D2 (ADR-035 Test Contract, external review finding #2): a hard kill
+    between the attempt's own registration (written BEFORE the executor
+    can be killed) and any terminal outcome must not lose the attempt
+    silently. Simulates the kill directly: register a running attempt
+    exactly as ``bridge._evaluate_candidate`` does right after cycle-
+    branch setup succeeds, but never record a terminal outcome for it (an
+    imitation of the process dying in between) -- then drives a REAL
+    ``bridge._main_impl()`` tick (planning and the executor spawn are
+    stubbed, as in every other ``_main_impl``-level test here; the kill-
+    detection wiring itself lives in ``_main_impl``'s own body, before the
+    planning call, so it runs whether or not the planning session is
+    stubbed) and asserts the stale registration became a pending open
+    increment with reason ``interrupted_kill``, naming the dead attempt's
+    own branch -- not silently discarded, and not conflated with a
+    supplier interruption.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _FakeSubagentManager, _init_selfevo_repo
+    from nanobot.runtime import bridge, open_increment
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    old_cycle_id = "cycle-killed-01"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", old_branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "wip.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/wip.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/wip.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    # The registration a real attempt writes BEFORE it can be killed --
+    # simulated directly here, with no matching terminal outcome ever
+    # recorded, exactly like a hard kill would leave it.
+    open_increment.record_attempt_started(state_dir, old_cycle_id, old_branch)
+
+    _stub_planning_session(monkeypatch, "a brand new, unrelated task")
+    monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is not None, "the killed attempt's registration must become a pending open increment"
+    assert pending["reason"] == "interrupted_kill"
+    assert pending["cycle_id"] == old_cycle_id
+    assert pending["branch"] == old_branch
+
+    state = open_increment.load_state(state_dir)
+    assert state.hold is None, "a kill is not supplier evidence -- it must not start a backoff hold"
+
+
+def test_keep_record_survives_kill_before_execution(tmp_path: Path):
+    """D2 (ADR-035 Test Contract, external review finding #2): ``resolve``'s
+    ``keep`` decision must not erase the pending open increment before
+    handing control back to the resumed attempt -- only annotate it. If
+    the process is killed in the gap between this decision and the
+    resumed attempt's OWN ``record_attempt_started`` registration, the
+    pending record is the ONLY durable proof left that this increment
+    still needs a terminal outcome (the 77ca scenario B2 exists for).
+    Drives ``resolve()`` directly against a real state file -- no bridge
+    involved -- and asserts the pending record is still there, right
+    after ``resolve()`` returns and BEFORE anything re-registers the
+    resumed attempt.
+    """
+    from nanobot.runtime import open_increment
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    old_cycle_id = "cycle-interrupted-09"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id,
+        retry_key="keep-survival-test", plan_text="finish the wip feature", candidate_id=None,
+        branch=old_branch,
+    )
+    assert open_increment.pending_open_increment(state_dir) is not None
+
+    deciding_cycle_id = "cycle-deciding-10"
+    open_increment.resolve(state_dir, deciding_cycle_id, "keep")
+
+    # This is the exact gap the decision text calls out: the resumed
+    # attempt has NOT re-registered itself yet (no record_attempt_started
+    # call has happened for this decision) -- if a kill lands here, this
+    # pending record is all that is left. It must still be there.
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is not None, "resolve(keep) erased the pending record before the resumed attempt could re-register"
+    assert pending["cycle_id"] == old_cycle_id
+    assert pending["branch"] == old_branch
+    assert pending["reason"] == "interrupted_supply"
+    assert pending["resumed_by"] == deciding_cycle_id, "keep must annotate who is resuming it"
+
+    state = open_increment.load_state(state_dir)
+    assert state.hold is None
+    assert state.held_ticks == 0
+    assert state.consecutive_supply_interrupts == 0
+
+
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
 # architect addendum, #1942 B2) -----------------------------------------------
 
