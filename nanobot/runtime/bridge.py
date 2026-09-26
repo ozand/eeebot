@@ -508,6 +508,26 @@ def _all_commits_are_artificial_since(selfevo_repo: 'Path', pre_spawn_sha: str) 
         return False
 
 
+def _current_tip_sha(selfevo_repo: 'Path') -> str:
+    """HEAD sha of ``selfevo_repo``'s current checkout, or ``''`` on any
+    error. Round 4 external re-check, item P1-b (architect resolution
+    2026-09-26): the repair barrier's commit-COUNT check
+    (:func:`_count_commits_since`) is blind to ``git commit --amend`` --
+    it changes the tip sha without adding a new commit. Comparing tip
+    shas before/after a repair turn catches that shape too."""
+    import subprocess as _sp_tip
+    try:
+        r = _sp_tip.run(
+            ['git', '-c', f'safe.directory={selfevo_repo}', '-C', str(selfevo_repo), 'rev-parse', 'HEAD'],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            return r.stdout.strip()
+    except Exception:
+        pass
+    return ''
+
+
 def _count_commits_since(selfevo_repo: 'Path', pre_spawn_sha: str) -> int:
     """Count commits in selfevo_repo made since pre_spawn_sha.
 
@@ -5533,6 +5553,7 @@ async def _main_impl_body():
                         # main executor spawn above.
                         expected_cycle_branch=cycle_branch,
                     )
+                    _repair_tip_before = _current_tip_sha(_selfevo_repo)
                     await _repair_mgr.spawn(
                         task=_repair_prompt,
                         task_id=f'selfevo-repair-{_repair_attempts}',
@@ -5561,6 +5582,20 @@ async def _main_impl_body():
                     if _repair_added_commits:
                         print(f'cycle-branch: {_repair_new - cycle_commit_count} additional commit(s) (repair {_repair_attempts})')
                         cycle_commit_count = _repair_new
+                    # Round 4 external re-check, item P1-b (architect
+                    # resolution 2026-09-26): `git commit --amend` moves
+                    # the branch tip WITHOUT growing the commit count --
+                    # invisible to `_repair_added_commits` alone. Any tip
+                    # change at all is "the repair turn touched the
+                    # branch", whether by amend or by a fresh commit.
+                    _repair_tip_after = _current_tip_sha(_selfevo_repo)
+                    _repair_tip_changed = (
+                        bool(_repair_tip_before) and bool(_repair_tip_after)
+                        and _repair_tip_before != _repair_tip_after
+                    )
+                    _repair_changed = _repair_added_commits or _repair_tip_changed
+                    if _repair_tip_changed and not _repair_added_commits:
+                        print(f'cycle-branch: tip amended (repair {_repair_attempts}), commit count unchanged')
                     # Round 3 external re-check, item 1 (architect
                     # resolution 2026-09-26): the repair spawn's OWN
                     # terminal telemetry must say 'ok', same positive-only
@@ -5568,16 +5603,18 @@ async def _main_impl_body():
                     # turn that commits a real (partial) fix and then ends
                     # in 'error'/'bounded_stop'/'cancelled'/no telemetry is
                     # not a finished session, however smoke reads after it.
-                    # Gated on the repair having actually ADDED commits --
-                    # a repair attempt that touched nothing (a citation-only
-                    # non-'ok' turn, e.g.) leaves the cycle's real work
-                    # exactly as the ALREADY-checked primary executor left
-                    # it, so its own bad status carries no risk to block on.
+                    # Gated on the repair having actually CHANGED the
+                    # branch (a new commit OR an amended tip, item P1-b
+                    # above) -- a repair attempt that touched nothing (a
+                    # citation-only non-'ok' turn, e.g.) leaves the
+                    # cycle's real work exactly as the ALREADY-checked
+                    # primary executor left it, so its own bad status
+                    # carries no risk to block on.
                     # Stop retrying immediately (no point repairing further
                     # on an unfinished turn) -- the barrier after this loop
                     # blocks the whole cycle from integrating.
                     _repair_status = _subagent_own_status(STATE_DIR, _repair_spawn_id) if _repair_spawn_id else ''
-                    if _repair_added_commits and _repair_status != 'ok':
+                    if _repair_changed and _repair_status != 'ok':
                         _repair_unfinished_status = _repair_status
                         _repair_unfinished_task_id = _repair_spawn_id
                         print(
