@@ -191,13 +191,13 @@ class ExecTool(Tool):
             except ProcessLookupError:
                 pass
 
+            # The grace period applies to the group, not just the shell:
+            # signaling is repeated even if the shell exits before SIGKILL.
             try:
-                await asyncio.wait_for(process.wait(), timeout=1.0)
-            except asyncio.TimeoutError:
-                try:
-                    os.killpg(process_group_id, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                await asyncio.sleep(1.0)
+                os.killpg(process_group_id, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
         try:
             await asyncio.wait_for(process.wait(), timeout=5.0)
@@ -219,14 +219,26 @@ class ExecTool(Tool):
         try:
             await asyncio.wait_for(process.communicate(), timeout=1.0)
         except asyncio.TimeoutError:
-            if os.name != "nt":
+            if os.name == "nt":
+                cleanup = await asyncio.create_subprocess_exec(
+                    "taskkill.exe", "/PID", str(process.pid), "/T", "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await cleanup.wait()
+            else:
                 import signal
 
                 try:
                     os.killpg(process_group_id, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-            await process.communicate()
+            try:
+                await asyncio.wait_for(process.communicate(), timeout=1.0)
+            except asyncio.TimeoutError:
+                # A detached descendant may retain inherited pipes; forcibly
+                # close our transports rather than wait for its lifetime.
+                process._transport.close()
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
         """Best-effort safety guard for potentially destructive commands."""

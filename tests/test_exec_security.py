@@ -117,13 +117,19 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
 
     child_pid_file = tmp_path / "background-child.pid"
     shell_pid_file = tmp_path / "background-shell.pid"
+    ignore_term_file = tmp_path / "ignore-term.py"
     child_pid_posix = child_pid_file.as_posix()
     shell_pid_posix = shell_pid_file.as_posix()
+    ignore_term_file.write_text(
+        "import os, signal, sys, time\\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
+        "open(sys.argv[1], 'w').write(str(os.getpid()))\\n"
+        "time.sleep(60)\\n",
+        encoding="utf-8",
+    )
     command = (
-        f"python3 -c 'import os,sys; open(sys.argv[1], \"w\").write(str(os.getpid()))' "
-        f'"{shell_pid_posix}"; '
-        f"python3 -c 'import os,sys,time; open(sys.argv[1], \"w\").write(str(os.getpid())); time.sleep(60)' "
-        f'"{child_pid_posix}" &'
+        f'echo $$ > "{shell_pid_posix}"; '
+        f'python3 "{ignore_term_file.as_posix()}" "{child_pid_posix}" &'
     )
     execution = asyncio.create_task(ExecTool(timeout=60).execute(command))
     deadline = time.monotonic() + 10
@@ -135,8 +141,8 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
     shell_stat = Path(f"/proc/{shell_pid}/stat")
     child_stat = Path(f"/proc/{child_pid}/stat")
 
-    # Wait until the shell has exited; communicate remains blocked because the
-    # grandchild inherited stdout/stderr. This is the regression window.
+    # The shell exits after starting its background child; communicate remains
+    # blocked because the descendant inherited stdout/stderr.
     deadline = time.monotonic() + 5
     while shell_stat.exists() and time.monotonic() < deadline:
         await asyncio.sleep(0.01)
@@ -145,7 +151,7 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
             shell_fields = shell_stat.read_text(encoding="utf-8").split()
         except (FileNotFoundError, ProcessLookupError):
             shell_fields = []
-        assert not shell_fields or shell_fields[2] == "Z"
+        assert not shell_fields or shell_fields[2] != "Z"
     assert execution.done() is False
 
     child_stat_fields = child_stat.read_text(encoding="utf-8").split()
@@ -153,6 +159,8 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
     child_session = int(child_stat_fields[5])
     assert child_pgrp == child_session, "grandchild process group differs from its session"
     assert child_pgrp != os.getpgid(os.getpid()), "grandchild accidentally joined pytest's process group"
+    child_stat_before = child_stat.read_text(encoding="utf-8").split()
+    child_start_time = child_stat_before[21]
 
     execution.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -173,7 +181,10 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
             fields = child_stat.read_text(encoding="utf-8").split()
         except (FileNotFoundError, ProcessLookupError):
             fields = []
+        # The SIGTERM-ignoring child must not merely be a zombie: escalation
+        # should remove its exact process identity from the process table.
         assert not fields or fields[2] == "Z", f"grandchild PID {child_pid} survived cancellation"
+        assert not fields or fields[21] != child_start_time, f"grandchild PID {child_pid} still exists"
 
 
 def _fake_resolve_private(hostname, port, family=0, type_=0):
