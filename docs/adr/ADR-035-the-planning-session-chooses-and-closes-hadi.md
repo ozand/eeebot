@@ -190,8 +190,19 @@ with its branch and one of three causes:
 - `interrupted(kill)`: the process was killed, for example by the unit timeout,
   before any post-execution bookkeeping ran. To make this detectable, the attempt
   records a `running` increment (cycle, branch, attempt) **before** the executor
-  starts. At the next cycle start, a `running` record with no terminal row becomes
-  `interrupted(kill)`.
+  starts. At the next cycle start, a `running` record with no terminal row is
+  recovered from the executor's own telemetry first. The mapping is total:
+  - executor telemetry `status: error` → the cause is classified as usual:
+    `interrupted(supply)`, with the supply hold, or `interrupted(defect)`;
+  - any other terminal executor status (`ok`, `bounded_stop`, `blocked`,
+    `cancelled`), or no terminal telemetry at all → `interrupted(kill)`. The
+    bridge never reached a gate verdict, so the cycle is unfinished even if the
+    executor finished. The executor's status is kept on the record as
+    `executor_status` evidence. A kept increment then resumes with that
+    evidence, which may mean running only the gate on the existing branch.
+
+  A kill during bookkeeping never erases a known cause, and no terminal status
+  falls outside the three causes.
 
 Keeping an increment does not erase its record before execution resumes. The
 record is marked as resumed by the new cycle and cleared only by a terminal
@@ -219,7 +230,23 @@ killed attempts survived, about two and a half hours of work.
   to a fresh branch from `main`.
 - **Checkpoints go only to their own branch.** The executor knows the exact branch
   it works on, and a checkpoint is written to that branch by a compare-and-swap on
-  its ref, not by committing to whatever `HEAD` is at that moment.
+  its ref, not by committing to whatever `HEAD` is at that moment. The ref check
+  alone does not prove where the content came from, so the checkpoint also checks
+  its source. The steps, in order:
+  1. Read `HEAD`; it must be the symbolic ref of the expected branch. Record that
+     branch's tip as `old`.
+  2. Stage the changed paths in the checkout's own index, exactly as a normal
+     commit would. A private index is not used: moving the checked-out branch
+     under a private index leaves the shared index on the old tip, and the next
+     normal commit would then revert the checkpoint.
+  3. `write-tree`, then check `HEAD` again.
+  4. `commit-tree` with parent `old`, then `update-ref refs/heads/<expected> <new>
+     <old>`.
+
+  The shared index then already equals the committed tree. If a check fails or the
+  compare-and-swap is refused, the staging is undone (`git reset -q`, never
+  `--hard`), and the checkpoint is skipped and recorded, never written. The bridge
+  remains the single writer of the shared checkout during an attempt.
 - **The increment is measured from its base, not from the attempt.** Whether there
   is work, the closing commit, the changed files and the counts are taken from
   the branch's merge base with `main`. Work kept from an earlier attempt therefore
@@ -426,6 +453,7 @@ actor that has both.
 | Recovery maps EVERY executor terminal status: telemetry `error` → supply/defect as usual; `ok`/`bounded_stop`/`blocked`/`cancelled`/no telemetry → `interrupted(kill)`, with `executor_status` carried into the record as evidence | `tests/test_agent_chooses.py::test_recovery_maps_every_executor_status` | passing (B2 external-review fixes, architect resolution on #1979 external-review followups, #1962): `open_increment.record_attempt_task_id` (attached right after `spawn()`) + `check_running_for_kill` reading the executor's own telemetry via `bridge._subagent_own_status` (#1546, reused rather than duplicated); parametrized over every status |
 | A checkpoint is written only to the expected branch, by compare-and-swap on its ref; a different `HEAD` or a concurrent checkout never receives it | `tests/test_agent_chooses.py::test_checkpoint_bound_to_expected_branch` | passing (B2 external-review fixes, architect resolution on #1979 external-review followups, #1962): ordinary (not private) index, `symbolic-ref HEAD` compared exactly (re-checked after `write-tree`, before `commit-tree`); the commit goes through `write-tree`/`commit-tree`/`update-ref refs/heads/<expected>` with the prior tip as the CAS old-value, never touching `HEAD`; any failed check or CAS rejection unstages via `git reset -q` (never `--hard`) |
 | After a successful checkpoint CAS the shared index equals the new `HEAD`'s tree (`git diff --cached --quiet`), and the next ordinary `git commit` on that branch preserves the checkpoint's content rather than reverting it | `tests/test_agent_chooses.py::test_checkpoint_keeps_shared_index_coherent` | passing (B2 external-review fixes, architect resolution on #1979 external-review followups, #1962) |
+| A rejected checkpoint (failed `HEAD` check or refused compare-and-swap) resets the shared index to the actual `HEAD` while the working-tree edits stay, so the next ordinary commit does not absorb the skipped checkpoint | `tests/test_agent_chooses.py::test_rejected_checkpoint_resets_index_keeps_worktree` | passing (B2 external-review fixes, Codex P2 followup on #1979, 16710f62, #1962): covers both rejection paths (mismatched branch, refused CAS); `git reset -q`, never `--hard`; the branch-mismatch path now also logs its skip reason via `_abandon`, consistent with every other rejection path |
 | A kept branch that is missing or fails to check out stops the attempt, and is never reset to `main` | `tests/test_agent_chooses.py::test_keep_never_falls_back_to_reset` | passing (B2 external-review fixes, #1962): `_setup_cycle_branch`'s `reuse_existing_branch=True` path never falls through to `-B`; missing branch → `resume_branch_missing`, failed reuse checkout → `resume_checkout_failed` |
 | Work, closing commit, changed files and counts are measured from the increment's merge base, so work kept from a killed attempt counts | `tests/test_agent_chooses.py::test_increment_accounting_uses_merge_base` | passing (B2 external-review fixes, #1962): new `_increment_base` (`merge-base(origin/main, cycle_branch)` when resumed, else `main_sha_before`) replaces `_pre_spawn_sha` at every commit-count/files_changed/artificiality/test-weakening call site; `_pre_spawn_sha` itself (the attempt's own pre-spawn HEAD) is unchanged, unused by this accounting now |
 | A failed closing commit blocks integration | `tests/test_agent_chooses.py::test_failed_closing_commit_blocks_integration` | passing (B2 external-review fixes, #1962): a failed `git commit --allow-empty` sets `_closing_commit_failed`, an explicit early return (reason `closing_commit_failed`, added to `_INCONCLUSIVE_REASONS`) before smoke/repair/gate |
