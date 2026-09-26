@@ -3134,9 +3134,11 @@ def test_stopped_and_minimal_mode_are_enforced(tmp_path: Path, monkeypatch):
     1. ``stopped`` blocks the planning session from even starting, until
        the operator resumes manually (``no_plan_recovery.resume``) -- a
        stubbed planning session must never be called.
-    2. ``minimal_mode`` actually selects a smaller context: the
-       candidates block is omitted from the planner's task text, not
-       merely a recorded flag with no effect on what the session sees.
+    2. ``minimal_mode`` actually selects a smaller context: the top FIVE
+       candidates (round 2 external re-check, item 9, architect
+       resolution 2026-09-26 -- "minimal mode means the five best
+       candidates, as in the ADR, not zero"), not the full list and not
+       an empty omission either.
     """
     import asyncio
 
@@ -3203,13 +3205,27 @@ def test_stopped_and_minimal_mode_are_enforced(tmp_path: Path, monkeypatch):
             self._running_tasks[task_id] = asyncio.create_task(_noop())
             return "fake planner spawned"
 
+    # Eight candidates -- more than the five-candidate cap -- so the test
+    # can prove minimal_mode TRUNCATES rather than omits or shows all.
+    _fake_candidate_items = [
+        {"kind": "priority", "id": f"prio-{i}", "summary": f"Priority item {i}"}
+        for i in range(1, 9)
+    ]
+    monkeypatch.setattr(bridge.demand, "collect_demand", lambda *a, **k: list(_fake_candidate_items))
+
     monkeypatch.setattr(bridge, "SubagentManager", _CapturingPlannerManager)
 
     rc2 = asyncio.run(bridge._main_impl())
     assert rc2 == 0
     assert len(captured_tasks) == 1
-    assert "minimal mode: candidate list omitted" in captured_tasks[0], (
-        f"minimal_mode did not select a smaller context: {captured_tasks[0]!r}"
+    task_text = captured_tasks[0]
+    assert "## Ranked candidates" in task_text, (
+        f"minimal_mode must still show the top candidates, not omit the list entirely: {task_text!r}"
+    )
+    assert "Priority item 1" in task_text
+    assert "Priority item 5" in task_text
+    assert "Priority item 6" not in task_text, (
+        f"minimal_mode must cap the candidate list at five, not show more: {task_text!r}"
     )
 
 
