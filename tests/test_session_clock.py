@@ -117,6 +117,41 @@ class TestWallClockSafetyMargin:
 class TestProgressWatchdog:
     """Requirement 2 (#1899): watchdog interrupts session when no progress for N minutes."""
 
+    async def test_hung_tool_times_out_without_recording_late_progress(self, tmp_path, monkeypatch):
+        """A tool exceeding the watchdog window is cancelled; its late completion cannot reset it."""
+        from nanobot.agent.tools.registry import ToolRegistry
+
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        class _HangingRegistry(ToolRegistry):
+            async def execute(self, name, params):
+                started.set()
+                try:
+                    await asyncio.sleep(1)
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+                return "late completion"
+
+        provider = _MockProvider(responses=[LLMResponse(
+            content=None,
+            tool_calls=[ToolCallRequest(id="call-hang", name="read_file", arguments={"path": "a.txt"})],
+        )])
+        mgr = SubagentManager(provider=provider, workspace=tmp_path, bus=MessageBus(), max_iterations=10)
+        monkeypatch.setenv("NANOBOT_PROGRESS_TIMEOUT_SECS", "0.05")
+        from nanobot.agent import subagent as subagent_module
+        monkeypatch.setattr(subagent_module, "ToolRegistry", _HangingRegistry)
+
+        await mgr.spawn(task="hung tool test", label="hung_tool_watchdog")
+        await asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True)
+
+        assert started.is_set()
+        assert cancelled.is_set(), "watchdog must cancel a tool that outlives its remaining window"
+        telem_path = next((tmp_path / "state" / "subagents").glob("*.json"))
+        telemetry = json.loads(telem_path.read_text(encoding="utf-8"))
+        assert telemetry["stop_reason"] == "progress_watchdog_timeout"
+
     def test_env_defaults_and_overrides(self, monkeypatch):
         monkeypatch.delenv("NANOBOT_PROGRESS_TIMEOUT_SECS", raising=False)
         monkeypatch.delenv("NANOBOT_PROGRESS_TIMEOUT_MINUTES", raising=False)
