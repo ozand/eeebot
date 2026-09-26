@@ -3345,6 +3345,85 @@ def test_missing_open_increment_decision_is_no_plan(tmp_path: Path, monkeypatch)
     )
 
 
+def test_resolve_saved_reflects_the_full_verified_transition(tmp_path: Path, monkeypatch):
+    """Round 4 P2-a (architect resolution 2026-09-26): ``resolve()``
+    itself now verifies the FULL intended transition by reading the
+    saved state back, and reports it via the explicit
+    ``resolve_saved`` field -- not just whether ``_save_state``
+    returned truthy (which only proves a write landed, not that it
+    landed with the intended content). Two scenarios:
+
+    1. ``delete``: the inspection ref succeeds (so the old
+       inspection-ref-only check from round 2/3 would have accepted
+       this), but the FINAL save (clearing ``pending``) fails once --
+       ``resolve_saved`` must still read False, and ``pending`` must
+       still be intact.
+    2. ``keep``+edit: the save fails -- ``resolve_saved`` must read
+       False, and the durable ``plan_text``/``plan_version`` must be
+       unchanged from before the edit.
+    """
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import open_increment
+
+    # --- Scenario 1: delete, inspection ref succeeds, final save fails ---
+    base1 = tmp_path / "base1"
+    base1.mkdir()
+    state_dir1 = base1 / "state"
+    state_dir1.mkdir()
+    _origin1, work1 = _init_selfevo_repo(base1)
+
+    cycle_id_1 = "cycle-p2a-delete-savefail"
+    branch1 = f"selfevo/cycle-{cycle_id_1}"
+    subprocess.run(["git", "-C", str(work1), "checkout", "-b", branch1], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(work1), "checkout", "main"], check=True, capture_output=True)
+
+    open_increment.record_supply_interruption(
+        state_dir1, cycle_id_1,
+        retry_key="p2a-delete-test", plan_text="finish the wip feature", candidate_id=None,
+        selfevo_repo=work1, branch=branch1,
+    )
+
+    _real_save_state_1 = open_increment._save_state
+    monkeypatch.setattr(open_increment, "_save_state", lambda *a, **k: False)
+    result1 = open_increment.resolve(state_dir1, cycle_id_1, "delete", selfevo_repo=work1)
+    monkeypatch.setattr(open_increment, "_save_state", _real_save_state_1)
+
+    assert result1.resolve_saved is False, (
+        "a delete whose inspection ref succeeded but final save failed must not report resolve_saved=True"
+    )
+    assert open_increment.pending_open_increment(state_dir1) is not None, (
+        "pending must remain intact when delete's final save fails, even after a successful inspection ref"
+    )
+
+    # --- Scenario 2: keep+edit, save fails --------------------------------
+    base2 = tmp_path / "base2"
+    base2.mkdir()
+    state_dir2 = base2 / "state"
+    state_dir2.mkdir()
+
+    cycle_id_2 = "cycle-p2a-keepedit-savefail"
+    original_plan = "Plan: finish the wip feature exactly as originally scoped."
+    open_increment.record_supply_interruption(
+        state_dir2, cycle_id_2,
+        retry_key="p2a-keepedit-test", plan_text=original_plan, candidate_id=None,
+        branch=f"selfevo/cycle-{cycle_id_2}",
+    )
+
+    revised_plan = "finish the wip feature, but also add a regression test"
+    monkeypatch.setattr(open_increment, "_save_state", lambda *a, **k: False)
+    result2 = open_increment.resolve(state_dir2, cycle_id_2, "keep", plan_text=revised_plan)
+    monkeypatch.undo()
+
+    assert result2.resolve_saved is False, "a keep+edit whose save failed must not report resolve_saved=True"
+    pending2 = open_increment.pending_open_increment(state_dir2)
+    assert pending2["plan_text"] == original_plan, (
+        f"the durable plan must be unchanged when the edit's save failed: {pending2!r}"
+    )
+    assert pending2.get("plan_version", 1) == 1
+
+
 def test_keep_edit_with_persistence_failure_rejects_the_plan(tmp_path: Path, monkeypatch):
     """Round 3, item N2 (architect resolution 2026-09-26): ``resolve``'s
     ``keep``+edit path writes the revised ``plan_text`` in-memory and
