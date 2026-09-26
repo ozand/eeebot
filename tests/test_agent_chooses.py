@@ -4400,6 +4400,70 @@ def test_plan_version_survives_a_second_interruption(tmp_path: Path):
     )
 
 
+def test_recovery_does_not_overwrite_an_accepted_edit(tmp_path: Path):
+    """Round 4 P1-a (architect resolution 2026-09-26): an interruption
+    writer (``record_kill_interruption``, same shape as
+    ``record_supply_interruption``/``record_defect_interruption``) sets
+    ``pending`` but leaves the stale ``running`` registration untouched
+    -- only :func:`resolve` (``keep``) or ``record_attempt_finished``
+    ever clear it. If the RESUMED attempt (same ``cycle_id``, a
+    ``keep``+edit) dies in the narrow gap BEFORE its own
+    ``record_attempt_started`` call lands, the next tick's
+    ``check_running_for_kill`` still finds the OLD, pre-edit ``running``
+    entry (same ``cycle_id`` as ``pending``, so it is not deferred) and
+    re-classifies it as a fresh kill -- the caller then re-interrupts
+    using ``running``'s OWN (stale, un-edited) ``plan_text``, silently
+    discarding the accepted edit that already landed in ``pending``.
+    ``running`` must be cleared in the SAME save as the interruption
+    that creates ``pending``, so this exact gap produces NO stale
+    ``running`` to misclassify at all -- the accepted edit is the only
+    source of truth left standing.
+    """
+    from nanobot.runtime import open_increment
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    cycle_id = "cycle-recovery-overwrite-01"
+    branch = f"selfevo/cycle-{cycle_id}"
+    original_plan = "Plan: finish the wip feature exactly as originally scoped."
+
+    # The FIRST attempt registers (a stale registration to recover from).
+    open_increment.record_attempt_started(state_dir, cycle_id, branch, plan_text=original_plan)
+
+    # Recovery: the first attempt is found dead (a hard kill, no
+    # telemetry) and recorded as the pending open increment.
+    open_increment.record_kill_interruption(
+        state_dir, cycle_id,
+        retry_key="recovery-overwrite-test", plan_text=original_plan, candidate_id=None,
+        branch=branch,
+    )
+
+    # The planning session decides keep+edit -- saved successfully.
+    revised_plan = "finish the wip feature, but also add a regression test for the crash it fixes"
+    open_increment.resolve(state_dir, "cycle-recovery-decider", "keep", plan_text=revised_plan)
+    pending_after_edit = open_increment.pending_open_increment(state_dir)
+    assert pending_after_edit["plan_text"] == revised_plan
+    assert pending_after_edit["plan_version"] == 2
+
+    # The resumed attempt (SAME cycle_id, per D2's keep-resume design)
+    # dies BEFORE its own record_attempt_started call ever lands --
+    # nothing re-registers `running`. The NEXT tick's kill-check must
+    # find nothing stale to misclassify.
+    stale = open_increment.check_running_for_kill(state_dir, "cycle-recovery-tick-2")
+    assert stale is None, (
+        f"a resumed attempt that died before re-registering must leave no stale `running` "
+        f"to misclassify -- `running` must have been cleared when the interruption was "
+        f"recorded, not left showing the pre-edit registration: {stale!r}"
+    )
+
+    pending_final = open_increment.pending_open_increment(state_dir)
+    assert pending_final["plan_text"] == revised_plan, (
+        f"the accepted edit must survive a death in the re-registration gap: {pending_final!r}"
+    )
+    assert pending_final["plan_version"] == 2
+
+
 def test_recovery_of_resumed_supply_error_actually_holds(tmp_path: Path, monkeypatch):
     """Round 3, items 2 and C (architect resolution 2026-09-26). Item 2: a
     ``keep``-resumed attempt's own ``running`` registration shares
