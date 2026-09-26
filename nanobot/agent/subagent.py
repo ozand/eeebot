@@ -996,7 +996,13 @@ class SubagentManager:
             if not changed:
                 return
             for path in changed:
-                _sp_ckpt.run(git + ["add", "--", path], capture_output=True, text=True, timeout=10)
+                add_result = _sp_ckpt.run(git + ["add", "--", path], capture_output=True, text=True, timeout=10)
+                if add_result.returncode != 0:
+                    # Round 2 external re-check, item 3 (architect
+                    # resolution 2026-09-26): a staging failure must never
+                    # be followed by write-tree/commit-tree/update-ref.
+                    _abandon(f"git add failed for {path!r}")
+                    return
             if len(changed) == 1:
                 paths_desc = changed[0]
             else:
@@ -1031,8 +1037,19 @@ class SubagentManager:
             if cas.returncode != 0:
                 _abandon("update-ref CAS rejected (branch moved concurrently)")
                 return
-        except Exception:
-            pass
+        except Exception as exc:
+            # Round 2 external re-check, item 3 (architect resolution
+            # 2026-09-26): any exception after staging may have started
+            # (a write-tree timeout, for example) must still reset the
+            # index -- a bare `except: pass` here left it staged with no
+            # reset at all. `_abandon` is itself a no-op when nothing was
+            # staged yet (the branch-mismatch case), so this is safe to
+            # call unconditionally; wrapped again so a failure in the
+            # reset itself cannot escape this fail-open, silent contract.
+            try:
+                _abandon(f"unexpected exception: {exc}")
+            except Exception:
+                pass
 
     async def _announce_result(
         self,
