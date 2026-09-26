@@ -112,6 +112,13 @@ def snapshot_version(state_dir: "Path", selfevo_repo: "Path | None", wc: WakeCon
                 ["git", "-C", str(selfevo_repo), "rev-parse", "origin/main"],
                 capture_output=True, text=True, timeout=10,
             )
+            # Small item (ADR-035 Test Contract, #1962): a failing rev-parse
+            # can still print something to stdout despite a nonzero exit
+            # (e.g. an ambiguous-ref echo) -- checking the returncode, not
+            # just stdout, is what keeps that read honestly "unknown"
+            # rather than a stored literal that looks unchanged forever.
+            if out.returncode != 0:
+                return None
             sha = out.stdout.strip()
             return sha or None
 
