@@ -380,7 +380,7 @@ def read_subagent_queue_depth(state_root: Path) -> int:
     return len(list(_json_files_sorted_by_mtime(False, requests_dir)))
 
 
-def read_derived_priorities_queue(state_root: Path) -> dict[str, int]:
+def read_derived_priorities_queue(state_root: Path) -> dict[str, int | str]:
     """Depth and limit for derived priorities — ADR-034 rule 2: read via
     :func:`operator_documents.resolve_derived_priorities`, the derived
     priorities' one resolver, never a second path to the file."""
