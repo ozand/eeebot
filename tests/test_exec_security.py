@@ -22,7 +22,6 @@ async def test_watchdog_cancellation_kills_and_reaps_real_exec_subprocess(tmp_pa
     child_pid_file = tmp_path / "child.pid"
     shell_pid_file = tmp_path / "shell.pid"
     if os.name == "nt":
-        pid_file = child_pid_file
         child_script = tmp_path / "child.py"
         child_script.write_text(
             "import os, sys, time\n"
@@ -30,17 +29,7 @@ async def test_watchdog_cancellation_kills_and_reaps_real_exec_subprocess(tmp_pa
             "time.sleep(60)\n",
             encoding="utf-8",
         )
-        command_file = tmp_path / "spawn_child.ps1"
-        command_file.write_text(
-            "$python = $args[0]; $script = $args[1]; $pidfile = $args[2]; "
-            "$p = Start-Process -FilePath $python -ArgumentList @($script, $pidfile) -PassThru; "
-            "Wait-Process -Id $p.Id",
-            encoding="utf-8",
-        )
-        child_command = (
-            f'powershell -NoProfile -File "{command_file}" '
-            f'"{sys.executable}" "{child_script}" "{pid_file}"'
-        )
+        child_command = f'"{sys.executable}" "{child_script}" "{child_pid_file}"'
     else:
         child_script = tmp_path / "child.py"
         child_script.write_text(
