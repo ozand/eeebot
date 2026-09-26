@@ -134,26 +134,30 @@ def test_base_fixture_recomputes_published_rule_c_counts():
     assert all(set(row) == {"cycle_id", "outcome", "verdict", "branch_files"} for row in rows)
     assert all(not path.startswith("/") and ".." not in Path(path).parts for row in rows for path in row["branch_files"])
     from nanobot.runtime.service_paths import is_service_only
-    rule_c_count = lambda selected: sum(
-        row["outcome"] == "success" and row["verdict"] == "accept"
-        and not is_service_only(row["branch_files"]) for row in selected
-    )
+    def rule_c_count(selected):
+        return sum(
+            row["outcome"] == "success" and row["verdict"] == "accept"
+            and not is_service_only(row["branch_files"])
+            for row in selected
+        )
     first_24 = rows[:24]
     assert rule_c_count(rows) == 15
     assert rule_c_count(first_24) == 14
 
 
 def test_service_paths_follow_the_published_rule_c_set():
-    assert m.is_service_path("diary/2026-09-24.md")
-    assert m.is_service_path("memory/HISTORY.md")
-    assert m.is_service_path("memory/repeat_failures.json")
-    assert not m.is_service_path("memory/facts/decay_archival_policy.md")
-    assert not m.is_service_path("lessons/scaffold_first_reasoning_limits.md")
-    assert not m.is_service_path("scripts/diary/tool.py")
-    assert m.is_service_only(["diary/2026-09-24.md", "memory/MEMORY.md"])
-    assert not m.is_service_only(["diary/2026-09-24.md", "lessons/x.md"])
-    assert not m.is_service_only([])
-    assert not m.is_service_only(None)
+    from nanobot.runtime.service_paths import is_service_only, is_service_path
+
+    assert is_service_path("diary/2026-09-24.md")
+    assert is_service_path("memory/HISTORY.md")
+    assert is_service_path("memory/repeat_failures.json")
+    assert not is_service_path("memory/facts/decay_archival_policy.md")
+    assert not is_service_path("lessons/scaffold_first_reasoning_limits.md")
+    assert not is_service_path("scripts/diary/tool.py")
+    assert is_service_only(["diary/2026-09-24.md", "memory/MEMORY.md"])
+    assert not is_service_only(["diary/2026-09-24.md", "lessons/x.md"])
+    assert not is_service_only([])
+    assert not is_service_only(None)
 
 
 def _git(repo: Path, *args: str) -> str:

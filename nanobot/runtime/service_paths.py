@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 SERVICE_PATH_PREFIXES = ("diary/",)
-SERVICE_PATH_EXACT = frozenset({
-    "memory/MEMORY.md",
-    "memory/HISTORY.md",
-    "memory/confirmation_status.json",
-    "memory/prevent_repeats.json",
-    "memory/repeat_failures.json",
-})
+SERVICE_PATH_EXACT = frozenset(
+    {
+        "memory/MEMORY.md",
+        "memory/HISTORY.md",
+        "memory/confirmation_status.json",
+        "memory/prevent_repeats.json",
+        "memory/repeat_failures.json",
+    }
+)
 
 
 def is_service_path(path: str) -> bool:

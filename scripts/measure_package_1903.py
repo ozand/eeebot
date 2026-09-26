@@ -84,8 +84,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
-
-from nanobot.runtime.service_paths import SERVICE_PATH_EXACT, SERVICE_PATH_PREFIXES, is_service_only, is_service_path
+from nanobot.runtime.service_paths import is_service_only
 
 _MERGE_SUBJECT_PREFIX = "merge: integrate selfevo/cycle-"
 
