@@ -117,14 +117,14 @@ def test_operator_priority_block_stays_atomic_under_context_cap(tmp_path, monkey
     state_dir = _state_dir(tmp_path)
     full_title = "A" * 1200
     _write_goal_text(state_dir, f"Current priority targets:\n(A) Priority 14 — {full_title}: do work.")
-    monkeypatch.setattr(llm_proposer, "_MAX_CONTEXT_CHARS", 5000)
+    monkeypatch.setattr(llm_proposer, "_MAX_CONTEXT_CHARS", 1000)
     monkeypatch.setattr(
         llm_proposer, "_captured_pattern_hint",
         lambda _rows: "guardrail filler " * 230,
     )
     context = llm_proposer.build_context(state_dir, None)
 
-    assert len(context) <= 5000
+    assert len(context) <= 1000
     assert full_title not in context
     assert "priorities could not be shown here (unavailable, reason: oversize)" in context.lower()
     assert "Open:" not in context

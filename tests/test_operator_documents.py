@@ -215,6 +215,25 @@ def test_completed_em_dash_title_preserves_internal_punctuation(tmp_path: Path):
     assert "improve parsing, logging and alerts" in resolve_operator_priority_labels(state)
 
 
+def test_completed_em_dash_title_stops_before_next_section(tmp_path: Path):
+    """A following priority section must not be parsed as Completed prose."""
+    state = tmp_path / "state"
+    _goal_text_json(
+        state,
+        "Completed (do not repeat): Priority 7 — Already shipped.\n"
+        "Current priority targets:\n(A) Priority 8 — Next: Next task.",
+    )
+
+    result = resolve_operator_priorities(state)
+
+    assert [(entry.number, entry.title) for entry in result.completed_entries] == [
+        (7, "Already shipped"),
+    ]
+    assert [(entry.number, entry.title) for entry in result.open_entries] == [
+        (8, "Next"),
+    ]
+
+
 def test_four_priority_states_are_distinct(tmp_path: Path):
     state_present = tmp_path / "present"
     _goal_text_json(
