@@ -199,6 +199,22 @@ def test_completed_priority_parser_preserves_closing_vector_tag(tmp_path: Path):
     assert "existing label" in resolve_operator_priority_labels(state)
 
 
+def test_completed_em_dash_title_preserves_internal_punctuation(tmp_path: Path):
+    """ADR-034: punctuation inside an em-dash Completed title is not a delimiter."""
+    state = tmp_path / "state"
+    _goal_text_json(
+        state,
+        "Completed (do not repeat): Priority 14 — Improve parsing, logging and alerts.",
+    )
+
+    result = resolve_operator_priorities(state)
+
+    assert [(entry.number, entry.title) for entry in result.completed_entries] == [
+        (14, "Improve parsing, logging and alerts"),
+    ]
+    assert "improve parsing, logging and alerts" in resolve_operator_priority_labels(state)
+
+
 def test_four_priority_states_are_distinct(tmp_path: Path):
     state_present = tmp_path / "present"
     _goal_text_json(

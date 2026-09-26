@@ -112,6 +112,25 @@ def test_proposer_prompt_distinguishes_all_completed_derived_priorities(tmp_path
     assert "none; document contains no open priorities" not in context.lower()
 
 
+def test_operator_priority_block_stays_atomic_under_context_cap(tmp_path, monkeypatch):
+    """ADR-034: a tiny residual context budget must not slice priority content."""
+    state_dir = _state_dir(tmp_path)
+    full_title = "A" * 1200
+    _write_goal_text(state_dir, f"Current priority targets:\n(A) Priority 14 — {full_title}: do work.")
+    monkeypatch.setattr(llm_proposer, "_MAX_CONTEXT_CHARS", 5000)
+    monkeypatch.setattr(
+        llm_proposer, "_captured_pattern_hint",
+        lambda _rows: "guardrail filler " * 230,
+    )
+    context = llm_proposer.build_context(state_dir, None)
+
+    assert len(context) <= 5000
+    assert full_title not in context
+    assert "Operator priorities could not be shown here (unavailable, reason: oversize)" in context
+    assert "Open:" not in context
+    assert "14." not in context
+
+
 def _append_proposed(state_dir: Path, cycle_id: str, task_title: str) -> None:
     cycle_ledger.append_event(
         state_dir,
