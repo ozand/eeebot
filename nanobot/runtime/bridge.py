@@ -4576,6 +4576,11 @@ async def _main_impl_body():
         cycle_commit_count = 0
         commits_pushed = 0
         _auto_committed = False
+        # D6 (ADR-035 Test Contract): set True only when the checkpoint-only
+        # closing-commit marker was ATTEMPTED and failed -- never for a
+        # branch that didn't need one (a real, non-artificial commit already
+        # exists).
+        _closing_commit_failed = False
         _cycle_tier = 'script'  # #812: 'script' | 'runtime' (set by surface classify below)
         _integrated = False
         _delivered = False
@@ -4840,6 +4845,19 @@ async def _main_impl_body():
                         if _closing.returncode == 0:
                             cycle_commit_count = _count_commits_since(_selfevo_repo, _increment_base)
                             print(f'cycle-branch: checkpoint-only branch closed with 1 marker commit ({_closing_subject!r})')
+                        else:
+                            # D6 (ADR-035 Test Contract, external review
+                            # finding #6): "no closing commit created -> no
+                            # integration." A branch whose only commits are
+                            # artificial (checkpoints/residual) has no
+                            # task-subject evidence for the readers that
+                            # invariant protects -- integrating it anyway
+                            # would be exactly the defect this blocks.
+                            _closing_commit_failed = True
+                            print(
+                                f'cycle-branch: closing-commit creation FAILED '
+                                f'({_closing.stderr.strip()[:200]!r}); blocking integration'
+                            )
                     # #678 F1/F3: initial changed-file set + violation split, for
                     # logging. This is RECOMPUTED after the repair loop (just before
                     # the gate decision) so the enforced lists reflect every commit,
@@ -4954,6 +4972,39 @@ async def _main_impl_body():
                     candidate_id=req.get('candidate_id') or None,
                     branch=cycle_branch,
                 )
+
+            if _closing_commit_failed:
+                # D6 (ADR-035 Test Contract, external review finding #6):
+                # "no closing commit created -> no integration." Stop here,
+                # same shape as D1 below -- never reach smoke/repair/gate.
+                # The branch (all-artificial commits, no closing marker) is
+                # retained for forensics, main is left untouched.
+                _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
+                handled_marker.write_text(str(req_path), encoding='utf-8')
+                _write_bridge_completed_result(
+                    state_dir=STATE_DIR, req=req, request_id=request_id,
+                    cycle_id=req.get('cycle_id') or '', goal_id=goal_id,
+                    files_changed=files_changed, commits_pushed=0, result_status='blocked',
+                    backlog_title=backlog_title,
+                    key_learnings=[
+                        f'The required closing commit failed to be created; {cycle_branch} kept '
+                        'for forensics, main left unchanged.'
+                    ],
+                    rollback={
+                        'integrated': False, 'cycle_branch': cycle_branch,
+                        'main_sha_before': main_sha_before, 'main_sha_after': main_sha_before,
+                        'reason': 'closing_commit_failed',
+                    },
+                )
+                _v, _vr = _derive_cycle_verdict('failed', 'closing_commit_failed')
+                record_cycle_outcome(
+                    STATE_DIR, _cycle_id, 'failed', 'closing_commit_failed', files_changed, cycle_branch,
+                    verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                    real_result=_real_result_ledger_inputs('blocked'),
+                    retry_key=req.get('retry_key') or None,
+                )
+                _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
+                return {'status': 0}
 
             if _session_errored and cycle_commit_count > 0:
                 # D1: "a session with status=error ... is not finished. It
@@ -6746,6 +6797,10 @@ _INCONCLUSIVE_REASONS = frozenset({
     # checkpoints exist — the session never finished, ambiguous by
     # construction, same treatment as a supplier outage.
     'interrupted_defect',
+    # D6 (ADR-035 Test Contract, #1942 B2): a required closing commit that
+    # failed to be created is harness/infra trouble, never a verdict on the
+    # work itself.
+    'closing_commit_failed',
 })
 
 
