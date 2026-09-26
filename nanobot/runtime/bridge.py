@@ -3683,6 +3683,32 @@ async def _run_planning_session(
         planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
         print('planning-session: malformed (response contains both plan and rest)')
         return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
+    if parse_error is None and _rest_candidate is not None and _pending_open_increment:
+        # Codex review of 777ada1a (nanobot/runtime/bridge.py:3688), P1
+        # (architect resolution 2026-09-26): D8 below rejects a `plan`
+        # response that leaves a pending open increment unresolved
+        # (missing/invalid `open_increment_decision`), but the rest
+        # branch runs BEFORE that check and returns early on any
+        # structurally valid `rest` -- a `rest` is exactly as much a way
+        # to skip the mandatory keep/edit/delete decision as an ordinary
+        # malformed plan, and must be rejected the same way (same shape
+        # as D8's own rejection just below).
+        record_planning_session(
+            state_dir, cycle_id, 'malformed',
+            iterations_used=iterations_used, iterations_planned=None,
+            reason='pending open increment unresolved: rest cannot substitute for keep/edit/delete',
+            parse_mode=parse_mode,
+            format_violation=format_violation,
+            task_writing_read=_task_writing_read,
+            task_writing_source=_task_writing_source or None,
+            task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+            task_writing_bytes=_task_writing_bytes_count,
+            task_writing_sha256=_task_writing_sha256 or None,
+        )
+        no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
+        planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
+        print('planning-session: malformed (rest cannot skip a pending open increment)')
+        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
     if parse_error is None and _rest_candidate is not None:
         try:
             _wake_condition, _deadline = planner_rest.parse_rest(_rest_candidate)
