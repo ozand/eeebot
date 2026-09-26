@@ -3552,6 +3552,22 @@ async def _run_planning_session(
         # D10 only fixes the misclassification of supplier errors.
         return _fail('malformed', f'planner error: {_planner_error_text[:200]}')
 
+    # Small item (ADR-035 Test Contract, #1962): reset the supply-
+    # interruption streak on ANY successful planner model call, including
+    # `rest` -- not just the executor's own post-spawn path. The streak
+    # exists to answer "is the supplier reachable again", and a completed
+    # planner call (whatever it then decides -- a plan, a rest, even a
+    # malformed/no_plan outcome that still means status != 'error') is
+    # exactly that proof; a successful `rest` in particular never reaches
+    # the executor path at all, so without this the streak could survive
+    # past the very recovery it was waiting to observe.
+    try:
+        from nanobot.runtime import open_increment as _open_increment_planner_ok
+
+        _open_increment_planner_ok.record_model_call_completed(state_dir)
+    except Exception:
+        pass
+
     # #1893: exhausted tool-call budgets and bounded stops are not malformed
     # JSON attempts. They produced no final plan at all; keep their reason
     # instead of reporting the parser's incidental Expecting value error.
