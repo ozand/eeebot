@@ -2808,6 +2808,93 @@ def test_missing_open_increment_decision_is_no_plan(tmp_path: Path, monkeypatch)
     )
 
 
+def test_stopped_and_minimal_mode_are_enforced(tmp_path: Path, monkeypatch):
+    """D9 (ADR-035 Test Contract, external review finding #9): both
+    ``no_plan_recovery`` states are WIRED, not merely recorded --
+    "recording a state that nothing acts on is the unobservable guard
+    class" (architect resolution). Two scenarios:
+
+    1. ``stopped`` blocks the planning session from even starting, until
+       the operator resumes manually (``no_plan_recovery.resume``) -- a
+       stubbed planning session must never be called.
+    2. ``minimal_mode`` actually selects a smaller context: the
+       candidates block is omitted from the planner's task text, not
+       merely a recorded flag with no effect on what the session sees.
+    """
+    import asyncio
+
+    from tests.test_cycle_ledger import _FakeSubagentManager, _init_selfevo_repo
+    from nanobot.runtime import bridge, no_plan_recovery
+
+    # --- Scenario 1: stopped blocks session start ---------------------
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _init_selfevo_repo(base)
+
+    _np_state = no_plan_recovery.load_state(state_dir)
+    _np_state.stopped = True
+    no_plan_recovery._save_state(state_dir, _np_state)
+
+    planning_calls = _stub_planning_session(monkeypatch, "should never be used")
+    monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+    assert planning_calls == [], "a stopped planner must never even start a session"
+
+    # --- Scenario 2: minimal_mode selects a smaller context ------------
+    base2 = tmp_path / "base2"
+    base2.mkdir()
+    state_dir2 = _setup_planner_chooses_harness(base2, monkeypatch)
+    _origin2, work2 = _init_selfevo_repo(base2)
+
+    _task_writing_dir = bridge.RELEASE_ROOT / "nanobot" / "skills" / "task-writing"
+    _task_writing_dir.mkdir(parents=True, exist_ok=True)
+    (_task_writing_dir / "SKILL.md").write_text("task-writing contract (test stub)\n", encoding="utf-8")
+
+    _np_state2 = no_plan_recovery.load_state(state_dir2)
+    _np_state2.minimal_mode = True
+    no_plan_recovery._save_state(state_dir2, _np_state2)
+
+    captured_tasks: list = []
+
+    class _CapturingPlannerManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **kwargs):
+            if self._telemetry_component != "planner":
+                return "fake subagent spawned"
+            captured_tasks.append(kwargs.get("task", ""))
+            task_id = "planner-minimal-01"
+            raw_plan = json.dumps({
+                "insight": "ok", "plan": "a minimal-mode increment", "iterations_planned": 1,
+            })
+            (state_dir2 / "subagents").mkdir(parents=True, exist_ok=True)
+            (state_dir2 / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({"status": "ok", "result": raw_plan, "context_usage": {"iterations": [{}]}}),
+                encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
+            return "fake planner spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _CapturingPlannerManager)
+
+    rc2 = asyncio.run(bridge._main_impl())
+    assert rc2 == 0
+    assert len(captured_tasks) == 1
+    assert "minimal mode: candidate list omitted" in captured_tasks[0], (
+        f"minimal_mode did not select a smaller context: {captured_tasks[0]!r}"
+    )
+
+
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
 # architect addendum, #1942 B2) -----------------------------------------------
 
