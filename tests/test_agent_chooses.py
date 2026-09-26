@@ -3807,6 +3807,61 @@ def test_resolve_keep_with_edit_persists_revised_plan_before_handoff(tmp_path: P
     assert pending["resumed_by"] == cycle_id
 
 
+def test_plan_version_survives_a_second_interruption(tmp_path: Path):
+    """Round 3, item B (architect resolution 2026-09-26): both
+    interruption writers (``record_supply_interruption``,
+    ``_record_interruption_without_backoff`` -- kill/defect) must carry
+    ``plan_version``/``plan_text`` over from the CURRENT pending record
+    when re-interrupting the SAME increment (same ``cycle_id``), not
+    silently reset to the default. Sequence: A/v1 -> edited B/v2 ->
+    interrupted (still B) -> the version must still read 2, not reset to
+    1 -- or the next edit would restart the plan-chain's own version
+    numbering.
+    """
+    from nanobot.runtime import open_increment
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    cycle_id = "cycle-plan-version-01"
+    plan_a = "Plan: finish the wip feature exactly as originally scoped."
+    open_increment.record_supply_interruption(
+        state_dir, cycle_id,
+        retry_key="plan-version-test", plan_text=plan_a, candidate_id=None,
+        branch=f"selfevo/cycle-{cycle_id}",
+    )
+    assert open_increment.pending_open_increment(state_dir).get("plan_version", 1) == 1
+
+    plan_b = "finish the wip feature, but also add a regression test"
+    open_increment.resolve(state_dir, cycle_id, "keep", plan_text=plan_b)
+    assert open_increment.pending_open_increment(state_dir)["plan_version"] == 2
+
+    # The resumed (B) attempt is itself interrupted again -- SAME cycle_id,
+    # same retry_key (a real kill-recovery/resumed-error case, not a fresh
+    # unrelated increment).
+    open_increment.record_supply_interruption(
+        state_dir, cycle_id,
+        retry_key="plan-version-test", plan_text=plan_b, candidate_id=None,
+        branch=f"selfevo/cycle-{cycle_id}",
+    )
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending["plan_text"] == plan_b
+    assert pending["plan_version"] == 2, (
+        f"plan_version must survive a re-interruption of the same increment, not reset: {pending!r}"
+    )
+
+    # Same proof for the kill/defect writer.
+    open_increment.record_defect_interruption(
+        state_dir, cycle_id,
+        retry_key="plan-version-test", plan_text=plan_b, candidate_id=None,
+        branch=f"selfevo/cycle-{cycle_id}",
+    )
+    pending2 = open_increment.pending_open_increment(state_dir)
+    assert pending2["plan_version"] == 2, (
+        f"the kill/defect writer must also carry plan_version forward: {pending2!r}"
+    )
+
+
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
 # architect addendum, #1942 B2) -----------------------------------------------
 
