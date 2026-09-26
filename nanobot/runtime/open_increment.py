@@ -298,7 +298,18 @@ def render_open_increment_block(pending: "dict[str, Any] | None", consecutive_su
     string when there is none. Mandates a keep/edit/delete decision via
     ``open_increment_decision`` in the plan's final JSON before anything
     else, so the session cannot silently plan past an unresolved
-    interruption."""
+    interruption.
+
+    D11 (#1903 planning-cost measurement, architect resolution
+    2026-09-26): for ``keep``, the session is told it may CONFIRM the
+    plan shown above instead of composing a fresh one from scratch --
+    ``plan_action: "confirm"`` (the default whenever it is absent) skips
+    the mandatory ``plan`` field entirely (the harness reuses the text
+    shown here verbatim); ``plan_action: "edit"`` requires a revised
+    ``plan`` and is recorded as an edit of THIS plan, never a new one.
+    Planning a `keep` from scratch was measured (#1903) to nearly double
+    the planner's own call budget after a kill.
+    """
     if not pending:
         return ""
     return (
@@ -310,7 +321,11 @@ def render_open_increment_block(pending: "dict[str, Any] | None", consecutive_su
         f"(consecutive supply interruptions: {consecutive_supply_interrupts}).\n"
         "You must decide `keep`, `edit`, or `delete` for this open increment "
         "before planning anything else -- set `open_increment_decision` to one "
-        "of those three values in your final plan JSON."
+        "of those three values in your final plan JSON.\n\n"
+        "If you decide `keep`: do not plan this increment from scratch. Set "
+        "`plan_action` to `confirm` to reuse the plan shown above as-is (the "
+        "`plan` field may be omitted), or to `edit` together with a revised "
+        "`plan` field -- recorded as an edit of this same plan, not a new one."
     )
 
 

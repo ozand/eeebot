@@ -3646,7 +3646,23 @@ async def _run_planning_session(
         print(f'planning-session: rest (waiting for {_wake_condition.kind}:{_wake_condition.ref} until {_deadline})')
         return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
 
-    if parse_error is None and (
+    # D11 (#1903 planning-cost measurement, architect resolution
+    # 2026-09-26): `keep` + `plan_action: confirm` (the default whenever
+    # absent) reuses the pending increment's OWN stored plan text
+    # verbatim -- the mandatory-plan-field check below must not demand a
+    # freshly-composed one for this case, or `keep` never actually skips
+    # planning from scratch. Only `plan_action: edit` still requires a
+    # revised `plan` field of its own.
+    _keep_confirm = (
+        bool(_pending_open_increment)
+        and isinstance(parsed, dict)
+        and str(parsed.get('open_increment_decision') or '').strip().lower() == 'keep'
+        and str(parsed.get('plan_action') or '').strip().lower() != 'edit'
+    )
+    if _keep_confirm and isinstance(parsed, dict):
+        parsed['plan'] = _pending_open_increment.get('plan_text', '') or parsed.get('plan') or ''
+
+    if parse_error is None and not _keep_confirm and (
         not isinstance(parsed, dict)
         or not isinstance(parsed.get('plan'), str)
         or not parsed['plan'].strip()
@@ -3737,6 +3753,22 @@ async def _run_planning_session(
                     _resume_branch = _pending_open_increment.get('branch') or None
                     _resume_cycle_id = _pending_open_increment.get('cycle_id') or None
                     _resume_skip_opening_entry = bool(_pending_open_increment.get('opening_entry_written'))
+                    # D11 (#1903 planning-cost measurement): the diary
+                    # entry itself names which of the two `keep` paths this
+                    # was -- confirm reused the previous plan verbatim
+                    # (`parsed['plan']` was substituted above, before
+                    # `plan_lines` was built); edit recorded a revised one,
+                    # referring back to the plan it revises.
+                    if _keep_confirm:
+                        plan_lines.append(
+                            'Plan action: confirm (previous plan for this open increment reused as-is, '
+                            'not re-planned from scratch)'
+                        )
+                    else:
+                        plan_lines.append(
+                            "Plan action: edit (this is an edit of the open increment's previous plan, "
+                            'not a new plan)'
+                        )
                 _open_increment_mod.resolve(state_dir, cycle_id, _oi_decision, selfevo_repo=selfevo_repo)
                 plan_lines.append(f'Open increment: {_oi_decision}')
             except Exception:
