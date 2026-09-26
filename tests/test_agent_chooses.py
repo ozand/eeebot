@@ -840,6 +840,27 @@ def _stub_planning_session(
     return calls
 
 
+def _mark_spawn_finished_ok(state_dir, running_tasks: dict, task_id: str) -> None:
+    """Round 2 external re-check, item 1 (architect resolution 2026-09-26):
+    completion is positive-only -- a real subagent always writes terminal
+    telemetry with ``status: "ok"`` on success (``_write_subagent_telemetry``,
+    ``nanobot/agent/subagent.py``). A fixture simulating a FINISHED executor
+    must write the same, in the same shape production reads
+    (``_subagent_own_status``), or the barrier treats it as never having
+    finished."""
+    import asyncio
+
+    (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+    (state_dir / "subagents" / f"{task_id}.json").write_text(
+        json.dumps({"status": "ok", "summary": "done", "result": "done"}), encoding="utf-8",
+    )
+
+    async def _noop():
+        return None
+
+    running_tasks[task_id] = asyncio.create_task(_noop())
+
+
 def _make_capturing_subagent_manager(captured: list):
     from tests.test_cycle_ledger import _FakeSubagentManager
 
@@ -1378,6 +1399,9 @@ def test_integrated_branch_has_non_checkpoint_commit(tmp_path: Path, monkeypatch
                  "-m", "selfevo: checkpoint — scripts/feature.py", "-m", CHECKPOINT_TRAILER],
                 check=True, capture_output=True,
             )
+            # Round 2, item 1: completion is positive-only -- production
+            # always writes 'ok' terminal telemetry for a finished executor.
+            _mark_spawn_finished_ok(state_dir, self._running_tasks, "checkpoint-only-ok")
             return "fake subagent spawned"
 
     base = tmp_path / "base"
@@ -2316,17 +2340,23 @@ def test_killed_attempt_becomes_interrupted_kill(tmp_path: Path, monkeypatch):
 
 @pytest.mark.parametrize("executor_status", ["ok", "bounded_stop", "blocked", "cancelled", "error", None])
 def test_recovery_maps_every_executor_status(tmp_path: Path, executor_status):
-    """D2 (ADR-035 Test Contract #1979, 16710f62): full mapping. The GATE
-    never rendered a verdict for the killed attempt's cycle_id
+    """D2 (ADR-035 Test Contract #1979, 16710f62; round 2 external
+    re-check item 2, architect resolution 2026-09-26): full mapping. The
+    GATE never rendered a verdict for the killed attempt's cycle_id
     (record_attempt_finished never ran) regardless of what the
     executor's OWN telemetry says -- ``ok``/``bounded_stop``/``blocked``/
     ``cancelled``, or no telemetry at all, all become ``interrupted_kill``,
-    with ``executor_status`` carried into the record as evidence. The ONE
-    exception is a telemetry-confirmed ``error``: that is the existing
-    supply/defect classifier's job (elsewhere, synchronous, same tick),
-    never re-classified as a kill here -- ``check_running_for_kill``
-    leaves the registration standing, untouched, for that classifier to
-    own.
+    with ``executor_status`` carried into the record as evidence.
+
+    A telemetry-confirmed ``error`` is classified IMMEDIATELY, right here
+    -- round 1 left this "for the existing supply/defect classifier
+    (elsewhere, synchronous, same tick)", but that classifier only runs in
+    the SAME process that wrote the error telemetry; if that process is
+    killed in the narrow window between writing it and reaching the
+    classifier, nothing ever runs it, and the next attempt's
+    ``record_attempt_started`` silently overwrites the registration with
+    no interruption ever recorded. ``check_running_for_kill`` must never
+    return ``None`` for a stale ``error`` registration.
     """
     from nanobot.runtime import open_increment
 
@@ -2348,13 +2378,27 @@ def test_recovery_maps_every_executor_status(tmp_path: Path, executor_status):
     stale = open_increment.check_running_for_kill(state_dir, "cycle-fresh-02")
 
     if executor_status == "error":
-        assert stale is None, (
-            "a telemetry-confirmed error must be left to the existing "
-            "supply/defect classifier, never reclassified as a kill here"
+        assert stale is not None, (
+            "a telemetry-confirmed error must be classified immediately here, never dropped"
         )
-        assert open_increment.load_state(state_dir).running is not None, (
-            "the registration must survive untouched for the classifier that owns it"
+        assert stale["cycle_id"] == old_cycle_id
+        assert stale["branch"] == old_branch
+        assert stale["executor_status"] == "error"
+        # "whatever" (the fixture's own error text, above) matches no
+        # supplier-outage pattern -- our own defect, not a supply interruption.
+        assert stale["error_class"] == "failed"
+
+        open_increment.record_defect_interruption(
+            state_dir, stale["cycle_id"],
+            retry_key=f"kill:{old_cycle_id}",
+            plan_text="(a prior attempt died on its LLM call before a terminal outcome was recorded)",
+            candidate_id=None, branch=stale["branch"],
         )
+        pending = open_increment.pending_open_increment(state_dir)
+        assert pending is not None
+        assert pending["reason"] == "interrupted_defect"
+        assert pending["cycle_id"] == old_cycle_id
+        assert pending["branch"] == old_branch
         return
 
     assert stale is not None, f"executor_status={executor_status!r} must be classified as a kill"
@@ -2559,6 +2603,7 @@ def test_increment_accounting_uses_merge_base(tmp_path: Path, monkeypatch):
         async def spawn(self, **_kwargs):
             # The resumed executor verifies the retained work and
             # finishes WITHOUT making any new commit itself.
+            _mark_spawn_finished_ok(state_dir, self._running_tasks, "no-new-commit-ok")
             return "fake subagent spawned"
 
     monkeypatch.setattr(bridge, "SubagentManager", _NoNewCommitManager)
@@ -2613,6 +2658,7 @@ def test_increment_accounting_uses_merge_base(tmp_path: Path, monkeypatch):
                 ["git", "-C", str(self.workspace), "commit", "-m", "feat: finish the increment"],
                 check=True, capture_output=True,
             )
+            _mark_spawn_finished_ok(state_dir2, self._running_tasks, "one-new-commit-ok")
             return "fake subagent spawned"
 
     monkeypatch.setattr(bridge, "SubagentManager", _OneNewCommitManager)
@@ -2698,6 +2744,10 @@ def test_failed_closing_commit_blocks_integration(tmp_path: Path, monkeypatch):
                 ],
                 check=True, capture_output=True,
             )
+            # Round 2, item 1: the session itself is FINISHED (the closing-
+            # commit hook rejection, not an unfinished session, is what
+            # must block integration here) -- write real 'ok' telemetry.
+            _mark_spawn_finished_ok(state_dir, self._running_tasks, "closing-fail-ok")
             return "fake subagent spawned"
 
     monkeypatch.setattr(bridge, "SubagentManager", _CheckpointOnlyManager)
@@ -2725,6 +2775,13 @@ def test_failed_closing_commit_blocks_integration(tmp_path: Path, monkeypatch):
     assert len([s for s in subjects if s.strip()]) == 1, (
         f"a closing-commit failure must not leave a manufactured marker on the branch: {subjects!r}"
     )
+
+    # Round 2, item 1: with the session now FINISHED (real 'ok' telemetry),
+    # the closing_commit_failed branch itself must be the one actually
+    # reached -- not a D1 rejection for missing telemetry that happens to
+    # produce the same "no integration, one checkpoint" shape.
+    outcome_rows = [e for e in read_events(state_dir) if e.get("phase") == "outcome"]
+    assert outcome_rows and outcome_rows[-1].get("reason") == "closing_commit_failed", outcome_rows
 
 
 def test_delete_keeps_inspection_ref(tmp_path: Path):

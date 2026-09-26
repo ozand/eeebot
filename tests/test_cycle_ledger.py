@@ -618,6 +618,7 @@ class _FakeSubagentManager:
     def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
         self.workspace = workspace
         self._telemetry_component = telemetry_component
+        self._state_dir = _kwargs.get("skill_fitness_state_dir")
         self._running_tasks: dict = {}
 
     async def spawn(self, **_kwargs):
@@ -627,6 +628,25 @@ class _FakeSubagentManager:
         (self.workspace / "scripts" / "feature.py").write_text("def feature():\n    return 42\n")
         _run(self.workspace, "add", "scripts/feature.py")
         _run(self.workspace, "commit", "-m", "feat: add feature")
+        # Round 2 external re-check, item 1 (architect resolution
+        # 2026-09-26): completion is positive-only -- a real subagent
+        # always writes terminal telemetry with status: "ok" on success
+        # (nanobot/agent/subagent.py's `_write_subagent_telemetry`).
+        # Without a durable state_dir (a caller that never passed
+        # `skill_fitness_state_dir` through to the real SubagentManager
+        # constructor) there is nowhere to write it -- same as any other
+        # caller-shape gap, left as a no-op rather than guessed at.
+        if self._state_dir is not None:
+            task_id = f"fake-executor-{id(self)}"
+            (Path(self._state_dir) / "subagents").mkdir(parents=True, exist_ok=True)
+            (Path(self._state_dir) / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({"status": "ok", "summary": "done", "result": "done"}), encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
         return "fake subagent spawned"
 
 

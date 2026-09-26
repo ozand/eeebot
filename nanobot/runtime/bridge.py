@@ -508,40 +508,6 @@ def _all_commits_are_artificial_since(selfevo_repo: 'Path', pre_spawn_sha: str) 
         return False
 
 
-def _any_checkpoint_commit_since(selfevo_repo: 'Path', base_sha: str) -> bool:
-    """D1 (ADR-035 Test Contract, external review finding #1): True iff at
-    least one commit in ``base_sha..HEAD`` is a per-step checkpoint
-    (``commit_markers.CHECKPOINT_SUBJECT_PREFIX``) -- narrower than
-    :func:`_all_commits_are_artificial_since`, which ALSO matches the
-    #666 residual auto-commit safety net. D1's "our error while
-    checkpoints exist" scope is specifically about checkpoints: the
-    #1280/#1281 contract (a dead LLM call whose edits the auto-commit
-    net rescues still integrates through the normal gate,
-    ``executor_llm_error=True`` recorded but not blocked) is UNCHANGED
-    and must not be swept into D1's new interrupted(defect)/interrupted
-    (supply) early-return just because ``cycle_commit_count`` is
-    nonzero -- an auto-commit is not a checkpoint. False on an empty
-    range, an unreadable sha, or any git error.
-    """
-    if not base_sha:
-        return False
-    import subprocess as _sp_ckpt_since
-    from nanobot.runtime.commit_markers import CHECKPOINT_SUBJECT_PREFIX
-    try:
-        r = _sp_ckpt_since.run(
-            ['git', '-c', f'safe.directory={selfevo_repo}', '-C', str(selfevo_repo),
-             'log', '--format=%s', f'{base_sha}..HEAD'],
-            capture_output=True, text=True, timeout=10,
-        )
-        if r.returncode != 0:
-            return False
-        subjects = [ln for ln in r.stdout.splitlines() if ln.strip()]
-        prefix = CHECKPOINT_SUBJECT_PREFIX.lower()
-        return any(s.strip().lower().startswith(prefix) for s in subjects)
-    except Exception:
-        return False
-
-
 def _count_commits_since(selfevo_repo: 'Path', pre_spawn_sha: str) -> int:
     """Count commits in selfevo_repo made since pre_spawn_sha.
 
@@ -4941,13 +4907,24 @@ async def _main_impl_body():
                     f"{_executor_llm_error_text}"
                 )
             # D1 (ADR-035 Test Contract, external review finding #1;
-            # architect resolution): session STATUS decides completeness,
-            # not commit count. Read once, here, before the checkpoint-only
-            # closing marker (below) or the smoke/gate/integrate path
-            # (further down) can act as if a session that ended in error
-            # had actually finished.
+            # architect resolution, round 2 2026-09-26): session STATUS
+            # decides completeness, not commit count -- and completion is
+            # POSITIVE-only. A session is finished ONLY when its own
+            # terminal telemetry says the one status production ever
+            # writes on success, 'ok'. bounded_stop/blocked/cancelled/
+            # error and NO telemetry at all (a dead task_id, or a read
+            # failure) are all "not finished" -- read once, here, before
+            # the checkpoint-only closing marker (below) or the smoke/
+            # gate/integrate path (further down) can act as if a session
+            # that never reached a normal completion had actually
+            # finished. This replaces the round-1 `_session_errored`
+            # check (only `status == 'error'`) plus the checkpoint-gated
+            # `_any_checkpoint_commit_since` barrier below it (now
+            # removed): the barrier applies to ANY commit the session
+            # made -- ordinary, checkpoint or the #666 residual auto-
+            # commit -- not only a checkpoint.
             _executor_status = _subagent_own_status(STATE_DIR, _subagent_task_id)
-            _session_errored = (_executor_status == 'error')
+            _session_unfinished = (_executor_status != 'ok')
             latest = TARGET_WORKSPACE / '.nanobot' / 'subagents' / 'latest.json'
             print(latest)
 
@@ -5006,9 +4983,10 @@ async def _main_impl_body():
                     # checkpoints themselves; this commit is a marker, not a
                     # second copy of the diff.
                     # D1: "the closing commit is created only for a finished
-                    # session" -- an errored session never gets one, even
-                    # when every commit so far is artificial.
-                    if _all_commits_are_artificial_since(_selfevo_repo, _increment_base) and not _session_errored:
+                    # session" -- an unfinished session (any status other
+                    # than 'ok', including no telemetry at all) never gets
+                    # one, even when every commit so far is artificial.
+                    if _all_commits_are_artificial_since(_selfevo_repo, _increment_base) and not _session_unfinished:
                         from nanobot.runtime.commit_markers import (
                             MERGE_TRAILER_CYCLE_KEY, sanitize_trailer_value,
                         )
@@ -5124,29 +5102,38 @@ async def _main_impl_body():
                 _open_increment_exec.record_model_call_completed(STATE_DIR)
 
             # D1 (ADR-035 Test Contract, external review finding #1;
-            # architect resolution): the checkpoints-exist case gets its OWN
-            # classification, independent of the zero-commit one above --
-            # an executor that died AFTER checkpointing real work must
-            # never be silently treated as "model call completed fine".
-            # Gated on an ACTUAL checkpoint commit existing in the range
-            # (_any_checkpoint_commit_since), never on `cycle_commit_count
-            # > 0` alone -- the #666 auto-commit safety net can ALSO make
-            # that count positive for a dead LLM call with no checkpoints
-            # at all, and the #1280/#1281 contract for exactly that case
-            # (still integrates through the normal gate) must be
-            # unaffected. `_session_errored` is broader than
-            # `_executor_llm_error_text` (that reader is narrowly gated on
-            # the literal "LLM execution failed" text) -- deliberately so:
-            # a real error status with a DIFFERENT message is still not a
-            # finished session.
-            _has_checkpoint_commit = (
-                _any_checkpoint_commit_since(_selfevo_repo, _increment_base) if _session_errored else False
+            # architect resolution, round 2 2026-09-26): an UNFINISHED
+            # session with ANY commit -- ordinary, checkpoint, or the #666
+            # residual auto-commit -- gets its own classification,
+            # independent of the zero-commit one above. Gated on
+            # `_session_unfinished and cycle_commit_count > 0`, never on
+            # checkpoint presence: the round-1 `_any_checkpoint_commit_since`
+            # gate let an unfinished session with only ORDINARY commits (or
+            # only the #666 auto-commit) bypass this entirely and reach the
+            # normal smoke/gate/integrate path below, exactly the gap the
+            # external re-check reopened. This DOES supersede the
+            # #1280/#1281 contract for a dead-LLM-call auto-commit
+            # (previously: still integrates through the normal gate) --
+            # completion is positive-only now, so that case also becomes an
+            # interrupted open increment; see
+            # ``test_edit_then_dead_llm_becomes_interrupted_supply`` (was
+            # ``..._still_integrates_via_auto_commit_and_is_countable``).
+            # `_executor_llm_error_text` is narrowly gated on the literal
+            # "LLM execution failed" text -- when the status is anything
+            # other than 'error' (or the text is otherwise empty), the
+            # placeholder names the ACTUAL status so the classifier's
+            # (conservative, positive-match-only) default of 'failed' ->
+            # interrupted_defect is what a bounded_stop/blocked/cancelled/
+            # missing-telemetry session gets, never a manufactured supply
+            # classification it never earned.
+            _unfinished_error_class = (
+                _classify_llm_error(
+                    _executor_llm_error_text
+                    or f'(status: {_executor_status or "missing"}, no LLM-call text recorded)'
+                )
+                if (_session_unfinished and cycle_commit_count > 0) else ''
             )
-            _checkpoint_error_class = (
-                _classify_llm_error(_executor_llm_error_text or '(status: error, no LLM-call text recorded)')
-                if (_session_errored and _has_checkpoint_commit) else ''
-            )
-            if _checkpoint_error_class == 'paused-supplier':
+            if _unfinished_error_class == 'paused-supplier':
                 _open_increment_exec.record_supply_interruption(
                     STATE_DIR, _cycle_id,
                     retry_key=req.get('retry_key') or '',
@@ -5155,7 +5142,7 @@ async def _main_impl_body():
                     selfevo_repo=_selfevo_repo,
                     branch=cycle_branch,
                 )
-            elif _checkpoint_error_class == 'failed':
+            elif _unfinished_error_class == 'failed':
                 _open_increment_exec.record_defect_interruption(
                     STATE_DIR, _cycle_id,
                     retry_key=req.get('retry_key') or '',
@@ -5197,17 +5184,22 @@ async def _main_impl_body():
                 _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
                 return {'status': 0}
 
-            if _session_errored and _has_checkpoint_commit:
-                # D1: "a session with status=error ... is not finished. It
-                # is never integrated." Stop here -- never reach the
-                # smoke/repair/gate/integrate path below. The branch (with
-                # its checkpoints) is retained for forensics/resume, main
+            if _session_unfinished and cycle_commit_count > 0:
+                # D1 (round 2, architect resolution 2026-09-26): "a session
+                # is finished ONLY if its terminal telemetry has a normal
+                # status (ok/completed) ... bounded_stop, blocked,
+                # cancelled, error and missing telemetry all mean NOT
+                # finished. The barrier applies to ANY commits of the
+                # session: ordinary commits, checkpoints and the residual
+                # auto-commit." Stop here -- never reach the smoke/repair/
+                # gate/integrate path below. The branch (with whatever
+                # commits it holds) is retained for forensics/resume, main
                 # is left untouched; the pending open increment set just
                 # above (supply or defect) is the next session's first item.
                 _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
                 handled_marker.write_text(str(req_path), encoding='utf-8')
                 _unfinished_reason = (
-                    LLM_SUPPLIER_PAUSED_REASON if _checkpoint_error_class == 'paused-supplier'
+                    LLM_SUPPLIER_PAUSED_REASON if _unfinished_error_class == 'paused-supplier'
                     else 'interrupted_defect'
                 )
                 _write_bridge_completed_result(
@@ -5216,8 +5208,9 @@ async def _main_impl_body():
                     files_changed=files_changed, commits_pushed=0, result_status='blocked',
                     backlog_title=backlog_title,
                     key_learnings=[
-                        f"Executor session ended in error ({_unfinished_reason}) after checkpointing "
-                        f'real work; {cycle_branch} kept for forensics/resume, main left unchanged.'
+                        f"Executor session did not finish (status={_executor_status or 'missing'}, "
+                        f'{_unfinished_reason}) with {cycle_commit_count} commit(s) on the branch; '
+                        f'{cycle_branch} kept for forensics/resume, main left unchanged.'
                     ],
                     rollback={
                         'integrated': False, 'cycle_branch': cycle_branch,
@@ -5232,7 +5225,7 @@ async def _main_impl_body():
                     executor_llm_error=True,
                     real_result=_real_result_ledger_inputs('blocked'),
                     llm_error_classification=(
-                        {'class': _checkpoint_error_class, 'raw_error': _executor_llm_error_text[:400]}
+                        {'class': _unfinished_error_class, 'raw_error': _executor_llm_error_text[:400]}
                         if _executor_llm_error_text else None
                     ),
                     retry_key=req.get('retry_key') or None,

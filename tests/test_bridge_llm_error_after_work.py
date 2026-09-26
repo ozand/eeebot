@@ -69,35 +69,43 @@ def _core_smoke_set_matches_fixture_repo(monkeypatch, tmp_path):
     monkeypatch.setattr(bridge, "RELEASE_ROOT", _adr034_release_root)
 
 
-def test_edit_then_dead_llm_still_integrates_via_auto_commit_and_is_countable(tmp_path, monkeypatch):
+def test_edit_then_dead_llm_becomes_interrupted_supply(tmp_path, monkeypatch):
+    """Round 2 external re-check, item 1 (architect resolution
+    2026-09-26): completion is POSITIVE-only, and the barrier applies to
+    ANY commit the session made -- including the #666 residual auto-commit
+    that rescued this edit. This REVOKES the #1281 decision this test used
+    to pin ("the net fired, the gate passed, the cycle integrated"): a
+    session whose own telemetry says ``status: error`` is not finished,
+    however the commit landed, so the auto-committed edit must now become
+    a pending open increment (classified ``interrupted_supply`` -- the
+    TRANSPORT_ERROR text is a recognized supplier-outage pattern) instead
+    of integrating.
+    """
     title = "Add feature helper"
     state_dir = _wire(tmp_path, monkeypatch, _EditedThenDiedSubagentManager)
     _seed_bridge_request(state_dir, "req-edited", "cycle-edited", task_title=title)
     _stub_planning_session(monkeypatch, title)
-    key = bridge._retry_key_for(None, title)
 
     rc = asyncio.run(bridge._main_impl())
-
-    # The kept behaviour (#1281 decision): the net fired, the gate passed, the cycle integrated.
-    res = _result_for(state_dir)
-    assert res["rollback"]["auto_committed"] is True
-    assert res["rollback"]["integrated"] is True
-    assert res["rollback"]["reason"] is None
-    assert res["result_status"] == "completed"
-    assert res["commits_pushed"] == 1
-    assert res["files_changed"] == ["scripts/feature.py"]
-    assert any("EXECUTOR LLM ERROR (#1280)" in s for s in res.get("key_learnings") or [])
-    # Not the #1280 failure path: exit 0, request retired, no retry counter.
     assert rc == 0
-    assert (state_dir / "subagent_bridge" / f"handled_{key}.txt").exists()
-    assert not (state_dir / "subagent_bridge" / f"retry_{key}.json").exists()
 
-    # The countable part (#1281): the ledger row says the executor died even though the cycle succeeded.
+    res = _result_for(state_dir)
+    assert res["rollback"]["integrated"] is False
+    assert res["rollback"]["reason"] == bridge.LLM_SUPPLIER_PAUSED_REASON
+    assert res["result_status"] == "blocked"
+    assert res["commits_pushed"] == 0
+    assert any("did not finish" in s for s in res.get("key_learnings") or [])
+
     outcome = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"][-1]
-    assert outcome["outcome"] == "success"
-    assert outcome["reason"] is None
+    assert outcome["outcome"] == "failed"
+    assert outcome["reason"] == bridge.LLM_SUPPLIER_PAUSED_REASON
     assert outcome["executor_llm_error"] is True
-    assert outcome["files_changed"] == ["scripts/feature.py"]
+
+    from nanobot.runtime import open_increment
+
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is not None, "the auto-committed edit must become a pending open increment, not integrate"
+    assert pending["reason"] == "interrupted_supply"
 
 
 class TestOutcomeRowFlag:
