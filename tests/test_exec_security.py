@@ -140,12 +140,18 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
     deadline = time.monotonic() + 5
     while shell_stat.exists() and time.monotonic() < deadline:
         await asyncio.sleep(0.01)
-    assert not shell_stat.exists() or shell_stat.read_text(encoding="utf-8").split()[2] == "Z"
+    if shell_stat.exists():
+        try:
+            shell_fields = shell_stat.read_text(encoding="utf-8").split()
+        except FileNotFoundError:
+            shell_fields = []
+        assert not shell_fields or shell_fields[2] == "Z"
     assert execution.done() is False
 
     child_stat_fields = child_stat.read_text(encoding="utf-8").split()
     child_pgrp = int(child_stat_fields[4])
-    assert child_pgrp == os.getsid(child_pid), "grandchild process group differs from its session"
+    child_session = int(child_stat_fields[5])
+    assert child_pgrp == child_session, "grandchild process group differs from its session"
     assert child_pgrp != os.getpgid(os.getpid()), "grandchild accidentally joined pytest's process group"
 
     execution.cancel()
@@ -160,8 +166,11 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
             break
         await asyncio.sleep(0.01)
     if child_stat.exists():
-        fields = child_stat.read_text(encoding="utf-8").split()
-        assert len(fields) > 2 and fields[2] == "Z", f"grandchild PID {child_pid} survived cancellation"
+        try:
+            fields = child_stat.read_text(encoding="utf-8").split()
+        except FileNotFoundError:
+            fields = []
+        assert not fields or fields[2] == "Z", f"grandchild PID {child_pid} survived cancellation"
 
 
 def _fake_resolve_private(hostname, port, family=0, type_=0):
