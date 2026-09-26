@@ -2076,7 +2076,7 @@ def _recent_commit_is_bookkeeping_only(paths: 'list[str]') -> bool:
     )
 
 
-def _recent_commits_with_paths(repo_root: 'Path', since: str) -> 'list[tuple[str, str, list[str]]]':
+def _recent_commits_with_paths(repo_root: 'Path', since: str) -> 'list[tuple[str, str, list[str]]] | None':
     """``(short_sha, subject, changed_paths)`` for every commit ``--since``
     *since*, newest first — the same window `_recent_git_log`
     (`nanobot.runtime.goal_text_utils`) reads, but with the changed-file
@@ -2089,8 +2089,10 @@ def _recent_commits_with_paths(repo_root: 'Path', since: str) -> 'list[tuple[str
 
     ``\\x00`` (never a legal character in a git subject or path) separates
     commit records so a multi-line changed-file list can be split
-    unambiguously. Best-effort — never raises; a git failure yields ``[]``,
-    the same fail-open contract as `_recent_git_log`.
+    unambiguously. Best-effort — never raises; a git failure yields
+    ``None`` (unknown), never ``[]`` -- a failed read and a genuinely
+    empty commit window must not collapse into the same value for a
+    caller like `_recent_activity_context`.
     """
     import subprocess as _sp
 
@@ -2108,7 +2110,7 @@ def _recent_commits_with_paths(repo_root: 'Path', since: str) -> 'list[tuple[str
     try:
         raw = _sp.check_output(git_cmd, stderr=_sp.DEVNULL, timeout=10).decode(errors='replace')
     except Exception:
-        return []
+        return None
     commits: 'list[tuple[str, str, list[str]]]' = []
     for block in raw.split('\x00'):
         if not block.strip():
@@ -2171,19 +2173,26 @@ def _recent_activity_context(
             # covered by adding its path prefix, not a new special case.
             from nanobot.runtime.commit_markers import is_artificial_commit_subject
 
-            subjects: list[str] = []
-            for sha, subject, paths in commits:
-                subj_lower = subject.strip().lower()
-                if subj_lower.startswith('merge:') or is_artificial_commit_subject(subject):
-                    continue
-                if _recent_commit_is_bookkeeping_only(paths):
-                    continue
-                subjects.append(f'{sha} {subject}')
-                if len(subjects) >= 8:
-                    break
-            if subjects:
-                lines.append('Recently completed (recent commits):')
-                lines.extend(f'- {s}' for s in subjects)
+            if commits is None:
+                # Small item (ADR-035 Test Contract, #1962): a git failure
+                # is unknown, not "nothing recent" -- say so, rather than
+                # silently omitting the section as if there were nothing to
+                # report.
+                lines.append('Recently completed (recent commits): unknown -- git read failed')
+            else:
+                subjects: list[str] = []
+                for sha, subject, paths in commits:
+                    subj_lower = subject.strip().lower()
+                    if subj_lower.startswith('merge:') or is_artificial_commit_subject(subject):
+                        continue
+                    if _recent_commit_is_bookkeeping_only(paths):
+                        continue
+                    subjects.append(f'{sha} {subject}')
+                    if len(subjects) >= 8:
+                        break
+                if subjects:
+                    lines.append('Recently completed (recent commits):')
+                    lines.extend(f'- {s}' for s in subjects)
 
         if state_dir is not None:
             results_dir = state_dir / 'subagents' / 'results'
