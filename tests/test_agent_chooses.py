@@ -3499,10 +3499,20 @@ def test_stopped_and_minimal_mode_are_enforced(tmp_path: Path, monkeypatch):
     assert "## Ranked candidates" in task_text, (
         f"minimal_mode must still show the top candidates, not omit the list entirely: {task_text!r}"
     )
-    assert "Priority item 1" in task_text
-    assert "Priority item 5" in task_text
+    # Round 3 external re-check: checking only ranks 1 and 5 present (and 6
+    # absent) leaves ranks 2-4 and the total count unasserted -- a prompt
+    # naming only two of the five candidates would have passed. Assert
+    # every one of the five ranks explicitly, and the exact count.
+    for rank in range(1, 6):
+        assert f"Priority item {rank}" in task_text, (
+            f"minimal_mode must show all five ranked candidates, missing rank {rank}: {task_text!r}"
+        )
     assert "Priority item 6" not in task_text, (
         f"minimal_mode must cap the candidate list at five, not show more: {task_text!r}"
+    )
+    rendered_count = sum(1 for i in range(1, 9) if f"Priority item {i}" in task_text)
+    assert rendered_count == 5, (
+        f"minimal_mode must render EXACTLY five candidates, not {rendered_count}: {task_text!r}"
     )
 
 
@@ -4189,46 +4199,13 @@ def test_checkpoint_commit_excluded_from_self_dedup_and_recent_activity(tmp_path
     assert not any(s.lower().startswith("selfevo: checkpoint") for s in subjects)
 
 
-def test_checkpoint_is_not_an_integration(tmp_path: Path):
-    """A checkpoint commit is never itself an integration (ADR-035
-    keep-work): integration only ever happens through the bridge's own
-    explicit, smoke-gated call to ``_integrate_cycle_to_main`` -- never as a
-    side effect of a cycle branch merely having commits on it. Two
-    complementary checks: the shared exclusion (checkpoint commits are
-    indistinguishable from "no real work" to every done-work reader, proven
-    above) and a structural guard that ``_integrate_cycle_to_main`` has no
-    caller outside the explicit smoke-gated sites -- a call site added
-    without that gate would flip this assertion.
-    """
-    import ast
-    import inspect
-
-    from nanobot.runtime import bridge
-
-    source = inspect.getsource(bridge)
-    tree = ast.parse(source)
-    call_lines = sorted(
-        node.lineno for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == '_integrate_cycle_to_main'
-    )
-    # Exactly the two live call sites (the single-candidate path and the
-    # explore-mode path) -- both gated behind a passed smoke test
-    # (`record_gate_decision(..., True, 'smoke_passed', [])` immediately
-    # precedes each). A checkpoint commit existing on a branch never reaches
-    # either: both require the executor's own run to finish and the smoke
-    # gate to pass first. A new call site added without that gate changes
-    # this count and must be reviewed, not silently accepted.
-    assert len(call_lines) == 2, (
-        f"expected exactly two _integrate_cycle_to_main call sites, found {len(call_lines)} at "
-        f"lines {call_lines} -- a new one must stay behind an explicit smoke-gated do_integration branch"
-    )
-    source_lines = source.splitlines()
-    for lineno in call_lines:
-        preceding = '\n'.join(source_lines[max(0, lineno - 20):lineno])
-        assert 'smoke_passed' in preceding, (
-            f"_integrate_cycle_to_main call at line {lineno} is not preceded by a "
-            "smoke-gate decision within 20 lines -- integration must stay gated, "
-            "never triggered by commit presence alone"
-        )
+# NOTE (round 3 external re-check, architect resolution 2026-09-26): the
+# structural "exactly two _integrate_cycle_to_main call sites, each preceded
+# by 'smoke_passed' within 20 source lines" assertion that used to live here
+# (test_checkpoint_is_not_an_integration) was removed. It never established
+# a terminal-completion prerequisite -- a call site can be smoke-gated and
+# STILL reachable from an unfinished session (finding 1's own repair-loop
+# gap proved this structural check gave false confidence). Replaced by a
+# real behavioral test that drives the actual unfinished path end-to-end:
+# tests/test_bridge_authoritative_subagent.py::TestUnfinishedRepairNeverIntegrates
+# ::test_repair_commit_with_non_ok_status_blocks_the_whole_cycle.
