@@ -2447,6 +2447,47 @@ def test_killed_attempt_becomes_interrupted_kill(tmp_path: Path, monkeypatch):
     assert state.hold is None, "a kill is not supplier evidence -- it must not start a backoff hold"
 
 
+def test_registration_persistence_failure_blocks_executor_startup(tmp_path: Path, monkeypatch):
+    """N4 (round 2 external re-check, architect resolution 2026-09-26):
+    ``record_attempt_started``'s write is a correctness prerequisite, not
+    optional telemetry -- if it cannot be verified as persisted, the
+    executor must not start at all (reason ``registration_failed``).
+    Round 1's ``record_attempt_started`` called ``_save_state`` but never
+    checked whether it actually wrote anything, and the bridge neither
+    verified the registration nor blocked the spawn on failure.
+    """
+    import asyncio
+
+    from tests.test_cycle_ledger import _FakeSubagentManager, _init_selfevo_repo, _read_ledger
+    from nanobot.runtime import bridge, open_increment
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    monkeypatch.setattr(open_increment, "_save_state", lambda *a, **k: False)
+
+    spawned: list = []
+
+    class _NeverSpawnedManager(_FakeSubagentManager):
+        async def spawn(self, **kwargs):
+            if self._telemetry_component != "planner":
+                spawned.append(1)
+            return await super().spawn(**kwargs)
+
+    _stub_planning_session(monkeypatch, "should never reach the executor")
+    monkeypatch.setattr(bridge, "SubagentManager", _NeverSpawnedManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+    assert spawned == [], "the executor must never spawn when the registration write cannot be verified"
+
+    outcome_rows = [r for r in _read_ledger(state_dir) if r.get("phase") == "outcome"]
+    assert outcome_rows, "a blocked cycle must still record its outcome"
+    assert outcome_rows[-1]["reason"] == "registration_failed"
+
+
 def test_killed_attempt_recovery_carries_original_plan(tmp_path: Path, monkeypatch):
     """N1 (round 2 external re-check, architect resolution 2026-09-26):
     the ``running`` record must store the original plan (or a reliable
