@@ -636,10 +636,14 @@ else
 fi
 
 # Semantic release health gate (ADR-036 D3 Part B: model-free and dashboard-free):
-# Runs independently of dashboard service state or port 8080.
+# Runs independently of dashboard service state or port 8080 under runtime service identity.
 # Vocabulary allowlist matching dashboard.ARTIFACT_SOURCE_STATUSES:
 # source["status"] not in {"fresh", "stale", "missing", "permission", "unreadable", "malformed", "valid-empty", "retired", "unavailable"}
-if ! python3 "$RELEASE_DIR/scripts/verify_release_health.py"; then
+HEALTH_GATE_PYTHON="${HEALTH_GATE_PYTHON:-/opt/eeepc-agent/venv/bin/python}"
+if [ ! -x "$HEALTH_GATE_PYTHON" ]; then
+  HEALTH_GATE_PYTHON=python3
+fi
+if ! sudo -u eeepc-agent env PYTHONPATH="$RELEASE_DIR" PYTHONDONTWRITEBYTECODE=1 "$HEALTH_GATE_PYTHON" "$RELEASE_DIR/scripts/verify_release_health.py"; then
   if [ "$VERIFY_ONLY" -eq 1 ]; then
     echo "VERIFY_ONLY HEALTH_FETCH_FAILED" >&2
   fi

@@ -38,10 +38,15 @@ def test_gate_is_model_free_and_dashboard_free(monkeypatch) -> None:
     finally:
         s.close()
 
+    # Verify execution under runtime service identity eeepc-agent (Codex P1 on PR #1978)
+    assert "sudo -u eeepc-agent" in script_text, (
+        "release health gate must execute under runtime service identity eeepc-agent"
+    )
+
     # Extract command line from deploy_release.sh and execute it for real
     # (catching trailing spaces, quoting bugs, or bad arguments - class 'edit trailing space lost')
-    match = re.search(r'python3\s+["\']?\$RELEASE_DIR/([^"\'\s\n]+)["\']?', script_text)
-    assert match is not None, "deploy_release.sh must execute python3 $RELEASE_DIR/<script>"
+    match = re.search(r'\$RELEASE_DIR/([^"\'\s\n]+)', script_text[script_text.index("sudo -u eeepc-agent"):])
+    assert match is not None, "deploy_release.sh must execute $RELEASE_DIR/<script>"
     script_rel_path = match.group(1)
     target_script = REPO_ROOT / script_rel_path
     assert target_script.is_file(), f"target script {target_script} must exist"
@@ -138,7 +143,7 @@ def test_health_gate_runs_when_dashboard_unit_is_disabled_or_absent() -> None:
 
     # Confirm health gate invocation is outside and after the dashboard unit if-block
     idx_dashboard_end = script_text.index('die "unexpected $DASHBOARD_UNIT LoadState=$DASHBOARD_LOAD_STATE"\nfi')
-    idx_health_gate = script_text.index('python3 "$RELEASE_DIR/scripts/verify_release_health.py"')
+    idx_health_gate = script_text.index('"$RELEASE_DIR/scripts/verify_release_health.py"')
     assert idx_health_gate > idx_dashboard_end, (
         "release health gate must be outside and after the dashboard unit block"
     )
