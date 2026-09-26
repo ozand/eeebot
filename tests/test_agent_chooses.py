@@ -2893,6 +2893,67 @@ def test_failed_closing_commit_blocks_integration(tmp_path: Path, monkeypatch):
     assert outcome_rows and outcome_rows[-1].get("reason") == "closing_commit_failed", outcome_rows
 
 
+def test_delete_leaves_pending_when_inspection_ref_creation_fails(tmp_path: Path):
+    """Round 2 external re-check, item 7 (architect resolution
+    2026-09-26): ``resolve(delete)`` counts as done only if the
+    ``update-ref`` of the inspection ref actually succeeded. Round 1's
+    ``_create_inspection_ref`` ignored the ``update-ref`` return code and
+    swallowed exceptions, so ``resolve`` cleared ``pending`` unconditionally
+    -- a stale lock specifically on the inspection ref (or any other write
+    failure) then silently loses the branch's pruning exemption without
+    ever gaining the protection it was traded for.
+    """
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import open_increment
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = base / "state"
+    state_dir.mkdir()
+    _origin, work = _init_selfevo_repo(base)
+
+    old_cycle_id = "cycle-delete-lockfail"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", old_branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "inspect_me.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/inspect_me.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/inspect_me.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id,
+        retry_key="delete-lockfail-test", plan_text="finish the wip feature", candidate_id=None,
+        selfevo_repo=work, branch=old_branch,
+    )
+    assert open_increment.pending_open_increment(state_dir) is not None
+
+    # A stale lock file on the EXACT inspection ref path forces
+    # update-ref to refuse the write -- a concurrent writer or leftover
+    # crash artifact, nothing else touched.
+    inspect_dir = work / ".git" / "refs" / "selfevo" / "inspect"
+    inspect_dir.mkdir(parents=True, exist_ok=True)
+    (inspect_dir / f"{old_cycle_id}.lock").write_text("", encoding="utf-8")
+
+    open_increment.resolve(state_dir, "cycle-deciding-lockfail", "delete", selfevo_repo=work)
+
+    assert open_increment.pending_open_increment(state_dir) is not None, (
+        "delete must not clear pending when the inspection ref write failed"
+    )
+    inspection_ref = f"refs/selfevo/inspect/{old_cycle_id}"
+    check = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "--verify", "--quiet", inspection_ref],
+        capture_output=True, text=True,
+    )
+    assert check.returncode != 0, "the inspection ref must not exist when its own write failed"
+
+
 def test_delete_keeps_inspection_ref(tmp_path: Path):
     """D7 (ADR-035 Test Contract, external review finding #7): `delete`
     must protect the branch's commit from immediate pruning by pinning
