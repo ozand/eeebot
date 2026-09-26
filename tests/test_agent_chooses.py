@@ -3060,6 +3060,23 @@ def test_planner_rest_snapshot_checks_returncode(tmp_path: Path, monkeypatch):
     )
 
 
+def test_recent_commits_with_paths_returns_unknown_on_git_failure(tmp_path: Path):
+    """Small item (ADR-035 Test Contract, #1962): ``_recent_commits_with_paths``
+    must return ``None`` (unknown) on a git failure, never ``[]`` --
+    otherwise a failed read and a genuinely empty commit window are the
+    same value to every caller, and the novelty-pressure prompt silently
+    tells the subagent "no recent activity" when the truth is "we could
+    not check".
+    """
+    from nanobot.runtime import bridge
+
+    not_a_repo = tmp_path / "not-a-repo"
+    not_a_repo.mkdir()
+
+    result = bridge._recent_commits_with_paths(not_a_repo, since="7 days ago")
+    assert result is None, f"a git failure must read as None (unknown), got {result!r}"
+
+
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
 # architect addendum, #1942 B2) -----------------------------------------------
 
