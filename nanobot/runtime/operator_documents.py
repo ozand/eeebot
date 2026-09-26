@@ -584,7 +584,7 @@ def render_priorities_block(
 
 _COMPLETED_EM_DASH_RE = re.compile(
     r"Priority\s+(\d+)\s*[—-]\s*([^\n]*?)"
-    r"(?=\s*(?:Priority\s+\d+\s*[—-]|[.;]\s*(?:Priority\s+\d+|$)|$))",
+    r"(?=\s*(?:[;,]\s*Priority\s+\d+\s*[—-]|[.;]\s*(?:Priority\s+\d+|$)|$))",
     re.IGNORECASE,
 )
 _COMPLETED_PAREN_PRIORITY_RE = re.compile(
