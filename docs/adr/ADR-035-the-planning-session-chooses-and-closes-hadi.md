@@ -191,11 +191,18 @@ with its branch and one of three causes:
   before any post-execution bookkeeping ran. To make this detectable, the attempt
   records a `running` increment (cycle, branch, attempt) **before** the executor
   starts. At the next cycle start, a `running` record with no terminal row is
-  recovered from the executor's own telemetry first. If the executor had already
-  written a terminal `status: error`, its cause is classified as usual, becoming
-  `interrupted(supply)` or `interrupted(defect)`, and the supply hold applies when
-  it is supply. Only a record with no terminal telemetry at all becomes
-  `interrupted(kill)`. A kill during bookkeeping must not erase a known cause.
+  recovered from the executor's own telemetry first. The mapping is total:
+  - executor telemetry `status: error` → the cause is classified as usual:
+    `interrupted(supply)`, with the supply hold, or `interrupted(defect)`;
+  - any other terminal executor status (`ok`, `bounded_stop`, `blocked`,
+    `cancelled`), or no terminal telemetry at all → `interrupted(kill)`. The
+    bridge never reached a gate verdict, so the cycle is unfinished even if the
+    executor finished. The executor's status is kept on the record as
+    `executor_status` evidence. A kept increment then resumes with that
+    evidence, which may mean running only the gate on the existing branch.
+
+  A kill during bookkeeping never erases a known cause, and no terminal status
+  falls outside the three causes.
 
 Keeping an increment does not erase its record before execution resumes. The
 record is marked as resumed by the new cycle and cleared only by a terminal
@@ -225,11 +232,21 @@ killed attempts survived, about two and a half hours of work.
   it works on, and a checkpoint is written to that branch by a compare-and-swap on
   its ref, not by committing to whatever `HEAD` is at that moment. The ref check
   alone does not prove where the content came from, so the checkpoint also checks
-  its source. `HEAD` must point at the expected branch both before staging and
-  after the tree is written. The tree is built in a private index (a temporary
-  `GIT_INDEX_FILE`) seeded from the expected branch's tip, never the shared index.
-  If either check fails, the checkpoint is skipped and recorded, never written.
-  The bridge remains the single writer of the shared checkout during an attempt.
+  its source. The steps, in order:
+  1. Read `HEAD`; it must be the symbolic ref of the expected branch. Record that
+     branch's tip as `old`.
+  2. Stage the changed paths in the checkout's own index, exactly as a normal
+     commit would. A private index is not used: moving the checked-out branch
+     under a private index leaves the shared index on the old tip, and the next
+     normal commit would then revert the checkpoint.
+  3. `write-tree`, then check `HEAD` again.
+  4. `commit-tree` with parent `old`, then `update-ref refs/heads/<expected> <new>
+     <old>`.
+
+  The shared index then already equals the committed tree. If a check fails or the
+  compare-and-swap is refused, the staging is undone (`git reset -q`, never
+  `--hard`), and the checkpoint is skipped and recorded, never written. The bridge
+  remains the single writer of the shared checkout during an attempt.
 - **The increment is measured from its base, not from the attempt.** Whether there
   is work, the closing commit, the changed files and the counts are taken from
   the branch's merge base with `main`. Work kept from an earlier attempt therefore
