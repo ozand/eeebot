@@ -1924,6 +1924,115 @@ def test_rejected_checkpoint_resets_index_keeps_worktree(tmp_path: Path, monkeyp
     )
 
 
+def test_checkpoint_git_add_failure_and_post_staging_exception_both_abandon(tmp_path: Path, monkeypatch):
+    """Round 2 external re-check, item 3 (architect resolution
+    2026-09-26): ``_maybe_checkpoint_commit`` must check the returncode
+    of every ``git add`` (a staging failure must never be followed by
+    write-tree/commit-tree/update-ref), and any EXCEPTION after staging
+    has begun must still run ``_abandon`` (``git reset -q``) -- round 1
+    wrapped the whole call in a bare ``except Exception: pass``, so an
+    exception after `git add` (a write-tree timeout, for example) left
+    the shared index staged with no reset at all. Two sub-scenarios,
+    against real repos.
+    """
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.agent import subagent as subagent_module
+    from nanobot.agent.subagent import SubagentManager
+
+    logged_reasons: list = []
+    monkeypatch.setattr(
+        subagent_module.logger, "debug",
+        lambda *args, **kwargs: logged_reasons.append(args),
+    )
+
+    class _NeverCalledProvider:
+        async def chat_with_retry(self, *args, **kwargs):
+            raise AssertionError("provider must never be called by _maybe_checkpoint_commit")
+
+    real_run = subprocess.run
+
+    # --- Sub-scenario 1: `git add` itself fails -----------------------
+    base = tmp_path / "base"
+    base.mkdir()
+    _origin, work = _init_selfevo_repo(base)
+    branch = "selfevo/cycle-add-fail"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "edit.py").write_text("EXECUTOR_EDIT = 1\n", encoding="utf-8")
+    old_tip_1 = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", branch], capture_output=True, text=True,
+    ).stdout.strip()
+
+    class _FakeFailedResult:
+        returncode = 1
+        stdout = ""
+        stderr = "simulated add failure"
+
+    def _fail_add(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and cmd[-3:-1] == ["add", "--"]:
+            return _FakeFailedResult()
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _fail_add)
+    manager1 = SubagentManager(
+        provider=_NeverCalledProvider(), workspace=work, bus=object(), model="fake/model",
+        expected_cycle_branch=branch,
+    )
+    manager1._maybe_checkpoint_commit()
+    monkeypatch.undo()
+
+    new_tip_1 = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", branch], capture_output=True, text=True,
+    ).stdout.strip()
+    assert new_tip_1 == old_tip_1, "a failed git add must never be followed by a commit"
+    assert (work / "scripts" / "edit.py").read_text(encoding="utf-8") == "EXECUTOR_EDIT = 1\n"
+    diff_cached_1 = subprocess.run(["git", "-C", str(work), "diff", "--cached", "--quiet"])
+    assert diff_cached_1.returncode == 0, "the index must be reset after a failed git add"
+    assert any("add" in str(call).lower() for call in logged_reasons), (
+        f"the git-add failure reason must be recorded: {logged_reasons!r}"
+    )
+
+    # --- Sub-scenario 2: an exception AFTER staging (e.g. write-tree) ---
+    logged_reasons.clear()
+    base2 = tmp_path / "base2"
+    base2.mkdir()
+    _origin2, work2 = _init_selfevo_repo(base2)
+    branch2 = "selfevo/cycle-post-stage-exc"
+    subprocess.run(["git", "-C", str(work2), "checkout", "-b", branch2], check=True, capture_output=True)
+    (work2 / "scripts").mkdir(exist_ok=True)
+    (work2 / "scripts" / "dirty.py").write_text("EXECUTOR_EDIT = 2\n", encoding="utf-8")
+    old_tip_2 = subprocess.run(
+        ["git", "-C", str(work2), "rev-parse", branch2], capture_output=True, text=True,
+    ).stdout.strip()
+
+    def _raise_on_write_tree(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and cmd[-1:] == ["write-tree"]:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=10)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _raise_on_write_tree)
+    manager2 = SubagentManager(
+        provider=_NeverCalledProvider(), workspace=work2, bus=object(), model="fake/model",
+        expected_cycle_branch=branch2,
+    )
+    manager2._maybe_checkpoint_commit()
+    monkeypatch.undo()
+
+    new_tip_2 = subprocess.run(
+        ["git", "-C", str(work2), "rev-parse", branch2], capture_output=True, text=True,
+    ).stdout.strip()
+    assert new_tip_2 == old_tip_2, "an exception after staging must never leave a commit"
+    assert (work2 / "scripts" / "dirty.py").read_text(encoding="utf-8") == "EXECUTOR_EDIT = 2\n", (
+        "the executor's edit must survive in the working tree"
+    )
+    diff_cached_2 = subprocess.run(["git", "-C", str(work2), "diff", "--cached", "--quiet"])
+    assert diff_cached_2.returncode == 0, (
+        "an exception after staging began must still reset the index, not leave it staged"
+    )
+
+
 def test_checkpoint_keeps_shared_index_coherent(tmp_path: Path):
     """D3 (ADR-035 Test Contract #1979, 16710f62): after a successful
     checkpoint CAS, the workspace's ORDINARY (shared, not private) index
