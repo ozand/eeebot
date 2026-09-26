@@ -130,6 +130,7 @@ class TestProgressWatchdog:
 
         started = asyncio.Event()
         cancelled = asyncio.Event()
+        late_finished = asyncio.Event()
 
         class _HangingRegistry(ToolRegistry):
             async def execute(self, name, params):
@@ -138,13 +139,19 @@ class TestProgressWatchdog:
                     await asyncio.sleep(1)
                 except asyncio.CancelledError:
                     cancelled.set()
-                    raise
+                    # Simulate a tool that suppresses cancellation and returns late.
+                    await asyncio.sleep(0.1)
+                    late_finished.set()
+                    return "late completion"
                 return "late completion"
 
-        provider = _MockProvider(responses=[LLMResponse(
-            content=None,
-            tool_calls=[ToolCallRequest(id="call-hang", name="read_file", arguments={"path": "a.txt"})],
-        )])
+        provider = _MockProvider(responses=[
+            LLMResponse(
+                content=None,
+                tool_calls=[ToolCallRequest(id="call-hang", name="read_file", arguments={"path": "a.txt"})],
+            ),
+            LLMResponse(content="must not run after late tool result", tool_calls=[]),
+        ])
         mgr = SubagentManager(provider=provider, workspace=tmp_path, bus=MessageBus(), max_iterations=10)
         monkeypatch.setenv("NANOBOT_PROGRESS_TIMEOUT_SECS", "0.05")
         from nanobot.agent import subagent as subagent_module
@@ -155,6 +162,8 @@ class TestProgressWatchdog:
 
         assert started.is_set()
         assert cancelled.is_set(), "watchdog must cancel a tool that outlives its remaining window"
+        assert late_finished.is_set(), "test tool should return after suppressing cancellation"
+        assert provider.calls == 1, "late tool completion must not reset progress and permit another model turn"
         telem_path = next((tmp_path / "state" / "subagents").glob("*.json"))
         telemetry = json.loads(telem_path.read_text(encoding="utf-8"))
         assert telemetry["stop_reason"] == "progress_watchdog_timeout"
@@ -259,18 +268,19 @@ class TestMaxCallGapRecording:
         )
         monkeypatch.setenv("LLM_CALLS_DIR", str(configured))
         assert llm_telemetry._llm_calls_dir() == configured
-        assert compute_cycle_max_call_gap(state_dir, "c-dir") == 540.0
-        # The unit has no LLM_CALLS_DIR override; STATE_DIR selects the writer path.
+        assert compute_cycle_max_call_gap(state_dir, "c-dir") == 42.0
+        # The host unit has no LLM_CALLS_DIR override; STATE_DIR selects the writer path.
         monkeypatch.delenv("LLM_CALLS_DIR")
         monkeypatch.setenv("STATE_DIR", str(state_dir))
         assert llm_telemetry._llm_calls_dir() == state_default
         assert compute_cycle_max_call_gap(state_dir, "c-dir") == 540.0
 
-    def test_compute_cycle_max_call_gap_from_llm_calls(self, tmp_path):
+    def test_compute_cycle_max_call_gap_from_llm_calls(self, tmp_path, monkeypatch):
         state_dir = tmp_path / "state"
         llm_dir = state_dir / "llm_calls"
         llm_dir.mkdir(parents=True)
 
+        monkeypatch.setenv("LLM_CALLS_DIR", str(llm_dir))
         cycle_id = "cycle-test-gap"
         # 3 calls with gaps 15s and 45s -> max gap is 45.0s
         records = [
