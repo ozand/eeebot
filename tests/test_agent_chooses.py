@@ -2484,6 +2484,94 @@ def test_unfinished_session_with_ordinary_commit_never_integrates(tmp_path: Path
     assert pending["reason"] == "interrupted_defect"
 
 
+def test_unfinished_session_interruption_persist_failure_does_not_finish_cycle(tmp_path: Path, monkeypatch):
+    """Codex review of 22e1aeb8, P1 (architect resolution 2026-09-27): the
+    D1 barrier's own interruption-recording call
+    (record_supply_interruption/record_defect_interruption) has its
+    result ignored -- if that write fails to verifiably persist, the
+    barrier still marks the cycle "finished" (handled marker, terminal
+    ledger row) anyway, permanently retiring the request with NO durable
+    record of the interrupted attempt anywhere. Same setup as
+    ``test_unfinished_session_with_ordinary_commit_never_integrates``
+    (status='error', one ordinary commit), but the interruption write
+    itself is forced to fail.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo, _read_ledger
+    from nanobot.runtime import bridge, open_increment
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    class _OrdinaryCommitThenErrorManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            if self._telemetry_component == "planner":
+                return "fake planner spawned (noop)"
+            (self.workspace / "scripts").mkdir(exist_ok=True)
+            (self.workspace / "scripts" / "partial.py").write_text(
+                "def partial():\n    return 'wip'\n", encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "-C", str(self.workspace), "add", "scripts/partial.py"],
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(self.workspace), "commit", "-m", "feat: partial work"],
+                check=True, capture_output=True,
+            )
+            task_id = "unfinished-persist-fail"
+            (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+            (state_dir / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({"status": "error", "summary": "stopped", "result": "stopped"}),
+                encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
+            return "fake subagent spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _OrdinaryCommitThenErrorManager)
+    _stub_planning_session(monkeypatch, "finish the wip feature (interruption persist fails)")
+
+    # Only the interruption write itself fails -- a blanket _save_state
+    # stub would also break record_attempt_started's earlier registration
+    # (N4), masking what this test targets. The interruption write is the
+    # only one that sets `pending`; record_attempt_started's own save
+    # only ever touches `running`.
+    _real_save_state = open_increment._save_state
+
+    def _fail_on_pending_write(sd, st):
+        if st.pending is not None:
+            return False
+        return _real_save_state(sd, st)
+
+    monkeypatch.setattr(open_increment, "_save_state", _fail_on_pending_write)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is None, (
+        f"the interruption write genuinely failed -- no pending increment should have landed: {pending!r}"
+    )
+    outcome_rows = [r for r in _read_ledger(state_dir) if r.get("phase") == "outcome"]
+    assert not outcome_rows, (
+        f"a cycle whose interruption record failed to persist must not be recorded as finished "
+        f"(terminal outcome row) at all: {outcome_rows!r}"
+    )
+
+
 # --- keep-work: a resumed increment keeps one opening entry (ADR-035,
 # #1942 B2) --------------------------------------------------------------------
 
