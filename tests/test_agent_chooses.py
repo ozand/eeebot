@@ -1586,27 +1586,38 @@ def test_killed_attempt_keeps_checkpoint_commits(tmp_path: Path):
     asyncio.run(manager._run_subagent("t1", "finish the wip feature", "label", {"channel": "cli", "chat_id": "direct"}))
 
     log = subprocess.run(
-        ["git", "-C", str(work), "log", "--format=%s%x1f%b%x1e"], capture_output=True, text=True,
+        ["git", "-C", str(work), "log", "--format=%H%x1f%s%x1f%b%x1e"], capture_output=True, text=True,
     ).stdout
     records = [r.strip("\n") for r in log.split("\x1e") if r.strip()]
-    checkpoint_records = [r for r in records if r.split("\x1f", 1)[0].startswith("selfevo: checkpoint")]
+    checkpoint_records = [r for r in records if r.split("\x1f")[1].startswith("selfevo: checkpoint")]
     assert len(checkpoint_records) == 2, f"expected 2 checkpoint commits, got {len(checkpoint_records)}:\n{records}"
 
-    subjects = [r.split("\x1f", 1)[0] for r in checkpoint_records]
+    subjects = [r.split("\x1f")[1] for r in checkpoint_records]
     assert any("step_one.py" in s for s in subjects)
     assert any("step_two.py" in s for s in subjects)
     for record in checkpoint_records:
-        subject, _sep, body = record.partition("\x1f")
+        _sha, _subject, body = record.split("\x1f", 2)
         assert "Selfevo-Checkpoint: true" in body
 
-    # Granularity: the FIRST checkpoint (oldest commit touching step_one.py)
-    # must not already contain step_two.py -- a kill right after step 1
-    # would resume with only step_one.py's work, not both.
-    first_checkpoint_files = subprocess.run(
-        ["git", "-C", str(work), "log", "--diff-filter=A", "--name-only", "--format=", "--", "scripts/step_one.py"],
+    # Round 4 external re-check, test tail (architect resolution
+    # 2026-09-26): the granularity proof reads the first checkpoint's own
+    # TREE by its sha -- not a path-filtered `git log` listing, which
+    # only proves step_two.py's name never appears in commits that ADDED
+    # step_one.py, not what the first checkpoint's tree actually
+    # contained. `git log` lists newest-first, so the first checkpoint
+    # CHRONOLOGICALLY is the LAST of the two records.
+    first_checkpoint_sha = checkpoint_records[-1].split("\x1f")[0]
+    first_checkpoint_tree = subprocess.run(
+        ["git", "-C", str(work), "ls-tree", "-r", "--name-only", first_checkpoint_sha],
         capture_output=True, text=True,
-    ).stdout
-    assert "step_two.py" not in first_checkpoint_files
+    ).stdout.splitlines()
+    assert "scripts/step_one.py" in first_checkpoint_tree, (
+        f"the first checkpoint's own tree must contain step_one.py: {first_checkpoint_tree!r}"
+    )
+    assert "scripts/step_two.py" not in first_checkpoint_tree, (
+        f"the first checkpoint's own tree must not already contain step_two.py -- a kill right "
+        f"after step 1 would resume with only step_one.py's work, not both: {first_checkpoint_tree!r}"
+    )
 
 
 def test_checkpoint_commit_never_lands_on_main(tmp_path: Path):
