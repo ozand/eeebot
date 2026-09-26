@@ -1430,12 +1430,15 @@ def _append_outcome(
     outcome: str,
     ts: str | None = None,
     files_changed: list[str] | None = None,
+    demand_id: str | None = None,
 ) -> None:
     event: dict = {"phase": "outcome", "cycle_id": cycle_id, "outcome": outcome}
     if ts:
         event["ts"] = ts
     if files_changed is not None:
         event["files_changed"] = files_changed
+    if demand_id:
+        event["demand_id"] = demand_id
     cycle_ledger.append_event(state_dir, event)
 
 
@@ -1493,6 +1496,19 @@ class TestCompletedSidecar:
         _append_proposed(state_dir, "fallback-copy", "", ts=_now_iso(2))
         _append_outcome(state_dir, "fallback-copy", "success", ts=_now_iso(1), files_changed=["scripts/fallback.py"])
         assert isolated_demand(state_dir) == set()
+
+    def test_service_only_success_does_not_complete_demand(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "service-cycle", "priority-service123", ts=_now_iso(2))
+        _append_outcome(
+            state_dir, "service-cycle", "success", ts=_now_iso(1),
+            files_changed=["diary/2026-09-21.md", "memory/MEMORY.md"],
+            demand_id="priority-service123",
+        )
+        assert demand._fold_completed(state_dir) == set()
+        completed_path = state_dir / "demand" / "completed.json"
+        if completed_path.exists():
+            assert "priority-service123" not in _completed_sidecar(state_dir)["entries"]
 
     def test_normal_success_still_folds_by_demand_id(self, tmp_path):
         state_dir = _state_dir(tmp_path)

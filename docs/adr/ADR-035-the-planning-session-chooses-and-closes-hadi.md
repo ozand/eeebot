@@ -171,8 +171,32 @@ deadline; a changed or unreadable input, or the deadline passing, starts a sessi
 and the session itself discovers whether supply is back. Held ticks join the
 "ticks without a session" count. The same `open_increment` interrupted by supply
 three times running is flagged to the operator (#1765) and is never dropped
-automatically. A failure that is not supply — code, gate — is an ordinary outcome
-and reaches the next session as data, unmarked.
+automatically. A failure of a *finished* session that is not supply, such as a
+gate or smoke failure, is an ordinary outcome and reaches the next session as data,
+unmarked.
+
+**Three ways an increment is interrupted, one rule for all of them.** Whether an
+execution finished is decided by the session's own terminal status, never by how
+many commits its branch holds. A session is finished only when its telemetry
+records a normal terminal status. A session that ended in an error, or left no
+terminal record, is unfinished, and an unfinished session never integrates. An
+unfinished increment becomes the `open_increment` the next session sees first,
+with its branch and one of three causes:
+
+- `interrupted(supply)`: the model supply failed. It gets the hold and backoff
+  described above.
+- `interrupted(defect)`: our own error ended the session after it had checkpointed
+  work. There is no hold or backoff; the next session decides keep, edit or delete.
+- `interrupted(kill)`: the process was killed, for example by the unit timeout,
+  before any post-execution bookkeeping ran. To make this detectable, the attempt
+  records a `running` increment (cycle, branch, attempt) **before** the executor
+  starts. At the next cycle start, a `running` record with no terminal row becomes
+  `interrupted(kill)`.
+
+Keeping an increment does not erase its record before execution resumes. The
+record is marked as resumed by the new cycle and cleared only by a terminal
+outcome, so a kill between the planning session and the executor does not lose the
+branch. Architect decision 2026-09-26, after the external review of #1962.
 
 **The work of an interrupted attempt is kept, not only its plan.** Carrying the
 plan is not enough if the work is thrown away. `cycle-77ca3cf3580c` (2026-09-25)
@@ -188,12 +212,25 @@ killed attempts survived, about two and a half hours of work.
   `open_increment`, the executor continues on the existing cycle branch with its
   checkpoints; the branch is never reset to `main` for a kept increment. Only
   *edit* or *delete* may start from `main`, and *delete* leaves the branch in
-  place, named, for inspection.
+  place, named, for inspection. The branch is protected by a ref
+  `refs/selfevo/inspect/<cycle_id>`, which branch pruning never touches; a separate
+  cleanup removes such refs after 14 days. If a kept branch is missing or cannot be
+  checked out, the attempt stops with its own reason. It never silently falls back
+  to a fresh branch from `main`.
+- **Checkpoints go only to their own branch.** The executor knows the exact branch
+  it works on, and a checkpoint is written to that branch by a compare-and-swap on
+  its ref, not by committing to whatever `HEAD` is at that moment.
+- **The increment is measured from its base, not from the attempt.** Whether there
+  is work, the closing commit, the changed files and the counts are taken from
+  the branch's merge base with `main`. Work kept from an earlier attempt therefore
+  counts. The attempt's own start is used only for per-attempt statistics.
 - **One opening, one plan chain.** A resumed increment appends to its existing
   diary entry and plan instead of writing a new opening entry per attempt.
 - **Checkpoints are not results.** A checkpoint commit is never an integration;
   the gate judges only the finished branch, and rule C of #1903 already excludes
-  diary-only and bookkeeping-only changes from counting as a result.
+  diary-only and bookkeeping-only changes from counting as a result. A finished
+  branch that holds only checkpoints gets one closing commit that names the task.
+  If that commit cannot be created, the branch does not integrate.
 
 **A duplicate is a recorded outcome too.** When the chosen increment is refused by
 the duplicate check, the cycle records `rejected_duplicate` with the evidence sha
@@ -287,6 +324,7 @@ both dashboard generators (`scripts/eeebot_dashboard.py` on the host and
 | reflector demand items | `reflection`/instruction-change demand | `demand`, `llm_proposer` candidate join | **superseded** — findings go to lessons and the diary, which the planner reads. **Kept:** the reflection-context hints (`reflection_context.py`) and the knowledge curator's reading of the journals; only the demand lane closes. The dashboard's cycle-detail join labels reflection as `informational` rather than rendering an empty list |
 | rotation selector | the cycle's one item | `llm_proposer` stamps it; ops dashboard renders served times | **superseded** by the planner's choice; ranking (ADR-027) orders the list the planner sees. The dashboard labels the served map `retired (ADR-035)` from the switch-over, so its stale times are not read as recent selection |
 | proposer task text | "Implement and commit: X" into `improvements/` requests | executor via `bridge.py`; dashboard proposer panel; `loop_metrics_report.py` | **dropped**. **Drain rule:** at the switch-over every queued proposer request is marked `superseded (ADR-035)` and never executed; its candidate re-enters the ranked list. The proposer panel keeps its history and shows `authority: candidates only` from the switch-over |
+| auto-commit safety net for an interrupted executor (#1280/#1281) | `_auto_commit_uncommitted_work` commits a dead session's edits, and the normal gate may integrate them | the bridge's gate and integration path | **superseded** by `open_increment` `interrupted(supply\|defect\|kill)`. An unfinished session never integrates; its checkpointed work waits on its branch for keep, edit or delete. The auto-commit stays only as a checkpoint of residual edits on that branch, never as a route to integration |
 | day judge verdict | `state/day_verdict/` | none today (writer runs at 03:00; no runtime, dashboard or unit reader) | **gains its readers** in this record's implementation: the planner (rule 1) and the dashboard. Until they land, the absence of a reader is a known void recorded here, not a healthy state |
 
 **Rates whose meaning changes.** Per-cycle rates computed over the proposer's
@@ -382,6 +420,14 @@ actor that has both.
 | A kept `open_increment` resumes on its existing cycle branch and is never reset to `main` | `tests/test_agent_chooses.py::test_kept_increment_resumes_branch_without_reset` | passing (keep-work, #1942 B2): `open_increment.pending` now carries `branch`; `_setup_cycle_branch(..., reuse_existing_branch=True)` checks out the existing ref instead of `-B origin/main`; `_prune_stale_cycle_branches` exempts the pending increment's branch |
 | A resumed increment appends to its opening entry and plan chain instead of writing new ones | `tests/test_agent_chooses.py::test_resumed_increment_keeps_one_opening` | passing (keep-work, #1942 B2): `open_increment.pending["opening_entry_written"]` threaded through `_run_planning_session`'s `resume_skip_opening_entry` to skip a second `_write_diary_open_entry` call. The plan-chain half needs no extra code -- `append_plan_entry` (rule 1) already preserves every prior entry unconditionally |
 | A checkpoint commit never integrates on its own | `tests/test_agent_chooses.py::test_checkpoint_is_not_an_integration` | passing (keep-work, #1942 B2): structural proof `_integrate_cycle_to_main` has exactly two call sites, both behind an explicit smoke-gate decision; paired with `test_checkpoint_commit_excluded_from_self_dedup_and_recent_activity`, the mandatory exclusion test the architect addendum required |
+| A session that ended in an error or left no terminal record never integrates, however many checkpoints its branch holds; supply → `interrupted(supply)`, our error → `interrupted(defect)` | `tests/test_agent_chooses.py::test_unfinished_session_never_integrates` | not written (B2 external-review fixes in progress, #1962) |
+| A `running` increment is recorded before the executor starts; a killed attempt (no post-execution bookkeeping) becomes `interrupted(kill)` with its branch at the next cycle start | `tests/test_agent_chooses.py::test_killed_attempt_becomes_interrupted_kill` | passing (B2 external-review fixes, #1962): `open_increment.record_attempt_started`/`check_running_for_kill`/`record_kill_interruption`; the check runs in `_main_impl` before the planning-session call (not inside it, since every `_main_impl`-level test stubs that function wholesale) |
+| A kept increment's record survives a kill between the planning session and the executor | `tests/test_agent_chooses.py::test_keep_record_survives_kill_before_execution` | passing (B2 external-review fixes, #1962): `open_increment.resolve`'s `keep` branch no longer clears `pending` -- it only annotates `resumed_by`; only `record_attempt_finished` (a real terminal outcome) removes it |
+| A checkpoint is written only to the expected branch, by compare-and-swap on its ref; a different `HEAD` or a concurrent checkout never receives it | `tests/test_agent_chooses.py::test_checkpoint_bound_to_expected_branch` | passing (B2 external-review fixes, #1962): `SubagentManager(expected_cycle_branch=...)`, compared exactly (never a prefix test); the commit itself goes through `write-tree`/`commit-tree`/`update-ref refs/heads/<expected>` with the prior tip as the CAS old-value, never touching `HEAD` |
+| A kept branch that is missing or fails to check out stops the attempt, and is never reset to `main` | `tests/test_agent_chooses.py::test_keep_never_falls_back_to_reset` | not written (B2 external-review fixes in progress, #1962) |
+| Work, closing commit, changed files and counts are measured from the increment's merge base, so work kept from a killed attempt counts | `tests/test_agent_chooses.py::test_increment_accounting_uses_merge_base` | not written (B2 external-review fixes in progress, #1962) |
+| A failed closing commit blocks integration | `tests/test_agent_chooses.py::test_failed_closing_commit_blocks_integration` | not written (B2 external-review fixes in progress, #1962) |
+| *delete* protects the branch with `refs/selfevo/inspect/<cycle_id>`, which pruning skips | `tests/test_agent_chooses.py::test_delete_keeps_inspection_ref` | not written (B2 external-review fixes in progress, #1962) |
 
 # References
 

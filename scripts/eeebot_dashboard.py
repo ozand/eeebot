@@ -28,18 +28,10 @@ from typing import Any, Callable
 try:
     from scripts.cycle_cost_probe import (
         PERMANENT_BATTERY_REASON,
-        battery_probe,
-        framebuffer_surface_probe,
-        service_account_group_membership_probe,
-        toolchain_measurement_placeholders,
     )
 except ModuleNotFoundError:
     from cycle_cost_probe import (
         PERMANENT_BATTERY_REASON,
-        battery_probe,
-        framebuffer_surface_probe,
-        service_account_group_membership_probe,
-        toolchain_measurement_placeholders,
     )
 
 # Live-refresh TUI state
@@ -174,221 +166,28 @@ def refresh_host_capabilities(
     trigger: str = "dashboard_refresh",
     cycle_id: str | None = None,
     process_probe: Callable[[], dict[str, Any]] | None = None,
+    state_dir: Path | None = None,
+    scan_timestamp: str | None = None,
 ) -> dict[str, Any]:
-    """Re-scan host hardware and write a triggered inventory.
-
-    ``cycle_id`` and ``process_probe`` are optional because this daily probe
-    must remain safe outside a running cycle. A live cycle can pass its own
-    process sampler to record attributable CPU/RSS and load-time thermal data;
-    the host-wide metrics feed is intentionally not used for that purpose.
-
-    Each probe result keeps command failure distinct from a successful empty
-    result.  ``available`` remains as a compatibility field, but consumers
-    must use ``state`` when they need to distinguish ``absent`` from
-    ``probe_unavailable``.  The inventory metadata makes its manual trigger
-    explicit; freshness is derived separately from the file mtime.
-    """
-    import subprocess
-
-    def result(state: str, details: str) -> dict[str, Any]:
-        return {
-            "state": state,
-            "available": state == "present",
-            "details": details,
-        }
-
-    def read_probe(path: Path, parse: Any) -> dict[str, Any]:
-        try:
-            return result(*parse(path.read_text()))
-        except Exception as exc:
-            return result("probe_unavailable", f"probe failed: {type(exc).__name__}")
-
-    def command_probe(command: list[str], parse: Any) -> dict[str, Any]:
-        try:
-            output = subprocess.check_output(command, stderr=subprocess.DEVNULL).decode()
-        except Exception as exc:
-            # FileNotFoundError (missing utility), command failure, and other
-            # execution errors all mean that this probe could not look.
-            return result("probe_unavailable", f"probe failed: {type(exc).__name__}")
-        try:
-            state, details = parse(output)
-        except Exception as exc:
-            return result("probe_unavailable", f"probe output unreadable: {type(exc).__name__}")
-        return result(state, details)
-
-    caps: dict[str, Any] = {}
-
-    # Own-cycle body cost. The daily inventory can only report that this
-    # measurement is unavailable unless a running cycle supplies a sampler;
-    # this avoids relabelling host-wide metrics as process-attributed cost.
-    if process_probe is None:
-        caps["cycle_body"] = result(
-            "probe_unavailable",
-            "own-process sample requires an active cycle; daily probe is idle",
-        )
-    else:
-        try:
-            body = process_probe()
-            if not isinstance(body, dict):
-                raise TypeError("process probe must return an object")
-            state = str(body.get("state") or "probe_unavailable")
-            if state not in {"present", "absent", "present_uninitialized", "probe_unavailable"}:
-                raise ValueError("invalid process probe state")
-            caps["cycle_body"] = body
-        except Exception as exc:
-            caps["cycle_body"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
-
-    # Battery presence / slot inspection. Distinguishes present vs absent slot vs unanswerable.
-    caps["battery_draw"] = battery_probe()
-
-    # Service account group memberships (video, audio permissions).
-    caps["service_account_groups"] = service_account_group_membership_probe()
-
-    # Camera. Use pathlib globbing rather than passing the wildcard literally
-    # to ``ls`` (subprocess does not perform shell expansion).
+    """Compatibility wrapper delegating to scripts.probe_host_capabilities (#1557, ADR-036)."""
     try:
-        videos = sorted(str(path) for path in Path("/dev").glob("video*"))
-        caps["camera"] = result(
-            "present" if videos else "absent",
-            f"Detected {', '.join(videos)}" if videos else "not detected",
+        from scripts.probe_host_capabilities import (
+            refresh_host_capabilities as _impl_refresh,
         )
-    except Exception as exc:
-        caps["camera"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
-
-    # Bluetooth. Prefer kernel sysfs: the service sandbox may not expose
-    # lsusb, while rfkill gives the adapter's usable/blocked state.
-    try:
-        bluetooth_devices = sorted(Path("/sys/class/bluetooth").glob("hci*"))
-        if bluetooth_devices:
-            states: list[tuple[str, str, str | None]] = []
-            for device in bluetooth_devices:
-                rfkill_paths = sorted(device.glob("rfkill*"))
-                if not rfkill_paths:
-                    states.append((device.name, "", None))
-                    continue
-                rfkill = rfkill_paths[0]
-                soft = (rfkill / "soft").read_text(encoding="utf-8").strip()
-                hard = (rfkill / "hard").read_text(encoding="utf-8").strip()
-                states.append((device.name, soft, hard))
-            if any(soft == "0" and hard == "0" for _, soft, hard in states):
-                details = f"Detected {', '.join(name for name, _, _ in states)} via rfkill"
-                caps["bluetooth"] = result("present", details)
-            else:
-                blocked_parts = []
-                for name, soft, hard in states:
-                    if hard is None:
-                        reason = "no rfkill state"
-                    else:
-                        flags = ("soft" if soft == "1" else "") + ("+" if soft == "1" and hard == "1" else "") + ("hard" if hard == "1" else "")
-                        reason = f"{flags} blocked"
-                    blocked_parts.append(f"{name} ({reason})")
-                caps["bluetooth"] = result("present_uninitialized", f"{', '.join(blocked_parts)} via rfkill")
-        else:
-            rfkill_devices = []
-            for path in sorted(Path("/sys/class/rfkill").glob("rfkill*")):
-                try:
-                    if (path / "type").read_text(encoding="utf-8").strip().lower() == "bluetooth":
-                        rfkill_devices.append(path.name)
-                except (FileNotFoundError, OSError):
-                    continue
-            caps["bluetooth"] = result(
-                "present_uninitialized" if rfkill_devices else "absent",
-                f"Detected Bluetooth rfkill: {', '.join(rfkill_devices)} (hci unavailable)" if rfkill_devices else "not detected",
-            )
-    except OSError as exc:
-        caps["bluetooth"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
-
-    # WiFi
-    def parse_wifi(output: str) -> tuple[str, str]:
-        wifi_ifaces = [line.split(":")[1].strip() for line in output.splitlines() if "wlan" in line or "wlp" in line]
-        return (
-            ("present", f"Detected {', '.join(wifi_ifaces)}")
-            if wifi_ifaces
-            else ("absent", "not detected")
+    except ModuleNotFoundError:
+        from probe_host_capabilities import (
+            refresh_host_capabilities as _impl_refresh,
         )
 
-    caps["wifi"] = command_probe(["ip", "-o", "link", "show"], parse_wifi)
-
-    # Microphone. Read the kernel's ALSA card inventory directly; this does
-    # not depend on the optional alsa-utils/arecord package.
-    def parse_microphone(text: str) -> tuple[str, str]:
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        return (
-            ("present", lines[0])
-            if lines and any("[" in line for line in lines)
-            else ("absent", "not detected")
-        )
-
-    caps["microphone"] = read_probe(Path("/proc/asound/cards"), parse_microphone)
-
-    # CPU
-    caps["cpu"] = read_probe(
-        Path("/proc/cpuinfo"),
-        lambda text: (
-            "present",
-            next(line.split(":", 1)[1].strip() for line in text.splitlines() if line.startswith("model name")),
-        ),
+    caps = _impl_refresh(
+        trigger=trigger,
+        cycle_id=cycle_id,
+        process_probe=process_probe,
+        state_dir=state_dir or STATE_DIR,
+        scan_timestamp=scan_timestamp,
     )
-
-    # Memory
-    def parse_memory(text: str) -> tuple[str, str]:
-        lines = {line.split(":", 1)[0]: line.split(":", 1)[1].strip() for line in text.splitlines() if ":" in line}
-        if "MemTotal" not in lines:
-            return "absent", "not detected"
-        return "present", f"Mem: total={lines.get('MemTotal', '?')} available={lines.get('MemAvailable', '?')}"
-
-    caps["memory"] = read_probe(Path("/proc/meminfo"), parse_memory)
-
-    # Disk
-    def parse_disk(text: str) -> tuple[str, str]:
-        parts = text.strip().splitlines()[1].split()
-        return "present", f"{parts[0]} {parts[1]} total, {parts[2]} used, {parts[3]} free, {parts[4]} used on /"
-
-    caps["disk"] = command_probe(["df", "-h", "/"], parse_disk)
-    caps["kernel"] = command_probe(["uname", "-r"], lambda output: ("present", output.strip()) if output.strip() else ("absent", "not detected"))
-    caps["uptime"] = command_probe(["uptime", "-p"], lambda output: ("present", output.strip()) if output.strip() else ("absent", "not detected"))
-
-    # Screen resolution and one full-surface transfer cost. The geometry and
-    # pixel format are measured host facts; the byte count is deterministic.
-    try:
-        screen_res = "unknown"
-        fb_size_path = Path("/sys/class/graphics/fb0/virtual_size")
-        if fb_size_path.exists():
-            screen_res = fb_size_path.read_text().strip().replace(",", "x")
-        else:
-            for mode_path in Path("/sys/class/drm").glob("card*-*/modes"):
-                if mode_path.exists():
-                    lines = mode_path.read_text().strip().splitlines()
-                    if lines:
-                        screen_res = lines[0].strip()
-                        break
-        screen_state = "present" if screen_res != "unknown" else "absent"
-        caps["screen"] = result(
-            screen_state,
-            f"Physical Resolution: {screen_res}" if screen_res != "unknown" else "not detected",
-        )
-        caps["screen_push"] = framebuffer_surface_probe()
-    except Exception as exc:
-        caps["screen"] = result("probe_unavailable", f"probe failed: {type(exc).__name__}")
-
-    # Toolchain cost is intentionally a separate measurement from the known
-    # executable inventory. Building is not run by the daily refresh; an
-    # explicitly authorized caller may provide measured values.
-    caps.update(toolchain_measurement_placeholders())
-
-    if cycle_id:
-        caps["_cycle_id"] = cycle_id
-    caps["_scan_timestamp"] = datetime.now(timezone.utc).isoformat()
-    caps["_probe_trigger"] = trigger
-
-    # Write to state file
-    host_caps_path = STATE_DIR / "host_capabilities.json"
-    host_caps_path.write_text(json.dumps(caps, indent=2) + "\n", encoding="utf-8")
-
-    # Invalidate cache
     _HOST_CAPS_CACHE["host_caps"] = caps
     _HOST_CAPS_CACHE["loaded_at"] = time.monotonic()
-
     return caps
 
 

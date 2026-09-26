@@ -3806,6 +3806,9 @@ async def _main_impl_body():
         return 0
 
     BRIDGE_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _bridge_start_mono = time.monotonic()
+    from nanobot.runtime.session_clock import get_bridge_wall_secs
+    _bridge_wall_deadline = _bridge_start_mono + get_bridge_wall_secs()
 
     # ADR-035 rest amendment (#1964): the harness pre-check runs before
     # repository preparation too -- a held tick touches neither the model
@@ -4499,6 +4502,7 @@ async def _main_impl_body():
             # D3 (ADR-035 Test Contract): bind checkpoints to THIS spawn's
             # resolved branch, exactly -- never a prefix guess from HEAD.
             expected_cycle_branch=cycle_branch,
+            wall_deadline=_bridge_wall_deadline,
         )
 
         # Capture HEAD SHA before spawn so we can count subagent commits correctly,
@@ -4524,6 +4528,8 @@ async def _main_impl_body():
         _auto_committed = False
         _cycle_tier = 'script'  # #812: 'script' | 'runtime' (set by surface classify below)
         _integrated = False
+        _delivered = False
+        _service_only = False
         _rollback_reason: 'str | None' = None
         # #678 F1/F3: mutation-surface / blocked-pattern violations across ALL cycle
         # commits (not just the auto-commit fallback) — populated below once
@@ -4645,15 +4651,15 @@ async def _main_impl_body():
             _subagent_task_id = next(iter(mgr._running_tasks), None)
             if mgr._running_tasks:
                 try:
-                    # Limit subagent execution time to 3000s (50 minutes).
-                    # Coordinator stale threshold is 3600s (60 minutes).
-                    # This ensures the subagent terminates gracefully before coordinator marks it stale.
+                    # Limit subagent execution time to remaining bridge wall allocation.
+                    # #1899: anchored to bridge start time so planning does not displace the deadline.
+                    _remaining_wall = max(60.0, _bridge_wall_deadline - time.monotonic())
                     await asyncio.wait_for(
                         asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True),
-                        timeout=3000.0
+                        timeout=_remaining_wall,
                     )
                 except asyncio.TimeoutError:
-                    print("Subagent execution timed out (limit: 3000s). Cancelling running tasks...")
+                    print("Subagent execution timed out (wall-clock limit). Cancelling running tasks...")
                     for task_obj in list(mgr._running_tasks.values()):
                         task_obj.cancel()
                     # Allow tasks to process CancelledError and write telemetry
@@ -4668,6 +4674,9 @@ async def _main_impl_body():
                     _run_record.set_run_metadata(classification='loop_breaker_abort', reason=_run_stop_reason)
                 elif _run_stop_reason == 'wall_clock_deadline':
                     _run_record.set_run_metadata(classification='wall_clock_abort', reason=_run_stop_reason)
+                elif _run_stop_reason == 'progress_watchdog_timeout':
+                    _run_record.set_run_metadata(classification='progress_watchdog_abort', reason=_run_stop_reason)
+                    _rollback_reason = 'progress_watchdog_timeout'
             except Exception:
                 pass
             # #1280: the handled_ marker is no longer written here unconditionally
@@ -5363,6 +5372,9 @@ async def _main_impl_body():
                                     except Exception: pass
                             if _integ['ok']:
                                 _integrated = True
+                                from nanobot.runtime.service_paths import is_delivered as _is_delivered
+                                _delivered = _is_delivered(True, files_changed)
+                                _service_only = not _delivered
                                 try:
                                     from nanobot.runtime import archive as _archive_mod
                                     _archive_mod.record_stepping_stone(
@@ -5414,7 +5426,7 @@ async def _main_impl_body():
             # audit, never counted in fitness scoring).  A non-integrated cycle's
             # reads are discarded — the subagent did not ship, so no fitness credit.
             try:
-                if _integrated:
+                if _delivered:
                     _sf_count = mgr.collect_skill_reads()
                     if _sf_count:
                         print(f'skill-fitness: recorded {_sf_count} SKILL.md read(s) for cycle {_cycle_id}')
@@ -5467,7 +5479,7 @@ async def _main_impl_body():
                 except Exception:
                     pass  # skills-index regeneration errors are non-blocking
 
-            if _integrated and backlog_title and not _is_proposer_request(req):
+            if _delivered and backlog_title and not _is_proposer_request(req):
                 marked = _try_mark_backlog_done(
                     repo_root=_selfevo_repo,
                     backlog_title=backlog_title,
@@ -5591,6 +5603,7 @@ async def _main_impl_body():
             'integrity_changed': locals().get('_integrity_changed', []),
             'rollback_reason': locals().get('_rollback_reason', ''),
             'integrated': locals().get('_integrated', False),
+            'delivered': locals().get('_delivered', False),
             'score': locals().get('cand_score', float('-inf')),
             'cycle_tier': locals().get('_cycle_tier', 'script'),
             'subagent_task_id': locals().get('_subagent_task_id', None),
@@ -5742,6 +5755,7 @@ async def _main_impl_body():
     _integrity_changed = _res['integrity_changed']
     _rollback_reason = _res['rollback_reason']
     _integrated = _res['integrated']
+    _delivered = _res.get('delivered', _integrated)
     _cycle_tier = _res.get('cycle_tier', 'script')
     _subagent_task_id = _res.get('subagent_task_id')
     _citation_subagent_task_id = _res.get('citation_subagent_task_id', _subagent_task_id)
@@ -5840,7 +5854,13 @@ async def _main_impl_body():
     # rejection, integrate failure) -> failed. Timeouts (subagent-spawn,
     # repair-turn asyncio.wait_for) fold into the normal commit/gate
     # accounting above rather than a distinct outcome.
-    if _integrated:
+    from nanobot.runtime.service_paths import is_service_only as _is_service_only_branch
+    _service_only = bool(_integrated and _is_service_only_branch(files_changed))
+    _delivered = bool(_integrated and not _service_only)
+    if _service_only:
+        _cycle_outcome = 'partial'
+        _rollback_reason = 'service_only'
+    elif _integrated:
         _cycle_outcome = 'success'
     elif _rollback_reason == 'push_pending':
         # #1709: the cycle gate-passed and merged locally; only the final
@@ -5880,18 +5900,24 @@ async def _main_impl_body():
     if _cycle_outcome in ('partial', 'failed') and not _rollback_reason:
         if _executor_reported_skipped(STATE_DIR, _subagent_task_id):
             _verdict_reason_hint = 'executor_reported_skipped'
+    if _service_only:
+        _verdict_reason_hint = 'service_only'
     _verdict, _verdict_reason = _derive_cycle_verdict(_cycle_outcome, _verdict_reason_hint)
     try:
         from nanobot import crash_record as _run_record
         if not _res.get('run_stop_reason'):
             _run_record.set_run_metadata(
-                classification=("completion" if _cycle_outcome == "success" else "failed"),
+                # A service-only cycle merged cleanly and the bridge run
+                # completed; only its delivery verdict is non-success.
+                classification=(
+                    "completion" if _cycle_outcome == "success" or _service_only else "failed"
+                ),
                 reason=_rollback_reason or _cycle_outcome,
             )
     except Exception:
         pass
     _lesson_candidate: dict[str, object] | None = None
-    if _integrated:
+    if _delivered:
         _lesson_candidate = {"condition_met": bool(
             _has_meaningful_lesson(_artifact_data)
             and _has_delta_evidence(_artifact_data, repo_root=_selfevo_repo, backlog_title=backlog_title)
@@ -5900,7 +5926,7 @@ async def _main_impl_body():
     # the terminal ledger row is appended. This makes the row self-contained:
     # an observer can distinguish no qualifying condition, a queued candidate,
     # and a refusal without joining a later sink.
-    if _integrated and _lesson_candidate and _lesson_candidate["condition_met"]:
+    if _delivered and _lesson_candidate and _lesson_candidate["condition_met"]:
         try:
             from nanobot.runtime.knowledge_curator import queue_bridge_lesson_candidate
 
@@ -5992,6 +6018,18 @@ async def _main_impl_body():
                     _iterations_used = len(_iters_list)
         except Exception:
             _iterations_used = None
+    _max_call_gap_s: float | None = None
+    try:
+        from nanobot.runtime.session_clock import compute_cycle_max_call_gap
+        _mgr = locals().get("mgr")
+        _fallback = getattr(_mgr, "last_max_call_gap_s", None) if _mgr else None
+        _max_call_gap_s = compute_cycle_max_call_gap(
+            STATE_DIR,
+            _cycle_id,
+            fallback_gap=_fallback,
+        )
+    except Exception:
+        pass
     record_cycle_outcome(
         STATE_DIR, _cycle_id, _cycle_outcome, _rollback_reason, files_changed, cycle_branch,
         lesson_candidate=_lesson_candidate,
@@ -6011,11 +6049,12 @@ async def _main_impl_body():
         # set unconditionally earlier in this function before the explore-
         # mode branch.
         iterations_predicted=_planning_result.get('iterations_planned'),
+        max_call_gap_s=_max_call_gap_s,
         # #1709 increment 2: only a push_pending row needs the base it
         # merged against — _finish_pending_pushes reads this back to tell
         # "origin/main unchanged" (safe to redo) from "moved" (superseded).
         main_sha_before=(main_sha_before if _cycle_outcome == 'push_pending' else None),
-        real_result=_real_result_ledger_inputs(_bridge_status),
+        real_result=_real_result_ledger_inputs('blocked' if _service_only else _bridge_status),
         # #1765: the classifier's decision AND the raw error text, together,
         # so a misclassification is auditable after the fact — never just
         # the derived outcome/reason with the evidence discarded.
@@ -6535,7 +6574,7 @@ _REJECT_REASONS = frozenset({
 _INCONCLUSIVE_REASONS = frozenset({
     'gate_failed', 'mutation_surface_violation', 'blocked_file_present',
     'out_of_band_main_detected', 'switch_base_gate_error',
-    'switch_base_gate_blocked', 'head_on_main_precondition_failed',
+    'switch_base_gate_blocked', 'head_on_main_precondition_failed', 'service_only',
     'no_commit', 'internal_error', 'executor_llm_error',
     # #1765: a supplier outage is infra trouble by definition — never
     # upgraded to accept/reject.

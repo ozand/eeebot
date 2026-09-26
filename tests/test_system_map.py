@@ -208,7 +208,8 @@ class TestUpdateSystemMap:
         wrote = system_map.update_system_map(repo, state_dir)
 
         assert wrote is True
-        assert (repo / "docs" / "SYSTEM_MAP.md").is_file()
+        assert system_map.system_map_path(state_dir).is_file()
+        assert not (repo / "docs" / "SYSTEM_MAP.md").exists()
         watermark = json.loads((state_dir / "system_map" / "watermark.json").read_text())
         assert watermark["git_head"]
         assert watermark["content_sha256"]
@@ -219,7 +220,7 @@ class TestUpdateSystemMap:
         state_dir = tmp_path / "state"
         assert system_map.update_system_map(repo, state_dir) is True
 
-        map_path = repo / "docs" / "SYSTEM_MAP.md"
+        map_path = system_map.system_map_path(state_dir)
         mtime_before = map_path.stat().st_mtime
         wm_before = (state_dir / "system_map" / "watermark.json").read_text()
 
@@ -234,7 +235,7 @@ class TestUpdateSystemMap:
         state_dir = tmp_path / "state"
         assert system_map.update_system_map(repo, state_dir) is True
 
-        map_path = repo / "docs" / "SYSTEM_MAP.md"
+        map_path = system_map.system_map_path(state_dir)
         mtime_before = map_path.stat().st_mtime
         wm_before = (state_dir / "system_map" / "watermark.json").read_text()
 
@@ -260,8 +261,9 @@ class TestUpdateSystemMap:
         wrote = system_map.update_system_map(repo, state_dir)
 
         assert wrote is True
-        content = (repo / "docs" / "SYSTEM_MAP.md").read_text()
+        content = system_map.system_map_path(state_dir).read_text(encoding="utf-8")
         assert "scripts/new_script.py" in content
+        assert not (repo / "docs" / "SYSTEM_MAP.md").exists()
 
     def test_foreign_generator_map_deferred_untouched(self, tmp_path):
         """#749 follow-up: a foreign-format SYSTEM_MAP.md (e.g. produced by
@@ -302,18 +304,20 @@ class TestUpdateSystemMap:
         wrote = system_map.update_system_map(repo, state_dir)
 
         assert wrote is True
-        content = (repo / "docs" / "SYSTEM_MAP.md").read_text(encoding="utf-8")
+        content = system_map.system_map_path(state_dir).read_text(encoding="utf-8")
         assert "scripts/new_script.py" in content
+        assert not (repo / "docs" / "SYSTEM_MAP.md").exists()
 
     def test_absent_file_is_adopted_not_treated_as_foreign(self, tmp_path):
         repo = _git_repo(tmp_path)
         state_dir = tmp_path / "state"
-        assert not (repo / "docs" / "SYSTEM_MAP.md").exists()
+        assert not system_map.system_map_path(state_dir).exists()
 
         wrote = system_map.update_system_map(repo, state_dir)
 
         assert wrote is True
-        assert (repo / "docs" / "SYSTEM_MAP.md").is_file()
+        assert system_map.system_map_path(state_dir).is_file()
+        assert not (repo / "docs" / "SYSTEM_MAP.md").exists()
 
     def test_missing_repo_fails_open(self, tmp_path):
         assert system_map.update_system_map(tmp_path / "nope", tmp_path / "state") is False
@@ -332,6 +336,74 @@ class TestUpdateSystemMap:
         monkeypatch.setattr(system_map.Path, "write_text", _boom, raising=False)
         # Should degrade to False, never raise.
         assert system_map.update_system_map(repo, tmp_path / "state") is False
+
+    def test_system_map_survives_restore_to_main(self, tmp_path):
+        """#1966: system map written to state/system_map survives _restore_to_main."""
+        from nanobot.runtime.bridge import _restore_to_main
+
+        repo = _git_repo(tmp_path)
+        _write_script(repo, "scripts/track_memory.py", '"""Track."""\n')
+        _commit_all(repo, "feat: track memory")
+        state_dir = tmp_path / "state"
+
+        assert system_map.update_system_map(repo, state_dir) is True
+        map_path = system_map.system_map_path(state_dir)
+        assert map_path.is_file()
+        content_before = map_path.read_text(encoding="utf-8")
+
+        # Run _restore_to_main on repo
+        _restore_to_main(repo, state_dir)
+
+        assert map_path.is_file()
+        assert map_path.read_text(encoding="utf-8") == content_before
+        assert not (repo / "docs" / "SYSTEM_MAP.md").exists()
+
+    def test_restore_followed_by_unchanged_head_leaves_proposer_readable_map(self, tmp_path):
+        """#1966: after _restore_to_main, when HEAD is unchanged, update_system_map
+        is a no-op but the proposer still reads the existing state system map."""
+        from nanobot.runtime import llm_proposer
+        from nanobot.runtime.bridge import _restore_to_main
+
+        repo = _git_repo(tmp_path)
+        _write_script(repo, "scripts/track_memory.py", '"""Track memory."""\n')
+        _commit_all(repo, "feat: track memory")
+        state_dir = tmp_path / "state"
+
+        assert system_map.update_system_map(repo, state_dir) is True
+
+        # Restore checkout to main
+        _restore_to_main(repo, state_dir)
+
+        # Next cycle: HEAD unchanged -> no write
+        assert system_map.update_system_map(repo, state_dir) is False
+
+        # Proposer context must still read the system map from state
+        section = llm_proposer._system_map_inventory_section(repo, state_dir=state_dir)
+        assert "- scripts/track_memory.py — Track memory." in section
+
+    def test_no_file_under_instance_checkout_created_by_proposer(self, tmp_path, monkeypatch):
+        """#1966: maybe_propose creates no uncommitted files in the instance checkout."""
+        from nanobot.runtime import llm_proposer
+
+        monkeypatch.delenv("SELFEVO_LLM_PROPOSER_ENABLED", raising=False)
+        repo = _git_repo(tmp_path)
+        state_dir = tmp_path / "state"
+
+        result = llm_proposer.maybe_propose(state_dir, repo)
+        assert result is None
+
+        # Verify state system map exists
+        assert system_map.system_map_path(state_dir).is_file()
+
+        # Verify git status of instance repo is strictly clean
+        status = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert status.stdout.strip() == ""
+        assert not (repo / "docs").exists()
 
 
 # ─── parse_inventory_section ───────────────────────────────────────────────

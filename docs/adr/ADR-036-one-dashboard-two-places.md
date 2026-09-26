@@ -94,6 +94,8 @@ can read the private pages of rule 3. "All interfaces" includes the tailnet, not
 only the home LAN; which networks actually reach the port is a fact of the host's
 network rules, checked and recorded when this ships and whenever they change. The
 decision is revisited if any reachable network stops being trusted.
+Checked 2026-09-26: `:8080` is reachable from the LAN, the tailnet and loopback.
+The operator accepted the LAN and the tailnet as trusted (#1969).
 
 The interface of `scripts/eeebot_dashboard.py` is retired (rule 6).
 
@@ -103,6 +105,8 @@ The generator produces two sets:
 
 - **public pages** — cycles, attempts, sessions, roles, models, counts, causes,
   durations, verdicts; never the text of a request or an answer;
+  task and commit titles are public by the operator's decision of 2026-09-26;
+  the text of calls is not;
 - **private pages** — the per-call detail of rule 4.
 
 The boundary is enforced on **every file** of the publish tree, not only on HTML

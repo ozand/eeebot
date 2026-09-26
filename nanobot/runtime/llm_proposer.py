@@ -1100,9 +1100,18 @@ def _system_map_inventory_section(
         return ""
     try:
         repo = Path(selfevo_repo)
-        map_path = repo / "docs" / "SYSTEM_MAP.md"
+        map_path: Path | None = None
+        if state_dir:
+            sp = system_map.system_map_path(state_dir)
+            if sp.is_file():
+                map_path = sp
+        if map_path is None:
+            rp = repo / "docs" / "SYSTEM_MAP.md"
+            if rp.is_file():
+                map_path = rp
+
         lines: list[str] = []
-        if map_path.is_file():
+        if map_path is not None and map_path.is_file():
             lines = system_map.parse_inventory_section(map_path.read_text(encoding="utf-8"))
         if not lines:
             # Absent file, empty file, or a foreign-format map our parser
