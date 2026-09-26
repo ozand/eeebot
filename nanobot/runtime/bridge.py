@@ -1367,7 +1367,11 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
             outcome = str(row.get('outcome') or '')
             if outcome == 'push_pending':
                 pending_by_cycle[cid] = row
-            elif outcome in _LATE_PUSH_RESOLUTIONS:
+            elif outcome in _LATE_PUSH_RESOLUTIONS or (
+                outcome == 'partial' and row.get('reason') == 'service_only'
+            ):
+                # A service-only late push is recorded as the ordinary
+                # Rule-C partial outcome; it still resolves its pending push.
                 resolved_cycles.add(cid)
         todo = {cid: row for cid, row in pending_by_cycle.items() if cid not in resolved_cycles}
         if not todo:
