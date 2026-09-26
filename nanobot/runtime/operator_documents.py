@@ -309,13 +309,22 @@ def resolve_operator_priorities(
         return PriorityResolution(state=PRIORITY_UNAVAILABLE, reason=doc.reason)
 
     raw_text = str(data.get("text") or "")
+    completed_prose = _completed_prose_entries(raw_text)
     marker_idx = raw_text.find(_PRIORITY_TARGETS_MARKER)
     if marker_idx == -1:
-        return PriorityResolution(state=PRIORITY_EMPTY, reason="no_priority_section")
+        state = PRIORITY_ALL_COMPLETED if completed_prose else PRIORITY_EMPTY
+        return PriorityResolution(
+            state=state, reason="no_priority_section",
+            completed_count=len(completed_prose), completed_entries=completed_prose,
+        )
     section = raw_text[marker_idx + len(_PRIORITY_TARGETS_MARKER):]
     original_entries = _parse_entries(section)
     if not original_entries:
-        return PriorityResolution(state=PRIORITY_EMPTY, reason="no_entries")
+        state = PRIORITY_ALL_COMPLETED if completed_prose else PRIORITY_EMPTY
+        return PriorityResolution(
+            state=state, reason="no_entries",
+            completed_count=len(completed_prose), completed_entries=completed_prose,
+        )
 
     from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goal_text
 
@@ -329,7 +338,10 @@ def resolve_operator_priorities(
     )
     open_entries = _parse_entries(filtered_section)
     open_numbers = {e.number for e in open_entries}
-    completed_entries = tuple(e for e in original_entries if e.number not in open_numbers)
+    completed_entries = tuple(
+        [e for e in original_entries if e.number not in open_numbers]
+        + [e for e in completed_prose if e.number not in {entry.number for entry in original_entries}]
+    )
 
     if not open_entries:
         return PriorityResolution(
@@ -344,6 +356,18 @@ def resolve_operator_priorities(
         open_entries=tuple(open_entries),
         completed_entries=completed_entries,
     )
+
+
+def resolve_operator_priority_labels(state_dir: "Path | str") -> "frozenset[str]":
+    """Normalized labels from the operator's structured and Completed entries."""
+    res = resolve_operator_priorities(state_dir)
+    entries = (*res.open_entries, *res.completed_entries)
+    return frozenset(re.sub(r"\\s+", " ", entry.title.strip().lower()) for entry in entries if entry.title.strip())
+
+
+def resolve_operator_priorities_status(state_dir: "Path | str") -> PriorityStatus:
+    """Status-only adapter for operator priorities (privacy-safe)."""
+    return operator_priorities_status(state_dir)
 
 
 def resolve_operator_priority_numbers(state_dir: "Path | str") -> "frozenset[int]":
@@ -533,6 +557,27 @@ def render_priorities_block(
     if len(text) > cap:
         return _PRIORITIES_BLOCK_OVERSIZE_TEXT
     return text
+
+
+_COMPLETED_PRIORITY_RE = re.compile(r"Priority\s+(\d+)\s*[—-]\s*([^,.;\n]+)", re.IGNORECASE)
+
+
+def _completed_prose_entries(raw_text: str) -> tuple[PriorityEntry, ...]:
+    marker = "Completed (do not repeat):"
+    idx = raw_text.find(marker)
+    if idx < 0:
+        return ()
+    tail = raw_text[idx + len(marker):]
+    entries: list[PriorityEntry] = []
+    for match in _COMPLETED_PRIORITY_RE.finditer(tail):
+        try:
+            number = int(match.group(1))
+        except ValueError:
+            continue
+        title = match.group(2).strip()
+        if number > 0 and title:
+            entries.append(PriorityEntry(number=number, source=SOURCE_OPERATOR, title=title, instructions=""))
+    return tuple(entries)
 
 
 def _parse_entries(section: str) -> list[PriorityEntry]:

@@ -499,7 +499,7 @@ def test_missing_charter_keeps_diagnostics_running(tmp_path: Path, monkeypatch):
     from nanobot.runtime.health import read_derived_priorities_queue
 
     queue = read_derived_priorities_queue(state_dir)
-    assert queue == {"depth": 0, "limit": goal_review._DERIVED_PRIORITIES_MAX}
+    assert queue == {"depth": 0, "limit": goal_review._DERIVED_PRIORITIES_MAX, "status": "absent"}
 
     # The publisher (demand.build_derived_view/publish_derived_view) keeps
     # running too: it still produces a full, well-formed view — showing

@@ -77,11 +77,13 @@ from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
 from nanobot.runtime.operator_documents import (
     PRIORITY_UNAVAILABLE,
+    STATE_ABSENT,
     STATE_TEXT,
     PriorityResolution,
     format_derived_priority_line,
     render_priorities_block,
     resolve_charter,
+    resolve_derived_priorities,
     resolve_derived_priorities_split,
     resolve_operator_priorities,
 )
@@ -1703,7 +1705,18 @@ def build_context(
         # filtered independently, rendered under their own heading — never
         # folded into the charter's own "## Goal" text (that was
         # goal_review.merged_goal_text, #860/#1665).
-        derived_text = _render_derived_priorities(_load_derived_priorities(state_dir, selfevo_repo))
+        try:
+            _derived_open, _derived_completed = resolve_derived_priorities_split(
+                state_dir, selfevo_repo_root=selfevo_repo
+            )
+            _derived_resolution = resolve_derived_priorities(state_dir)
+            derived_text = _render_derived_priorities(_derived_open)
+            derived_state = _derived_resolution.state
+            if _derived_resolution.state == STATE_TEXT:
+                derived_state = "present" if _derived_open else "empty"
+        except Exception:
+            derived_text = ""
+            derived_state = "unreadable"
         # ADR-034 rule 5 (#1940, A4): the operator's OWN priority list (with
         # its Completed headers), which nothing in this context previously
         # showed -- "## Goal" above is the release charter, not this
@@ -1746,14 +1759,16 @@ def build_context(
         # proposer and it kept generating duplicate/failed proposals (post-hoc
         # dedup caught them, but the wasted LLM call already happened). Now only
         # the blob is trimmed; guardrails + surface_rule are appended after.
+        goal_cut_marker = ""
         blob_parts = [
+            "## Operator priorities (protected; rendered before lower-priority context)",
+            operator_priorities_block,
+            "",
             "## Goal (charter, filtered — already-completed priorities removed)",
             filtered_goal.strip() or "(no goal text available)",
             "",
-            operator_priorities_block,
-            "",
             "## Derived priorities (source: derived; filtered — already-completed removed)",
-            derived_text or "(none)",
+            derived_text or ("(none)" if derived_state == STATE_ABSENT else f"(unavailable: {derived_state})"),
             "",
             "## Recent cycle outcomes (most recent last — do not repeat done/failed work)",
             "\n".join(f"- {line}" for line in digest_lines) or "(no ledger history yet)",
@@ -1804,7 +1819,11 @@ def build_context(
         blob = "\n".join(blob_parts)
         budget = max(0, _MAX_CONTEXT_CHARS - reserved)
         if len(blob) > budget:
-            blob = blob[:budget]
+            marker = "\n[context truncated; earlier sections have priority]\n"
+            keep = max(0, budget - len(marker))
+            blob = blob[:keep] + marker[:budget - keep]
+            if operator_priorities_block not in blob:
+                blob = operator_priorities_block[:budget] + "\n[remaining context truncated]"
         context = blob + "\n" + guardrail_tail + "\n" + surface_rule
 
         # #844: PROTECTED (never-truncated) stepping-stones section — optional

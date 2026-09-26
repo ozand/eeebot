@@ -166,6 +166,7 @@ from nanobot.runtime.operator_documents import (
     resolve_derived_priorities_split,
     resolve_operator_priorities,
     resolve_operator_priorities_metadata,
+    resolve_operator_priorities_status,
     resolve_operator_priority_numbers,
 )
 from nanobot.runtime.schemas import QUALIFYING_ARTIFACT_DIRS
@@ -971,6 +972,7 @@ def build_derived_view(
         )
 
     ts = now or datetime.now(timezone.utc)
+    operator_status = resolve_operator_priorities_status(state_dir)
     return {
         "schema_version": DERIVED_VIEW_SCHEMA,
         "generated_at_utc": ts.isoformat().replace("+00:00", "Z"),
@@ -980,6 +982,12 @@ def build_derived_view(
             "text": charter_text,
         },
         "derived_status": derived_status,
+        "operator_priorities_status": {
+            "state": operator_status.state,
+            "reason": operator_status.reason,
+            "open_count": operator_status.open_count,
+            "completed_count": operator_status.completed_count,
+        },
         "derived_priorities": derived_entries,
         "priority_items": ranked,
         "input_mtimes_utc": {

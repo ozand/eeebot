@@ -128,18 +128,23 @@ def charter_input(state_root: Path) -> tuple[str, dict[str, Any]]:
     from nanobot.runtime.operator_documents import STATE_TEXT, resolve_charter
 
     res = resolve_charter(_release_root_from_env())
+    original_chars = len(res.text) if res.state == STATE_TEXT else 0
+    truncated = res.state == STATE_TEXT and original_chars > _MAX_TEXT
     text = res.text[:_MAX_TEXT] if res.state == STATE_TEXT else ""
     source = "release_root" if text else "none"
-    # Missing is a genuine empty only when no file was even there to read;
-    # a present-but-unreadable/blank/oversize file remains unavailable. The
-    # refusal decision is intentionally unchanged in should_refuse() (#1444).
-    if text:
+    if truncated:
+        text = text[:_MAX_TEXT - 96] + f"\n[charter truncated; original length {original_chars}]"
+        status = "truncated"
+    elif text:
         status = "complete"
     elif res.reason == "no_file":
         status = "empty"
     else:
         status = "unavailable"
-    return text, {"chars": len(text), "source": source, "status": status}
+    return text, {
+        "chars": len(text), "source": source, "status": status,
+        "truncated": truncated, "original_chars": original_chars,
+    }
 
 def _history_rows(path: Path) -> list[dict[str, Any]]:
     """Newest :data:`_HISTORY_TAIL_ROWS` rows of ``path`` inside the 7-day window."""

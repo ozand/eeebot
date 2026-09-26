@@ -98,6 +98,9 @@ from nanobot.runtime.operator_documents import (
     resolve_charter,
     resolve_derived_priorities,
     resolve_operator_priorities_metadata,
+    resolve_operator_priorities,
+    resolve_operator_priority_labels,
+    resolve_operator_priority_numbers,
 )
 from nanobot.runtime.role_prompt import load_role_text
 
@@ -997,7 +1000,11 @@ def maybe_goal_review(
 
         # ADR-034 rule 4: dedup baseline unions labels from BOTH lists,
         # each scanned on its own text — never one merged blob.
-        existing_labels = _existing_priority_labels(goal_text) | _existing_priority_labels(derived_text)
+        existing_labels = (
+            _existing_priority_labels(goal_text)
+            | _existing_priority_labels(derived_text)
+            | set(resolve_operator_priority_labels(state_dir))
+        )
         _record_guard_key_event(
             state_dir, "baseline", "priority_labels", str(len(existing_labels)),
         )
@@ -1059,7 +1066,12 @@ def maybe_goal_review(
         # READ-ONLY in this function either way — the accepted entries land
         # in derived_priorities.json, which deploy_release.sh never touches
         # (the actual #860 fix).
-        base_number = max(_next_priority_number(goal_text), _next_priority_number(derived_text))
+        operator_numbers = resolve_operator_priority_numbers(state_dir)
+        base_number = max(
+            _next_priority_number(goal_text),
+            _next_priority_number(derived_text),
+            (max(operator_numbers) + 1) if operator_numbers else 1,
+        )
         for offset, cand in enumerate(accepted):
             cand["number"] = base_number + offset
         _, titles = append_priorities(goal_text, accepted)
