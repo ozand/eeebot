@@ -4773,6 +4773,56 @@ def test_plan_version_survives_a_second_interruption(tmp_path: Path):
     )
 
 
+def test_interruption_writers_report_persisted_false_on_write_failure(tmp_path: Path, monkeypatch):
+    """Codex review of 22e1aeb8, P1 (architect resolution 2026-09-27):
+    ``record_supply_interruption`` and ``_record_interruption_without_backoff``
+    (kill/defect) call ``_save_state`` but ignore its result -- the same
+    "write without verification is treated as success" class P2-a fixed
+    for ``resolve()``. A caller that marks the cycle finished (handled
+    marker, terminal ledger row) regardless of whether the interruption
+    record actually landed would silently lose the only durable proof of
+    an interrupted attempt. Both writers must report ``persisted=False``
+    when the save fails.
+    """
+    from nanobot.runtime import open_increment
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    monkeypatch.setattr(open_increment, "_save_state", lambda *a, **k: False)
+
+    supply_result = open_increment.record_supply_interruption(
+        state_dir, "cycle-persist-fail-supply",
+        retry_key="persist-fail-supply-test", plan_text="finish the wip feature", candidate_id=None,
+        branch="selfevo/cycle-cycle-persist-fail-supply",
+    )
+    assert supply_result.persisted is False
+
+    kill_result = open_increment.record_kill_interruption(
+        state_dir, "cycle-persist-fail-kill",
+        retry_key="persist-fail-kill-test", plan_text="finish the wip feature", candidate_id=None,
+        branch="selfevo/cycle-cycle-persist-fail-kill",
+    )
+    assert kill_result.persisted is False
+
+    defect_result = open_increment.record_defect_interruption(
+        state_dir, "cycle-persist-fail-defect",
+        retry_key="persist-fail-defect-test", plan_text="finish the wip feature", candidate_id=None,
+        branch="selfevo/cycle-cycle-persist-fail-defect",
+    )
+    assert defect_result.persisted is False
+
+    monkeypatch.undo()
+
+    # Companion positive case: a real, successful write reports True.
+    ok_result = open_increment.record_supply_interruption(
+        state_dir, "cycle-persist-ok",
+        retry_key="persist-ok-test", plan_text="finish the wip feature", candidate_id=None,
+        branch="selfevo/cycle-cycle-persist-ok",
+    )
+    assert ok_result.persisted is True
+
+
 def test_recovery_does_not_overwrite_an_accepted_edit(tmp_path: Path):
     """Round 4 P1-a (architect resolution 2026-09-26): an interruption
     writer (``record_kill_interruption``, same shape as
