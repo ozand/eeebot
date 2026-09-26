@@ -3359,39 +3359,57 @@ async def _run_planning_session(
     # priorities, never reorders it. Fail-open: candidates are read-only
     # context, never a selection made on the planner's behalf -- a failure
     # here must not stop the session, only leave it without this block.
+    # D9 (ADR-035 Test Contract, external review finding #9): minimal_mode
+    # actually selects a smaller context here -- not just a recorded flag
+    # nothing acts on. Skips the candidates list (demand.collect_demand is
+    # also the most expensive of these blocks to build) and the dedup
+    # evidence; priorities and the open-increment block (mandatory, and
+    # already small) are unaffected.
+    _minimal_mode_active = False
     try:
-        from nanobot.runtime import demand as _demand_mod
-        from nanobot.runtime import llm_proposer as _llm_proposer_mod
-        from nanobot.runtime import planner_candidates as _planner_candidates_mod
+        from nanobot.runtime import no_plan_recovery as _no_plan_recovery_ctx
 
-        _planner_candidate_items = _demand_mod.collect_demand(state_dir, selfevo_repo)
-        # ADR-035 rule 2: the proposer's own still-live requests become
-        # candidates too, positioned right after defect items (rule 1's
-        # trust order) -- read-only, no LLM call.
-        _planner_proposer_items = _llm_proposer_mod.proposer_candidate_items(state_dir)
-        _planner_candidate_items = _planner_candidates_mod.merge_proposer_candidates(
-            _planner_candidate_items, _planner_proposer_items,
-        )
-        _planner_new_priority_ids = _planner_candidates_mod.mark_new_priority_items(
-            state_dir, _planner_candidate_items,
-        )
-        _candidates_block = _planner_candidates_mod.render_candidates_block(
-            _planner_candidate_items, _planner_new_priority_ids,
-        )
+        _minimal_mode_active = bool(_no_plan_recovery_ctx.load_state(state_dir).minimal_mode)
     except Exception:
-        _candidates_block = ''
+        _minimal_mode_active = False
 
-    # ADR-035 rest amendment (#1964): "the sha and the reason are an input
-    # to the next session, or it would choose the same increment again."
-    # Consumed (read-and-cleared) here, so it reaches exactly this one
-    # session -- fail-open, same as the candidates block above.
-    try:
-        from nanobot.runtime import planner_dedup_evidence as _dedup_evidence_mod
-
-        _dedup_evidence = _dedup_evidence_mod.consume_pending_evidence(state_dir)
-        _dedup_evidence_block = _dedup_evidence_mod.render_dedup_evidence_block(_dedup_evidence)
-    except Exception:
+    if _minimal_mode_active:
+        _candidates_block = '(minimal mode: candidate list omitted)'
         _dedup_evidence_block = ''
+    else:
+        try:
+            from nanobot.runtime import demand as _demand_mod
+            from nanobot.runtime import llm_proposer as _llm_proposer_mod
+            from nanobot.runtime import planner_candidates as _planner_candidates_mod
+
+            _planner_candidate_items = _demand_mod.collect_demand(state_dir, selfevo_repo)
+            # ADR-035 rule 2: the proposer's own still-live requests become
+            # candidates too, positioned right after defect items (rule 1's
+            # trust order) -- read-only, no LLM call.
+            _planner_proposer_items = _llm_proposer_mod.proposer_candidate_items(state_dir)
+            _planner_candidate_items = _planner_candidates_mod.merge_proposer_candidates(
+                _planner_candidate_items, _planner_proposer_items,
+            )
+            _planner_new_priority_ids = _planner_candidates_mod.mark_new_priority_items(
+                state_dir, _planner_candidate_items,
+            )
+            _candidates_block = _planner_candidates_mod.render_candidates_block(
+                _planner_candidate_items, _planner_new_priority_ids,
+            )
+        except Exception:
+            _candidates_block = ''
+
+        # ADR-035 rest amendment (#1964): "the sha and the reason are an
+        # input to the next session, or it would choose the same increment
+        # again." Consumed (read-and-cleared) here, so it reaches exactly
+        # this one session -- fail-open, same as the candidates block above.
+        try:
+            from nanobot.runtime import planner_dedup_evidence as _dedup_evidence_mod
+
+            _dedup_evidence = _dedup_evidence_mod.consume_pending_evidence(state_dir)
+            _dedup_evidence_block = _dedup_evidence_mod.render_dedup_evidence_block(_dedup_evidence)
+        except Exception:
+            _dedup_evidence_block = ''
 
     # Architect resolution 2026-09-25 (ADR-035 rule 3 / ADR-031 rule 2): a
     # plan interrupted by a supplier-side executor failure is this
@@ -3973,6 +3991,26 @@ async def _main_impl_body():
                 branch=_stale_running.get('branch', ''),
                 executor_status=_stale_running.get('executor_status'),
             )
+    except Exception:
+        pass
+
+    # D9 (ADR-035 Test Contract, external review finding #9): a `stopped`
+    # no_plan_recovery state blocks session start until the operator
+    # resumes manually (no_plan_recovery.resume) -- recording the state
+    # alone, as before, is the "unobservable guard" class; it must
+    # actually gate something. Placed here, not inside
+    # _run_planning_session, for the same reason as the kill-check above
+    # -- every _main_impl-level test in this file stubs that function
+    # wholesale, and this gate must still run.
+    try:
+        from nanobot.runtime import no_plan_recovery as _no_plan_recovery_gate
+
+        if _no_plan_recovery_gate.load_state(STATE_DIR).stopped:
+            print(
+                'bridge: planner stopped (6 consecutive planner-family no_plan outcomes) -- '
+                'no session until the operator resumes manually'
+            )
+            return 0
     except Exception:
         pass
 

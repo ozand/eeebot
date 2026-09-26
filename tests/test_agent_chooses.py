@@ -2842,6 +2842,7 @@ def test_stopped_and_minimal_mode_are_enforced(tmp_path: Path, monkeypatch):
     rc = asyncio.run(bridge._main_impl())
     assert rc == 0
     assert planning_calls == [], "a stopped planner must never even start a session"
+    monkeypatch.undo()
 
     # --- Scenario 2: minimal_mode selects a smaller context ------------
     base2 = tmp_path / "base2"
