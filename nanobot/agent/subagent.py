@@ -181,6 +181,15 @@ class SubagentManager:
         # passes True; the planner spawn and every other caller are
         # unaffected.
         checkpoint_commits: bool = False,
+        # D3 (ADR-035 Test Contract, external review finding #3): the exact
+        # branch the bridge resolved for THIS spawn (via
+        # `_setup_cycle_branch`). `_maybe_checkpoint_commit` binds to this
+        # value with an exact comparison, never a `selfevo/cycle-` prefix
+        # test -- a workspace checked out on a DIFFERENT cycle's branch
+        # (stray checkout, race) must never receive this executor's
+        # checkpoint. Required (fail-closed) whenever `checkpoint_commits`
+        # is True; `None` skips checkpointing entirely rather than guessing.
+        expected_cycle_branch: str | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -252,6 +261,7 @@ class SubagentManager:
         self._telemetry_component = str(telemetry_component or "").strip()
         self.web_tools_enabled = bool(web_tools_enabled)
         self._checkpoint_commits = bool(checkpoint_commits)
+        self._expected_cycle_branch = (expected_cycle_branch or "").strip() or None
 
     async def spawn(
         self,
@@ -838,6 +848,29 @@ class SubagentManager:
         end-of-turn commit/gate path is unaffected either way. Every git
         call is timeout-bounded so a stuck index.lock cannot hang the
         executor's own loop.
+
+        D3 (ADR-035 Test Contract, external review finding #3): the branch
+        guard below is an EXACT comparison against
+        ``self._expected_cycle_branch`` (what the bridge resolved for this
+        spawn via ``_setup_cycle_branch``), never a ``selfevo/cycle-``
+        prefix test -- a workspace sitting on a DIFFERENT cycle's branch
+        (stray checkout left by another process, a race) is a real
+        ``selfevo/cycle-*`` branch too, so a prefix match would silently
+        commit this executor's work onto it. ``expected_cycle_branch``
+        being unset (``None``) skips checkpointing entirely; it never falls
+        back to guessing from HEAD.
+
+        The commit itself is written through plumbing
+        (``write-tree`` / ``commit-tree`` / ``update-ref``) targeting
+        ``refs/heads/<expected_cycle_branch>`` directly, with the ref's
+        prior tip passed as the compare-and-swap old-value -- unlike
+        ``git commit``, this never reads or writes HEAD. If an external
+        checkout moves HEAD to another branch (main, say) between the
+        branch probe above and this write, the commit still lands on the
+        expected branch's ref, never on whatever HEAD now points to; if
+        something else already advanced the expected branch concurrently,
+        ``update-ref``'s CAS rejects the write instead of silently losing
+        that commit.
         """
         import subprocess as _sp_ckpt
 
@@ -845,6 +878,9 @@ class SubagentManager:
             CHECKPOINT_SUBJECT_PREFIX, CHECKPOINT_TRAILER, is_blocked_checkpoint_filename,
         )
 
+        expected_branch = self._expected_cycle_branch
+        if not expected_branch:
+            return
         repo_root = self.workspace
         try:
             git = ["git", "-c", f"safe.directory={repo_root}", "-C", str(repo_root)]
@@ -852,7 +888,7 @@ class SubagentManager:
                 git + ["rev-parse", "--abbrev-ref", "HEAD"],
                 capture_output=True, text=True, timeout=10,
             )
-            if branch.returncode != 0 or not branch.stdout.strip().startswith("selfevo/cycle-"):
+            if branch.returncode != 0 or branch.stdout.strip() != expected_branch:
                 return
             status = _sp_ckpt.run(
                 git + ["status", "--porcelain", "-uall"], capture_output=True, text=True, timeout=10,
@@ -879,8 +915,28 @@ class SubagentManager:
                 joined = ", ".join(changed)
                 paths_desc = joined if len(joined) <= 60 and len(changed) <= 3 else f"{len(changed)} paths"
             subject = f"{CHECKPOINT_SUBJECT_PREFIX} — {paths_desc}"
+
+            old_tip = _sp_ckpt.run(
+                git + ["rev-parse", f"refs/heads/{expected_branch}"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if old_tip.returncode != 0 or not old_tip.stdout.strip():
+                return
+            old_sha = old_tip.stdout.strip()
+            tree = _sp_ckpt.run(
+                git + ["write-tree"], capture_output=True, text=True, timeout=10,
+            )
+            if tree.returncode != 0 or not tree.stdout.strip():
+                return
+            commit = _sp_ckpt.run(
+                git + ["commit-tree", tree.stdout.strip(), "-p", old_sha, "-m", subject, "-m", CHECKPOINT_TRAILER],
+                capture_output=True, text=True, timeout=10,
+            )
+            if commit.returncode != 0 or not commit.stdout.strip():
+                return
+            new_sha = commit.stdout.strip()
             _sp_ckpt.run(
-                git + ["commit", "-m", subject, "-m", CHECKPOINT_TRAILER],
+                git + ["update-ref", f"refs/heads/{expected_branch}", new_sha, old_sha],
                 capture_output=True, text=True, timeout=10,
             )
         except Exception:

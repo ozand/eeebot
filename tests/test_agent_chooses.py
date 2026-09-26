@@ -1479,6 +1479,7 @@ def test_killed_attempt_keeps_checkpoint_commits(tmp_path: Path):
         model="fake/model",
         max_iterations=5,
         checkpoint_commits=True,
+        expected_cycle_branch="selfevo/cycle-checkpoint-test",
     )
 
     asyncio.run(manager._run_subagent("t1", "finish the wip feature", "label", {"channel": "cli", "chat_id": "direct"}))
@@ -1573,6 +1574,7 @@ def test_checkpoint_commit_never_lands_on_main(tmp_path: Path):
         model="fake/model",
         max_iterations=5,
         checkpoint_commits=True,
+        expected_cycle_branch="selfevo/cycle-should-be-elsewhere",
     )
 
     asyncio.run(manager._run_subagent("t1", "task on main", "label", {"channel": "cli", "chat_id": "direct"}))

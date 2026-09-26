@@ -4454,6 +4454,9 @@ async def _main_impl_body():
             # branch as the executor goes, so a kill loses minutes, not the
             # whole attempt.
             checkpoint_commits=True,
+            # D3 (ADR-035 Test Contract): bind checkpoints to THIS spawn's
+            # resolved branch, exactly -- never a prefix guess from HEAD.
+            expected_cycle_branch=cycle_branch,
         )
 
         # Capture HEAD SHA before spawn so we can count subagent commits correctly,
@@ -4853,6 +4856,9 @@ async def _main_impl_body():
                         # writes to the committed cycle-branch repo -- same
                         # per-step checkpointing as the main executor spawn.
                         checkpoint_commits=True,
+                        # D3 (ADR-035 Test Contract): same binding as the
+                        # main executor spawn above.
+                        expected_cycle_branch=cycle_branch,
                     )
                     await _repair_mgr.spawn(
                         task=_repair_prompt,
