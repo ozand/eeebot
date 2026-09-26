@@ -132,17 +132,21 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
     assert child_pid_file.exists(), "background grandchild did not start"
     shell_pid = int(shell_pid_file.read_text(encoding="utf-8"))
     child_pid = int(child_pid_file.read_text(encoding="utf-8"))
-    assert os.getsid(shell_pid) == shell_pid
-    assert os.getpgid(child_pid) == shell_pid
+    shell_stat = Path(f"/proc/{shell_pid}/stat")
+    child_stat = Path(f"/proc/{child_pid}/stat")
 
     # Wait until the shell has exited; communicate remains blocked because the
     # grandchild inherited stdout/stderr. This is the regression window.
     deadline = time.monotonic() + 5
-    while Path(f"/proc/{shell_pid}/stat").exists() and time.monotonic() < deadline:
+    while shell_stat.exists() and time.monotonic() < deadline:
         await asyncio.sleep(0.01)
-    shell_stat = Path(f"/proc/{shell_pid}/stat")
     assert not shell_stat.exists() or shell_stat.read_text(encoding="utf-8").split()[2] == "Z"
     assert execution.done() is False
+
+    child_stat_fields = child_stat.read_text(encoding="utf-8").split()
+    child_pgrp = int(child_stat_fields[4])
+    assert child_pgrp == os.getsid(child_pid), "grandchild process group differs from its session"
+    assert child_pgrp != os.getpgid(os.getpid()), "grandchild accidentally joined pytest's process group"
 
     execution.cancel()
     with pytest.raises(asyncio.CancelledError):
