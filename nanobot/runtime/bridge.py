@@ -4066,6 +4066,18 @@ async def _main_impl_body():
         if _stale_running:
             _stale_cycle_id = _stale_running.get('cycle_id', '')
             _stale_branch = _stale_running.get('branch', '')
+            # N1 (round 2 external re-check, architect resolution
+            # 2026-09-26): the attempt's OWN plan (record_attempt_started),
+            # carried forward as the pending increment's plan_text -- a
+            # later `keep`-confirm must hand the executor its real task
+            # back, not a description of the kill. A registration written
+            # before this field existed (or an unset one) falls back to
+            # the old explanatory placeholder, never a blank plan.
+            _stale_plan_text = _stale_running.get('plan_text') or (
+                '(a prior attempt on this branch was interrupted before it '
+                'reached a terminal outcome, and its own plan text was not '
+                'recorded)'
+            )
             # Round 2 external re-check, item 2 (architect resolution
             # 2026-09-26): a telemetry-confirmed `error` is classified
             # HERE, immediately, instead of the (never-run, since the
@@ -4073,10 +4085,6 @@ async def _main_impl_body():
             # classifier round 1 assumed -- see
             # `check_running_for_kill`'s own docstring.
             if _stale_running.get('executor_status') == 'error':
-                _stale_plan_text = (
-                    '(a prior attempt on this branch died on its LLM call '
-                    'before a terminal outcome was ever recorded for it)'
-                )
                 if _stale_running.get('error_class') == 'paused-supplier':
                     _open_increment_killcheck.record_supply_interruption(
                         STATE_DIR, _stale_cycle_id,
@@ -4097,10 +4105,7 @@ async def _main_impl_body():
                 _open_increment_killcheck.record_kill_interruption(
                     STATE_DIR, _stale_cycle_id,
                     retry_key=f"kill:{_stale_cycle_id}",
-                    plan_text=(
-                        '(a prior attempt on this branch was interrupted by a hard '
-                        'kill before it reached a terminal outcome)'
-                    ),
+                    plan_text=_stale_plan_text,
                     candidate_id=None,
                     branch=_stale_branch,
                     executor_status=_stale_running.get('executor_status'),
@@ -4635,7 +4640,12 @@ async def _main_impl_body():
         try:
             from nanobot.runtime import open_increment as _open_increment_register
 
-            _open_increment_register.record_attempt_started(STATE_DIR, _cycle_id, cycle_branch)
+            # N1 (round 2 external re-check, architect resolution
+            # 2026-09-26): the attempt's OWN plan, so a later kill-recovery
+            # can hand it back verbatim instead of an explanatory placeholder.
+            _open_increment_register.record_attempt_started(
+                STATE_DIR, _cycle_id, cycle_branch, plan_text=req.get('task') or '',
+            )
         except Exception:
             pass
 

@@ -493,7 +493,7 @@ def operator_clear_flag(state_dir: "Path", cycle_id: str) -> OpenIncrementState:
 
 
 def record_attempt_started(
-    state_dir: "Path", cycle_id: str, branch: str, attempt: int = 1,
+    state_dir: "Path", cycle_id: str, branch: str, attempt: int = 1, plan_text: str = "",
 ) -> OpenIncrementState:
     """Register the in-flight attempt BEFORE the executor can be killed --
     called once cycle-branch setup succeeds, before the subagent spawns.
@@ -505,7 +505,16 @@ def record_attempt_started(
     finds this registration still standing and converts it into a pending
     open increment (``reason: interrupted_kill``) instead of losing the
     attempt silently. ``task_id`` starts unset -- the subagent's own id
-    does not exist yet at this point; see :func:`record_attempt_task_id`."""
+    does not exist yet at this point; see :func:`record_attempt_task_id`.
+
+    N1 (round 2 external re-check, architect resolution 2026-09-26):
+    ``plan_text`` is this attempt's OWN plan -- stored here (not just at
+    interruption time) so a later kill-recovery
+    (:func:`check_running_for_kill`) can hand the REAL plan to
+    ``record_kill_interruption``/``record_supply_interruption``/
+    ``record_defect_interruption`` instead of a generic explanatory
+    placeholder. A subsequent ``keep``-confirm then hands the executor
+    back its actual task, not a description of the kill."""
     from nanobot.runtime.cycle_ledger import append_event
 
     state = load_state(state_dir)
@@ -516,6 +525,7 @@ def record_attempt_started(
         "started_at": _now_iso(),
         "resumed_by": None,
         "task_id": None,
+        "plan_text": plan_text or "",
     }
     _save_state(state_dir, state)
     append_event(state_dir, {
