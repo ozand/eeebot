@@ -4060,17 +4060,47 @@ async def _main_impl_body():
 
         _stale_running = _open_increment_killcheck.check_running_for_kill(STATE_DIR, _planning_cycle_id)
         if _stale_running:
-            _open_increment_killcheck.record_kill_interruption(
-                STATE_DIR, _stale_running.get('cycle_id', ''),
-                retry_key=f"kill:{_stale_running.get('cycle_id', '')}",
-                plan_text=(
-                    '(a prior attempt on this branch was interrupted by a hard '
-                    'kill before it reached a terminal outcome)'
-                ),
-                candidate_id=None,
-                branch=_stale_running.get('branch', ''),
-                executor_status=_stale_running.get('executor_status'),
-            )
+            _stale_cycle_id = _stale_running.get('cycle_id', '')
+            _stale_branch = _stale_running.get('branch', '')
+            # Round 2 external re-check, item 2 (architect resolution
+            # 2026-09-26): a telemetry-confirmed `error` is classified
+            # HERE, immediately, instead of the (never-run, since the
+            # process that would have run it already died) in-tick
+            # classifier round 1 assumed -- see
+            # `check_running_for_kill`'s own docstring.
+            if _stale_running.get('executor_status') == 'error':
+                _stale_plan_text = (
+                    '(a prior attempt on this branch died on its LLM call '
+                    'before a terminal outcome was ever recorded for it)'
+                )
+                if _stale_running.get('error_class') == 'paused-supplier':
+                    _open_increment_killcheck.record_supply_interruption(
+                        STATE_DIR, _stale_cycle_id,
+                        retry_key=f"kill:{_stale_cycle_id}",
+                        plan_text=_stale_plan_text,
+                        candidate_id=None,
+                        branch=_stale_branch,
+                    )
+                else:
+                    _open_increment_killcheck.record_defect_interruption(
+                        STATE_DIR, _stale_cycle_id,
+                        retry_key=f"kill:{_stale_cycle_id}",
+                        plan_text=_stale_plan_text,
+                        candidate_id=None,
+                        branch=_stale_branch,
+                    )
+            else:
+                _open_increment_killcheck.record_kill_interruption(
+                    STATE_DIR, _stale_cycle_id,
+                    retry_key=f"kill:{_stale_cycle_id}",
+                    plan_text=(
+                        '(a prior attempt on this branch was interrupted by a hard '
+                        'kill before it reached a terminal outcome)'
+                    ),
+                    candidate_id=None,
+                    branch=_stale_branch,
+                    executor_status=_stale_running.get('executor_status'),
+                )
     except Exception:
         pass
 
@@ -7034,62 +7064,15 @@ def _authoritative_subagent_task_id(
     return primary_task_id
 
 
-# #1765: patterns that mean "the supplier could not serve us" — connection
-# refused/reset, a timeout with no response, HTTP 429/500/502/503/504, "no
-# deployments available", or a route missing for a configured model. Matched
-# case-insensitively against the raw LLM-call error text. Deliberately an
-# ALLOWLIST, not a denylist: only these positive signals promote a cycle to
-# 'paused-supplier'; everything else (context length exceeded, malformed
-# tool-call payload, invalid model parameters, our own schema errors) stays
-# 'failed' by falling through to the default — the conservative direction
-# the issue asks for, and the only way this stays a real distinction instead
-# of a catch-all.
-_SUPPLIER_UNAVAILABLE_RX = re.compile(
-    r'connection (?:refused|reset|error)'
-    r'|connect(?:ion)? timed? ?out'
-    r'|\btimed? ?out\b'
-    r'|\btimeout\b'
-    r'|\bread timeout\b'
-    r'|\berror code:\s*(?:429|500|502|503|504)\b'
-    r'|\b(?:429|500|502|503|504)\b.{0,20}\berror\b'
-    r'|ratelimiterror'
-    r'|internalservererror'
-    r'|serviceunavailableerror'
-    r'|apiconnectionerror'
-    r'|notfounderror'
-    r'|no deployments available'
-    r'|no healthy deployment'
-    r'|try again in \d'
-    # #1765 review: a genuine supplier-side unavailability observed in the
-    # wild carries HTTP 400 (litellm.BadRequestError) — the local gateway's
-    # own model daemon has no model loaded yet, not a malformed request of
-    # ours. Classified on the MESSAGE, never on the status code alone (a
-    # bare "400" stays unmatched — see the client-defect test fixtures) —
-    # this is exactly why the allowlist below matches phrasing, not codes.
-    r'|model.{0,20}not loaded'
-    r'|/inference/load\b'
-    r'|load first\b',
-    re.IGNORECASE,
+# #1765/round-2 item 2 (external re-check, architect resolution
+# 2026-09-26): the classifier now lives in its own leaf module
+# (nanobot/runtime/llm_error_classification.py) so open_increment.py's
+# check_running_for_kill (D2) can classify a stale error registration
+# immediately, without importing bridge.py -- see that module's docstring.
+from nanobot.runtime.llm_error_classification import (
+    SUPPLIER_UNAVAILABLE_RX as _SUPPLIER_UNAVAILABLE_RX,
+    classify_llm_error as _classify_llm_error,
 )
-
-
-def _classify_llm_error(error_text: str) -> str:
-    """#1765: 'paused-supplier' (the gateway/model provider could not serve
-    us) or 'failed' (the supplier rejected OUR request — our own defect,
-    must keep failing loudly), from the raw executor LLM-call error text.
-
-    Positive-match only (see :data:`_SUPPLIER_UNAVAILABLE_RX`) — when the
-    text does not clearly say "supplier unavailable", this returns 'failed',
-    the conservative default the issue specifies. The raw text is recorded
-    alongside this decision on the ledger row (see
-    ``cycle_ledger.record_cycle_outcome``'s ``llm_error_classification``)
-    so a misclassification is auditable after the fact, never silently lost.
-    """
-    if not error_text:
-        return 'failed'
-    if _SUPPLIER_UNAVAILABLE_RX.search(error_text):
-        return 'paused-supplier'
-    return 'failed'
 
 
 def _executor_llm_error(state_dir: Path, task_id: 'str | None') -> str:

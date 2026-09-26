@@ -47,6 +47,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from nanobot.runtime.llm_error_classification import classify_llm_error
 from nanobot.runtime.planner_rest import WakeCondition, _parse_deadline, snapshot_version
 
 _STATE_RELPATH = ("planner", "open_increment.json")
@@ -548,6 +549,30 @@ def _read_executor_terminal_status(state_dir: "Path", task_id: str) -> "str | No
     return str(status) if status else None
 
 
+def _read_executor_error_text(state_dir: "Path", task_id: str) -> str:
+    """Round 2 external re-check, item 2 (architect resolution
+    2026-09-26): the raw error text behind a stale ``status: error``
+    registration, so :func:`check_running_for_kill` can classify it
+    immediately (:func:`nanobot.runtime.llm_error_classification.classify_llm_error`)
+    instead of leaving it for a same-tick classifier that may never run
+    if the process died first. Same duplicate-read shape as
+    :func:`_read_executor_terminal_status` (see its docstring for why
+    this module never imports ``bridge.py``). Fail-open to ``""`` on any
+    read problem -- the caller's classifier already defaults an empty
+    string to ``'failed'`` (our own defect), never a manufactured supply
+    classification."""
+    if not task_id:
+        return ""
+    try:
+        payload = json.loads((Path(state_dir) / "subagents" / f"{task_id}.json").read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    text = payload.get("summary") or payload.get("result") or ""
+    return str(text)[:400]
+
+
 def record_attempt_finished(state_dir: "Path", cycle_id: str) -> OpenIncrementState:
     """A terminal outcome was recorded for ``cycle_id``
     (:func:`nanobot.runtime.cycle_ledger.record_cycle_outcome` calls this
@@ -601,35 +626,43 @@ def check_running_for_kill(state_dir: "Path", current_cycle_id: str) -> "dict[st
     that wrote it died before a terminal outcome -- or ``None`` when
     there is nothing stale, or nothing THIS function should classify.
 
-    Full mapping (architect resolution, #1979 external-review followups):
+    Full mapping (architect resolution, #1979 external-review followups;
+    round 2 external re-check item 2, architect resolution 2026-09-26):
     the executor's own terminal telemetry status, whatever it is, does
     NOT by itself mean the cycle finished -- the GATE (smoke tests, the
     integration decision) never rendered a verdict for this cycle_id
     either way, or :func:`record_attempt_finished` would have cleared
     this registration. ``ok``/``bounded_stop``/``blocked``/``cancelled``,
     or no telemetry at all (unwritten, or ``task_id`` never attached) --
-    all become ``interrupted_kill`` here. The ONE exception is
-    ``error``: a telemetry-confirmed executor error is classified as
-    supply/defect by the existing LLM-error classifier, synchronously,
-    in the SAME tick it happened -- this function must never
-    re-classify it as a kill. In practice that classification already
-    guards this: it sets ``pending`` before this tick ends, so the
-    ``state.pending`` check below already skips it on the next tick. The
-    explicit ``status == "error"`` check here is a second, independent
-    guard for the narrower race where the executor wrote its ``error``
-    row but the process died before the classifier ran -- ``running`` is
-    left standing for that case, on purpose, exactly like any other
-    not-yet-classified attempt, rather than being converted to
-    ``interrupted_kill`` out from under the classifier that owns it."""
+    all become ``interrupted_kill`` here.
+
+    ``error`` is classified IMMEDIATELY, right here, via
+    :func:`nanobot.runtime.llm_error_classification.classify_llm_error` --
+    round 1 left this "for the existing supply/defect classifier,
+    synchronously, in the SAME tick it happened", reasoning that the
+    classification would already have set ``pending`` before this tick
+    ended. That assumption breaks exactly when the PROCESS that would
+    have run that classifier dies in the narrow window between the
+    executor writing its ``error`` telemetry and the bridge reaching its
+    own classification code -- nothing ever runs it, ``pending`` is never
+    set, and the next attempt's :func:`record_attempt_started` silently
+    overwrites this registration with no interruption ever recorded. The
+    returned dict's ``error_class`` (``'paused-supplier'`` or
+    ``'failed'``) tells the caller which of
+    :func:`record_supply_interruption`/:func:`record_defect_interruption`
+    to call instead of :func:`record_kill_interruption`."""
     state = load_state(state_dir)
     if state.pending:
         return None
     running = state.running
     if not running or running.get("cycle_id") == (current_cycle_id or ""):
         return None
-    executor_status = _read_executor_terminal_status(state_dir, running.get("task_id") or "")
+    task_id = running.get("task_id") or ""
+    executor_status = _read_executor_terminal_status(state_dir, task_id)
     if executor_status == "error":
-        return None
+        error_text = _read_executor_error_text(state_dir, task_id)
+        error_class = classify_llm_error(error_text or "(status: error, no LLM-call text recorded)")
+        return {**running, "executor_status": executor_status, "error_class": error_class}
     return {**running, "executor_status": executor_status}
 
 
