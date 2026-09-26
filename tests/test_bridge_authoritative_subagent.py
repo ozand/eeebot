@@ -194,6 +194,42 @@ class TestAuthoritativeSpawnEndToEnd:
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
         assert rows[-1]["max_call_gap_s"] == 17.5
 
+    def test_cancelled_executor_records_observed_call_gap(self, tmp_path, monkeypatch):
+        class _CancelledPrimary(_PrimaryManager):
+            last_max_call_gap_s = 42.0
+
+            async def spawn(self, **kwargs):
+                _write_telemetry(bridge.STATE_DIR, self.task_id, "cancelled", "CancelledError")
+                async def _cancelled():
+                    raise asyncio.CancelledError()
+                self._running_tasks[self.task_id] = asyncio.ensure_future(_cancelled())
+                return "cancelled primary"
+
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("cancelled", REPAIR_TEXT_CANCELLED))
+        _seed_bridge_request(state_dir, "req-gap-cancel", "cycle-gap-cancel")
+        monkeypatch.setattr(bridge, "SubagentManager", _CancelledPrimary)
+        assert asyncio.run(bridge._main_impl()) == 0
+        rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
+        assert rows[-1]["max_call_gap_s"] == 42.0
+
+    def test_executor_error_records_observed_call_gap(self, tmp_path, monkeypatch):
+        class _ErrorPrimary(_PrimaryManager):
+            last_max_call_gap_s = 31.0
+
+            async def spawn(self, **kwargs):
+                _write_telemetry(bridge.STATE_DIR, self.task_id, "error", "LLM execution failed")
+                async def _error():
+                    raise RuntimeError("executor error")
+                self._running_tasks[self.task_id] = asyncio.ensure_future(_error())
+                return "error primary"
+
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("cancelled", REPAIR_TEXT_CANCELLED))
+        _seed_bridge_request(state_dir, "req-gap-error", "cycle-gap-error")
+        monkeypatch.setattr(bridge, "SubagentManager", _ErrorPrimary)
+        assert asyncio.run(bridge._main_impl()) == bridge.EXIT_EXECUTOR_LLM_ERROR
+        rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
+        assert rows[-1]["max_call_gap_s"] == 31.0
+
     def test_repair_manager_receives_shared_deadline(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-repair-deadline", "cycle-repair-deadline")

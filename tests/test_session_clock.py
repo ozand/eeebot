@@ -238,6 +238,34 @@ class TestProgressWatchdog:
 class TestMaxCallGapRecording:
     """Requirement 3 (#1899): write max call gap between completed calls to the ledger."""
 
+    def test_compute_cycle_max_call_gap_uses_telemetry_writer_directory(self, tmp_path, monkeypatch):
+        from nanobot.observability import llm_telemetry
+        from nanobot.runtime.session_clock import compute_cycle_max_call_gap
+
+        configured = tmp_path / "configured-calls"
+        state_dir = tmp_path / "state"
+        state_default = state_dir / "llm_calls"
+        configured.mkdir()
+        state_default.mkdir(parents=True)
+        (configured / "calls.jsonl").write_text(
+            '{"cycle_id":"c-dir","ts":"2026-01-01T00:00:00Z"}\n'
+            '{"cycle_id":"c-dir","ts":"2026-01-01T00:00:42Z"}\n',
+            encoding="utf-8",
+        )
+        (state_default / "calls.jsonl").write_text(
+            '{"cycle_id":"c-dir","ts":"2026-01-01T00:00:00Z"}\n'
+            '{"cycle_id":"c-dir","ts":"2026-01-01T00:09:00Z"}\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("LLM_CALLS_DIR", str(configured))
+        assert llm_telemetry._llm_calls_dir() == configured
+        assert compute_cycle_max_call_gap(state_dir, "c-dir") == 540.0
+        # The unit has no LLM_CALLS_DIR override; STATE_DIR selects the writer path.
+        monkeypatch.delenv("LLM_CALLS_DIR")
+        monkeypatch.setenv("STATE_DIR", str(state_dir))
+        assert llm_telemetry._llm_calls_dir() == state_default
+        assert compute_cycle_max_call_gap(state_dir, "c-dir") == 540.0
+
     def test_compute_cycle_max_call_gap_from_llm_calls(self, tmp_path):
         state_dir = tmp_path / "state"
         llm_dir = state_dir / "llm_calls"
