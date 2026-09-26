@@ -190,8 +190,19 @@ with its branch and one of three causes:
 - `interrupted(kill)`: the process was killed, for example by the unit timeout,
   before any post-execution bookkeeping ran. To make this detectable, the attempt
   records a `running` increment (cycle, branch, attempt) **before** the executor
-  starts. At the next cycle start, a `running` record with no terminal row becomes
-  `interrupted(kill)`.
+  starts. At the next cycle start, a `running` record with no terminal row is
+  recovered from the executor's own telemetry first. The mapping is total:
+  - executor telemetry `status: error` → the cause is classified as usual:
+    `interrupted(supply)`, with the supply hold, or `interrupted(defect)`;
+  - any other terminal executor status (`ok`, `bounded_stop`, `blocked`,
+    `cancelled`), or no terminal telemetry at all → `interrupted(kill)`. The
+    bridge never reached a gate verdict, so the cycle is unfinished even if the
+    executor finished. The executor's status is kept on the record as
+    `executor_status` evidence. A kept increment then resumes with that
+    evidence, which may mean running only the gate on the existing branch.
+
+  A kill during bookkeeping never erases a known cause, and no terminal status
+  falls outside the three causes.
 
 Keeping an increment does not erase its record before execution resumes. The
 record is marked as resumed by the new cycle and cleared only by a terminal
@@ -219,7 +230,23 @@ killed attempts survived, about two and a half hours of work.
   to a fresh branch from `main`.
 - **Checkpoints go only to their own branch.** The executor knows the exact branch
   it works on, and a checkpoint is written to that branch by a compare-and-swap on
-  its ref, not by committing to whatever `HEAD` is at that moment.
+  its ref, not by committing to whatever `HEAD` is at that moment. The ref check
+  alone does not prove where the content came from, so the checkpoint also checks
+  its source. The steps, in order:
+  1. Read `HEAD`; it must be the symbolic ref of the expected branch. Record that
+     branch's tip as `old`.
+  2. Stage the changed paths in the checkout's own index, exactly as a normal
+     commit would. A private index is not used: moving the checked-out branch
+     under a private index leaves the shared index on the old tip, and the next
+     normal commit would then revert the checkpoint.
+  3. `write-tree`, then check `HEAD` again.
+  4. `commit-tree` with parent `old`, then `update-ref refs/heads/<expected> <new>
+     <old>`.
+
+  The shared index then already equals the committed tree. If a check fails or the
+  compare-and-swap is refused, the staging is undone (`git reset -q`, never
+  `--hard`), and the checkpoint is skipped and recorded, never written. The bridge
+  remains the single writer of the shared checkout during an attempt.
 - **The increment is measured from its base, not from the attempt.** Whether there
   is work, the closing commit, the changed files and the counts are taken from
   the branch's merge base with `main`. Work kept from an earlier attempt therefore
@@ -421,8 +448,11 @@ actor that has both.
 | A checkpoint commit never integrates on its own | `tests/test_agent_chooses.py::test_checkpoint_is_not_an_integration` | not written |
 | A session that ended in an error or left no terminal record never integrates, however many checkpoints its branch holds; supply → `interrupted(supply)`, our error → `interrupted(defect)` | `tests/test_agent_chooses.py::test_unfinished_session_never_integrates` | not written |
 | A `running` increment is recorded before the executor starts; a killed attempt (no post-execution bookkeeping) becomes `interrupted(kill)` with its branch at the next cycle start | `tests/test_agent_chooses.py::test_killed_attempt_becomes_interrupted_kill` | not written |
+| Recovery of a `running` record is total: executor telemetry `status: error` → `interrupted(supply)` (with the hold) or `interrupted(defect)`; `ok`, `bounded_stop`, `blocked`, `cancelled` or no telemetry → `interrupted(kill)` with `executor_status` kept as evidence; one case per status | `tests/test_agent_chooses.py::test_recovery_maps_every_executor_status` | not written |
 | A kept increment's record survives a kill between the planning session and the executor | `tests/test_agent_chooses.py::test_keep_record_survives_kill_before_execution` | not written |
 | A checkpoint is written only to the expected branch, by compare-and-swap on its ref; a different `HEAD` or a concurrent checkout never receives it | `tests/test_agent_chooses.py::test_checkpoint_bound_to_expected_branch` | not written |
+| After a checkpoint the checkout's shared index equals the new `HEAD` tree, and the next ordinary commit keeps the checkpoint's content (a private-index implementation fails this) | `tests/test_agent_chooses.py::test_checkpoint_keeps_shared_index_coherent` | not written |
+| A rejected checkpoint (failed `HEAD` check or refused compare-and-swap) resets the shared index to the actual `HEAD` while the working-tree edits stay, so the next ordinary commit does not absorb the skipped checkpoint | `tests/test_agent_chooses.py::test_rejected_checkpoint_resets_index_keeps_worktree` | not written |
 | A kept branch that is missing or fails to check out stops the attempt, and is never reset to `main` | `tests/test_agent_chooses.py::test_keep_never_falls_back_to_reset` | not written |
 | Work, closing commit, changed files and counts are measured from the increment's merge base, so work kept from a killed attempt counts | `tests/test_agent_chooses.py::test_increment_accounting_uses_merge_base` | not written |
 | A failed closing commit blocks integration | `tests/test_agent_chooses.py::test_failed_closing_commit_blocks_integration` | not written |

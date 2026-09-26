@@ -936,6 +936,22 @@ def build_derived_view(
         title = m.group(2) if m else summary
         label = _VECTOR_TAG_RE.sub("", title).strip()
         provenance = str(item.get("provenance") or "")
+        if provenance == PROVENANCE_OPERATOR:
+            # ADR-034 F1: this file is 0644 and the public dashboard reads it.
+            # An operator priority's title, V-tag, instructions and id (a hash
+            # of the title) are private goal_text.json wording — publish only
+            # its number, provenance, state and rank. _priority_items yields
+            # open operator entries only, hence state "open".
+            ranked.append(
+                {
+                    "rank": rank,
+                    "kind": item.get("kind", "priority"),
+                    "number": number,
+                    "provenance": provenance,
+                    "state": "open",
+                }
+            )
+            continue
         direction = str(item.get("direction") or "")
         if not direction and provenance == PROVENANCE_SELF_DERIVED and number is not None:
             direction = direction_by_number.get(number, "")
