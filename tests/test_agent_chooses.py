@@ -2447,6 +2447,61 @@ def test_killed_attempt_becomes_interrupted_kill(tmp_path: Path, monkeypatch):
     assert state.hold is None, "a kill is not supplier evidence -- it must not start a backoff hold"
 
 
+def test_killed_attempt_recovery_carries_original_plan(tmp_path: Path, monkeypatch):
+    """N1 (round 2 external re-check, architect resolution 2026-09-26):
+    the ``running`` record must store the original plan (or a reliable
+    reference recovery actually resolves), so a ``keep``-confirm after a
+    kill hands the executor the ORIGINAL plan back -- not an explanatory
+    placeholder describing the kill itself. Round 1's ``record_attempt_started``
+    stored cycle/branch/attempt/timing/task_id but not the plan; recovery
+    substituted a fixed "a prior attempt ... was interrupted by a hard
+    kill" string as ``pending['plan_text']``, so a subsequent keep-confirm
+    would hand the executor that explanation instead of its real task.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _FakeSubagentManager, _init_selfevo_repo
+    from nanobot.runtime import bridge, open_increment
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    old_cycle_id = "cycle-killed-plan-01"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    original_plan = "Refine the caching layer: add an LRU eviction policy to scripts/cache.py"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", old_branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "wip.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/wip.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/wip.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    # The registration a real attempt writes BEFORE it can be killed --
+    # simulated directly here, with the real plan text a production
+    # attempt would have, and no matching terminal outcome ever recorded.
+    open_increment.record_attempt_started(state_dir, old_cycle_id, old_branch, plan_text=original_plan)
+
+    _stub_planning_session(monkeypatch, "a brand new, unrelated task")
+    monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is not None
+    assert pending["reason"] == "interrupted_kill"
+    assert pending["plan_text"] == original_plan, (
+        f"recovery must carry the ORIGINAL plan forward, not an explanatory placeholder: {pending['plan_text']!r}"
+    )
+
+
 @pytest.mark.parametrize("executor_status", ["ok", "bounded_stop", "blocked", "cancelled", "error", None])
 def test_recovery_maps_every_executor_status(tmp_path: Path, executor_status):
     """D2 (ADR-035 Test Contract #1979, 16710f62; round 2 external
