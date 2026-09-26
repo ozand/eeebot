@@ -3679,6 +3679,36 @@ async def _run_planning_session(
                 plan_lines.append(f'Open increment: {_oi_decision}')
             except Exception:
                 pass
+        else:
+            # D8 (ADR-035 Test Contract, external review finding #8): a
+            # pending increment with a MISSING or INVALID
+            # open_increment_decision is an invalid plan -- no_plan/
+            # malformed, planner family -- never silent acceptance of the
+            # new plan with no resume routed through. Enforced as output
+            # validation here; prompt wording alone (roles/planner.md) is
+            # not sufficient.
+            record_planning_session(
+                state_dir, cycle_id, 'malformed',
+                iterations_used=iterations_used, iterations_planned=iterations_planned,
+                reason=f'pending open increment unresolved: open_increment_decision={_oi_decision!r}',
+                parse_mode=parse_mode,
+                format_violation=format_violation,
+                task_writing_read=_task_writing_read,
+                task_writing_source=_task_writing_source or None,
+                task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+                task_writing_bytes=_task_writing_bytes_count,
+                task_writing_sha256=_task_writing_sha256 or None,
+            )
+            no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
+            planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
+            print(
+                f'planning-session: malformed (pending open increment unresolved, '
+                f'open_increment_decision={_oi_decision!r})'
+            )
+            return {
+                'ran': True, 'iterations_used': iterations_used, 'iterations_planned': iterations_planned,
+                'tampered_files': [], 'plan': None,
+            }
 
     plan_text = '\n'.join(plan_lines)
 
