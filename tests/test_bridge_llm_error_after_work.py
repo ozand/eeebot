@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 
 import pytest
 
@@ -69,17 +70,20 @@ def _core_smoke_set_matches_fixture_repo(monkeypatch, tmp_path):
     monkeypatch.setattr(bridge, "RELEASE_ROOT", _adr034_release_root)
 
 
-def test_edit_then_dead_llm_becomes_interrupted_supply(tmp_path, monkeypatch):
-    """Round 2 external re-check, item 1 (architect resolution
-    2026-09-26): completion is POSITIVE-only, and the barrier applies to
-    ANY commit the session made -- including the #666 residual auto-commit
-    that rescued this edit. This REVOKES the #1281 decision this test used
-    to pin ("the net fired, the gate passed, the cycle integrated"): a
-    session whose own telemetry says ``status: error`` is not finished,
-    however the commit landed, so the auto-committed edit must now become
-    a pending open increment (classified ``interrupted_supply`` -- the
-    TRANSPORT_ERROR text is a recognized supplier-outage pattern) instead
-    of integrating.
+def test_edit_then_dead_llm_keeps_work_on_branch_as_interrupted_increment(tmp_path, monkeypatch):
+    """ADR-035 (D1, external review finding #1; round 2 external re-check,
+    architect resolution 2026-09-26): completion is POSITIVE-only, and the
+    barrier applies to ANY commit the session made -- including the #666
+    residual auto-commit that rescued this edit. This is a decision
+    CHANGE, not a deletion: the #1281 decommission-map entry this test
+    used to pin ("the net fired, the gate passed, the cycle integrated")
+    is superseded -- a session whose own telemetry says ``status: error``
+    is not finished, however the commit landed. The edit is not lost: it
+    stays committed on the cycle branch, and the branch becomes a pending
+    open increment (classified ``interrupted_supply`` here -- the
+    TRANSPORT_ERROR text is a recognized supplier-outage pattern) for the
+    next planning session to keep/edit/delete, instead of integrating
+    unverified.
     """
     title = "Add feature helper"
     state_dir = _wire(tmp_path, monkeypatch, _EditedThenDiedSubagentManager)
@@ -106,6 +110,21 @@ def test_edit_then_dead_llm_becomes_interrupted_supply(tmp_path, monkeypatch):
     pending = open_increment.pending_open_increment(state_dir)
     assert pending is not None, "the auto-committed edit must become a pending open increment, not integrate"
     assert pending["reason"] == "interrupted_supply"
+
+    # The work itself is NOT lost: the auto-committed edit is still on the
+    # cycle branch the pending increment names, ready for a later keep.
+    work = tmp_path / "eeebot-self-evolving"
+    show = subprocess.run(
+        ["git", "-C", str(work), "show", f"{pending['branch']}:scripts/feature.py"],
+        capture_output=True, text=True,
+    )
+    assert show.returncode == 0 and "def feature" in show.stdout, (
+        f"the edit must survive committed on {pending['branch']!r}, not be discarded: {show.stderr!r}"
+    )
+    main_tree = subprocess.run(
+        ["git", "-C", str(work), "ls-tree", "-r", "--name-only", "main"], capture_output=True, text=True,
+    ).stdout
+    assert "scripts/feature.py" not in main_tree, "the edit must not reach main unverified"
 
 
 class TestOutcomeRowFlag:
