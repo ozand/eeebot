@@ -3,11 +3,171 @@
 from __future__ import annotations
 
 import socket
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from nanobot.agent.tools.shell import ExecTool
+
+
+@pytest.mark.asyncio
+async def test_watchdog_cancellation_kills_and_reaps_real_exec_subprocess(tmp_path):
+    """Cancelling ExecTool.execute must not leave its real child process alive."""
+    import asyncio
+    import os
+    import sys
+    import time
+
+    child_pid_file = tmp_path / "child.pid"
+    shell_pid_file = tmp_path / "shell.pid"
+    if os.name == "nt":
+        child_script = tmp_path / "child.py"
+        child_script.write_text(
+            "import os, sys, time\n"
+            "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+            "time.sleep(60)\n",
+            encoding="utf-8",
+        )
+        child_command = f'"{sys.executable}" "{child_script}" "{child_pid_file}"'
+    else:
+        child_script = tmp_path / "child.py"
+        child_script.write_text(
+            "import os, sys, time\n"
+            "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+            "time.sleep(60)\n",
+            encoding="utf-8",
+        )
+        child_command = (
+            f'echo $$ > "{shell_pid_file}"; '
+            f'"{sys.executable}" "{child_script}" "{child_pid_file}"'
+        )
+    tool = ExecTool(timeout=60)
+    execution = asyncio.create_task(tool.execute(child_command))
+    deadline = time.monotonic() + 10
+    while (
+        (not child_pid_file.exists() or (os.name != "nt" and not shell_pid_file.exists()))
+        and time.monotonic() < deadline
+    ):
+        await asyncio.sleep(0.01)
+    assert child_pid_file.exists(), "exec child did not start"
+    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+    shell_pid = int(shell_pid_file.read_text(encoding="utf-8")) if shell_pid_file.exists() else None
+    if os.name != "nt":
+        import os as posix_os
+
+        assert shell_pid is not None
+        assert posix_os.getsid(shell_pid) == shell_pid
+        assert posix_os.getpgid(child_pid) == shell_pid, "grandchild did not inherit ExecTool's process group"
+
+    execution.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(execution, timeout=8)
+
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        process = kernel32.OpenProcess(0x00100000 | 0x1000, False, child_pid)
+        if process:
+            try:
+                assert kernel32.WaitForSingleObject(process, 0) == 0, f"child PID {child_pid} is still alive"
+            finally:
+                kernel32.CloseHandle(process)
+    else:
+        for pid in (shell_pid, child_pid):
+            assert pid is not None
+            proc_stat = Path(f"/proc/{pid}/stat")
+            deadline = time.monotonic() + 5
+            while proc_stat.exists() and time.monotonic() < deadline:
+                stat_fields = proc_stat.read_text(encoding="utf-8").split()
+                if len(stat_fields) > 2 and stat_fields[2] == "Z":
+                    break
+                await asyncio.sleep(0.01)
+            if proc_stat.exists():
+                stat_fields = proc_stat.read_text(encoding="utf-8").split()
+                assert len(stat_fields) > 2 and stat_fields[2] == "Z", (
+                    f"PID {pid} remains running (state={stat_fields[2] if len(stat_fields) > 2 else 'unknown'})"
+                )
+
+
+@pytest.mark.asyncio
+async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path):
+    """A shell exit must not bypass process-group cleanup for a pipe-holding child."""
+    import asyncio
+    import os
+    import sys
+    import time
+
+    if os.name == "nt":
+        pytest.skip("POSIX process-group semantics")
+    if sys.platform != "linux":
+        pytest.skip("/proc process-state inspection requires Linux")
+
+    child_pid_file = tmp_path / "background-child.pid"
+    shell_pid_file = tmp_path / "background-shell.pid"
+    shell_exit_file = tmp_path / "shell-exited"
+    child_script = tmp_path / "background_child.py"
+    child_script.write_text(
+        "import os, signal, sys, time\n"
+        "child_pid, shell_pid, exit_marker = sys.argv[1:]\n"
+        "open(child_pid, 'w').write(str(os.getpid()))\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "parent_pid = int(open(shell_pid).read())\n"
+        "while os.getppid() == parent_pid: time.sleep(0.01)\n"
+        "open(exit_marker, 'w').write('shell exited')\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    command = (
+        f'echo $$ > "{shell_pid_file.as_posix()}"; '
+        f'python3 "{child_script.as_posix()}" "{child_pid_file.as_posix()}" '
+        f'"{shell_pid_file.as_posix()}" "{shell_exit_file.as_posix()}" & exit 0'
+    )
+    execution = asyncio.create_task(ExecTool(timeout=60).execute(command))
+    deadline = time.monotonic() + 10
+    while not child_pid_file.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    assert child_pid_file.exists(), "background grandchild did not start"
+    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+    shell_pid_file.read_text(encoding="utf-8")
+    child_stat = Path(f"/proc/{child_pid}/stat")
+
+    # The background child confirms its parent shell exited while the child
+    # still holds the captured pipes open, leaving communicate() pending.
+    deadline = time.monotonic() + 5
+    while not shell_exit_file.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    assert shell_exit_file.exists(), "shell did not exit while descendant remained"
+    assert execution.done() is False
+
+    child_fields = child_stat.read_text(encoding="utf-8").split()
+    child_pgrp = int(child_fields[4])
+    child_session = int(child_fields[5])
+    child_start_time = child_fields[21]
+    assert child_pgrp == child_session, "grandchild process group differs from its session"
+    assert child_pgrp != os.getpgid(os.getpid()), "grandchild accidentally joined pytest's process group"
+
+    execution.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(execution, timeout=8)
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            fields = child_stat.read_text(encoding="utf-8").split()
+        except (FileNotFoundError, ProcessLookupError):
+            break
+        if len(fields) > 2 and fields[2] == "Z":
+            break
+        await asyncio.sleep(0.01)
+    if child_stat.exists():
+        try:
+            fields = child_stat.read_text(encoding="utf-8").split()
+        except (FileNotFoundError, ProcessLookupError):
+            fields = []
+        assert not fields or fields[2] == "Z", f"grandchild PID {child_pid} survived cancellation"
+        assert not fields or fields[21] != child_start_time, f"grandchild PID {child_pid} still exists"
 
 
 def _fake_resolve_private(hostname, port, family=0, type_=0):

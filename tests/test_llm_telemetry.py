@@ -1,12 +1,14 @@
 """Tests for nanobot.observability.llm_telemetry (issue #675)."""
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
 from nanobot.observability.llm_telemetry import (
     call_context,
     record_llm_call,
+    record_llm_prompt,
     reset_call_context,
     set_call_context,
 )
@@ -44,6 +46,137 @@ def test_record_llm_call_writes_well_formed_line(tmp_path, monkeypatch):
     assert rec["cycle_id"] == ""
     assert rec["component"] == ""
     assert rec["ts"].endswith("Z")
+
+
+def test_duration_and_matching_prompt_records_share_call_seq(tmp_path, monkeypatch):
+    """Duration records must carry the same sequence as their prompt row."""
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+    monkeypatch.delenv("LLM_CAPTURE_PROMPTS", raising=False)
+
+    with call_context("cycle-duration-seq", "bridge"):
+        record_llm_call(model="m", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
+        record_llm_prompt(
+            messages=[{"role": "user", "content": "call one"}],
+            content="one",
+            reasoning_content=None,
+            finish_reason="stop",
+            model="m",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+    duration = _read_jsonl(next(tmp_path.glob("*.jsonl")))[0]
+    prompt = _read_jsonl(next((tmp_path / "prompts").glob("*.jsonl")))[0]
+    assert duration["seq"] == prompt["seq"]
+
+
+def test_call_sequence_does_not_leak_across_call_contexts(tmp_path, monkeypatch):
+    """An unpaired duration cannot lend its seq to another context's prompt."""
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+    monkeypatch.delenv("LLM_CAPTURE_PROMPTS", raising=False)
+
+    with call_context("cycle-first", "executor"):
+        record_llm_call(model="m", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
+        record_llm_call(model="m", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
+
+    with call_context("cycle-second", "proposer"):
+        record_llm_prompt(
+            messages=[{"role": "user", "content": "prompt only"}],
+            content="answer", reasoning_content=None, finish_reason="stop",
+            model="m", prompt_tokens=1, completion_tokens=1,
+        )
+
+    prompt = _read_jsonl(next((tmp_path / "prompts").glob("*.jsonl")))[0]
+    assert (prompt["cycle_id"], prompt["component"], prompt["seq"]) == (
+        "cycle-second", "proposer", 1,
+    )
+
+
+def test_nested_call_context_restores_outer_duration_sequence(tmp_path, monkeypatch):
+    """An inner call context must not erase the outer call's pending seq."""
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+    monkeypatch.delenv("LLM_CAPTURE_PROMPTS", raising=False)
+
+    with call_context("cycle-outer", "bridge"):
+        record_llm_call(model="m", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
+        with call_context("cycle-inner", "proposer"):
+            record_llm_call(model="m", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
+            record_llm_prompt(
+                messages=[], content="inner", reasoning_content=None,
+                finish_reason="stop", model="m", prompt_tokens=1, completion_tokens=1,
+            )
+        record_llm_prompt(
+            messages=[], content="outer", reasoning_content=None,
+            finish_reason="stop", model="m", prompt_tokens=1, completion_tokens=1,
+        )
+
+    rows = [json.loads(line) for path in tmp_path.rglob("*.jsonl") for line in path.read_text().splitlines()]
+    prompts = [row for row in rows if "messages" in row]
+    assert {(row["cycle_id"], row["component"], row["seq"]) for row in prompts} == {
+        ("cycle-inner", "proposer", 1), ("cycle-outer", "bridge", 1),
+    }
+
+
+def test_legacy_duration_row_without_seq_is_still_readable_by_duration_readers(
+    tmp_path, monkeypatch
+):
+    """Existing readers use optional lookups and must accept old telemetry."""
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    path = tmp_path / f"{day}.jsonl"
+    path.write_text(
+        json.dumps({"cycle_id": "cycle-legacy", "component": "bridge", "duration_ms": 4.0}) + "\n",
+        encoding="utf-8",
+    )
+
+    from scripts import llm_calls_report
+
+    rows = llm_calls_report.load_records(tmp_path)
+    assert rows[0].get("seq") is None
+    assert llm_calls_report.aggregate(rows)["totals"]["calls"] == 1
+
+
+def test_duration_seq_increments_with_each_call_and_stays_component_scoped(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+    monkeypatch.delenv("LLM_CAPTURE_PROMPTS", raising=False)
+
+    with call_context("cycle-seq-multi", "bridge"):
+        record_llm_call(model="m", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
+        record_llm_prompt(
+            messages=[{"role": "user", "content": "one"}],
+            content="one",
+            reasoning_content=None,
+            finish_reason="stop",
+            model="m",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+        record_llm_call(model="m", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
+        record_llm_prompt(
+            messages=[{"role": "user", "content": "two"}],
+            content="two",
+            reasoning_content=None,
+            finish_reason="stop",
+            model="m",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+    with call_context("cycle-seq-multi", "proposer"):
+        record_llm_call(model="m", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
+        record_llm_prompt(
+            messages=[{"role": "user", "content": "propose"}],
+            content="propose",
+            reasoning_content=None,
+            finish_reason="stop",
+            model="m",
+            prompt_tokens=1,
+            completion_tokens=1,
+        )
+
+    durations = _read_jsonl(next(tmp_path.glob("*.jsonl")))
+    prompts = _read_jsonl(next((tmp_path / "prompts").glob("*.jsonl")))
+    assert [row["seq"] for row in durations] == [1, 2, 1]
+    assert [row["seq"] for row in prompts] == [1, 2, 1]
 
 
 def test_record_llm_call_defaults_missing_usage_fields_to_zero(tmp_path, monkeypatch):
@@ -129,7 +262,9 @@ def test_record_llm_call_logs_fs_failure(caplog, monkeypatch, tmp_path):
 
     monkeypatch.setattr("builtins.open", _raise_open)
     with caplog.at_level("WARNING"):
-        record_llm_call(model="executor-model", duration_ms=1.0, usage={}, finish_reason="error", retries=0)
+        record_llm_call(
+            model="executor-model", duration_ms=1.0, usage={}, finish_reason="error", retries=0
+        )
     assert "llm call telemetry recording failed: disk full" in caplog.text
 
 
@@ -150,8 +285,12 @@ def test_record_llm_call_carries_context_window_for_a_known_model(tmp_path, monk
     monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
 
     record_llm_call(
-        model="un/qwen3.8-27b-gguf", duration_ms=1.0, usage={}, finish_reason="stop",
-        retries=0, context_window=98304,
+        model="un/qwen3.8-27b-gguf",
+        duration_ms=1.0,
+        usage={},
+        finish_reason="stop",
+        retries=0,
+        context_window=98304,
     )
 
     rec = _read_jsonl(next(tmp_path.glob("*.jsonl")))[0]
@@ -164,7 +303,9 @@ def test_record_llm_call_defaults_context_window_to_none(tmp_path, monkeypatch):
     of the parameter itself is None, and None round-trips as JSON null."""
     monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
 
-    record_llm_call(model="unknown-model", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
+    record_llm_call(
+        model="unknown-model", duration_ms=1.0, usage={}, finish_reason="stop", retries=0
+    )
 
     rec = _read_jsonl(next(tmp_path.glob("*.jsonl")))[0]
     assert "context_window" in rec
@@ -178,8 +319,12 @@ def test_record_llm_call_context_window_survives_a_registry_error(tmp_path, monk
     monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
 
     record_llm_call(
-        model="un/qwen3.8-27b-gguf", duration_ms=1.0, usage={}, finish_reason="stop",
-        retries=0, context_window=None,
+        model="un/qwen3.8-27b-gguf",
+        duration_ms=1.0,
+        usage={},
+        finish_reason="stop",
+        retries=0,
+        context_window=None,
     )
 
     rec = _read_jsonl(next(tmp_path.glob("*.jsonl")))[0]
