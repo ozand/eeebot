@@ -583,6 +583,7 @@ class _FakeSkillHygieneSubagentManager:
 
     def __init__(self, *, workspace, **_kwargs):
         self.workspace = workspace
+        self._state_dir = _kwargs.get("skill_fitness_state_dir")
         self._running_tasks: dict = {}
 
     async def spawn(self, **_kwargs):
@@ -599,6 +600,19 @@ class _FakeSkillHygieneSubagentManager:
             )
         _run(self.workspace, "add", "skills")
         _run(self.workspace, "commit", "-m", "feat: add duplicate skill batch")
+        # Round 2, item 1: completion is positive-only -- production always
+        # writes 'ok' terminal telemetry for a finished executor.
+        if self._state_dir is not None:
+            task_id = f"skill-hygiene-{id(self)}"
+            (Path(self._state_dir) / "subagents").mkdir(parents=True, exist_ok=True)
+            (Path(self._state_dir) / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({"status": "ok", "summary": "done", "result": "done"}), encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
         return "fake skill subagent spawned"
 
 

@@ -1334,6 +1334,9 @@ def test_change_shape_reads_last_non_checkpoint_commit(tmp_path: Path, monkeypat
                  "-m", "selfevo: checkpoint — scripts/feature.py", "-m", CHECKPOINT_TRAILER],
                 check=True, capture_output=True,
             )
+            # Round 2, item 1: completion is positive-only -- production
+            # always writes 'ok' terminal telemetry for a finished executor.
+            _mark_spawn_finished_ok(state_dir, self._running_tasks, "real-then-checkpoint-ok")
             return "fake subagent spawned"
 
     base = tmp_path / "base"
