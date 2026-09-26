@@ -109,6 +109,31 @@ class TestFinishPendingPushes:
         assert len(resolutions) == 1
         assert resolutions[0]["outcome"] == "partial"
 
+    def test_legacy_late_push_recovers_paths_from_surviving_branch(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        staged = _stage_push_pending(tmp_path, work, "cid-legacy-path-recovery", [])
+        _run(work, "checkout", staged["branch"])
+        _commit_file(work, "feature.py", "value = 1\\n", "feat: legacy feature")
+        _run(work, "checkout", "main")
+
+        assert bridge._finish_pending_pushes(work, staged["state_dir"]) == 1
+        rows = _read_ledger_rows(staged["state_dir"])
+        resolved = [
+            row for row in rows
+            if row.get("phase") == "outcome" and row.get("cycle_id") == "cid-legacy-path-recovery"
+            and row.get("outcome") != "push_pending"
+        ][-1]
+        assert resolved["files_changed"] == ["feature.py"]
+        assert resolved["delivered"] is True
+        assert resolved["delivery_state"] == "known"
+        assert resolved["outcome"] == "pushed_late"
+        assert bridge._finish_pending_pushes(work, staged["state_dir"]) == 0
+        assert len([
+            row for row in _read_ledger_rows(staged["state_dir"])
+            if row.get("phase") == "outcome" and row.get("cycle_id") == "cid-legacy-path-recovery"
+            and row.get("outcome") != "push_pending"
+        ]) == 1
+
     def test_late_push_with_old_empty_file_list_is_unknown_and_not_folded(self, tmp_path):
         from nanobot.runtime import demand
         _, work = _init_repo(tmp_path)
