@@ -111,10 +111,24 @@ class OpenIncrementState:
     #: :meth:`as_dict`) and never set by :func:`load_state` -- it
     #: describes what THIS resolve() call did, not a durable fact.
     resolve_saved: "bool | None" = None
+    #: Codex review of 22e1aeb8, P1 (architect resolution 2026-09-27):
+    #: set ONLY by :func:`record_supply_interruption`/
+    #: :func:`_record_interruption_without_backoff` (kill/defect), on
+    #: their return value -- True when the interruption record was
+    #: verified by reading the saved state back, False otherwise. Same
+    #: shape and same reason as :data:`resolve_saved`: a truthy
+    #: ``_save_state`` return only proves a write landed, not that it
+    #: landed with the intended content, and a caller that goes on to
+    #: mark a cycle "finished" (handled marker, terminal ledger row)
+    #: regardless would silently lose the only durable record of an
+    #: interrupted attempt. Never part of the persisted schema (excluded
+    #: in :meth:`as_dict`) and never set by :func:`load_state`.
+    persisted: "bool | None" = None
 
     def as_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d.pop("resolve_saved", None)
+        d.pop("persisted", None)
         return d
 
 
@@ -288,7 +302,20 @@ def record_supply_interruption(
         "snapshot": snapshot,
     }
     state.held_ticks = 0
-    _save_state(state_dir, state)
+    _persisted_ok = _save_state(state_dir, state)
+
+    # Codex review of 22e1aeb8, P1 (architect resolution 2026-09-27): the
+    # same "read back to verify" discipline as resolve()'s resolve_saved
+    # (P2-a) -- a truthy _save_state return only proves a write landed,
+    # not that it landed with the intended pending/hold content. A
+    # caller that goes on to mark this cycle "finished" (handled marker,
+    # terminal ledger row) regardless would silently lose the only
+    # durable record of this interruption if the write actually failed
+    # or raced.
+    if _persisted_ok:
+        _reloaded = _load_state_strict(state_dir)
+        _persisted_ok = _reloaded is not None and _reloaded.pending == state.pending and _reloaded.hold == state.hold
+    state.persisted = _persisted_ok
 
     append_event(state_dir, {
         "phase": "open_increment",
@@ -298,6 +325,7 @@ def record_supply_interruption(
         "consecutive_supply_interrupts": consecutive,
         "cooldown_seconds": cooldown_seconds,
         "deadline": deadline,
+        "persisted": _persisted_ok,
     })
     if escalated:
         append_event(state_dir, {
@@ -949,13 +977,23 @@ def _record_interruption_without_backoff(
     }
     state.hold = None
     state.held_ticks = 0
-    _save_state(state_dir, state)
+    _persisted_ok = _save_state(state_dir, state)
+
+    # Codex review of 22e1aeb8, P1 (architect resolution 2026-09-27):
+    # same verify-by-readback discipline as record_supply_interruption --
+    # see its comment for the full rationale.
+    if _persisted_ok:
+        _reloaded = _load_state_strict(state_dir)
+        _persisted_ok = _reloaded is not None and _reloaded.pending == state.pending
+    state.persisted = _persisted_ok
+
     append_event(state_dir, {
         "phase": "open_increment",
         "cycle_id": cycle_id or "",
         "status": reason,
         "retry_key": retry_key,
         "branch": branch or "",
+        "persisted": _persisted_ok,
         **extra,
     })
     return state
