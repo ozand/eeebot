@@ -3845,18 +3845,23 @@ class TestPublishDerivedView:
         }]
         # The ranked list IS the production sort: operator (V2) before self-derived (V1).
         items = view["priority_items"]
-        assert [(i["rank"], i["number"], i["provenance"], i["vector"]) for i in items] == [
-            (1, 11, "operator", "V2"),
-            (2, 19, "self-derived", "V1"),
+        assert [(i["rank"], i["number"], i["provenance"]) for i in items] == [
+            (1, 11, "operator"),
+            (2, 19, "self-derived"),
         ]
-        assert items[0]["label"] == "Loop health in dashboard"
-        assert items[0]["direction"] == ""
+        # ADR-034 F1: an operator item carries no title, V-tag, id or text.
+        assert items[0] == {
+            "rank": 1, "kind": "priority", "number": 11,
+            "provenance": "operator", "state": "open",
+        }
         assert items[1]["label"] == "Night reflections batch"
+        assert items[1]["vector"] == "V1"
         assert items[1]["direction"] == "reflection"
         assert items[1]["kind"] == "priority"
         # Same rows, same order as the production ranking — not re-derived.
         prod = demand._priority_items(state_dir, None)
-        assert [i["id"] for i in items] == [p["id"] for p in prod]
+        assert len(items) == len(prod)
+        assert items[1]["id"] == prod[1]["id"]
         if os.name != "nt":
             assert (out.stat().st_mode & 0o777) == 0o644
 
