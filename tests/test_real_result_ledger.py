@@ -216,10 +216,18 @@ class TestEndToEndAgreement:
         monkeypatch.setattr(bridge, "_setup_cycle_branch", lambda *args, **kwargs: {
             "ok": False, "reason": "setup_test_failure", "branch": None, "main_sha": "abc",
         })
+        # ADR-035 rule 1 (#1942 B2): a real planning session now runs before
+        # cycle-branch setup, and needs a real task-writing skill pre-read
+        # -- this test is about the setup-failure path AFTER a plan is
+        # already accepted, not about planning itself.
+        _stub_planning_session(monkeypatch, "finish the wip feature")
 
         _seed_bridge_request(state_dir, "req-setup-fail", "cycle-setup-fail")
         assert asyncio.run(bridge._main_impl()) == 0
-        artifact = json.loads((state_dir / "subagents" / "results" / "result-req-setup-fail.json").read_text(encoding="utf-8"))
+        # ADR-035 rule 1 (#1942): result files are keyed by the per-cycle
+        # uuid, not the retired queue's literal request id.
+        result_path = next((state_dir / "subagents" / "results").glob("result-*.json"))
+        artifact = json.loads(result_path.read_text(encoding="utf-8"))
         assert artifact["result_status"] == "blocked"
         assert artifact["delivered"] is False
 
