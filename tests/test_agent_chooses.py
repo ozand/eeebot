@@ -3435,6 +3435,71 @@ def test_resolve_saved_reflects_the_full_verified_transition(tmp_path: Path, mon
     assert pending2.get("plan_version", 1) == 1
 
 
+def test_resolve_delete_rejects_an_unreadable_verification_readback(tmp_path: Path, monkeypatch):
+    """Round 5 external re-check, item N2 (architect resolution
+    2026-09-26): P2-a's verification calls ``load_state()`` back after a
+    successful save, but that loader deliberately returns a DEFAULT
+    ``OpenIncrementState()`` (``pending=None``) whenever the file is
+    missing, unreadable, or malformed -- indistinguishable from a
+    genuinely verified ``delete``. The write here actually succeeds (the
+    real ``_save_state`` is never touched); only the VERIFICATION read is
+    redirected to a corrupt file, simulating a transient read failure
+    right after a real, successful write. ``resolve_saved`` must read
+    False -- "could not verify" is not "verified cleared".
+    """
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import open_increment
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = base / "state"
+    state_dir.mkdir()
+    _origin, work = _init_selfevo_repo(base)
+
+    cycle_id = "cycle-n2-delete-unreadable-verify"
+    branch = f"selfevo/cycle-{cycle_id}"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", branch], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    open_increment.record_supply_interruption(
+        state_dir, cycle_id,
+        retry_key="n2-delete-unreadable-test", plan_text="finish the wip feature", candidate_id=None,
+        selfevo_repo=work, branch=branch,
+    )
+
+    corrupt_path = tmp_path / "corrupt_state.json"
+    corrupt_path.write_text("{not valid json", encoding="utf-8")
+    _real_state_path = open_increment._state_path
+    _calls = {"n": 0}
+
+    def _flaky_state_path(sd):
+        _calls["n"] += 1
+        # Calls 1 (resolve()'s initial load) and 2 (the real _save_state
+        # write) go to the REAL file -- the write genuinely succeeds. Only
+        # call 3 (the post-save verification readback) is redirected, so
+        # this simulates a transient read failure right after a real,
+        # successful write, not a failed write.
+        if _calls["n"] >= 3:
+            return corrupt_path
+        return _real_state_path(sd)
+
+    monkeypatch.setattr(open_increment, "_state_path", _flaky_state_path)
+    result = open_increment.resolve(state_dir, cycle_id, "delete", selfevo_repo=work)
+    monkeypatch.undo()
+
+    assert result.resolve_saved is False, (
+        "an unreadable post-save verification read must never report resolve_saved=True -- "
+        "the write actually succeeded (pending really is cleared on the real file), but that "
+        "cannot be VERIFIED, and 'could not verify' must not be treated as 'verified cleared'"
+    )
+    # The REAL file (never touched by the corrupt-path redirect) genuinely
+    # has pending cleared -- proving this is a readback failure, not a
+    # write failure, and resolve_saved=False is still the correct answer.
+    assert open_increment.pending_open_increment(state_dir) is None
+
+
 def test_keep_edit_with_persistence_failure_rejects_the_plan(tmp_path: Path, monkeypatch):
     """Round 3, item N2 (architect resolution 2026-09-26): ``resolve``'s
     ``keep``+edit path writes the revised ``plan_text`` in-memory and
