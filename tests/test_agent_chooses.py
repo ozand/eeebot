@@ -3291,6 +3291,111 @@ def test_missing_open_increment_decision_is_no_plan(tmp_path: Path, monkeypatch)
     )
 
 
+def test_keep_edit_with_persistence_failure_rejects_the_plan(tmp_path: Path, monkeypatch):
+    """Round 3, item N2 (architect resolution 2026-09-26): ``resolve``'s
+    ``keep``+edit path writes the revised ``plan_text`` in-memory and
+    returns it regardless of whether ``_save_state`` actually persisted
+    it -- the caller must verify by reading the DURABLE record back
+    (same "read back to verify" discipline as N4's registration check),
+    not trust the in-memory return. If the edit failed to persist, this
+    session's plan must be rejected (``no_plan``/``malformed``, planner
+    family) -- accepting it anyway would hand the executor a plan whose
+    durable basis silently reverts to the stale original the moment
+    anything reads ``pending`` back (a kill during this same resumed
+    execution, for instance).
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge, no_plan_recovery, open_increment
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    _task_writing_dir = bridge.RELEASE_ROOT / "nanobot" / "skills" / "task-writing"
+    _task_writing_dir.mkdir(parents=True, exist_ok=True)
+    (_task_writing_dir / "SKILL.md").write_text("task-writing contract (test stub)\n", encoding="utf-8")
+
+    old_cycle_id = "cycle-keep-edit-persist-fail"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    original_plan = "Plan: finish the wip feature exactly as originally scoped."
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", old_branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "wip.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/wip.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/wip.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id,
+        retry_key="n2-persist-fail-test", plan_text=original_plan, candidate_id=None,
+        selfevo_repo=work, branch=old_branch,
+    )
+    _oi_state = open_increment.load_state(state_dir)
+    _oi_state.hold["deadline"] = "2000-01-01T00:00:00Z"
+    open_increment._save_state(state_dir, _oi_state)
+
+    revised_plan = "finish the wip feature, but also add a regression test for the crash it fixes"
+
+    class _PlannerKeepEditManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            if self._telemetry_component != "planner":
+                return "fake subagent spawned"
+            task_id = "planner-keep-edit-persist-fail-01"
+            raw_plan = json.dumps({
+                "open_increment_decision": "keep",
+                "plan_action": "edit",
+                "plan": revised_plan,
+            })
+            (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+            (state_dir / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({
+                    "status": "ok",
+                    "result": raw_plan,
+                    "context_usage": {"iterations": [{}]},
+                }),
+                encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
+            return "fake planner spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _PlannerKeepEditManager)
+    # The edit's own persistence write fails -- resolve() itself still
+    # returns the in-memory (edited) state, but nothing landed on disk.
+    monkeypatch.setattr(open_increment, "_save_state", lambda *a, **k: False)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    pending_after = open_increment.pending_open_increment(state_dir)
+    assert pending_after is not None
+    assert pending_after["plan_text"] == original_plan, (
+        f"a failed edit-persistence write must leave the DURABLE plan unchanged: {pending_after!r}"
+    )
+
+    no_plan_state = no_plan_recovery.load_state(state_dir)
+    assert no_plan_state.consecutive_planner >= 1, (
+        "a keep+edit whose persistence write failed must count as a planner-family no_plan outcome, "
+        "not be silently accepted"
+    )
+
+
 def test_delete_with_inspection_ref_failure_hands_over_no_new_plan(tmp_path: Path, monkeypatch):
     """Round 3, item 7/A (architect resolution 2026-09-26): the CALLER of
     ``resolve(delete)`` must check its result. Round 2 fixed

@@ -3840,6 +3840,49 @@ async def _run_planning_session(
                         'ran': True, 'iterations_used': iterations_used, 'iterations_planned': iterations_planned,
                         'tampered_files': [], 'plan': None,
                     }
+                # N2 (round 3 external re-check, architect resolution
+                # 2026-09-26): resolve()'s `keep` branch never checks
+                # `_save_state`'s own result -- its IN-MEMORY return always
+                # shows the edited plan_text/plan_version whether or not
+                # that write actually landed on disk (unlike `delete`,
+                # which early-returns before ever touching `pending` on a
+                # protection failure). Verified here by reading the
+                # DURABLE record back (same discipline as N4's
+                # registration-write verification) rather than trusting
+                # the in-memory object -- a failed edit-persistence write
+                # must reject THIS session's plan, or a kill during the
+                # resumed execution would recover with the stale original,
+                # silently discarding the (never-actually-saved) revision.
+                if _oi_decision == 'keep' and not _keep_confirm:
+                    _oi_pending_after = _open_increment_mod.pending_open_increment(state_dir)
+                    _oi_intended_plan = parsed.get('plan')
+                    if not _oi_pending_after or _oi_pending_after.get('plan_text') != _oi_intended_plan:
+                        record_planning_session(
+                            state_dir, cycle_id, 'malformed',
+                            iterations_used=iterations_used, iterations_planned=iterations_planned,
+                            reason=(
+                                'pending open increment edit failed to persist '
+                                '(pending_write_failed); plan not accepted'
+                            ),
+                            parse_mode=parse_mode,
+                            format_violation=format_violation,
+                            task_writing_read=_task_writing_read,
+                            task_writing_source=_task_writing_source or None,
+                            task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+                            task_writing_bytes=_task_writing_bytes_count,
+                            task_writing_sha256=_task_writing_sha256 or None,
+                        )
+                        no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
+                        planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
+                        print(
+                            'planning-session: malformed (keep+edit failed to persist; '
+                            'plan not accepted)'
+                        )
+                        return {
+                            'ran': True, 'iterations_used': iterations_used,
+                            'iterations_planned': iterations_planned,
+                            'tampered_files': [], 'plan': None,
+                        }
                 plan_lines.append(f'Open increment: {_oi_decision}')
             except Exception:
                 pass
