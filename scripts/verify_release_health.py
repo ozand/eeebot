@@ -100,11 +100,20 @@ def verify_release_health(state_dir: Path | None = None) -> dict[str, Any]:
     if state_dir is not None:
         os.environ["EEEBOT_STATE_DIR"] = str(state_dir)
 
+    from copy import deepcopy
+
     from scripts import eeebot_dashboard as ed
+
     old_ed_state = getattr(ed, "STATE_DIR", None)
+    cache_names = (
+        "_METRICS_CACHE", "_SUBAGENT_TREE_CACHE", "_HOST_CAPS_CACHE",
+        "_REPORT_SCAN_CACHE", "_MATERIALIZED_CACHE",
+    )
+    old_caches = {name: deepcopy(getattr(ed, name)) for name in cache_names}
     if state_dir is not None:
         ed.STATE_DIR = Path(state_dir)
-    ed._METRICS_CACHE.clear()
+    for name in cache_names:
+        getattr(ed, name).clear()
 
     try:
         from scripts.eeebot_dashboard import (
@@ -119,10 +128,13 @@ def verify_release_health(state_dir: Path | None = None) -> dict[str, Any]:
         metrics_json = render_json(metrics_raw)
         html_content = render_html(metrics_raw)
     finally:
+        for name, contents in old_caches.items():
+            cache = getattr(ed, name)
+            cache.clear()
+            cache.update(contents)
         if state_dir is not None:
             if old_ed_state is not None:
                 ed.STATE_DIR = old_ed_state
-            ed._METRICS_CACHE.clear()
             if old_state_env is not None:
                 os.environ["EEEBOT_STATE_DIR"] = old_state_env
             else:

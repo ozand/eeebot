@@ -150,20 +150,24 @@ def test_health_gate_runs_when_dashboard_unit_is_disabled_or_absent() -> None:
 
 
 def test_verify_release_health_respects_custom_state_dir(tmp_path: Path) -> None:
-    """Verify state_dir parameter updates eeebot_dashboard.STATE_DIR and clears caches (Codex P2)."""
-    import time
+    """State-directory changes must not leak through dashboard collector caches (Codex P2)."""
+    import json
 
-    from scripts import eeebot_dashboard as ed
     from scripts.verify_release_health import verify_release_health
 
-    custom_state = tmp_path / "custom_state"
-    custom_state.mkdir()
+    state_a = tmp_path / "state_a"
+    state_b = tmp_path / "state_b"
+    state_a.mkdir()
+    state_b.mkdir()
+    caps = {"camera": {"state": "present", "available": True, "details": "camera-A"}}
+    (state_a / "host_capabilities.json").write_text(json.dumps(caps), encoding="utf-8")
+    caps["camera"] = {"state": "absent", "available": False, "details": "camera-B"}
+    (state_b / "host_capabilities.json").write_text(json.dumps(caps), encoding="utf-8")
 
-    # Pre-populate cache with a dummy value
-    ed._METRICS_CACHE["metrics"] = {"cached": True}
-    ed._METRICS_CACHE["loaded_at"] = time.monotonic()
-
-    original_state = ed.STATE_DIR
-    res = verify_release_health(state_dir=custom_state)
-    assert res["status"] == "ok"
-    assert ed.STATE_DIR == original_state
+    first = verify_release_health(state_dir=state_a)
+    second = verify_release_health(state_dir=state_b)
+    first_coverage = first["metrics"]["host_capability_coverage"]
+    second_coverage = second["metrics"]["host_capability_coverage"]
+    assert first_coverage != second_coverage, (
+        "sequential health checks for different state dirs reused state-dependent cached data"
+    )
