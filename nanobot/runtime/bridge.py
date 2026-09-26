@@ -1453,9 +1453,20 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
             main_sha_after = _sp_late.run(
                 git + ['rev-parse', 'HEAD'], capture_output=True, text=True,
             ).stdout.strip()
-            _v, _vr = _derive_cycle_verdict('pushed_late', None)
+            # A late-pushed service-only change integrated into Git but did
+            # not deliver work. Preserve the ordinary Rule-C non-delivery
+            # outcome/verdict so futility and recent-failure readers agree.
+            if delivered:
+                late_outcome, late_reason = 'pushed_late', None
+            elif delivery_state == 'known':
+                late_outcome, late_reason = 'partial', 'service_only'
+            else:
+                # Historical rows with no paths are not enough evidence to
+                # classify the branch as service-only or delivered.
+                late_outcome, late_reason = 'pushed_late', 'delivery_unknown'
+            _v, _vr = _derive_cycle_verdict(late_outcome, late_reason)
             record_cycle_outcome(
-                state_dir, cycle_id, 'pushed_late', None, files_changed, branch,
+                state_dir, cycle_id, late_outcome, late_reason, files_changed, branch,
                 verdict=_v, verdict_reason=_vr, delivered=delivered,
                 delivery_state=delivery_state,
             )
