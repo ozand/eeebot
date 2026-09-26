@@ -967,6 +967,56 @@ def test_executor_never_receives_assigned_title(tmp_path: Path, monkeypatch):
     assert outcome_rows[-1]["outcome"] == "success"
 
 
+def test_ran_proposer_candidate_is_retired_and_not_reoffered(tmp_path: Path, monkeypatch):
+    """Codex review of 777ada1a (nanobot/runtime/llm_proposer.py:558), P1
+    (architect resolution 2026-09-26): once the planner picks a
+    proposer-authored candidate_id and the executor's attempt actually
+    registers (about to run), the underlying proposer request must be
+    retired (the same handled_<rid>.txt marker the retired rotation path
+    used to write) -- otherwise proposer_candidate_items keeps offering
+    the SAME candidate forever, re-running the identical proposal every
+    cycle.
+    """
+    import asyncio
+
+    from nanobot.runtime import bridge, llm_proposer
+    from nanobot.runtime.demand import item_id
+    from tests.test_cycle_ledger import _init_selfevo_repo, _read_ledger
+
+    base = tmp_path
+    _init_selfevo_repo(base)
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+
+    proposer_title = "Add a proposer-authored helper script"
+    req_dir = state_dir / "subagents" / "requests"
+    req_dir.mkdir(parents=True)
+    (req_dir / "llm-proposer-cand.json").write_text(json.dumps({
+        "request_id": "llm-proposer-cand-1",
+        "task_title": proposer_title,
+        "task": "do the proposer-authored work",
+        "request_status": "queued",
+    }), encoding="utf-8")
+
+    candidate_id = item_id("proposer", proposer_title)
+    assert any(i["id"] == candidate_id for i in llm_proposer.proposer_candidate_items(state_dir)), (
+        "setup sanity check: the request must actually surface as this candidate_id"
+    )
+
+    plan_text = "Do the proposer-authored work, per the planner's own reasoning"
+    _stub_planning_session(monkeypatch, plan_text, candidate_id=candidate_id)
+    monkeypatch.setattr(bridge, "SubagentManager", _make_capturing_subagent_manager([]))
+
+    result = asyncio.run(bridge._main_impl())
+    assert result == 0
+
+    outcome_rows = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"]
+    assert outcome_rows[-1]["outcome"] == "success"
+
+    assert not any(
+        i["id"] == candidate_id for i in llm_proposer.proposer_candidate_items(state_dir)
+    ), "a proposer request whose candidate already ran must not be offered again"
+
+
 # --- test_supply_interruption_carries_open_increment -----------------------
 # --- test_supply_hold_uses_rest_snapshot_with_backoff ----------------------
 #

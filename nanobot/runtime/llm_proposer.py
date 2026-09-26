@@ -569,6 +569,66 @@ def proposer_candidate_items(state_dir: Path) -> list[dict[str, str]]:
     return items
 
 
+def retire_proposer_request_for_candidate(state_dir: Path, candidate_id: str) -> bool:
+    """Codex review of 777ada1a (nanobot/runtime/llm_proposer.py:558), P1
+    (architect resolution 2026-09-26): ADR-035 rule 1 has the planner pick
+    a candidate by ``candidate_id``, never through the old
+    ``find_pending_request`` rotation path that used to write the
+    ``handled_<rid>.txt`` marker (:func:`_is_request_handled`) -- so a
+    proposer request the planner already selected and ran kept surfacing
+    forever from :func:`proposer_candidate_items`, offering the SAME
+    candidate for re-execution every cycle.
+
+    Called once the executor is actually about to run this candidate
+    (after its attempt registration persists, same "the candidate runs"
+    moment D2 gates the executor spawn on) -- writes the SAME
+    ``handled_<rid>.txt`` marker the bridge's old rotation path wrote, so
+    :func:`_is_request_handled` (already the sole source of truth for
+    every other reader here) picks it up with no new state to keep in
+    sync.
+
+    Matches ``candidate_id`` by recomputing :func:`nanobot.runtime.demand.
+    item_id` for each live proposer request's own title -- the same
+    deterministic hash :func:`proposer_candidate_items` used to mint it;
+    there is no other stored link from a candidate_id back to its source
+    request file. Returns True only when a live (not already handled)
+    proposer request matched and its marker was written; False for a
+    non-proposer id, no match, or an already-handled request (idempotent).
+    """
+    if not candidate_id or not candidate_id.startswith("proposer-"):
+        return False
+    from nanobot.runtime.demand import item_id
+
+    req_dir = _requests_dir(state_dir)
+    if not req_dir.is_dir():
+        return False
+    for path in req_dir.glob("*.json"):
+        try:
+            req = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(req, dict) or not _is_proposer_request(req):
+            continue
+        title = str(req.get("task_title") or req.get("recommended_next_action") or "").strip()
+        if not title or item_id("proposer", title) != candidate_id:
+            continue
+        try:
+            if _is_request_handled(state_dir, req, path):
+                return False
+        except Exception:
+            return False
+        rid = _request_id_of(req, path)
+        safe_rid = rid.replace("/", "_")[:120]
+        marker = _bridge_state_dir(state_dir) / f"handled_{safe_rid}.txt"
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("retired: planner-selected candidate ran\n", encoding="utf-8")
+        except Exception:
+            return False
+        return True
+    return False
+
+
 def drain_queued_proposer_requests(state_dir: Path) -> int:
     """ADR-035 rest amendment's drain rule: every currently queued/pending
     proposer-authored request is marked :data:`_SUPERSEDED_STATUS` -- never

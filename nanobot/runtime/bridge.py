@@ -4845,6 +4845,23 @@ async def _main_impl_body():
             _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
             return {'status': 0}
 
+        # Codex review of 777ada1a (nanobot/runtime/llm_proposer.py:558), P1
+        # (architect resolution 2026-09-26): the attempt registration just
+        # above just persisted -- this candidate is actually about to run.
+        # A proposer-authored candidate must be retired here (the same
+        # handled_<rid>.txt marker the old rotation path wrote), or
+        # proposer_candidate_items keeps offering it forever, re-running
+        # the SAME proposal every cycle. Fail-open: retiring is
+        # bookkeeping on top of an already-registered attempt, never a
+        # reason to abort a cycle that is otherwise ready to execute.
+        if _matched_candidate and _matched_candidate.get('provenance') == 'proposer':
+            try:
+                from nanobot.runtime import llm_proposer as _llm_proposer_retire
+
+                _llm_proposer_retire.retire_proposer_request_for_candidate(STATE_DIR, _candidate_id)
+            except Exception:
+                pass
+
         # #718: the subagent must write into the git checkout the bridge branches,
         # commits, gates, and integrates (_selfevo_repo) — not TARGET_WORKSPACE
         # (the deployed release tree in prod, which is not a git repo and is never
