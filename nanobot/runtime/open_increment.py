@@ -205,10 +205,20 @@ def record_supply_interruption(
     same_increment = bool(state.pending) and state.pending.get("retry_key") == retry_key
     consecutive = (state.consecutive_supply_interrupts + 1) if same_increment else 1
 
+    # Round 3 external re-check, item B (architect resolution 2026-09-26):
+    # a re-interruption of the SAME increment (same cycle_id -- a kept/
+    # resumed attempt killed or errored again) must carry plan_version
+    # forward, not silently reset it -- resolve(keep, plan_text=...)'s own
+    # version bump would otherwise be lost the instant the resumed attempt
+    # is interrupted again.
+    _prior_pending = state.pending if (state.pending and state.pending.get("cycle_id") == (cycle_id or "")) else None
+    plan_version = (_prior_pending or {}).get("plan_version", 1)
+
     state.pending = {
         "retry_key": retry_key,
         "cycle_id": cycle_id or "",
         "plan_text": plan_text,
+        "plan_version": plan_version,
         "candidate_id": candidate_id or None,
         "reason": "interrupted_supply",
         "interrupted_at": _now_iso(),
@@ -758,10 +768,17 @@ def _record_interruption_without_backoff(
 
     extra = extra_fields or {}
     state = load_state(state_dir)
+    # Round 3 external re-check, item B (architect resolution 2026-09-26):
+    # same carry-forward as record_supply_interruption -- a re-interruption
+    # of the SAME increment (same cycle_id) must not silently reset
+    # plan_version to the default.
+    _prior_pending = state.pending if (state.pending and state.pending.get("cycle_id") == (cycle_id or "")) else None
+    plan_version = (_prior_pending or {}).get("plan_version", 1)
     state.pending = {
         "retry_key": retry_key,
         "cycle_id": cycle_id or "",
         "plan_text": plan_text,
+        "plan_version": plan_version,
         "candidate_id": candidate_id or None,
         "reason": reason,
         "interrupted_at": _now_iso(),

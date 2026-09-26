@@ -4863,6 +4863,15 @@ async def _main_impl_body():
         # completed (status "ok"), since the primary spawn's own answer can
         # be superseded by a later repair that fixed what the primary missed.
         _repair_task_ids: 'list[str]' = []
+        # Round 3 external re-check, item 1 (architect resolution
+        # 2026-09-26): "its commits integrate only if the repair session's
+        # OWN telemetry has status=ok. Otherwise the cycle is unfinished:
+        # interrupted, by error class. Same barrier as for the primary
+        # executor." Set the moment a repair attempt's own status is read
+        # as anything other than 'ok' -- checked once, right after the
+        # repair while-loop, below.
+        _repair_unfinished_status: 'str | None' = None
+        _repair_unfinished_task_id: 'str | None' = None
         _smoke_passed = True
         _smoke_ran = False
         try:
@@ -5430,9 +5439,34 @@ async def _main_impl_body():
                     # Recount commits after repair — still relative to pre-spawn SHA,
                     # still on the same cycle branch (no push yet).
                     _repair_new = _count_commits_since(_selfevo_repo, _increment_base)
-                    if _repair_new > cycle_commit_count:
+                    _repair_added_commits = _repair_new > cycle_commit_count
+                    if _repair_added_commits:
                         print(f'cycle-branch: {_repair_new - cycle_commit_count} additional commit(s) (repair {_repair_attempts})')
                         cycle_commit_count = _repair_new
+                    # Round 3 external re-check, item 1 (architect
+                    # resolution 2026-09-26): the repair spawn's OWN
+                    # terminal telemetry must say 'ok', same positive-only
+                    # completion rule as the primary executor -- a repair
+                    # turn that commits a real (partial) fix and then ends
+                    # in 'error'/'bounded_stop'/'cancelled'/no telemetry is
+                    # not a finished session, however smoke reads after it.
+                    # Gated on the repair having actually ADDED commits --
+                    # a repair attempt that touched nothing (a citation-only
+                    # non-'ok' turn, e.g.) leaves the cycle's real work
+                    # exactly as the ALREADY-checked primary executor left
+                    # it, so its own bad status carries no risk to block on.
+                    # Stop retrying immediately (no point repairing further
+                    # on an unfinished turn) -- the barrier after this loop
+                    # blocks the whole cycle from integrating.
+                    _repair_status = _subagent_own_status(STATE_DIR, _repair_spawn_id) if _repair_spawn_id else ''
+                    if _repair_added_commits and _repair_status != 'ok':
+                        _repair_unfinished_status = _repair_status
+                        _repair_unfinished_task_id = _repair_spawn_id
+                        print(
+                            f"repair turn {_repair_attempts}: unfinished "
+                            f"(status={_repair_status or 'missing'!r}); cycle will be treated as interrupted"
+                        )
+                        break
                     # #686: recompute the changed-file set before EVERY gate re-run,
                     # not just once — a repair turn can add/rename files, and the
                     # bounded gate must select tests against the CURRENT diff, the
@@ -5463,6 +5497,75 @@ async def _main_impl_body():
                         baseline_test_names=_baseline_test_names,
                     )
                     print(f'smoke (after repair {_repair_attempts}): {"PASS" if _smoke_passed else "FAIL"}')
+
+            if _repair_unfinished_status is not None:
+                # Round 3 external re-check, item 1 (architect resolution
+                # 2026-09-26): the repair session's own commits (and, by
+                # extension, the whole cycle -- nothing here distinguishes
+                # "repair's commits" from "primary's commits" once they
+                # share a branch) integrate only if the repair session
+                # itself finished. Same barrier shape as the primary
+                # executor's own unfinished-session block above, keyed on
+                # the repair spawn's telemetry instead -- never reaches
+                # smoke/gate/integrate below.
+                _repair_error_text = _executor_llm_error(STATE_DIR, _repair_unfinished_task_id)
+                _repair_error_class = _classify_llm_error(
+                    _repair_error_text
+                    or f'(status: {_repair_unfinished_status or "missing"}, no LLM-call text recorded)'
+                )
+                if _repair_error_class == 'paused-supplier':
+                    _open_increment_exec.record_supply_interruption(
+                        STATE_DIR, _cycle_id,
+                        retry_key=req.get('retry_key') or '',
+                        plan_text=req.get('task') or '',
+                        candidate_id=req.get('candidate_id') or None,
+                        selfevo_repo=_selfevo_repo,
+                        branch=cycle_branch,
+                    )
+                else:
+                    _open_increment_exec.record_defect_interruption(
+                        STATE_DIR, _cycle_id,
+                        retry_key=req.get('retry_key') or '',
+                        plan_text=req.get('task') or '',
+                        candidate_id=req.get('candidate_id') or None,
+                        branch=cycle_branch,
+                    )
+                _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
+                handled_marker.write_text(str(req_path), encoding='utf-8')
+                _repair_unfinished_reason = (
+                    LLM_SUPPLIER_PAUSED_REASON if _repair_error_class == 'paused-supplier'
+                    else 'interrupted_defect'
+                )
+                _write_bridge_completed_result(
+                    state_dir=STATE_DIR, req=req, request_id=request_id,
+                    cycle_id=req.get('cycle_id') or '', goal_id=goal_id,
+                    files_changed=files_changed, commits_pushed=0, result_status='blocked',
+                    backlog_title=backlog_title,
+                    key_learnings=[
+                        f"Repair session did not finish (status={_repair_unfinished_status or 'missing'}, "
+                        f'{_repair_unfinished_reason}) with {cycle_commit_count} commit(s) on the branch; '
+                        f'{cycle_branch} kept for forensics/resume, main left unchanged.'
+                    ],
+                    rollback={
+                        'integrated': False, 'cycle_branch': cycle_branch,
+                        'main_sha_before': main_sha_before, 'main_sha_after': main_sha_before,
+                        'reason': _repair_unfinished_reason,
+                    },
+                )
+                _v, _vr = _derive_cycle_verdict('failed', _repair_unfinished_reason)
+                record_cycle_outcome(
+                    STATE_DIR, _cycle_id, 'failed', _repair_unfinished_reason, files_changed, cycle_branch,
+                    verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                    executor_llm_error=True,
+                    real_result=_real_result_ledger_inputs('blocked'),
+                    llm_error_classification=(
+                        {'class': _repair_error_class, 'raw_error': _repair_error_text[:400]}
+                        if _repair_error_text else None
+                    ),
+                    retry_key=req.get('retry_key') or None,
+                )
+                _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
+                return {'status': 0}
             # #1546: the citation scan (see _read_executor_result/_record_lesson_citations
             # far below) must read whichever spawn's answer is actually authoritative for
             # this cycle, not always the primary. `_subagent_task_id` above stays fixed to
