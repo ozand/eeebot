@@ -3372,12 +3372,16 @@ async def _run_planning_session(
     # priorities, never reorders it. Fail-open: candidates are read-only
     # context, never a selection made on the planner's behalf -- a failure
     # here must not stop the session, only leave it without this block.
-    # D9 (ADR-035 Test Contract, external review finding #9): minimal_mode
+    # D9 (ADR-035 Test Contract, external review finding #9; round 2
+    # external re-check, architect resolution 2026-09-26): minimal_mode
     # actually selects a smaller context here -- not just a recorded flag
-    # nothing acts on. Skips the candidates list (demand.collect_demand is
-    # also the most expensive of these blocks to build) and the dedup
-    # evidence; priorities and the open-increment block (mandatory, and
-    # already small) are unaffected.
+    # nothing acts on. "minimal mode means the five best candidates, as
+    # in the ADR, not zero" -- round 1 omitted the candidates block
+    # entirely, which is its own unobservable-guard-adjacent defect (the
+    # planner loses the very demand signal it needs to keep choosing
+    # sensibly while degraded). The dedup evidence block is still
+    # skipped; priorities and the open-increment block (mandatory, and
+    # already small) are unaffected either way.
     _minimal_mode_active = False
     try:
         from nanobot.runtime import no_plan_recovery as _no_plan_recovery_ctx
@@ -3386,32 +3390,32 @@ async def _run_planning_session(
     except Exception:
         _minimal_mode_active = False
 
+    try:
+        from nanobot.runtime import demand as _demand_mod
+        from nanobot.runtime import llm_proposer as _llm_proposer_mod
+        from nanobot.runtime import planner_candidates as _planner_candidates_mod
+
+        _planner_candidate_items = _demand_mod.collect_demand(state_dir, selfevo_repo)
+        # ADR-035 rule 2: the proposer's own still-live requests become
+        # candidates too, positioned right after defect items (rule 1's
+        # trust order) -- read-only, no LLM call.
+        _planner_proposer_items = _llm_proposer_mod.proposer_candidate_items(state_dir)
+        _planner_candidate_items = _planner_candidates_mod.merge_proposer_candidates(
+            _planner_candidate_items, _planner_proposer_items,
+        )
+        _planner_new_priority_ids = _planner_candidates_mod.mark_new_priority_items(
+            state_dir, _planner_candidate_items,
+        )
+        _candidates_block = _planner_candidates_mod.render_candidates_block(
+            _planner_candidate_items, _planner_new_priority_ids,
+            limit=(5 if _minimal_mode_active else 20),
+        )
+    except Exception:
+        _candidates_block = ''
+
     if _minimal_mode_active:
-        _candidates_block = '(minimal mode: candidate list omitted)'
         _dedup_evidence_block = ''
     else:
-        try:
-            from nanobot.runtime import demand as _demand_mod
-            from nanobot.runtime import llm_proposer as _llm_proposer_mod
-            from nanobot.runtime import planner_candidates as _planner_candidates_mod
-
-            _planner_candidate_items = _demand_mod.collect_demand(state_dir, selfevo_repo)
-            # ADR-035 rule 2: the proposer's own still-live requests become
-            # candidates too, positioned right after defect items (rule 1's
-            # trust order) -- read-only, no LLM call.
-            _planner_proposer_items = _llm_proposer_mod.proposer_candidate_items(state_dir)
-            _planner_candidate_items = _planner_candidates_mod.merge_proposer_candidates(
-                _planner_candidate_items, _planner_proposer_items,
-            )
-            _planner_new_priority_ids = _planner_candidates_mod.mark_new_priority_items(
-                state_dir, _planner_candidate_items,
-            )
-            _candidates_block = _planner_candidates_mod.render_candidates_block(
-                _planner_candidate_items, _planner_new_priority_ids,
-            )
-        except Exception:
-            _candidates_block = ''
-
         # ADR-035 rest amendment (#1964): "the sha and the reason are an
         # input to the next session, or it would choose the same increment
         # again." Consumed (read-and-cleared) here, so it reaches exactly
