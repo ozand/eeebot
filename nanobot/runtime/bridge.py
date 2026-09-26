@@ -1499,6 +1499,28 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
                 state_dir, cycle_id, 'pushed_late', None, [], branch,
                 verdict=_v, verdict_reason=_vr,
             )
+            # N3 (round 2 external re-check, architect resolution
+            # 2026-09-26): a late push is a genuine integration success --
+            # a pending open increment for THIS cycle_id is resolved by it,
+            # exactly like the immediate integration path
+            # (_integrate_cycle_to_main) already clears. Without this, a
+            # kept increment that finishes here still reads as pending
+            # forever; the next `keep` then fails with resume_branch_missing
+            # even though the work already integrated.
+            # N3 (round 2 external re-check, architect resolution
+            # 2026-09-26): a late push is a genuine integration success --
+            # a pending open increment for THIS cycle_id is resolved by it,
+            # exactly like the immediate integration path
+            # (_integrate_cycle_to_main) already clears. Without this, a
+            # kept increment that finishes here still reads as pending
+            # forever; the next `keep` then fails with resume_branch_missing
+            # even though the work already integrated.
+            try:
+                from nanobot.runtime import open_increment as _open_increment_late_push
+
+                _open_increment_late_push.clear_pending_on_integration(state_dir, cycle_id)
+            except Exception:
+                pass
             _cleanup_cycle_branch(repo_root, branch)
             print(f'bridge: late push: {branch} (cycle {cycle_id}) pushed to main at {main_sha_after}')
             resolved_count += 1
