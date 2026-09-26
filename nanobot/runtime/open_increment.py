@@ -547,6 +547,52 @@ def check_running_for_kill(state_dir: "Path", current_cycle_id: str) -> "dict[st
     return {**running, "executor_status": executor_status}
 
 
+def _record_interruption_without_backoff(
+    state_dir: "Path",
+    cycle_id: str,
+    reason: str,
+    *,
+    retry_key: str,
+    plan_text: str,
+    candidate_id: "str | None",
+    branch: str = "",
+    extra_fields: "dict[str, Any] | None" = None,
+) -> OpenIncrementState:
+    """Shared shape for the two NO-backoff interruption reasons
+    (``interrupted_kill``, ``interrupted_defect``) -- neither is
+    supplier evidence, so the very next session may resolve it
+    immediately, unlike :func:`record_supply_interruption`'s doubling
+    backoff hold. Kept as one function so the two reasons cannot drift
+    apart in shape (the asymmetric-readers class of defect)."""
+    from nanobot.runtime.cycle_ledger import append_event
+
+    extra = extra_fields or {}
+    state = load_state(state_dir)
+    state.pending = {
+        "retry_key": retry_key,
+        "cycle_id": cycle_id or "",
+        "plan_text": plan_text,
+        "candidate_id": candidate_id or None,
+        "reason": reason,
+        "interrupted_at": _now_iso(),
+        "branch": branch or "",
+        "opening_entry_written": True,
+        **extra,
+    }
+    state.hold = None
+    state.held_ticks = 0
+    _save_state(state_dir, state)
+    append_event(state_dir, {
+        "phase": "open_increment",
+        "cycle_id": cycle_id or "",
+        "status": reason,
+        "retry_key": retry_key,
+        "branch": branch or "",
+        **extra,
+    })
+    return state
+
+
 def record_kill_interruption(
     state_dir: "Path",
     cycle_id: str,
@@ -561,39 +607,41 @@ def record_kill_interruption(
     :func:`record_attempt_started`) had no terminal outcome by the time a
     fresh cycle started -- a hard kill, or an exact imitation of one.
     Recorded as the pending open increment with ``reason:
-    interrupted_kill`` -- same keep/edit/delete contract as
-    ``interrupted_supply``, but with NO backoff hold: a kill is not
-    evidence the supplier is unavailable, so the very next session may
-    resolve it immediately. ``executor_status`` (architect resolution,
-    #1979 external-review followups) is the evidence :func:`check_running_for_kill`
-    read from the executor's own telemetry (``None`` when there was
-    none) -- carried into the record so the operator/planner can see
-    WHAT the executor last reported, even though the gate never acted on
-    it. Does not touch ``running`` -- :func:`resolve` (``keep``) and
-    :func:`record_attempt_finished` own its lifecycle from here."""
-    from nanobot.runtime.cycle_ledger import append_event
+    interrupted_kill``. ``executor_status`` (architect resolution,
+    #1979 external-review followups) is the evidence
+    :func:`check_running_for_kill` read from the executor's own
+    telemetry (``None`` when there was none) -- carried into the record
+    so the operator/planner can see WHAT the executor last reported,
+    even though the gate never acted on it. Does not touch ``running``
+    -- :func:`resolve` (``keep``) and :func:`record_attempt_finished`
+    own its lifecycle from here."""
+    return _record_interruption_without_backoff(
+        state_dir, cycle_id, "interrupted_kill",
+        retry_key=retry_key, plan_text=plan_text, candidate_id=candidate_id, branch=branch,
+        extra_fields={"executor_status": executor_status},
+    )
 
-    state = load_state(state_dir)
-    state.pending = {
-        "retry_key": retry_key,
-        "cycle_id": cycle_id or "",
-        "plan_text": plan_text,
-        "candidate_id": candidate_id or None,
-        "reason": "interrupted_kill",
-        "interrupted_at": _now_iso(),
-        "branch": branch or "",
-        "opening_entry_written": True,
-        "executor_status": executor_status,
-    }
-    state.hold = None
-    state.held_ticks = 0
-    _save_state(state_dir, state)
-    append_event(state_dir, {
-        "phase": "open_increment",
-        "cycle_id": cycle_id or "",
-        "status": "interrupted_kill",
-        "retry_key": retry_key,
-        "branch": branch or "",
-        "executor_status": executor_status,
-    })
-    return state
+
+def record_defect_interruption(
+    state_dir: "Path",
+    cycle_id: str,
+    *,
+    retry_key: str,
+    plan_text: str,
+    candidate_id: "str | None",
+    branch: str = "",
+) -> OpenIncrementState:
+    """D1 (ADR-035 Test Contract, external review finding #1): the
+    executor's OWN telemetry says ``status: error``, checkpoints already
+    exist on ``branch``, and :func:`nanobot.runtime.bridge._classify_llm_error`
+    found OUR OWN defect rather than a supplier outage. Recorded as the
+    pending open increment with ``reason: interrupted_defect`` -- same
+    keep/edit/delete contract as ``interrupted_supply``, but with NO
+    backoff hold: our own defect is not supplier evidence, so the very
+    next session may resolve it immediately. Does not touch ``running``
+    -- :func:`resolve` (``keep``) and :func:`record_attempt_finished` own
+    its lifecycle from here."""
+    return _record_interruption_without_backoff(
+        state_dir, cycle_id, "interrupted_defect",
+        retry_key=retry_key, plan_text=plan_text, candidate_id=candidate_id, branch=branch,
+    )

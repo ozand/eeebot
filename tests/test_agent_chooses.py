@@ -1845,6 +1845,114 @@ def test_checkpoint_keeps_shared_index_coherent(tmp_path: Path):
     assert (work / "scripts" / "clean.py").read_text(encoding="utf-8") == "Y = 2\n"
 
 
+def test_unfinished_session_never_integrates(tmp_path: Path, monkeypatch):
+    """D1 (ADR-035 Test Contract, external review finding #1): session
+    STATUS decides completeness, not commit count. A session whose own
+    telemetry says ``status: error`` is not finished -- however many
+    checkpoint commits its branch already holds -- and must never reach
+    the smoke/gate/integrate path, must never get a manufactured closing
+    commit, and must leave `main` untouched.
+
+    Drives a real ``bridge._main_impl()`` cycle with a fake executor
+    spawn that (1) commits a real checkpoint to the cycle branch, exactly
+    as ``_maybe_checkpoint_commit`` would mid-run, THEN (2) writes its
+    OWN terminal telemetry with ``status: "error"`` -- exactly the
+    checkpoint-then-died-on-the-next-step scenario the external review
+    reproduced. The error text does not match the supplier-outage
+    pattern, so this must classify as ``interrupted_defect``, not
+    ``interrupted_supply``.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge, open_increment
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    main_sha_before = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "main"], capture_output=True, text=True,
+    ).stdout.strip()
+
+    class _CheckpointThenErrorManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            if self._telemetry_component == "planner":
+                return "fake planner spawned (noop)"
+            (self.workspace / "scripts").mkdir(exist_ok=True)
+            (self.workspace / "scripts" / "partial.py").write_text(
+                "def partial():\n    return 'wip'\n", encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "-C", str(self.workspace), "add", "scripts/partial.py"],
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-C", str(self.workspace), "commit",
+                    "-m", "selfevo: checkpoint — scripts/partial.py", "-m", CHECKPOINT_TRAILER,
+                ],
+                check=True, capture_output=True,
+            )
+            task_id = "errored-task-01"
+            (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+            (state_dir / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({
+                    "status": "error",
+                    "summary": "Error: unexpected exception in tool execution",
+                    "result": "Error: unexpected exception in tool execution",
+                }),
+                encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
+            return "fake subagent spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _CheckpointThenErrorManager)
+    _stub_planning_session(monkeypatch, "finish the wip feature")
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    main_sha_after = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "main"], capture_output=True, text=True,
+    ).stdout.strip()
+    assert main_sha_after == main_sha_before, "an errored session with checkpoints must never integrate onto main"
+
+    # No manufactured closing commit -- exactly the one checkpoint commit
+    # this test wrote, nothing else, on whatever branch it landed on.
+    branches = subprocess.run(
+        ["git", "-C", str(work), "for-each-ref", "--format=%(refname:short)", "refs/heads/selfevo/cycle-*"],
+        capture_output=True, text=True,
+    ).stdout.split()
+    assert len(branches) == 1, f"expected exactly one retained cycle branch, got {branches!r}"
+    subjects = subprocess.run(
+        ["git", "-C", str(work), "log", "--format=%s", f"main..{branches[0]}"],
+        capture_output=True, text=True,
+    ).stdout.splitlines()
+    assert len([s for s in subjects if s.strip()]) == 1, (
+        f"expected exactly the one checkpoint commit, no manufactured closing marker: {subjects!r}"
+    )
+
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is not None, "an unfinished, checkpointed session must leave a pending open increment"
+    assert pending["reason"] == "interrupted_defect", (
+        "a non-supplier error text must classify as our own defect, not a supplier interruption"
+    )
+    assert pending["branch"] == branches[0]
+
+
 # --- keep-work: a resumed increment keeps one opening entry (ADR-035,
 # #1942 B2) --------------------------------------------------------------------
 
