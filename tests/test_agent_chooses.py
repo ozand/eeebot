@@ -3115,6 +3115,219 @@ def test_change_shape_excludes_checkpoints_via_shared_constant(tmp_path: Path):
     assert result["distribution"]["feature"] == 1
 
 
+def test_keep_confirm_prompt_and_task_reuse_previous_plan(tmp_path: Path, monkeypatch):
+    """D11 (#1903 planning-cost measurement, architect resolution
+    2026-09-26): on `keep`, the planner is NOT asked to plan the
+    increment from scratch. It receives the previous plan (the pending
+    open increment's own stored plan text -- the same text the diary's
+    dated entry for that cycle already holds) and only confirms or edits
+    it. Two assertions in one drive:
+
+    1. The planner's own prompt (task text) contains the previous plan
+       verbatim and names `plan_action`, and a response that OMITS
+       `plan` entirely (relying on the `plan_action: confirm` default)
+       is accepted -- never malformed -- proving the mandatory-plan-
+       field rule is relaxed for this path, not merely that the text
+       happens to be shown.
+    2. With `plan_action` omitted (confirm), the executor's own task
+       text contains that SAME previous plan, not a freshly composed one.
+    """
+    import asyncio
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge, no_plan_recovery, open_increment
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    _task_writing_dir = bridge.RELEASE_ROOT / "nanobot" / "skills" / "task-writing"
+    _task_writing_dir.mkdir(parents=True, exist_ok=True)
+    (_task_writing_dir / "SKILL.md").write_text("task-writing contract (test stub)\n", encoding="utf-8")
+
+    import subprocess
+
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    old_cycle_id = "cycle-keep-confirm-11"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    previous_plan_text = (
+        "Insight: the retained work needs one more verification pass.\n"
+        "Plan: finish verifying the wip feature and push it."
+    )
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", old_branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "wip.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/wip.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/wip.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id,
+        retry_key="d11-confirm-test", plan_text=previous_plan_text, candidate_id=None,
+        selfevo_repo=work, branch=old_branch,
+    )
+    _oi_state = open_increment.load_state(state_dir)
+    _oi_state.hold["deadline"] = "2000-01-01T00:00:00Z"
+    open_increment._save_state(state_dir, _oi_state)
+
+    captured_planner_tasks: list = []
+    captured_executor_tasks: list = []
+
+    class _KeepConfirmManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **kwargs):
+            if self._telemetry_component == "planner":
+                captured_planner_tasks.append(kwargs.get("task", ""))
+                task_id = "planner-keep-confirm-01"
+                raw_plan = json.dumps({
+                    "open_increment_decision": "keep",
+                    # `plan` and `plan_action` deliberately omitted -- the
+                    # default confirm path must not require either.
+                })
+                (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+                (state_dir / "subagents" / f"{task_id}.json").write_text(
+                    json.dumps({"status": "ok", "result": raw_plan, "context_usage": {"iterations": [{}]}}),
+                    encoding="utf-8",
+                )
+
+                async def _noop_planner():
+                    return None
+
+                self._running_tasks[task_id] = asyncio.create_task(_noop_planner())
+                return "fake planner spawned"
+            captured_executor_tasks.append(kwargs.get("task", ""))
+            return "fake subagent spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _KeepConfirmManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    assert len(captured_planner_tasks) == 1
+    assert previous_plan_text in captured_planner_tasks[0], (
+        "the planner's own prompt must contain the previous plan"
+    )
+    assert "plan_action" in captured_planner_tasks[0], (
+        "the planner must be told it may confirm/edit instead of planning from scratch"
+    )
+
+    no_plan_state = no_plan_recovery.load_state(state_dir)
+    assert no_plan_state.consecutive_planner == 0, (
+        "omitting `plan` under the confirm default must not be malformed"
+    )
+
+    assert len(captured_executor_tasks) == 1
+    assert previous_plan_text in captured_executor_tasks[0], (
+        f"the executor's task must reuse the previous plan verbatim, got: {captured_executor_tasks[0]!r}"
+    )
+
+
+def test_keep_edit_diary_records_edit_of_previous_plan(tmp_path: Path, monkeypatch):
+    """D11 (#1903 planning-cost measurement, architect resolution
+    2026-09-26): on `keep` + `plan_action: edit`, the diary must record
+    it as an EDIT of the open increment's previous plan, not a fresh
+    plan -- and the executor's task must carry the REVISED text, not the
+    stale previous one.
+    """
+    import asyncio
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge, open_increment
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    _task_writing_dir = bridge.RELEASE_ROOT / "nanobot" / "skills" / "task-writing"
+    _task_writing_dir.mkdir(parents=True, exist_ok=True)
+    (_task_writing_dir / "SKILL.md").write_text("task-writing contract (test stub)\n", encoding="utf-8")
+
+    import subprocess
+
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    old_cycle_id = "cycle-keep-edit-11"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    previous_plan_text = "Plan: finish the wip feature exactly as originally scoped."
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", old_branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "wip.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/wip.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/wip.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id,
+        retry_key="d11-edit-test", plan_text=previous_plan_text, candidate_id=None,
+        selfevo_repo=work, branch=old_branch,
+    )
+    _oi_state = open_increment.load_state(state_dir)
+    _oi_state.hold["deadline"] = "2000-01-01T00:00:00Z"
+    open_increment._save_state(state_dir, _oi_state)
+
+    revised_plan_text = "finish the wip feature, but also add a regression test for the crash it fixes"
+    captured_executor_tasks: list = []
+
+    class _KeepEditManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **kwargs):
+            if self._telemetry_component == "planner":
+                task_id = "planner-keep-edit-01"
+                raw_plan = json.dumps({
+                    "open_increment_decision": "keep",
+                    "plan_action": "edit",
+                    "plan": revised_plan_text,
+                })
+                (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+                (state_dir / "subagents" / f"{task_id}.json").write_text(
+                    json.dumps({"status": "ok", "result": raw_plan, "context_usage": {"iterations": [{}]}}),
+                    encoding="utf-8",
+                )
+
+                async def _noop_planner():
+                    return None
+
+                self._running_tasks[task_id] = asyncio.create_task(_noop_planner())
+                return "fake planner spawned"
+            captured_executor_tasks.append(kwargs.get("task", ""))
+            return "fake subagent spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _KeepEditManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    diary_files = sorted((work / "diary").glob("*.md"))
+    assert len(diary_files) == 1
+    diary_text = diary_files[0].read_text(encoding="utf-8")
+    assert revised_plan_text in diary_text
+    assert "edit" in diary_text.lower() and "previous plan" in diary_text.lower(), (
+        f"the diary must record this as an edit of the previous plan, not a fresh one:\n{diary_text}"
+    )
+
+    assert len(captured_executor_tasks) == 1
+    assert revised_plan_text in captured_executor_tasks[0], (
+        "the executor's task must carry the REVISED plan text on edit"
+    )
+
+
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
 # architect addendum, #1942 B2) -----------------------------------------------
 
