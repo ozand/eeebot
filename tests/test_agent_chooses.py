@@ -2586,6 +2586,110 @@ def test_delete_keeps_inspection_ref(tmp_path: Path):
     )
 
 
+def test_missing_open_increment_decision_is_no_plan(tmp_path: Path, monkeypatch):
+    """D8 (ADR-035 Test Contract, external review finding #8): a pending
+    open increment with a MISSING or INVALID ``open_increment_decision``
+    is an invalid plan -- ``no_plan``/``malformed``, planner family --
+    never silent acceptance of the new plan with no resume routed
+    through. Drives a real ``bridge._main_impl()`` cycle with a fake
+    planner spawn whose telemetry carries an otherwise well-formed plan
+    (parses fine, has a non-empty ``plan`` field) but simply omits
+    ``open_increment_decision``, while a real pending increment already
+    exists. The REAL ``_run_planning_session`` runs (only
+    ``SubagentManager`` is faked) so the actual validation logic is
+    exercised, not a stub.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge, no_plan_recovery, open_increment
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    # _run_planning_session (real, not stubbed, in THIS test) hard-requires
+    # the release-owned task-writing contract to exist before it will even
+    # attempt to parse a plan.
+    _task_writing_dir = bridge.RELEASE_ROOT / "nanobot" / "skills" / "task-writing"
+    _task_writing_dir.mkdir(parents=True, exist_ok=True)
+    (_task_writing_dir / "SKILL.md").write_text("task-writing contract (test stub)\n", encoding="utf-8")
+
+    old_cycle_id = "cycle-no-decision-08"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", old_branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "wip.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/wip.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/wip.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id,
+        retry_key="d8-test", plan_text="finish the wip feature", candidate_id=None,
+        selfevo_repo=work, branch=old_branch,
+    )
+    _oi_state = open_increment.load_state(state_dir)
+    _oi_state.hold["deadline"] = "2000-01-01T00:00:00Z"
+    open_increment._save_state(state_dir, _oi_state)
+    pending_before = open_increment.pending_open_increment(state_dir)
+    assert pending_before is not None
+
+    class _PlannerOmitsDecisionManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            if self._telemetry_component != "planner":
+                return "fake subagent spawned"
+            task_id = "planner-no-decision-01"
+            raw_plan = json.dumps({
+                "insight": "the retained checkpoint still needs one more commit",
+                "plan": "finish the wip feature",
+                "iterations_planned": 1,
+                # `open_increment_decision` deliberately omitted.
+            })
+            (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+            (state_dir / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({
+                    "status": "ok",
+                    "result": raw_plan,
+                    "context_usage": {"iterations": [{}]},
+                }),
+                encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
+            return "fake planner spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _PlannerOmitsDecisionManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    pending_after = open_increment.pending_open_increment(state_dir)
+    assert pending_after == pending_before, (
+        "an unresolved open increment must not be silently cleared/altered by an "
+        "invalid plan that never named a decision"
+    )
+
+    no_plan_state = no_plan_recovery.load_state(state_dir)
+    assert no_plan_state.consecutive_planner >= 1, (
+        "a missing/invalid open_increment_decision must count as a planner-family no_plan outcome"
+    )
+
+
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
 # architect addendum, #1942 B2) -----------------------------------------------
 
