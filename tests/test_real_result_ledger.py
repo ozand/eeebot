@@ -187,6 +187,7 @@ class TestEndToEndAgreement:
         result_path = state_dir / "subagents" / "results" / "result-req-dup.json"
         artifact = json.loads(result_path.read_text(encoding="utf-8"))
         assert artifact["result_status"] == "blocked"
+        assert artifact["delivered"] is False
 
         outcome_rows = [
             r for r in _read_ledger(state_dir)
@@ -196,6 +197,27 @@ class TestEndToEndAgreement:
         assert row["real_result"]["is_real_result"] == bridge._is_real_result(artifact)
         assert row["real_result"]["is_real_result"] is False
         assert row["real_result"] == bridge._real_result_ledger_inputs(artifact)
+        assert row["delivered"] is False
+
+    def test_cycle_branch_setup_failure_artifact_records_non_delivery(self, tmp_path, monkeypatch):
+        base = tmp_path
+        state_dir = base / "state"
+        state_dir.mkdir()
+        _init_selfevo_repo(base)
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+        monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
+        monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        monkeypatch.setattr(bridge, "_setup_cycle_branch", lambda *args, **kwargs: {
+            "ok": False, "reason": "setup_test_failure", "branch": None, "main_sha": "abc",
+        })
+
+        _seed_bridge_request(state_dir, "req-setup-fail", "cycle-setup-fail")
+        assert asyncio.run(bridge._main_impl()) == 0
+        artifact = json.loads((state_dir / "subagents" / "results" / "result-req-setup-fail.json").read_text(encoding="utf-8"))
+        assert artifact["result_status"] == "blocked"
+        assert artifact["delivered"] is False
 
 
 # ─── an old row (pre-#1748, no real_result key) is handled by every reader ─
