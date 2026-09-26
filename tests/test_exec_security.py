@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -18,8 +19,10 @@ async def test_watchdog_cancellation_kills_and_reaps_real_exec_subprocess(tmp_pa
     import sys
     import time
 
-    pid_file = tmp_path / "child.pid"
+    child_pid_file = tmp_path / "child.pid"
+    shell_pid_file = tmp_path / "shell.pid"
     if os.name == "nt":
+        pid_file = child_pid_file
         child_script = tmp_path / "child.py"
         child_script.write_text(
             "import os, sys, time\n"
@@ -39,19 +42,34 @@ async def test_watchdog_cancellation_kills_and_reaps_real_exec_subprocess(tmp_pa
             f'"{sys.executable}" "{child_script}" "{pid_file}"'
         )
     else:
-        child_code = (
-            "import os, sys, time; "
-            "open(sys.argv[1], 'w').write(str(os.getpid())); "
-            "time.sleep(60)"
+        child_script = tmp_path / "child.py"
+        child_script.write_text(
+            "import os, sys, time\n"
+            "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+            "time.sleep(60)\n",
+            encoding="utf-8",
         )
-        child_command = f'{sys.executable} -c "{child_code}" "{pid_file}"'
+        child_command = (
+            f'echo $$ > "{shell_pid_file}"; '
+            f'"{sys.executable}" "{child_script}" "{child_pid_file}"'
+        )
     tool = ExecTool(timeout=60)
     execution = asyncio.create_task(tool.execute(child_command))
     deadline = time.monotonic() + 10
-    while not pid_file.exists() and time.monotonic() < deadline:
+    while (
+        (not child_pid_file.exists() or (os.name != "nt" and not shell_pid_file.exists()))
+        and time.monotonic() < deadline
+    ):
         await asyncio.sleep(0.01)
-    assert pid_file.exists(), "exec child did not start"
-    pid = int(pid_file.read_text(encoding="utf-8"))
+    assert child_pid_file.exists(), "exec child did not start"
+    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+    shell_pid = int(shell_pid_file.read_text(encoding="utf-8")) if shell_pid_file.exists() else None
+    if os.name != "nt":
+        import os as posix_os
+
+        assert shell_pid is not None
+        assert posix_os.getsid(shell_pid) == shell_pid
+        assert posix_os.getpgid(child_pid) == shell_pid, "grandchild did not inherit ExecTool's process group"
 
     execution.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -61,15 +79,27 @@ async def test_watchdog_cancellation_kills_and_reaps_real_exec_subprocess(tmp_pa
         import ctypes
 
         kernel32 = ctypes.windll.kernel32
-        process = kernel32.OpenProcess(0x00100000 | 0x1000, False, pid)
-        assert process, f"child PID {pid} could not be inspected"
+        process = kernel32.OpenProcess(0x00100000 | 0x1000, False, child_pid)
+        assert process, f"child PID {child_pid} could not be inspected"
         try:
-            assert kernel32.WaitForSingleObject(process, 0) == 0, f"child PID {pid} is still alive"
+            assert kernel32.WaitForSingleObject(process, 0) == 0, f"child PID {child_pid} is still alive"
         finally:
             kernel32.CloseHandle(process)
     else:
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+        for pid in (shell_pid, child_pid):
+            assert pid is not None
+            proc_stat = Path(f"/proc/{pid}/stat")
+            deadline = time.monotonic() + 5
+            while proc_stat.exists() and time.monotonic() < deadline:
+                stat_fields = proc_stat.read_text(encoding="utf-8").split()
+                if len(stat_fields) > 2 and stat_fields[2] == "Z":
+                    break
+                await asyncio.sleep(0.01)
+            if proc_stat.exists():
+                stat_fields = proc_stat.read_text(encoding="utf-8").split()
+                assert len(stat_fields) > 2 and stat_fields[2] == "Z", (
+                    f"PID {pid} remains running (state={stat_fields[2] if len(stat_fields) > 2 else 'unknown'})"
+                )
 
 
 def _fake_resolve_private(hostname, port, family=0, type_=0):
