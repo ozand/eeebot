@@ -24,6 +24,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from nanobot.runtime.commit_markers import is_artificial_commit_subject
+
 
 def _resolve_api_key() -> str:
     key = os.environ.get("LITELLM_API_KEY", "").strip()
@@ -168,7 +170,13 @@ def extract_file_and_commits(
         if not line or "|" not in line:
             continue
         sha, subj = line.split("|", 1)
-        if subj.startswith("selfevo: auto-commit"):
+        # #1910 / round 3 external re-check ("prototype_already_implemented"
+        # item, architect resolution 2026-09-26): the shared exclusion also
+        # matches checkpoint commits, not just the residual auto-commit --
+        # a checkpoint's own subject names the paths it touched, exactly
+        # the same shape as real work, and must not become "already
+        # implemented" evidence.
+        if is_artificial_commit_subject(subj):
             continue
         try:
             diff = subprocess.check_output(
