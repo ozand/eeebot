@@ -2427,6 +2427,98 @@ def test_increment_accounting_uses_merge_base(tmp_path: Path, monkeypatch):
     assert "scripts/finishing.py" in files_changed
 
 
+def test_failed_closing_commit_blocks_integration(tmp_path: Path, monkeypatch):
+    """D6 (ADR-035 Test Contract, external review finding #6): if the
+    required closing commit (for an all-checkpoint branch) fails to be
+    created, integration must not proceed -- "no closing commit created
+    -> no integration" (reason ``closing_commit_failed``). Drives a real
+    ``bridge._main_impl()`` cycle whose fake executor spawn commits ONLY
+    a checkpoint (no separate closing commit -- the bridge itself must
+    create one), with a real ``commit-msg`` hook installed that rejects
+    every commit whose subject starts with ``selfevo: `` and does NOT
+    carry the checkpoint trailer -- exactly the closing commit's own
+    shape, never the checkpoint's -- mirroring the external review's own
+    reproduction ("a real commit-message hook rejected the closing
+    commit"). Asserts: the branch is retained with exactly the one
+    checkpoint commit (no manufactured marker), and the checkpoint's
+    work never reaches ``main``.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    hook_path = work / ".git" / "hooks" / "commit-msg"
+    hook_path.write_text(
+        "#!/bin/sh\n"
+        "if grep -q '^selfevo: ' \"$1\" && ! grep -q 'Selfevo-Checkpoint: true' \"$1\"; then\n"
+        "  echo 'rejected: non-checkpoint selfevo commit blocked by test hook' >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    hook_path.chmod(0o755)
+
+    class _CheckpointOnlyManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            if self._telemetry_component == "planner":
+                return "fake planner spawned (noop)"
+            (self.workspace / "scripts").mkdir(exist_ok=True)
+            (self.workspace / "scripts" / "wip.py").write_text(
+                "def wip():\n    return 'partial'\n", encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "-C", str(self.workspace), "add", "scripts/wip.py"], check=True, capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-C", str(self.workspace), "commit",
+                    "-m", "selfevo: checkpoint — scripts/wip.py", "-m", CHECKPOINT_TRAILER,
+                ],
+                check=True, capture_output=True,
+            )
+            return "fake subagent spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _CheckpointOnlyManager)
+    _stub_planning_session(monkeypatch, "finish the wip feature (closing-commit-fail test)")
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    main_tree = subprocess.run(
+        ["git", "-C", str(work), "ls-tree", "-r", "--name-only", "main"], capture_output=True, text=True,
+    ).stdout
+    assert "scripts/wip.py" not in main_tree, (
+        "a checkpoint-only branch whose closing commit failed must never integrate"
+    )
+
+    branches = subprocess.run(
+        ["git", "-C", str(work), "for-each-ref", "--format=%(refname:short)", "refs/heads/selfevo/cycle-*"],
+        capture_output=True, text=True,
+    ).stdout.split()
+    assert len(branches) == 1, f"expected exactly one retained cycle branch, got {branches!r}"
+    subjects = subprocess.run(
+        ["git", "-C", str(work), "log", "--format=%s", f"main..{branches[0]}"],
+        capture_output=True, text=True,
+    ).stdout.splitlines()
+    assert len([s for s in subjects if s.strip()]) == 1, (
+        f"a closing-commit failure must not leave a manufactured marker on the branch: {subjects!r}"
+    )
+
+
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
 # architect addendum, #1942 B2) -----------------------------------------------
 
