@@ -574,10 +574,12 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     if [ "$VERIFY_ONLY" -eq 1 ]; then
       echo "[remote] verify-only mode: checking $DASHBOARD_UNIT without restart"
       if ! systemctl is-active --quiet "$DASHBOARD_UNIT"; then
-        die "$DASHBOARD_UNIT is not active"
+        echo "[remote] NOTICE: $DASHBOARD_UNIT is not active; skipping process verification"
+        DASHBOARD_PID=""
+      else
+        DASHBOARD_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
+        DASHBOARD_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
       fi
-      DASHBOARD_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
-      DASHBOARD_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
     else
       echo "[remote] restarting $DASHBOARD_UNIT after current activation"
       DASHBOARD_PREV_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
@@ -602,41 +604,25 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     # aborts as `unreadable: /proc/<pid>/cwd (exit N: <stderr>)`, never as the
     # `cwd is ''` text below, which now means exactly one thing: the process
     # runs from somewhere other than the release.
-    DASHBOARD_CWD="$(gate_read "/proc/$DASHBOARD_PID/cwd" sudo readlink -v "/proc/$DASHBOARD_PID/cwd")"
-    # `sudo tr ... < file` would not work: the shell opens the redirect as the
-    # deploying user before sudo runs. The read itself has to be the sudo'd
-    # command; gate_read streams it (see there) so the NULs reach `tr`.
-    DASHBOARD_CMDLINE="$(gate_read "/proc/$DASHBOARD_PID/cmdline" sudo cat "/proc/$DASHBOARD_PID/cmdline" | tr "\0" " ")"
-    if [ "$VERIFY_ONLY" -eq 0 ] && [ "$DASHBOARD_PID" = "$DASHBOARD_PREV_PID" ] && [ "$DASHBOARD_START" = "$DASHBOARD_PREV_START" ]; then
-      die "$DASHBOARD_UNIT restart did not produce a new process identity"
-    fi
-    if [ "$DASHBOARD_CWD" != "$RELEASE_DIR" ]; then
-      die "$DASHBOARD_UNIT PID $DASHBOARD_PID cwd is '$DASHBOARD_CWD', expected '$RELEASE_DIR'"
-    fi
-    if [ "$VERIFY_ONLY" -eq 0 ] && [ "$(cat "$RELEASE_DIR/SOURCE_COMMIT")" != "$FULL_COMMIT" ]; then
-      die "activated release SOURCE_COMMIT does not equal full requested SHA"
-    fi
-    # The unit's ExecStart names the `current` symlink; the cwd check resolves
-    # that symlink to the release, while this exact check pins script and args.
-    case "$DASHBOARD_CMDLINE" in
-      *"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"*) : ;;
-      *)
-        die "$DASHBOARD_UNIT PID $DASHBOARD_PID has unexpected command line: $DASHBOARD_CMDLINE"
-        ;;
-    esac
-    echo "[remote] $DASHBOARD_UNIT active: MainPID=$DASHBOARD_PID start=$DASHBOARD_START previous_pid=$DASHBOARD_PREV_PID previous_start=$DASHBOARD_PREV_START cwd=$DASHBOARD_CWD source=$FULL_COMMIT"
-
-    # Semantic release health gate (ADR-036 D3 Part B: model-free and dashboard-free):
-    # Replaces former :8080 HTTP listener and curl checks (/api/health, /api/metrics, /).
-    # Directly validates release state and rendered payloads using the
-    # same collection and rendering logic.
-    # Vocabulary allowlist matching dashboard.ARTIFACT_SOURCE_STATUSES:
-    # source["status"] not in {"fresh", "stale", "missing", "permission", "unreadable", "malformed", "valid-empty", "retired", "unavailable"}
-    if ! python3 "$RELEASE_DIR/scripts/verify_release_health.py"; then
-      if [ "$VERIFY_ONLY" -eq 1 ]; then
-        echo "VERIFY_ONLY HEALTH_FETCH_FAILED" >&2
+    if [ -n "$DASHBOARD_PID" ]; then
+      DASHBOARD_CWD="$(gate_read "/proc/$DASHBOARD_PID/cwd" sudo readlink -v "/proc/$DASHBOARD_PID/cwd")"
+      DASHBOARD_CMDLINE="$(gate_read "/proc/$DASHBOARD_PID/cmdline" sudo cat "/proc/$DASHBOARD_PID/cmdline" | tr "\0" " ")"
+      if [ "$VERIFY_ONLY" -eq 0 ] && [ "$DASHBOARD_PID" = "$DASHBOARD_PREV_PID" ] && [ "$DASHBOARD_START" = "$DASHBOARD_PREV_START" ]; then
+        die "$DASHBOARD_UNIT restart did not produce a new process identity"
       fi
-      die "could not verify release health"
+      if [ "$DASHBOARD_CWD" != "$RELEASE_DIR" ]; then
+        die "$DASHBOARD_UNIT PID $DASHBOARD_PID cwd is '$DASHBOARD_CWD', expected '$RELEASE_DIR'"
+      fi
+      if [ "$VERIFY_ONLY" -eq 0 ] && [ "$(cat "$RELEASE_DIR/SOURCE_COMMIT")" != "$FULL_COMMIT" ]; then
+        die "activated release SOURCE_COMMIT does not equal full requested SHA"
+      fi
+      case "$DASHBOARD_CMDLINE" in
+        *"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"*) : ;;
+        *)
+          die "$DASHBOARD_UNIT PID $DASHBOARD_PID has unexpected command line: $DASHBOARD_CMDLINE"
+          ;;
+      esac
+      echo "[remote] $DASHBOARD_UNIT active: MainPID=$DASHBOARD_PID start=$DASHBOARD_START previous_pid=$DASHBOARD_PREV_PID previous_start=$DASHBOARD_PREV_START cwd=$DASHBOARD_CWD source=$FULL_COMMIT"
     fi
   elif [ "$DASHBOARD_UNIT_STATE" = "disabled" ] || [ "$DASHBOARD_UNIT_STATE" = "masked" ]; then
     echo "NOTICE: $DASHBOARD_UNIT is $DASHBOARD_UNIT_STATE; preserving state"
@@ -647,6 +633,17 @@ elif [ "$DASHBOARD_LOAD_STATE" = "not-found" ] || [ -z "$DASHBOARD_LOAD_STATE" ]
   echo "NOTICE: $DASHBOARD_UNIT is not found; preserving absence"
 else
   die "unexpected $DASHBOARD_UNIT LoadState=$DASHBOARD_LOAD_STATE"
+fi
+
+# Semantic release health gate (ADR-036 D3 Part B: model-free and dashboard-free):
+# Runs independently of dashboard service state or port 8080.
+# Vocabulary allowlist matching dashboard.ARTIFACT_SOURCE_STATUSES:
+# source["status"] not in {"fresh", "stale", "missing", "permission", "unreadable", "malformed", "valid-empty", "retired", "unavailable"}
+if ! python3 "$RELEASE_DIR/scripts/verify_release_health.py"; then
+  if [ "$VERIFY_ONLY" -eq 1 ]; then
+    echo "VERIFY_ONLY HEALTH_FETCH_FAILED" >&2
+  fi
+  die "could not verify release health"
 fi
 
 # Ensure bridge service is restarted correctly after model-free activation.

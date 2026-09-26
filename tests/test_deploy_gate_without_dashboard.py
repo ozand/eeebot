@@ -130,3 +130,15 @@ def test_every_former_route_reader_is_served_or_unavailable() -> None:
     res = verify_release_health()
     assert res["status"] == "ok"
     assert res["html_bytes"] >= 1024
+
+
+def test_health_gate_runs_when_dashboard_unit_is_disabled_or_absent() -> None:
+    """ADR-036 D3: release health gate runs independently after dashboard unit block."""
+    script_text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    # Confirm health gate invocation is outside and after the dashboard unit if-block
+    idx_dashboard_end = script_text.index('die "unexpected $DASHBOARD_UNIT LoadState=$DASHBOARD_LOAD_STATE"\nfi')
+    idx_health_gate = script_text.index('python3 "$RELEASE_DIR/scripts/verify_release_health.py"')
+    assert idx_health_gate > idx_dashboard_end, (
+        "release health gate must be outside and after the dashboard unit block"
+    )
