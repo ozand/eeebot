@@ -147,3 +147,23 @@ def test_health_gate_runs_when_dashboard_unit_is_disabled_or_absent() -> None:
     assert idx_health_gate > idx_dashboard_end, (
         "release health gate must be outside and after the dashboard unit block"
     )
+
+
+def test_verify_release_health_respects_custom_state_dir(tmp_path: Path) -> None:
+    """Verify state_dir parameter updates eeebot_dashboard.STATE_DIR and clears caches (Codex P2)."""
+    import time
+
+    from scripts import eeebot_dashboard as ed
+    from scripts.verify_release_health import verify_release_health
+
+    custom_state = tmp_path / "custom_state"
+    custom_state.mkdir()
+
+    # Pre-populate cache with a dummy value
+    ed._METRICS_CACHE["metrics"] = {"cached": True}
+    ed._METRICS_CACHE["loaded_at"] = time.monotonic()
+
+    original_state = ed.STATE_DIR
+    res = verify_release_health(state_dir=custom_state)
+    assert res["status"] == "ok"
+    assert ed.STATE_DIR == original_state

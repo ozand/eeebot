@@ -100,6 +100,12 @@ def verify_release_health(state_dir: Path | None = None) -> dict[str, Any]:
     if state_dir is not None:
         os.environ["EEEBOT_STATE_DIR"] = str(state_dir)
 
+    from scripts import eeebot_dashboard as ed
+    old_ed_state = getattr(ed, "STATE_DIR", None)
+    if state_dir is not None:
+        ed.STATE_DIR = Path(state_dir)
+    ed._METRICS_CACHE.clear()
+
     try:
         from scripts.eeebot_dashboard import (
             collect_metrics,
@@ -114,6 +120,9 @@ def verify_release_health(state_dir: Path | None = None) -> dict[str, Any]:
         html_content = render_html(metrics_raw)
     finally:
         if state_dir is not None:
+            if old_ed_state is not None:
+                ed.STATE_DIR = old_ed_state
+            ed._METRICS_CACHE.clear()
             if old_state_env is not None:
                 os.environ["EEEBOT_STATE_DIR"] = old_state_env
             else:
