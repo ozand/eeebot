@@ -3485,6 +3485,88 @@ def test_resolve_saved_reflects_the_full_verified_transition(tmp_path: Path, mon
     assert pending2.get("plan_version", 1) == 1
 
 
+def test_open_increment_resolution_raising_fails_closed(tmp_path: Path, monkeypatch):
+    """Codex review of 777ada1a (nanobot/runtime/bridge.py:3897), P2
+    (architect resolution 2026-09-26): the caller's ``try``/``except
+    Exception: pass`` around ``open_increment.resolve(...)`` silently
+    swallows ANY exception the call raises -- not just the
+    ``resolve_saved`` verification failure it already checks -- and falls
+    through with nothing recorded about the open increment's resolution
+    at all. The plan is then accepted and handed to the executor despite
+    the mandatory keep/edit/delete decision never actually resolving.
+    Must fail CLOSED: an exception here is rejected the same way a failed
+    ``resolve_saved`` already is (malformed, planner family), not
+    silently ignored.
+    """
+    import asyncio
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge, no_plan_recovery, open_increment, planner_rest
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    _task_writing_dir = bridge.RELEASE_ROOT / "nanobot" / "skills" / "task-writing"
+    _task_writing_dir.mkdir(parents=True, exist_ok=True)
+    (_task_writing_dir / "SKILL.md").write_text("task-writing contract (test stub)\n", encoding="utf-8")
+
+    old_cycle_id = "cycle-resolve-raises"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id,
+        retry_key="resolve-raises-test", plan_text="finish the wip feature", candidate_id=None,
+        selfevo_repo=work, branch=old_branch,
+    )
+    _oi_state = open_increment.load_state(state_dir)
+    _oi_state.hold["deadline"] = "2000-01-01T00:00:00Z"
+    open_increment._save_state(state_dir, _oi_state)
+
+    class _PlannerKeepManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            if self._telemetry_component != "planner":
+                return "fake subagent spawned"
+            task_id = "planner-resolve-raises-01"
+            raw_plan = json.dumps({"open_increment_decision": "keep"})
+            (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+            (state_dir / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({"status": "ok", "result": raw_plan, "context_usage": {"iterations": [{}]}}),
+                encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
+            return "fake planner spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _PlannerKeepManager)
+
+    def _raising_resolve(*_a, **_k):
+        raise RuntimeError("simulated unexpected resolve() failure")
+
+    monkeypatch.setattr(open_increment, "resolve", _raising_resolve)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is not None and pending["cycle_id"] == old_cycle_id, (
+        f"an exception during resolution must leave the original increment untouched: {pending!r}"
+    )
+    no_plan_state = no_plan_recovery.load_state(state_dir)
+    assert no_plan_state.consecutive_planner >= 1, (
+        "an exception during open-increment resolution must count as a planner-family "
+        "malformed outcome, not be silently swallowed"
+    )
+
+
 def test_resolve_delete_rejects_an_unreadable_verification_readback(tmp_path: Path, monkeypatch):
     """Round 5 external re-check, item N2 (architect resolution
     2026-09-26): P2-a's verification calls ``load_state()`` back after a
