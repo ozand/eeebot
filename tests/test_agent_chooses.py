@@ -4557,6 +4557,83 @@ def test_recovery_of_resumed_supply_error_actually_holds(tmp_path: Path, monkeyp
     )
 
 
+def test_supplier_recovery_holds_before_planning_starts_this_same_tick(tmp_path: Path, monkeypatch):
+    """Round 4 P2-b (architect resolution 2026-09-26): the stale-attempt
+    recovery check (D2) used to run AFTER both pre-check calls and after
+    repository/provider preparation -- so a hold it JUST created
+    (record_supply_interruption) was invisible to THIS SAME tick's own
+    ``open_increment.precheck()``, which had already run earlier. The
+    tick proceeded to prepare the repo, build a provider, and run a real
+    planning session in the exact tick that just decided to back off.
+    Moved to before both pre-checks: a hold created here must stop the
+    SAME tick (no planning session runs at all) and the NEXT tick too
+    (the hold's deadline has not passed).
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge, open_increment
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    stale_cycle_id = "cycle-p2b-stale"
+    stale_branch = f"selfevo/cycle-{stale_cycle_id}"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", stale_branch], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    open_increment.record_attempt_started(state_dir, stale_cycle_id, stale_branch, plan_text="original plan")
+    _oi_state = open_increment.load_state(state_dir)
+    task_id = "p2b-stale-task-01"
+    _oi_state.running["task_id"] = task_id
+    open_increment._save_state(state_dir, _oi_state)
+    (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+    (state_dir / "subagents" / f"{task_id}.json").write_text(
+        json.dumps({
+            "status": "error",
+            "result": "Error: LLM execution failed: Error calling LLM: litellm.InternalServerError: Connection error.",
+        }),
+        encoding="utf-8",
+    )
+
+    # A raising stub would be swallowed by _main_impl_body's own
+    # try/except around _run_planning_session (caught, logged as
+    # "unexpected error", treated as no plan) -- that path returns 0
+    # regardless of whether planning ran, so it cannot tell the two
+    # apart. A flag the stub sets on entry is the actual signal.
+    _plan_called = {"yes": False}
+
+    async def _flag_plan(**_kwargs):
+        _plan_called["yes"] = True
+        return {'ran': True, 'iterations_used': 1, 'iterations_planned': 1, 'tampered_files': [], 'plan': None}
+
+    monkeypatch.setattr(bridge, "_run_planning_session", _flag_plan)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+    assert _plan_called["yes"] is False, (
+        "planning session must never run on a tick that just created a hold"
+    )
+
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is not None and pending["reason"] == "interrupted_supply", (
+        f"the stale attempt's supplier error must be recorded as the pending increment: {pending!r}"
+    )
+    state = open_increment.load_state(state_dir)
+    assert state.hold is not None, "recovering a supply interruption must start a backoff hold"
+
+    # The NEXT tick: the hold's deadline has not passed -- still held, and
+    # planning must still never run.
+    rc2 = asyncio.run(bridge._main_impl())
+    assert rc2 == 0
+    assert _plan_called["yes"] is False, "the next tick must still be held -- planning must not run there either"
+    state_after = open_increment.load_state(state_dir)
+    assert state_after.hold is not None, "the next tick must still be held (the backoff deadline has not passed)"
+
+
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
 # architect addendum, #1942 B2) -----------------------------------------------
 
