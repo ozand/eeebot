@@ -113,7 +113,12 @@ def test_charter_is_read_from_release_root_not_instance_repo(roots):
     (release_root / "goals.md").write_text("# Charter\nOnly here.\n", encoding="utf-8")
     inputs = collect_inputs(state_root, repo_root)
     assert "Only here." in inputs["goals"]
-    assert inputs["inputs_status"]["goals"] == {"chars": len(inputs["goals"]), "source": "release_root", "status": "complete"}
+    # F6 adds explicit completeness metadata; a small readable charter is
+    # still complete and records its original length without truncation.
+    assert inputs["inputs_status"]["goals"] == {
+        "chars": len(inputs["goals"]), "source": "release_root", "status": "complete",
+        "truncated": False, "original_chars": len(inputs["goals"]),
+    }
 
 
 def test_charter_never_falls_back_to_goal_text_json(roots):
@@ -380,6 +385,17 @@ def test_should_refuse_verdict_for_the_other_four_inputs_is_unchanged():
         status.update({name: {"status": value} for name, value in zip(other_names, states)})
         expected = sum(value in {"empty", "unavailable"} for value in states) > strategist_inputs._MAX_EMPTY_INPUTS
         assert strategist_inputs.should_refuse(status) is expected
+
+
+def test_truncated_readable_charter_remains_eligible(roots):
+    state_root, repo_root, release_root = roots
+    _healthy(state_root, repo_root, release_root)
+    (release_root / "goals.md").write_text("# Charter\n" + ("A readable bounded charter. " * 250), encoding="utf-8")
+
+    inputs = collect_inputs(state_root, repo_root)
+    assert inputs["inputs_status"]["goals"]["status"] == "truncated"
+    assert inputs["inputs_status"]["goals"]["truncated"] is True
+    assert strategist_inputs.should_refuse(inputs["inputs_status"]) is False
 
 
 def test_should_refuse_when_charter_absent_or_unreadable_regardless_of_others():

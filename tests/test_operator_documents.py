@@ -35,6 +35,7 @@ from nanobot.runtime.operator_documents import (
     resolve_derived_priorities,
     resolve_derived_priorities_split,
     resolve_operator_priorities,
+    resolve_operator_priority_labels,
 )
 from nanobot.runtime.state import load_runtime_state_from_root
 
@@ -130,6 +131,33 @@ def test_each_document_resolves_from_its_one_root(tmp_path: Path, monkeypatch):
     )
     runtime = load_runtime_state_from_root(state_dir)
     assert runtime["active_goal"] == "goal-from-state-root"
+
+
+def test_operator_label_vector_tag_is_normalized_for_dedup(tmp_path: Path):
+    """ADR-034 rule 4: trailing vector metadata is not part of label identity."""
+    state = tmp_path / "state"
+    _goal_text_json(
+        state,
+        "Current priority targets:\n(A) Priority 14 — Existing label (V1): do work.",
+    )
+
+    assert "existing label" in resolve_operator_priority_labels(state)
+
+
+def test_completed_parenthesized_priority_syntax_is_preserved(tmp_path: Path):
+    """ADR-034 F7: retain the established `Priority N (context, commit …)` form."""
+    state = tmp_path / "state"
+    _goal_text_json(
+        state,
+        "Completed (do not repeat): Priority 14 (demand dashboard, commit abc123).",
+    )
+
+    result = resolve_operator_priorities(state)
+
+    assert result.state == PRIORITY_ALL_COMPLETED
+    assert [(entry.number, entry.title) for entry in result.completed_entries] == [
+        (14, "demand dashboard"),
+    ]
 
 
 def test_four_priority_states_are_distinct(tmp_path: Path):

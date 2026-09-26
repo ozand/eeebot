@@ -1712,7 +1712,12 @@ def build_context(
             _derived_resolution = resolve_derived_priorities(state_dir)
             derived_state = _derived_resolution.state
             if derived_state == STATE_TEXT:
-                derived_state = "present" if _derived_open else "empty"
+                if _derived_open:
+                    derived_state = "present"
+                elif _derived_resolution.entries:
+                    derived_state = "all_completed"
+                else:
+                    derived_state = "empty"
         except Exception:
             _derived_open = ()
             derived_state = "unreadable"

@@ -359,10 +359,20 @@ def resolve_operator_priorities(
 
 
 def resolve_operator_priority_labels(state_dir: "Path | str") -> "frozenset[str]":
-    """Normalized labels from the operator's structured and Completed entries."""
+    """Normalized labels from the operator's structured and Completed entries.
+
+    Goal-review candidates are normalized after removing their trailing
+    ``(V1)``/``(V2)`` vector tag; remove the same metadata tag here so an
+    operator label with an explicit vector tag still deduplicates.
+    """
     res = resolve_operator_priorities(state_dir)
     entries = (*res.open_entries, *res.completed_entries)
-    return frozenset(re.sub(r"\s+", " ", entry.title.strip().lower()) for entry in entries if entry.title.strip())
+    labels = set()
+    for entry in entries:
+        title = re.sub(r"\s*\(V[12]\)\s*$", "", entry.title.strip(), flags=re.IGNORECASE)
+        if title:
+            labels.add(re.sub(r"\s+", " ", title.lower()))
+    return frozenset(labels)
 
 
 def resolve_operator_priorities_status(state_dir: "Path | str") -> PriorityStatus:
@@ -568,7 +578,9 @@ def render_priorities_block(
     return text
 
 
-_COMPLETED_PRIORITY_RE = re.compile(r"Priority\s+(\d+)\s*[—-]\s*([^,.;\n]+)", re.IGNORECASE)
+_COMPLETED_PRIORITY_RE = re.compile(
+    r"Priority\s+(\d+)\s*(?:[—-]\s*|\(\s*)([^,.;)\n]+)", re.IGNORECASE
+)
 
 
 def _completed_prose_entries(raw_text: str) -> tuple[PriorityEntry, ...]:

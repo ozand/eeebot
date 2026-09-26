@@ -388,9 +388,11 @@ def should_refuse(inputs_status: dict[str, Any]) -> bool:
     # inputs the _MAX_EMPTY_INPUTS budget below shares — absent or
     # unreadable, it alone stops the strategist (role does not run,
     # reason recorded via the SAME empty_inputs/unavailable_inputs
-    # mechanism run_strategist already journals on refusal).
+    # mechanism run_strategist already journals on refusal). An intentionally
+    # bounded but readable charter is still eligible; its truncation and
+    # original length remain visible in the input metadata.
     charter_status = (inputs_status.get("goals") or {}).get("status")
-    if charter_status != "complete":
+    if charter_status not in {"complete", "truncated"}:
         return True
     # Preserve the existing refusal decision exactly while #1444 records the
     # operator question separately: unavailable counts like empty for now.
