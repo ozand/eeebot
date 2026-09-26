@@ -483,23 +483,40 @@ def record_attempt_finished(state_dir: "Path", cycle_id: str) -> OpenIncrementSt
     """A terminal outcome was recorded for ``cycle_id``
     (:func:`nanobot.runtime.cycle_ledger.record_cycle_outcome` calls this
     for every cycle, so this is the ONE place that clears the running
-    registration and any pending increment for the SAME lineage --
-    whatever the many outcome-writing call sites upstream are). A
-    registration/pending record for a DIFFERENT, not-yet-resolved
-    cycle_id is left untouched; only its own terminal outcome removes
-    it."""
+    registration -- whatever the many outcome-writing call sites
+    upstream are). A registration for a DIFFERENT, not-yet-resolved
+    cycle_id is left untouched.
+
+    Deliberately does NOT touch ``pending``: reaching SOME terminal
+    ledger row does not by itself mean the underlying open increment is
+    resolved -- D1's own interrupted_supply/interrupted_defect rows are
+    written for the SAME cycle_id that just became the pending open
+    increment, in the SAME call. Clearing ``pending`` here would erase
+    that record the instant it was created. Only :func:`resolve`
+    (edit/delete) or :func:`clear_pending_on_integration` (a genuine
+    successful integration) may clear ``pending``."""
     state = load_state(state_dir)
-    changed = False
     if state.running and state.running.get("cycle_id") == (cycle_id or ""):
         state.running = None
-        changed = True
+        _save_state(state_dir, state)
+    return state
+
+
+def clear_pending_on_integration(state_dir: "Path", cycle_id: str) -> OpenIncrementState:
+    """The cycle lineage named by the pending open increment's
+    ``cycle_id`` just integrated successfully (main advanced) -- the
+    increment this record was tracking is done, so it is cleared. Called
+    ONLY from the genuine integration-success path (never from a
+    blocked/interrupted terminal outcome, which SETS pending rather than
+    clearing it) -- a `keep`-resumed attempt that finally succeeds is
+    exactly the case this exists for; without it, a resolved increment
+    would keep surfacing to the planner forever."""
+    state = load_state(state_dir)
     if state.pending and state.pending.get("cycle_id") == (cycle_id or ""):
         state.pending = None
         state.hold = None
         state.held_ticks = 0
         state.consecutive_supply_interrupts = 0
-        changed = True
-    if changed:
         _save_state(state_dir, state)
     return state
 

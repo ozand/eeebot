@@ -4529,9 +4529,38 @@ async def _main_impl_body():
         # Capture HEAD SHA before spawn so we can count subagent commits correctly,
         # even when the subagent pushes itself (harmless under isolation: the
         # checkout sits on the cycle branch, so a bare self-push can only publish
-        # that branch, never origin/main).
+        # that branch, never origin/main). ATTEMPT base -- the exact SHA HEAD sat
+        # at when THIS attempt's subagent was about to spawn.
         _pre_spawn_sha_file = STATE_DIR / 'bridge_pre_spawn.sha'
         _pre_spawn_sha = _capture_pre_spawn_sha(_selfevo_repo, _pre_spawn_sha_file)
+
+        # D5 (ADR-035 Test Contract, external review finding #5): the
+        # INCREMENT base, used for every "is there work" accounting question
+        # below (commit counts, files_changed, artificiality, test-weakening,
+        # closing-commit eligibility) -- deliberately NOT `_pre_spawn_sha`.
+        # For a `keep`-resumed attempt, `_pre_spawn_sha` is captured AFTER the
+        # branch is checked out with its retained checkpoints already on it,
+        # so counting from there makes those checkpoints invisible: a resumed
+        # executor that only verifies retained work (no new commit) would
+        # read as "no new commits, nothing to do", and a resumed executor
+        # that adds one finishing commit would have files_changed cover only
+        # that commit's paths, silently dropping the retained ones. The
+        # increment's own base -- merge-base(origin/main, cycle_branch) --
+        # is the SAME for a fresh cycle (nothing has diverged from main yet,
+        # so it equals main_sha_before) and correctly covers every commit on
+        # the branch, across every attempt, for a resumed one.
+        _increment_base = main_sha_before
+        if _reuse_branch:
+            import subprocess as _sp_increment_base
+            try:
+                _mb = _sp_increment_base.run(
+                    _git_cmd(_selfevo_repo) + ['merge-base', 'origin/main', cycle_branch],
+                    capture_output=True, text=True,
+                )
+                if _mb.returncode == 0 and _mb.stdout.strip():
+                    _increment_base = _mb.stdout.strip()
+            except Exception:
+                pass
 
         # #678 F2: baseline test count at origin/main, captured via git blobs (no
         # checkout needed — the shared checkout already moved to the cycle branch
@@ -4724,6 +4753,14 @@ async def _main_impl_body():
                     f"base_url={getattr(provider, 'api_base', '') or '<provider-default>'}; "
                     f"{_executor_llm_error_text}"
                 )
+            # D1 (ADR-035 Test Contract, external review finding #1;
+            # architect resolution): session STATUS decides completeness,
+            # not commit count. Read once, here, before the checkpoint-only
+            # closing marker (below) or the smoke/gate/integrate path
+            # (further down) can act as if a session that ended in error
+            # had actually finished.
+            _executor_status = _subagent_own_status(STATE_DIR, _subagent_task_id)
+            _session_errored = (_executor_status == 'error')
             latest = TARGET_WORKSPACE / '.nanobot' / 'subagents' / 'latest.json'
             print(latest)
 
@@ -4731,7 +4768,7 @@ async def _main_impl_body():
             # SHA). No push here — origin/main only advances once the gate passes.
             if _selfevo_repo.is_dir():
                 _git_se = _git_cmd(_selfevo_repo)
-                _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+                _new_commits = _count_commits_since(_selfevo_repo, _increment_base)
                 if _new_commits == 0:
                     print(f'cycle-branch: no new commits on {cycle_branch}')
                 # Safety net (#666, unconditional since #717): the subagent may have
@@ -4758,7 +4795,7 @@ async def _main_impl_body():
                     )
                 if _auto['committed']:
                     _auto_committed = True
-                    _new_commits = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+                    _new_commits = _count_commits_since(_selfevo_repo, _increment_base)
                     print(
                         f"auto-commit: {_auto['files_committed']} file(s) committed on "
                         f'{cycle_branch} (#666)'
@@ -4781,7 +4818,10 @@ async def _main_impl_body():
                     # every real file change is already captured by the
                     # checkpoints themselves; this commit is a marker, not a
                     # second copy of the diff.
-                    if _all_commits_are_artificial_since(_selfevo_repo, _pre_spawn_sha):
+                    # D1: "the closing commit is created only for a finished
+                    # session" -- an errored session never gets one, even
+                    # when every commit so far is artificial.
+                    if _all_commits_are_artificial_since(_selfevo_repo, _increment_base) and not _session_errored:
                         from nanobot.runtime.commit_markers import (
                             MERGE_TRAILER_CYCLE_KEY, sanitize_trailer_value,
                         )
@@ -4798,14 +4838,14 @@ async def _main_impl_body():
                             capture_output=True, text=True,
                         )
                         if _closing.returncode == 0:
-                            cycle_commit_count = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+                            cycle_commit_count = _count_commits_since(_selfevo_repo, _increment_base)
                             print(f'cycle-branch: checkpoint-only branch closed with 1 marker commit ({_closing_subject!r})')
                     # #678 F1/F3: initial changed-file set + violation split, for
                     # logging. This is RECOMPUTED after the repair loop (just before
                     # the gate decision) so the enforced lists reflect every commit,
                     # not only the first — see the recompute below.
                     files_changed, _blocked_pattern_violations, _mutation_violations, _cycle_tier = (
-                        _changed_files_and_violations(_selfevo_repo, _pre_spawn_sha)
+                        _changed_files_and_violations(_selfevo_repo, _increment_base)
                     )
                     _violations = _blocked_pattern_violations + _mutation_violations
                     if _violations:
@@ -4818,7 +4858,7 @@ async def _main_impl_body():
                     # #1119: test-weakening check, same recompute point as the
                     # mutation-surface classification above.
                     _test_weakening_blocked, _test_weakening_hard, _test_weakening_soft = (
-                        _check_test_weakening(_selfevo_repo, _pre_spawn_sha)
+                        _check_test_weakening(_selfevo_repo, _increment_base)
                     )
                     if _test_weakening_hard:
                         print(f'test-weakening: {len(_test_weakening_hard)} hard signal(s):')
@@ -4882,6 +4922,81 @@ async def _main_impl_body():
                 )
             else:
                 _open_increment_exec.record_model_call_completed(STATE_DIR)
+
+            # D1 (ADR-035 Test Contract, external review finding #1;
+            # architect resolution): the checkpoints-exist case gets its OWN
+            # classification, independent of the zero-commit one above --
+            # an executor that died AFTER checkpointing real work must
+            # never be silently treated as "model call completed fine" just
+            # because `cycle_commit_count > 0`. `_session_errored` is
+            # broader than `_executor_llm_error_text` (that reader is
+            # narrowly gated on the literal "LLM execution failed" text) --
+            # deliberately so: a real error status with a DIFFERENT message
+            # is still not a finished session.
+            _checkpoint_error_class = (
+                _classify_llm_error(_executor_llm_error_text or '(status: error, no LLM-call text recorded)')
+                if (_session_errored and cycle_commit_count > 0) else ''
+            )
+            if _checkpoint_error_class == 'paused-supplier':
+                _open_increment_exec.record_supply_interruption(
+                    STATE_DIR, _cycle_id,
+                    retry_key=req.get('retry_key') or '',
+                    plan_text=req.get('task') or '',
+                    candidate_id=req.get('candidate_id') or None,
+                    selfevo_repo=_selfevo_repo,
+                    branch=cycle_branch,
+                )
+            elif _checkpoint_error_class == 'failed':
+                _open_increment_exec.record_defect_interruption(
+                    STATE_DIR, _cycle_id,
+                    retry_key=req.get('retry_key') or '',
+                    plan_text=req.get('task') or '',
+                    candidate_id=req.get('candidate_id') or None,
+                    branch=cycle_branch,
+                )
+
+            if _session_errored and cycle_commit_count > 0:
+                # D1: "a session with status=error ... is not finished. It
+                # is never integrated." Stop here -- never reach the
+                # smoke/repair/gate/integrate path below. The branch (with
+                # its checkpoints) is retained for forensics/resume, main
+                # is left untouched; the pending open increment set just
+                # above (supply or defect) is the next session's first item.
+                _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
+                handled_marker.write_text(str(req_path), encoding='utf-8')
+                _unfinished_reason = (
+                    LLM_SUPPLIER_PAUSED_REASON if _checkpoint_error_class == 'paused-supplier'
+                    else 'interrupted_defect'
+                )
+                _write_bridge_completed_result(
+                    state_dir=STATE_DIR, req=req, request_id=request_id,
+                    cycle_id=req.get('cycle_id') or '', goal_id=goal_id,
+                    files_changed=files_changed, commits_pushed=0, result_status='blocked',
+                    backlog_title=backlog_title,
+                    key_learnings=[
+                        f"Executor session ended in error ({_unfinished_reason}) after checkpointing "
+                        f'real work; {cycle_branch} kept for forensics/resume, main left unchanged.'
+                    ],
+                    rollback={
+                        'integrated': False, 'cycle_branch': cycle_branch,
+                        'main_sha_before': main_sha_before, 'main_sha_after': main_sha_before,
+                        'reason': _unfinished_reason,
+                    },
+                )
+                _v, _vr = _derive_cycle_verdict('failed', _unfinished_reason)
+                record_cycle_outcome(
+                    STATE_DIR, _cycle_id, 'failed', _unfinished_reason, files_changed, cycle_branch,
+                    verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                    executor_llm_error=True,
+                    real_result=_real_result_ledger_inputs('blocked'),
+                    llm_error_classification=(
+                        {'class': _checkpoint_error_class, 'raw_error': _executor_llm_error_text[:400]}
+                        if _executor_llm_error_text else None
+                    ),
+                    retry_key=req.get('retry_key') or None,
+                )
+                _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
+                return {'status': 0}
 
             # ── Closed-loop repair cycle (issue #526) ────────────────────────────
             # After the first commit, run smoke tests. If they fail, spawn a repair
@@ -4968,7 +5083,7 @@ async def _main_impl_body():
                     mgr._skill_reads_this_cycle.extend(_repair_mgr._skill_reads_this_cycle)
                     # Recount commits after repair — still relative to pre-spawn SHA,
                     # still on the same cycle branch (no push yet).
-                    _repair_new = _count_commits_since(_selfevo_repo, _pre_spawn_sha)
+                    _repair_new = _count_commits_since(_selfevo_repo, _increment_base)
                     if _repair_new > cycle_commit_count:
                         print(f'cycle-branch: {_repair_new - cycle_commit_count} additional commit(s) (repair {_repair_attempts})')
                         cycle_commit_count = _repair_new
@@ -4979,7 +5094,7 @@ async def _main_impl_body():
                     # the mutation-surface check. On git failure this keeps the
                     # last-known files_changed rather than gating on an empty set.
                     _rc_files, _rc_blocked, _rc_mut, _rc_tier = _changed_files_and_violations(
-                        _selfevo_repo, _pre_spawn_sha,
+                        _selfevo_repo, _increment_base,
                     )
                     if _rc_files or _rc_blocked or _rc_mut:
                         files_changed, _blocked_pattern_violations, _mutation_violations = (
@@ -4991,7 +5106,7 @@ async def _main_impl_body():
                     # (or introduce) a weakening; either way this reflects the
                     # latest state, same discipline as the mutation-surface recompute.
                     _test_weakening_blocked, _test_weakening_hard, _test_weakening_soft = (
-                        _check_test_weakening(_selfevo_repo, _pre_spawn_sha)
+                        _check_test_weakening(_selfevo_repo, _increment_base)
                     )
                     # Re-run smoke tests after repair. Re-applying the shrink guard
                     # on every retry (not just the first check) closes the path
@@ -5021,7 +5136,7 @@ async def _main_impl_body():
             # from the FIRST commit above. files_changed also becomes the final set
             # used downstream (backlog-done message, structured lesson).
             if cycle_commit_count > 0 and _selfevo_repo.is_dir():
-                _fc, _bpv, _mv, _tier = _changed_files_and_violations(_selfevo_repo, _pre_spawn_sha)
+                _fc, _bpv, _mv, _tier = _changed_files_and_violations(_selfevo_repo, _increment_base)
                 if _fc or _bpv or _mv:
                     files_changed, _blocked_pattern_violations, _mutation_violations = _fc, _bpv, _mv
                     _cycle_tier = _tier  # #812: tier reflects the full commit set at gate time
@@ -5029,7 +5144,7 @@ async def _main_impl_body():
                 # against the full commit set (initial + every repair turn) —
                 # mirrors the mutation-surface final recompute directly above.
                 _test_weakening_blocked, _test_weakening_hard, _test_weakening_soft = (
-                    _check_test_weakening(_selfevo_repo, _pre_spawn_sha)
+                    _check_test_weakening(_selfevo_repo, _increment_base)
                 )
                 if _test_weakening_soft:
                     # Soft signals never block (v1 policy, issue #1119 non-goals) —
@@ -5420,6 +5535,20 @@ async def _main_impl_body():
                                 main_sha_after = _integ['main_sha_after']
                                 _cleanup_cycle_branch(_selfevo_repo, cycle_branch)
                                 print(f'integrate: {cycle_branch} merged into main and pushed ({cycle_commit_count} commit(s))')
+                                # D1/D2 (ADR-035 Test Contract): a genuine
+                                # integration success is the ONE thing that
+                                # resolves a pending open increment for this
+                                # lineage -- a `keep`-resumed attempt that
+                                # finally succeeds must stop surfacing to the
+                                # planner. record_cycle_outcome's own
+                                # record_attempt_finished (below) never
+                                # clears `pending` itself -- only this does.
+                                try:
+                                    from nanobot.runtime import open_increment as _open_increment_integrated
+
+                                    _open_increment_integrated.clear_pending_on_integration(STATE_DIR, _cycle_id)
+                                except Exception:
+                                    pass
                                 # #877: record this generation in the evolution tree
                                 # (population = branches, generation = commit).
                                 # reward is filled in later cycles from scorecard
@@ -6613,6 +6742,10 @@ _INCONCLUSIVE_REASONS = frozenset({
     # #1765: a supplier outage is infra trouble by definition — never
     # upgraded to accept/reject.
     LLM_SUPPLIER_PAUSED_REASON,
+    # D1 (ADR-035 Test Contract, #1942 B2): our own defect while
+    # checkpoints exist — the session never finished, ambiguous by
+    # construction, same treatment as a supplier outage.
+    'interrupted_defect',
 })
 
 
