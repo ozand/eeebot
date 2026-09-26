@@ -131,6 +131,22 @@ def test_operator_priority_block_stays_atomic_under_context_cap(tmp_path, monkey
     assert "14." not in context
 
 
+def test_context_truncation_notice_survives_priority_fallback(tmp_path, monkeypatch):
+    """The priority fallback must not silently erase omitted-context notice."""
+    state_dir = _state_dir(tmp_path)
+    _write_goal_text(state_dir, "Current priority targets:\\n(A) Priority 14 — Do work: do work.")
+    monkeypatch.setattr(llm_proposer, "_MAX_CONTEXT_CHARS", 3000)
+    monkeypatch.setattr(
+        llm_proposer, "_captured_pattern_hint",
+        lambda _rows: "guardrail filler " * 130,
+    )
+
+    context = llm_proposer.build_context(state_dir, None)
+
+    assert "[context truncated; earlier sections have priority]" in context
+    assert "## Operator priorities" in context
+
+
 def _append_proposed(state_dir: Path, cycle_id: str, task_title: str) -> None:
     cycle_ledger.append_event(
         state_dir,
