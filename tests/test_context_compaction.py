@@ -321,6 +321,30 @@ def test_second_real_compaction_incorporates_newly_dropped_evidence(tmp_path):
     )
 
 
+def test_compaction_replaces_old_summary_carrier_instead_of_accumulating(tmp_path):
+    """Only one summary carrier may remain in history after repeated passes."""
+    messages = _make_messages([_long_content(20_000)] * 2)
+    for round_n in range(6):
+        messages = messages + [
+            {"role": "assistant", "content": f"decision: carrier round {round_n}",
+             "tool_calls": [{"id": f"carrier-{round_n}", "type": "function",
+                              "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": f"carrier-{round_n}", "name": "bash",
+             "content": _long_content(20_000) + f" carrier evidence {round_n}"},
+        ]
+        messages = cc.compact_messages(
+            messages, cycle_id="one-carrier", iteration=round_n, state_root=tmp_path,
+            threshold=0.01, keep_tokens=8_000, window_tokens=98_304,
+        )
+
+    carriers = [
+        m for m in messages
+        if isinstance(m.get("content"), str)
+        and m["content"].startswith("[Compaction summary")
+    ]
+    assert len(carriers) == 1, f"expected one current summary carrier, found {len(carriers)}"
+
+
 def test_cumulative_summary_growth_is_bounded_across_many_compactions(tmp_path):
     """#1776 item 2: 'retained verbatim' must not mean 'grows without bound'
     -- a cycle that compacts repeatedly (the issue's own telemetry: one

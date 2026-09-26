@@ -561,6 +561,17 @@ def compact_messages(
         results_compacted = 0
         compacted_details: list[dict[str, Any]] = []
         carrier = worth_indices[0]
+        # Move the refreshed cumulative summary into this round's carrier;
+        # keeping the prior carrier in place would accumulate one full summary
+        # per compaction and eventually consume the context window.
+        for i, msg in enumerate(messages):
+            if i != carrier and _message_text(msg).startswith("[Compaction summary"):
+                # Its evidence is already folded into this round's carrier;
+                # keep only a tiny marker so history doesn't retain one full
+                # summary-sized payload for every prior compaction.
+                new_messages[i] = dict(
+                    msg, content="[Earlier compaction summary incorporated below.]"
+                )
         for i in worth_indices:
             msg = messages[i]
             old_text = _message_text(msg)
