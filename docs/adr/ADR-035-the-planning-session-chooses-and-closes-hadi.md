@@ -190,8 +190,12 @@ with its branch and one of three causes:
 - `interrupted(kill)`: the process was killed, for example by the unit timeout,
   before any post-execution bookkeeping ran. To make this detectable, the attempt
   records a `running` increment (cycle, branch, attempt) **before** the executor
-  starts. At the next cycle start, a `running` record with no terminal row becomes
-  `interrupted(kill)`.
+  starts. At the next cycle start, a `running` record with no terminal row is
+  recovered from the executor's own telemetry first. If the executor had already
+  written a terminal `status: error`, its cause is classified as usual, becoming
+  `interrupted(supply)` or `interrupted(defect)`, and the supply hold applies when
+  it is supply. Only a record with no terminal telemetry at all becomes
+  `interrupted(kill)`. A kill during bookkeeping must not erase a known cause.
 
 Keeping an increment does not erase its record before execution resumes. The
 record is marked as resumed by the new cycle and cleared only by a terminal
@@ -219,7 +223,13 @@ killed attempts survived, about two and a half hours of work.
   to a fresh branch from `main`.
 - **Checkpoints go only to their own branch.** The executor knows the exact branch
   it works on, and a checkpoint is written to that branch by a compare-and-swap on
-  its ref, not by committing to whatever `HEAD` is at that moment.
+  its ref, not by committing to whatever `HEAD` is at that moment. The ref check
+  alone does not prove where the content came from, so the checkpoint also checks
+  its source. `HEAD` must point at the expected branch both before staging and
+  after the tree is written. The tree is built in a private index (a temporary
+  `GIT_INDEX_FILE`) seeded from the expected branch's tip, never the shared index.
+  If either check fails, the checkpoint is skipped and recorded, never written.
+  The bridge remains the single writer of the shared checkout during an attempt.
 - **The increment is measured from its base, not from the attempt.** Whether there
   is work, the closing commit, the changed files and the counts are taken from
   the branch's merge base with `main`. Work kept from an earlier attempt therefore
