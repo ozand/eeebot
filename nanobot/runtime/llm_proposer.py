@@ -1846,7 +1846,12 @@ def build_context(
                 # replace it with its fixed oversize/unavailable marker.
                 from nanobot.runtime.operator_documents import _PRIORITIES_BLOCK_OVERSIZE_TEXT
 
-                if len(operator_priorities_block) <= budget:
+                truncated_prefix = "[context truncated; earlier sections have priority]"
+                if len(operator_priorities_block) + len(truncated_prefix) + 2 <= budget:
+                    blob = truncated_prefix + "\n\n" + operator_priorities_block
+                elif len(_PRIORITIES_BLOCK_OVERSIZE_TEXT) + len(truncated_prefix) + 2 <= budget:
+                    blob = truncated_prefix + "\n\n" + _PRIORITIES_BLOCK_OVERSIZE_TEXT
+                elif len(operator_priorities_block) <= budget:
                     blob = operator_priorities_block
                 elif len(_PRIORITIES_BLOCK_OVERSIZE_TEXT) <= budget:
                     blob = _PRIORITIES_BLOCK_OVERSIZE_TEXT

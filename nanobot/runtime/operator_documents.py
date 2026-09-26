@@ -318,6 +318,9 @@ def resolve_operator_priorities(
             completed_count=len(completed_prose), completed_entries=completed_prose,
         )
     section = raw_text[marker_idx + len(_PRIORITY_TARGETS_MARKER):]
+    completed_marker_idx = section.find("Completed (do not repeat):")
+    if completed_marker_idx >= 0:
+        section = section[:completed_marker_idx]
     original_entries = _parse_entries(section)
     if not original_entries:
         state = PRIORITY_ALL_COMPLETED if completed_prose else PRIORITY_EMPTY
@@ -336,6 +339,9 @@ def resolve_operator_priorities(
     filtered_section = (
         filtered[filtered_idx + len(_PRIORITY_TARGETS_MARKER):] if filtered_idx != -1 else ""
     )
+    completed_marker_idx = filtered_section.find("Completed (do not repeat):")
+    if completed_marker_idx >= 0:
+        filtered_section = filtered_section[:completed_marker_idx]
     open_entries = _parse_entries(filtered_section)
     open_numbers = {e.number for e in open_entries}
     completed_entries = tuple(
