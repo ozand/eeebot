@@ -123,14 +123,18 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
         "import os, signal, sys, time\n"
         "child_pid, shell_pid, exit_marker = sys.argv[1:]\n"
         "open(child_pid, 'w').write(str(os.getpid()))\n"
-        "open(shell_pid, 'w').write(str(os.getppid()))\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "while os.getppid() == int(open(shell_pid).read()): time.sleep(0.01)\n"
+        "parent_pid = int(open(shell_pid).read())\n"
+        "while os.getppid() == parent_pid: time.sleep(0.01)\n"
         "open(exit_marker, 'w').write('shell exited')\n"
         "time.sleep(60)\n",
         encoding="utf-8",
     )
-    command = f'python3 "{child_script.as_posix()}" "{child_pid_file.as_posix()}" "{shell_pid_file.as_posix()}" "{shell_exit_file.as_posix()}" &'
+    command = (
+        f'echo $$ > "{shell_pid_file.as_posix()}"; '
+        f'python3 "{child_script.as_posix()}" "{child_pid_file.as_posix()}" '
+        f'"{shell_pid_file.as_posix()}" "{shell_exit_file.as_posix()}" & exit 0'
+    )
     execution = asyncio.create_task(ExecTool(timeout=60).execute(command))
     deadline = time.monotonic() + 10
     while not child_pid_file.exists() and time.monotonic() < deadline:
