@@ -1591,6 +1591,113 @@ def test_checkpoint_commit_never_lands_on_main(tmp_path: Path):
     assert head_after == head_before, "checkpoint committed on main -- the branch guard did not fire"
 
 
+def test_checkpoint_bound_to_expected_branch(tmp_path: Path):
+    """D3 (ADR-035 Test Contract, external review finding #3): the checkpoint
+    writer must bind to the SPECIFIC branch the bridge handed this executor
+    for THIS cycle, not to any branch merely matching the
+    ``selfevo/cycle-*`` prefix. An executor spawned for cycle A must never
+    checkpoint onto cycle B's branch just because a stray/racing checkout
+    left the workspace sitting there -- that would silently move A's work
+    onto B's history. ``SubagentManager`` is given ``expected_cycle_branch``
+    (what the bridge resolved via ``_setup_cycle_branch`` for this spawn);
+    ``_maybe_checkpoint_commit`` must compare the checked-out branch to
+    THAT value exactly, never a prefix test. Drives the real
+    ``_run_subagent`` loop (same pattern as
+    ``test_checkpoint_commit_never_lands_on_main``) with the workspace
+    deliberately left on a *different* cycle branch than the one this
+    executor was told to expect.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.providers.base import ToolCallRequest
+
+    base = tmp_path / "base"
+    base.mkdir()
+    _origin, work = _init_selfevo_repo(base)
+
+    other_cycle_branch = "selfevo/cycle-B"
+    expected_branch = "selfevo/cycle-A"
+    # The workspace is checked out on cycle B's branch -- a real
+    # selfevo/cycle-* branch, so the old prefix check would have let this
+    # through -- while THIS executor was spawned for cycle A.
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", other_cycle_branch], check=True, capture_output=True)
+
+    head_before = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "HEAD"], capture_output=True, text=True,
+    ).stdout.strip()
+    expected_branch_before = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "--verify", expected_branch],
+        capture_output=True, text=True,
+    )
+    assert expected_branch_before.returncode != 0, "expected_branch must not exist yet in this fixture"
+
+    class FakeResponse:
+        def __init__(self, content="", has_tool_calls=False, tool_calls=None):
+            self.content = content
+            self.finish_reason = "stop"
+            self.has_tool_calls = has_tool_calls
+            self.tool_calls = tool_calls or []
+            self.usage = {}
+            self.reasoning_content = None
+            self.thinking_blocks = None
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat_with_retry(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse(
+                    has_tool_calls=True,
+                    tool_calls=[ToolCallRequest(
+                        id="call-1", name="write_file",
+                        arguments={"path": "scripts/on_wrong_branch.py", "content": "X = 1\n"},
+                    )],
+                )
+            return FakeResponse(content="done")
+
+    from unittest.mock import AsyncMock
+
+    manager = SubagentManager(
+        provider=FakeProvider(),
+        workspace=work,
+        bus=AsyncMock(),
+        model="fake/model",
+        max_iterations=5,
+        checkpoint_commits=True,
+        expected_cycle_branch=expected_branch,
+    )
+
+    asyncio.run(manager._run_subagent("t1", "task on wrong cycle branch", "label", {"channel": "cli", "chat_id": "direct"}))
+
+    # The tool call really ran -- this isn't passing because nothing happened.
+    assert (work / "scripts" / "on_wrong_branch.py").is_file()
+    status = subprocess.run(
+        ["git", "-C", str(work), "status", "--porcelain", "-uall"], capture_output=True, text=True,
+    ).stdout
+    assert "on_wrong_branch.py" in status
+
+    head_after = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "HEAD"], capture_output=True, text=True,
+    ).stdout.strip()
+    assert head_after == head_before, (
+        "checkpoint committed onto the checked-out branch (cycle B) despite "
+        "expecting cycle A -- a prefix match let a wrong-branch checkpoint through"
+    )
+
+    expected_branch_after = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "--verify", expected_branch],
+        capture_output=True, text=True,
+    )
+    assert expected_branch_after.returncode != 0, (
+        "checkpoint fabricated the expected branch out of thin air instead of skipping"
+    )
+
+
 # --- keep-work: a resumed increment keeps one opening entry (ADR-035,
 # #1942 B2) --------------------------------------------------------------------
 
