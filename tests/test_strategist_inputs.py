@@ -387,6 +387,21 @@ def test_should_refuse_verdict_for_the_other_four_inputs_is_unchanged():
         assert strategist_inputs.should_refuse(status) is expected
 
 
+def test_refusal_due_to_other_inputs_does_not_call_truncated_charter_missing(roots, monkeypatch):
+    state_root, repo_root, release_root = roots
+    (release_root / "goals.md").write_text("# Charter\n" + ("Readable charter text. " * 250), encoding="utf-8")
+    (state_root / "scorecard.json").write_text(json.dumps({"cycles_total": 1}), encoding="utf-8")
+    _write_ledger(state_root, [])
+    llm = MagicMock(return_value=json.dumps(VALID_OUTPUT))
+
+    result = run_strategist(state_root, repo_root, llm=llm)
+
+    assert llm.call_count == 0
+    assert result["inputs_status"]["goals"]["status"] == "truncated"
+    assert result["reason"] == "inputs_unavailable"
+    assert "goals" not in result["empty_inputs"]
+
+
 def test_truncated_readable_charter_remains_eligible(roots):
     state_root, repo_root, release_root = roots
     _healthy(state_root, repo_root, release_root)
