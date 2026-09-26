@@ -10,6 +10,7 @@ Cites: ADR-036 Rule 6.
 
 from __future__ import annotations
 
+import os
 import re
 import socket
 import subprocess
@@ -19,7 +20,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEPLOY_SCRIPT = REPO_ROOT / "host" / "eeepc" / "scripts" / "deploy_release.sh"
 
-def test_gate_is_model_free_and_dashboard_free(monkeypatch) -> None:
+def test_gate_is_model_free_and_dashboard_free(monkeypatch, tmp_path: Path) -> None:
     """The deploy gate passes without any dashboard listener and without model calls (ADR-036)."""
     script_text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
 
@@ -43,19 +44,34 @@ def test_gate_is_model_free_and_dashboard_free(monkeypatch) -> None:
         "release health gate must execute under runtime service identity eeepc-agent"
     )
 
-    # Extract command line from deploy_release.sh and execute it for real
-    # (catching trailing spaces, quoting bugs, or bad arguments - class 'edit trailing space lost')
-    match = re.search(r'\$RELEASE_DIR/([^"\'\s\n]+)', script_text[script_text.index("sudo -u eeepc-agent"):])
-    assert match is not None, "deploy_release.sh must execute $RELEASE_DIR/<script>"
-    script_rel_path = match.group(1)
-    target_script = REPO_ROOT / script_rel_path
-    assert target_script.is_file(), f"target script {target_script} must exist"
-
-    cmd = [sys.executable, str(target_script)]
-
+    # Extract and execute the exact verifier invocation, not just its target.
+    # A fake sudo consumes the identity flags and execs the remaining argv,
+    # preserving shell quoting/spacing while making this host-independent.
+    invocation = re.search(
+        r"(?m)^if ! (sudo -u eeepc-agent env .*?\"\$RELEASE_DIR/scripts/verify_release_health\.py\"); then$",
+        script_text,
+    )
+    assert invocation is not None, "expected the exact runtime-identity gate command in deploy_release.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        "#!/bin/sh\n[ \"$1\" = \"-u\" ] && shift 2\nexec \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    release = str(REPO_ROOT)
+    env = dict(os.environ)
+    env.update({
+        "PATH": str(fake_bin) + os.pathsep + env.get("PATH", ""),
+        "HEALTH_GATE_PYTHON": sys.executable,
+        "RELEASE_DIR": release,
+    })
+    shell_command = invocation.group(1)
     proc = subprocess.run(
-        cmd,
+        ["bash", "-c", shell_command],
         cwd=str(REPO_ROOT),
+        env=env,
         capture_output=True,
         text=True,
         timeout=30,
@@ -83,15 +99,14 @@ def test_every_former_route_reader_is_served_or_unavailable() -> None:
     # 1. host/eeepc/scripts/deploy_release.sh:610 -> /api/health
     # 2. host/eeepc/scripts/deploy_release.sh:611 -> /api/metrics
     # 3. host/eeepc/scripts/deploy_release.sh:629 -> /
-    # And additional routes documented in #1969:
-    # - /api/health-oneliner
-    # - /api/reward-csv
-    # - /api/top-cycles
-    # - /api/cleanup
-    # - /api/refresh-host-caps
+    # Full former interface inventory from the handler and D0 census (#1969):
+    # GET /, /api/metrics, /api/health, /api/health-oneliner, /api/reward-csv,
+    # /api/top-cycles, /api/cleanup, /api/refresh-host-caps; POST /api/cleanup,
+    # /api/refresh-host-caps. Unmatched GET/POST paths returned 404.
     import json
 
     from scripts.eeebot_dashboard import (
+        DashboardHTTPRequestHandler,
         collect_metrics,
         render_health_json,
         render_health_oneliner,
@@ -130,7 +145,51 @@ def test_every_former_route_reader_is_served_or_unavailable() -> None:
     top_cycles = reward_export_unavailable(source)
     assert "unavailable" in top_cycles.lower()
 
-    # 7. scripts/verify_release_health.py itself validates both health and metrics directly
+    # Validate full former route inventory from the HTTP handler; each route
+    # must have a named local replacement or explicit unavailable treatment.
+    handler_source = __import__("inspect").getsource(DashboardHTTPRequestHandler)
+    former_routes = {
+        "GET /": "render_html",
+        "GET /api/metrics": "render_json",
+        "GET /api/health": "render_health_json",
+        "GET /api/health-oneliner": "render_health_oneliner",
+        "GET /api/reward-csv": "reward_export_unavailable",
+        "GET /api/top-cycles": "reward_export_unavailable",
+        "GET /api/cleanup": "unavailable",
+        "GET /api/refresh-host-caps": "probe_host_capabilities.refresh_host_capabilities",
+        "POST /api/cleanup": "unavailable",
+        "POST /api/refresh-host-caps": "probe_host_capabilities.refresh_host_capabilities",
+        "GET unmatched route": "unavailable",
+        "POST unmatched route": "unavailable",
+    }
+    for route, replacement in former_routes.items():
+        if route == "GET /":
+            assert "render_html(metrics)" in handler_source
+            assert len(render_html(metrics).encode("utf-8")) >= 1024
+        elif route == "GET /api/metrics":
+            assert "render_json(metrics)" in handler_source
+            assert isinstance(json.loads(render_json(metrics)), dict)
+        elif route == "GET /api/health":
+            assert "render_health_json(metrics)" in handler_source
+            assert isinstance(json.loads(render_health_json(metrics)), dict)
+        elif route == "GET /api/health-oneliner":
+            assert "render_health_oneliner(metrics)" in handler_source
+            assert render_health_oneliner(metrics)
+        elif route in {"GET /api/reward-csv", "GET /api/top-cycles"}:
+            assert "reward_export_unavailable(source)" in handler_source
+            assert "unavailable" in reward_export_unavailable(metrics.get("reward_source", {})).lower()
+        elif route == "GET /api/cleanup":
+            assert '"/api/cleanup"' in handler_source and "405" in handler_source
+        elif route == "GET /api/refresh-host-caps":
+            assert '"/api/refresh-host-caps"' in handler_source and "405" in handler_source
+        elif route == "POST /api/cleanup":
+            assert 'url.path == "/api/cleanup"' in handler_source
+        elif route == "POST /api/refresh-host-caps":
+            assert 'url.path == "/api/refresh-host-caps"' in handler_source
+        else:
+            assert "send_error(404" in handler_source or "Not Found" in handler_source
+
+    # The deploy replacement validates health/metrics and renders all output locally.
     from scripts.verify_release_health import verify_release_health
     res = verify_release_health()
     assert res["status"] == "ok"
