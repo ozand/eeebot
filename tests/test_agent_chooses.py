@@ -1246,6 +1246,73 @@ def test_kept_increment_resumes_branch_without_reset(tmp_path: Path, monkeypatch
     assert "feat: add feature" in log
 
 
+def test_failed_pending_clear_keeps_branch_for_retry(tmp_path: Path, monkeypatch):
+    """Round 3, item N3 (architect resolution 2026-09-26):
+    ``clear_pending_on_integration``'s own save can fail -- the caller
+    must not delete the cycle branch in that case, or a retry has
+    nothing left to resume. Same kept-increment setup as
+    ``test_kept_increment_resumes_branch_without_reset``, but
+    ``clear_pending_on_integration`` itself is forced to report failure.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _FakeSubagentManager, _init_selfevo_repo, _run
+    from nanobot.runtime import bridge, open_increment
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    old_cycle_id = "cycle-clear-fail-01"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    _run(work, "checkout", "-b", old_branch)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "wip.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
+    _run(work, "add", "scripts/wip.py")
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/wip.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    _run(work, "checkout", "main")
+
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id,
+        retry_key="clear-fail-test", plan_text="finish the wip feature", candidate_id=None,
+        selfevo_repo=work, branch=old_branch,
+    )
+    _oi_state = open_increment.load_state(state_dir)
+    _oi_state.hold["deadline"] = "2000-01-01T00:00:00Z"
+    open_increment._save_state(state_dir, _oi_state)
+
+    monkeypatch.setattr(open_increment, "clear_pending_on_integration", lambda *a, **k: False)
+
+    _stub_planning_session(
+        monkeypatch, "finish the wip feature",
+        resume_branch=old_branch, resume_cycle_id=old_cycle_id, resume_skip_opening_entry=True,
+    )
+    monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    branches = subprocess.run(
+        ["git", "-C", str(work), "for-each-ref", "--format=%(refname:short)", f"refs/heads/{old_branch}"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    assert branches == old_branch, (
+        "a failed pending-clear save must keep the cycle branch for a retry, not delete it"
+    )
+
+    # The work itself still integrated -- only the branch cleanup was skipped.
+    log = subprocess.run(
+        ["git", "-C", str(work), "log", "--oneline", "main"], capture_output=True, text=True,
+    ).stdout
+    assert "feat: add feature" in log
+
+
 def test_setup_cycle_branch_reuse_keeps_existing_commits(tmp_path: Path):
     """Narrower unit-level proof, directly on `_setup_cycle_branch`: with
     `reuse_existing_branch=True` and a same-named local branch already
@@ -3224,6 +3291,117 @@ def test_missing_open_increment_decision_is_no_plan(tmp_path: Path, monkeypatch)
     )
 
 
+def test_delete_with_inspection_ref_failure_hands_over_no_new_plan(tmp_path: Path, monkeypatch):
+    """Round 3, item 7/A (architect resolution 2026-09-26): the CALLER of
+    ``resolve(delete)`` must check its result. Round 2 fixed
+    ``resolve()`` itself (a failed inspection-ref write leaves ``pending``
+    untouched), but the caller in ``_run_planning_session`` ignored that
+    outcome and proceeded to accept the plan anyway -- ``delete`` was
+    recorded as the decision even though it never actually took effect,
+    and an unrelated new plan could be handed over while the old
+    increment was still pending. A stale lock on the inspection ref
+    forces the failure (same technique as
+    ``test_delete_leaves_pending_when_inspection_ref_creation_fails``);
+    the planner's plan must be rejected as ``no_plan``/``malformed``
+    (planner family), with no new plan accepted.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge, no_plan_recovery, open_increment
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    _task_writing_dir = bridge.RELEASE_ROOT / "nanobot" / "skills" / "task-writing"
+    _task_writing_dir.mkdir(parents=True, exist_ok=True)
+    (_task_writing_dir / "SKILL.md").write_text("task-writing contract (test stub)\n", encoding="utf-8")
+
+    old_cycle_id = "cycle-delete-caller-lockfail"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", old_branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "inspect_me.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/inspect_me.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/inspect_me.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id,
+        retry_key="delete-caller-lockfail-test", plan_text="finish the wip feature", candidate_id=None,
+        selfevo_repo=work, branch=old_branch,
+    )
+    _oi_state = open_increment.load_state(state_dir)
+    _oi_state.hold["deadline"] = "2000-01-01T00:00:00Z"
+    open_increment._save_state(state_dir, _oi_state)
+    pending_before = open_increment.pending_open_increment(state_dir)
+    assert pending_before is not None
+
+    # A stale lock file on the EXACT inspection ref path forces
+    # update-ref to refuse the write, exactly as D7's own unit test does.
+    inspect_dir = work / ".git" / "refs" / "selfevo" / "inspect"
+    inspect_dir.mkdir(parents=True, exist_ok=True)
+    (inspect_dir / f"{old_cycle_id}.lock").write_text("", encoding="utf-8")
+
+    class _PlannerChoosesDeleteManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            if self._telemetry_component != "planner":
+                return "fake subagent spawned"
+            task_id = "planner-delete-lockfail-01"
+            raw_plan = json.dumps({
+                "insight": "start fresh on an unrelated task",
+                "plan": "a brand new, unrelated task",
+                "iterations_planned": 1,
+                "open_increment_decision": "delete",
+            })
+            (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+            (state_dir / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({
+                    "status": "ok",
+                    "result": raw_plan,
+                    "context_usage": {"iterations": [{}]},
+                }),
+                encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
+            return "fake planner spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _PlannerChoosesDeleteManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    pending_after = open_increment.pending_open_increment(state_dir)
+    assert pending_after is not None, (
+        "a failed delete (inspection_ref_failed) must leave pending untouched"
+    )
+    assert pending_after["cycle_id"] == old_cycle_id, (
+        "the ORIGINAL increment must still be pending -- the caller must not accept "
+        "the unrelated new plan while a failed delete leaves it unresolved"
+    )
+
+    no_plan_state = no_plan_recovery.load_state(state_dir)
+    assert no_plan_state.consecutive_planner >= 1, (
+        "a rejected delete (inspection_ref_failed) must count as a planner-family no_plan outcome"
+    )
+
+
 def test_stopped_and_minimal_mode_are_enforced(tmp_path: Path, monkeypatch):
     """D9 (ADR-035 Test Contract, external review finding #9): both
     ``no_plan_recovery`` states are WIRED, not merely recorded --
@@ -3859,6 +4037,99 @@ def test_plan_version_survives_a_second_interruption(tmp_path: Path):
     pending2 = open_increment.pending_open_increment(state_dir)
     assert pending2["plan_version"] == 2, (
         f"the kill/defect writer must also carry plan_version forward: {pending2!r}"
+    )
+
+
+def test_recovery_of_resumed_supply_error_actually_holds(tmp_path: Path, monkeypatch):
+    """Round 3, items 2 and C (architect resolution 2026-09-26). Item 2: a
+    ``keep``-resumed attempt's own ``running`` registration shares
+    ``cycle_id`` with the still-pending increment (D2's design -- keep
+    never clears pending). If that exact resumed attempt goes stale with
+    a telemetry-confirmed error, recovery must classify it -- not silently
+    defer because something was already pending. Item C: the recovery
+    call must pass ``selfevo_repo``, or the resulting hold's version
+    snapshot is ``None`` and the very next precheck reads "input_changed"
+    regardless of whether anything actually changed, so the intended
+    backoff never actually holds.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _FakeSubagentManager, _init_selfevo_repo
+    from nanobot.runtime import bridge, open_increment
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    old_cycle_id = "cycle-resumed-error-01"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", old_branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "wip.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/wip.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/wip.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    # Original interruption -> pending increment for old_cycle_id.
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id,
+        retry_key="resumed-error-test", plan_text="original plan", candidate_id=None,
+        selfevo_repo=work, branch=old_branch,
+    )
+    # The planner decided keep -- resolve(keep) retains pending, annotates resumed_by.
+    open_increment.resolve(state_dir, old_cycle_id, "keep", selfevo_repo=work)
+
+    # The RESUMED attempt itself registered (record_attempt_started), then
+    # died on its own LLM call with a supplier-side error, BEFORE the
+    # in-tick classifier ran -- the exact D2 recovery gap.
+    open_increment.record_attempt_started(state_dir, old_cycle_id, old_branch, plan_text="the resumed plan")
+    _oi_state = open_increment.load_state(state_dir)
+    task_id = "resumed-attempt-task-01"
+    _oi_state.running["task_id"] = task_id
+    open_increment._save_state(state_dir, _oi_state)
+    (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+    (state_dir / "subagents" / f"{task_id}.json").write_text(
+        json.dumps({
+            "status": "error",
+            "summary": "Error: LLM execution failed: Error calling LLM: litellm.InternalServerError: Connection error.",
+            "result": "Error: LLM execution failed: Error calling LLM: litellm.InternalServerError: Connection error.",
+        }),
+        encoding="utf-8",
+    )
+
+    # Captured BEFORE the run: the kill-check (and its recovery snapshot)
+    # fires at the very TOP of _main_impl, before this same tick's own
+    # diary-open-entry push and any executor commit legitimately advance
+    # origin/main further -- so the snapshot must match THIS sha, not
+    # whatever main reads afterward.
+    origin_main_sha_before = subprocess.run(
+        ["git", "-C", str(_origin), "rev-parse", "main"], capture_output=True, text=True,
+    ).stdout.strip()
+
+    _stub_planning_session(monkeypatch, "a brand new, unrelated task")
+    monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is not None
+    assert pending["reason"] == "interrupted_supply", (
+        f"a resumed attempt's own supplier error must be classified, not silently deferred: {pending!r}"
+    )
+
+    state = open_increment.load_state(state_dir)
+    assert state.hold is not None, "a recovered supply interruption must start a backoff hold"
+    assert state.hold.get("snapshot") == origin_main_sha_before, (
+        "the hold's snapshot must be a REAL repo read (selfevo_repo passed) matching the "
+        "actual pre-recovery main sha, not None -- a None snapshot reads every subsequent "
+        f"tick as input_changed and the hold never actually holds: {state.hold!r}"
     )
 
 

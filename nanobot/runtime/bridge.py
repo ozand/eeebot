@@ -1499,29 +1499,27 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
                 state_dir, cycle_id, 'pushed_late', None, [], branch,
                 verdict=_v, verdict_reason=_vr,
             )
-            # N3 (round 2 external re-check, architect resolution
+            # N3 (round 2/3 external re-check, architect resolution
             # 2026-09-26): a late push is a genuine integration success --
             # a pending open increment for THIS cycle_id is resolved by it,
             # exactly like the immediate integration path
             # (_integrate_cycle_to_main) already clears. Without this, a
             # kept increment that finishes here still reads as pending
             # forever; the next `keep` then fails with resume_branch_missing
-            # even though the work already integrated.
-            # N3 (round 2 external re-check, architect resolution
-            # 2026-09-26): a late push is a genuine integration success --
-            # a pending open increment for THIS cycle_id is resolved by it,
-            # exactly like the immediate integration path
-            # (_integrate_cycle_to_main) already clears. Without this, a
-            # kept increment that finishes here still reads as pending
-            # forever; the next `keep` then fails with resume_branch_missing
-            # even though the work already integrated.
+            # even though the work already integrated. The branch is
+            # deleted only if the clear itself was saved (or nothing was
+            # pending for this cycle) -- a failed save must not delete a
+            # branch a retry would still need.
             try:
                 from nanobot.runtime import open_increment as _open_increment_late_push
 
-                _open_increment_late_push.clear_pending_on_integration(state_dir, cycle_id)
+                _pending_cleared = _open_increment_late_push.clear_pending_on_integration(state_dir, cycle_id)
             except Exception:
-                pass
-            _cleanup_cycle_branch(repo_root, branch)
+                _pending_cleared = False
+            if _pending_cleared:
+                _cleanup_cycle_branch(repo_root, branch)
+            else:
+                print(f'bridge: late push: pending-clear save failed for {branch}; branch kept for a retry')
             print(f'bridge: late push: {branch} (cycle {cycle_id}) pushed to main at {main_sha_after}')
             resolved_count += 1
         return resolved_count
@@ -3805,12 +3803,43 @@ async def _run_planning_session(
                 # not just this call's `parsed['plan']` -- before handing
                 # off to the resumed executor. `_keep_confirm` reuses the
                 # existing plan verbatim, so nothing needs updating there.
-                _open_increment_mod.resolve(
+                _oi_resolve_state = _open_increment_mod.resolve(
                     state_dir, cycle_id, _oi_decision, selfevo_repo=selfevo_repo,
                     plan_text=(
                         None if (_oi_decision != 'keep' or _keep_confirm) else parsed.get('plan')
                     ),
                 )
+                # 7/A (round 3 external re-check, architect resolution
+                # 2026-09-26): the CALLER must check resolve(delete)'s
+                # result. A failed inspection-ref write leaves `pending`
+                # set (see resolve()'s own docstring) -- accepting the
+                # decision anyway would hand off a valid but UNRELATED new
+                # plan while the old increment is still unresolved.
+                # Enforced as output validation, same shape as D8's
+                # missing/invalid-decision rejection just below.
+                if _oi_decision == 'delete' and _oi_resolve_state.pending is not None:
+                    record_planning_session(
+                        state_dir, cycle_id, 'malformed',
+                        iterations_used=iterations_used, iterations_planned=iterations_planned,
+                        reason='pending open increment delete failed (inspection_ref_failed); decision not accepted',
+                        parse_mode=parse_mode,
+                        format_violation=format_violation,
+                        task_writing_read=_task_writing_read,
+                        task_writing_source=_task_writing_source or None,
+                        task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+                        task_writing_bytes=_task_writing_bytes_count,
+                        task_writing_sha256=_task_writing_sha256 or None,
+                    )
+                    no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
+                    planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
+                    print(
+                        'planning-session: malformed (delete failed to protect the branch; '
+                        'decision not accepted)'
+                    )
+                    return {
+                        'ran': True, 'iterations_used': iterations_used, 'iterations_planned': iterations_planned,
+                        'tampered_files': [], 'plan': None,
+                    }
                 plan_lines.append(f'Open increment: {_oi_decision}')
             except Exception:
                 pass
@@ -4119,11 +4148,18 @@ async def _main_impl_body():
             # `check_running_for_kill`'s own docstring.
             if _stale_running.get('executor_status') == 'error':
                 if _stale_running.get('error_class') == 'paused-supplier':
+                    # C (round 3 external re-check, architect resolution
+                    # 2026-09-26): without selfevo_repo, the hold's version
+                    # snapshot is None -- planner_rest.snapshot_version
+                    # returns None for a missing repo, so precheck reads
+                    # every subsequent tick as "input_changed" and the
+                    # backoff never actually holds.
                     _open_increment_killcheck.record_supply_interruption(
                         STATE_DIR, _stale_cycle_id,
                         retry_key=f"kill:{_stale_cycle_id}",
                         plan_text=_stale_plan_text,
                         candidate_id=None,
+                        selfevo_repo=STATE_DIR.parent / 'eeebot-self-evolving',
                         branch=_stale_branch,
                     )
                 else:
@@ -5982,8 +6018,6 @@ async def _main_impl_body():
                                 except Exception:
                                     pass  # steering archive is non-blocking (#844)
                                 main_sha_after = _integ['main_sha_after']
-                                _cleanup_cycle_branch(_selfevo_repo, cycle_branch)
-                                print(f'integrate: {cycle_branch} merged into main and pushed ({cycle_commit_count} commit(s))')
                                 # D1/D2 (ADR-035 Test Contract): a genuine
                                 # integration success is the ONE thing that
                                 # resolves a pending open increment for this
@@ -5992,12 +6026,28 @@ async def _main_impl_body():
                                 # planner. record_cycle_outcome's own
                                 # record_attempt_finished (below) never
                                 # clears `pending` itself -- only this does.
+                                # N3 (round 3 external re-check, architect
+                                # resolution 2026-09-26): the branch is
+                                # deleted only if the clear itself was saved
+                                # (or there was nothing pending for this
+                                # cycle) -- a failed save must not delete the
+                                # branch a retry would still need.
                                 try:
                                     from nanobot.runtime import open_increment as _open_increment_integrated
 
-                                    _open_increment_integrated.clear_pending_on_integration(STATE_DIR, _cycle_id)
+                                    _pending_cleared = _open_increment_integrated.clear_pending_on_integration(
+                                        STATE_DIR, _cycle_id,
+                                    )
                                 except Exception:
-                                    pass
+                                    _pending_cleared = False
+                                if _pending_cleared:
+                                    _cleanup_cycle_branch(_selfevo_repo, cycle_branch)
+                                else:
+                                    print(
+                                        f'integrate: pending-clear save failed for {cycle_branch}; '
+                                        'branch kept (not cleaned up) for a retry'
+                                    )
+                                print(f'integrate: {cycle_branch} merged into main and pushed ({cycle_commit_count} commit(s))')
                                 # #877: record this generation in the evolution tree
                                 # (population = branches, generation = commit).
                                 # reward is filled in later cycles from scorecard
@@ -6335,6 +6385,19 @@ async def _main_impl_body():
                         _winner['integrated'] = True
                         _winner['rollback_reason'] = ''
                         _winner['main_sha_after'] = _integ.get('main_sha_after', _winner['main_sha_before'])
+                        # N3 (round 3 external re-check, architect
+                        # resolution 2026-09-26): the explore-winner path
+                        # is ALSO a genuine integration success -- must
+                        # clear a pending open increment for this
+                        # cycle_id, same as the normal gate path and the
+                        # late-push path. No separate branch-cleanup call
+                        # exists at this specific site to gate.
+                        try:
+                            from nanobot.runtime import open_increment as _open_increment_explore
+
+                            _open_increment_explore.clear_pending_on_integration(STATE_DIR, _cycle_id)
+                        except Exception:
+                            pass
                         try:
                             from nanobot.runtime import archive as _archive_mod
                             _archive_mod.record_stepping_stone(

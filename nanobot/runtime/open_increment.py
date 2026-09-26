@@ -677,23 +677,31 @@ def record_attempt_finished(state_dir: "Path", cycle_id: str) -> OpenIncrementSt
     return state
 
 
-def clear_pending_on_integration(state_dir: "Path", cycle_id: str) -> OpenIncrementState:
+def clear_pending_on_integration(state_dir: "Path", cycle_id: str) -> bool:
     """The cycle lineage named by the pending open increment's
     ``cycle_id`` just integrated successfully (main advanced) -- the
     increment this record was tracking is done, so it is cleared. Called
-    ONLY from the genuine integration-success path (never from a
+    from EVERY genuine integration-success path (never from a
     blocked/interrupted terminal outcome, which SETS pending rather than
     clearing it) -- a `keep`-resumed attempt that finally succeeds is
     exactly the case this exists for; without it, a resolved increment
-    would keep surfacing to the planner forever."""
+    would keep surfacing to the planner forever.
+
+    Round 3 external re-check, item N3 (architect resolution
+    2026-09-26): returns True when there was nothing to clear (no pending
+    for this cycle_id -- the common case) OR the clear was verified
+    persisted; False only when a pending record for THIS cycle existed
+    and the save failed. Callers use this to decide whether the cycle
+    branch may be deleted -- a failed clear must not delete a branch a
+    retry would still need to resume."""
     state = load_state(state_dir)
     if state.pending and state.pending.get("cycle_id") == (cycle_id or ""):
         state.pending = None
         state.hold = None
         state.held_ticks = 0
         state.consecutive_supply_interrupts = 0
-        _save_state(state_dir, state)
-    return state
+        return _save_state(state_dir, state)
+    return True
 
 
 def check_running_for_kill(state_dir: "Path", current_cycle_id: str) -> "dict[str, Any] | None":
@@ -731,11 +739,25 @@ def check_running_for_kill(state_dir: "Path", current_cycle_id: str) -> "dict[st
     returned dict's ``error_class`` (``'paused-supplier'`` or
     ``'failed'``) tells the caller which of
     :func:`record_supply_interruption`/:func:`record_defect_interruption`
-    to call instead of :func:`record_kill_interruption`."""
+    to call instead of :func:`record_kill_interruption`.
+
+    Round 3 external re-check, item 2 (architect resolution 2026-09-26):
+    an existing ``pending`` no longer unconditionally short-circuits this
+    function. A ``keep`` decision deliberately retains ``pending`` while
+    the resumed attempt runs (D2) -- its OWN ``running`` registration
+    shares ``pending``'s ``cycle_id``. If THAT exact resumed attempt goes
+    stale, it must be classified exactly like any other stale attempt (the
+    caller's existing supply/defect/kill dispatch, and this module's own
+    plan-version carry-forward, already handle "re-interrupting an
+    already-pending increment" correctly) -- not silently ignored because
+    something was already pending. Only an UNRELATED pending increment
+    (no running at all, or one for a different cycle_id) still defers
+    entirely, unchanged from round 1/2.
+    """
     state = load_state(state_dir)
-    if state.pending:
-        return None
     running = state.running
+    if state.pending and not (running and running.get("cycle_id") == state.pending.get("cycle_id")):
+        return None
     if not running or running.get("cycle_id") == (current_cycle_id or ""):
         return None
     task_id = running.get("task_id") or ""
