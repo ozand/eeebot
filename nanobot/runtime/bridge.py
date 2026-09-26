@@ -5774,22 +5774,34 @@ async def _main_impl_body():
                     or f'(status: {_repair_unfinished_status or "missing"}, no LLM-call text recorded)'
                 )
                 if _repair_error_class == 'paused-supplier':
-                    _open_increment_exec.record_supply_interruption(
+                    _repair_interruption_persisted = _open_increment_exec.record_supply_interruption(
                         STATE_DIR, _cycle_id,
                         retry_key=req.get('retry_key') or '',
                         plan_text=req.get('task') or '',
                         candidate_id=req.get('candidate_id') or None,
                         selfevo_repo=_selfevo_repo,
                         branch=cycle_branch,
-                    )
+                    ).persisted
                 else:
-                    _open_increment_exec.record_defect_interruption(
+                    _repair_interruption_persisted = _open_increment_exec.record_defect_interruption(
                         STATE_DIR, _cycle_id,
                         retry_key=req.get('retry_key') or '',
                         plan_text=req.get('task') or '',
                         candidate_id=req.get('candidate_id') or None,
                         branch=cycle_branch,
+                    ).persisted
+
+                # Codex review of 22e1aeb8, P1 (architect resolution
+                # 2026-09-27): same "verify before finishing" fix as the
+                # primary D1 barrier just above -- see its comment for
+                # the full rationale.
+                if not _repair_interruption_persisted:
+                    print(
+                        'open-increment interruption record failed to persist (repair barrier); '
+                        'not marking cycle finished, retrying next tick'
                     )
+                    _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
+                    return {'status': 0}
                 _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
                 handled_marker.write_text(str(req_path), encoding='utf-8')
                 _repair_unfinished_reason = (
