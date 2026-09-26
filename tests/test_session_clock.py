@@ -27,6 +27,7 @@ from nanobot.runtime.session_clock import (
     get_final_budget_secs,
     get_progress_timeout_secs,
     get_wall_safety_margin_secs,
+    repair_wait_budget_secs,
     should_stop_for_wall_clock,
 )
 
@@ -52,6 +53,12 @@ class _MockProvider(LLMProvider):
 
 class TestWallClockSafetyMargin:
     """Requirement 1 (#1899): stop before starting model call when budget < p99 + final."""
+
+    def test_repair_wait_is_capped_by_shared_wall_and_final_reserve(self):
+        deadline = 1000.0
+        assert repair_wait_budget_secs(deadline, now=100.0, final_reserve_secs=300.0) == 600.0
+        assert repair_wait_budget_secs(deadline, now=0.0, final_reserve_secs=100.0) == 900.0
+        assert repair_wait_budget_secs(deadline, now=750.0, final_reserve_secs=300.0) is None
 
     def test_defaults_derived_from_1899_measurement(self, monkeypatch):
         monkeypatch.delenv("NANOBOT_WALL_CALL_P99_SECS", raising=False)

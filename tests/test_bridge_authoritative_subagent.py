@@ -151,6 +151,14 @@ class TestAuthoritativeSpawnEndToEnd:
         monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "300")
         now = [0.0]
         monkeypatch.setattr(bridge.time, "monotonic", lambda: now[0])
+        monkeypatch.setattr(bridge, "_BRIDGE_PROCESS_START_MONO", 0.0)
+
+        repair_spawned = {"value": False}
+
+        class _TrackedRepair(_make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)):
+            async def spawn(self, **kwargs):
+                repair_spawned["value"] = True
+                return await super().spawn(**kwargs)
 
         class _SlowPrimary(_PrimaryManager):
             def __init__(self, *, workspace, telemetry_component="", **kwargs):
@@ -166,14 +174,16 @@ class TestAuthoritativeSpawnEndToEnd:
                     now[0] = 750.0
                 return result
 
+        import nanobot.agent.subagent as subagent_module
         monkeypatch.setattr(bridge, "SubagentManager", _SlowPrimary)
+        monkeypatch.setattr(subagent_module, "SubagentManager", _TrackedRepair)
         rc = asyncio.run(bridge._main_impl())
 
         assert rc == 0
         rows = _read_ledger(state_dir)
-        budget_rows = [row for row in rows if row.get("reason") == "repair_skipped_no_budget"]
+        budget_rows = [row for row in rows if row.get("phase") == "repair_skipped_no_budget"]
         assert budget_rows, "repair should be durably recorded as skipped when reserve cannot fit"
-        assert not (state_dir / "subagents" / f"{REPAIR_TASK_ID}.json").exists()
+        assert not repair_spawned["value"]
 
     def test_success_outcome_records_executor_call_gap(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
@@ -183,6 +193,45 @@ class TestAuthoritativeSpawnEndToEnd:
         assert asyncio.run(bridge._main_impl()) == 0
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
         assert rows[-1]["max_call_gap_s"] == 17.5
+
+    def test_repair_manager_receives_shared_deadline(self, tmp_path, monkeypatch):
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
+        _seed_bridge_request(state_dir, "req-repair-deadline", "cycle-repair-deadline")
+        deadline_seen = []
+
+        class _DeadlineRepair(_make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)):
+            def __init__(self, *, workspace, wall_deadline=None, **kwargs):
+                super().__init__(workspace=workspace, **kwargs)
+                deadline_seen.append(wall_deadline)
+
+        import nanobot.agent.subagent as subagent_module
+        monkeypatch.setattr(bridge, "_BRIDGE_PROCESS_START_MONO", 0.0)
+        monkeypatch.setattr(bridge.time, "monotonic", lambda: 100.0)
+        monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "3000")
+        monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "300")
+        monkeypatch.setattr(subagent_module, "SubagentManager", _DeadlineRepair)
+        assert asyncio.run(bridge._main_impl()) == 0
+        assert deadline_seen and deadline_seen[-1] == 3000.0
+
+    def test_bridge_wall_anchor_is_captured_before_housekeeping_functions(self):
+        import ast
+        import inspect
+
+        source = inspect.getsource(bridge)
+        tree = ast.parse(source)
+        assignments = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "_BRIDGE_PROCESS_START_MONO" for target in node.targets)
+        ]
+        assert assignments, "bridge process wall anchor must be defined"
+        anchor_line = min(node.lineno for node in assignments)
+        housekeeping_line = next(
+            node.lineno for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in {"_prune_cycle_tags", "usage_evidence"}
+        )
+        assert anchor_line < housekeeping_line
 
     def test_repair_turn_that_succeeds_is_read_not_the_stale_primary(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
