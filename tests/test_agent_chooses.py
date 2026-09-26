@@ -1775,6 +1775,124 @@ def test_checkpoint_bound_to_expected_branch(tmp_path: Path, monkeypatch):
     )
 
 
+def test_rejected_checkpoint_resets_index_keeps_worktree(tmp_path: Path, monkeypatch):
+    """D3 (ADR-035 Test Contract #1979, Codex P2 on 16710f62): after a
+    REJECTED checkpoint -- HEAD not on the expected branch, or a rejected
+    ``update-ref`` CAS -- ``_maybe_checkpoint_commit`` runs ``git reset
+    -q`` (never ``--hard``): the INDEX is reset back to HEAD, but the
+    WORKING TREE keeps the executor's edits (nothing is lost, only left
+    uncommitted), and the skip reason is logged. Two sub-scenarios,
+    against real repos.
+    """
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.agent import subagent as subagent_module
+    from nanobot.agent.subagent import SubagentManager
+
+    logged_reasons: list = []
+    monkeypatch.setattr(
+        subagent_module.logger, "debug",
+        lambda *args, **kwargs: logged_reasons.append(args),
+    )
+
+    class _NeverCalledProvider:
+        async def chat_with_retry(self, *args, **kwargs):
+            raise AssertionError("provider must never be called by _maybe_checkpoint_commit")
+
+    # --- Sub-scenario 1: HEAD not on the expected branch -------------
+    base = tmp_path / "base"
+    base.mkdir()
+    _origin, work = _init_selfevo_repo(base)
+    branch_b = "selfevo/cycle-B"
+    expected_a = "selfevo/cycle-A"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", branch_b], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "edit.py").write_text("EXECUTOR_EDIT = 1\n", encoding="utf-8")
+    # Simulates the executor having already staged its own in-progress edit
+    # (e.g. via its own tool-driven `git add`) before the checkpoint hook
+    # runs on the wrong branch.
+    subprocess.run(["git", "-C", str(work), "add", "scripts/edit.py"], check=True, capture_output=True)
+
+    manager1 = SubagentManager(
+        provider=_NeverCalledProvider(), workspace=work, bus=object(), model="fake/model",
+        expected_cycle_branch=expected_a,
+    )
+    manager1._maybe_checkpoint_commit()
+
+    assert (work / "scripts" / "edit.py").read_text(encoding="utf-8") == "EXECUTOR_EDIT = 1\n", (
+        "the executor's edit must survive in the working tree, only ever unstaged"
+    )
+    diff_cached_1 = subprocess.run(["git", "-C", str(work), "diff", "--cached", "--quiet"])
+    assert diff_cached_1.returncode == 0, (
+        "the index must be reset to HEAD (no staged entries left) after a rejected checkpoint"
+    )
+    status_1 = subprocess.run(
+        ["git", "-C", str(work), "status", "--porcelain", "-uall"], capture_output=True, text=True,
+    ).stdout
+    assert "scripts/edit.py" in status_1, "the file itself must still be present, just unstaged"
+    assert any("HEAD not on expected branch" in str(call) for call in logged_reasons), (
+        f"the skip reason must be recorded: {logged_reasons!r}"
+    )
+
+    # --- Sub-scenario 2: a rejected update-ref CAS (concurrent branch move) ---
+    logged_reasons.clear()
+    base2 = tmp_path / "base2"
+    base2.mkdir()
+    _origin2, work2 = _init_selfevo_repo(base2)
+    branch2 = "selfevo/cycle-race-reset"
+    subprocess.run(["git", "-C", str(work2), "checkout", "-b", branch2], check=True, capture_output=True)
+    (work2 / "scripts").mkdir(exist_ok=True)
+    (work2 / "scripts" / "dirty.py").write_text("EXECUTOR_EDIT = 2\n", encoding="utf-8")
+
+    old_tip = subprocess.run(
+        ["git", "-C", str(work2), "rev-parse", branch2], capture_output=True, text=True,
+    ).stdout.strip()
+
+    real_run = subprocess.run
+    advanced = {"done": False}
+
+    def _race_after_old_capture(cmd, *args, **kwargs):
+        result = real_run(cmd, *args, **kwargs)
+        if (
+            not advanced["done"]
+            and isinstance(cmd, list)
+            and cmd[-2:] == ["rev-parse", f"refs/heads/{branch2}"]
+            and result.returncode == 0
+        ):
+            advanced["done"] = True
+            tree_sha = real_run(
+                ["git", "-C", str(work2), "rev-parse", f"{old_tip}^{{tree}}"],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            concurrent_sha = real_run(
+                ["git", "-C", str(work2), "commit-tree", tree_sha, "-p", old_tip, "-m", "concurrent writer"],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            real_run(
+                ["git", "-C", str(work2), "update-ref", f"refs/heads/{branch2}", concurrent_sha, old_tip],
+                capture_output=True, text=True,
+            )
+        return result
+
+    monkeypatch.setattr(subprocess, "run", _race_after_old_capture)
+    manager2 = SubagentManager(
+        provider=_NeverCalledProvider(), workspace=work2, bus=object(), model="fake/model",
+        expected_cycle_branch=branch2,
+    )
+    manager2._maybe_checkpoint_commit()
+    monkeypatch.undo()
+
+    assert (work2 / "scripts" / "dirty.py").read_text(encoding="utf-8") == "EXECUTOR_EDIT = 2\n", (
+        "the executor's edit must survive a rejected CAS, not be lost"
+    )
+    diff_cached_2 = subprocess.run(["git", "-C", str(work2), "diff", "--cached", "--quiet"])
+    assert diff_cached_2.returncode == 0, "the index must be reset to HEAD after a rejected CAS"
+    assert any("update-ref CAS rejected" in str(call) for call in logged_reasons), (
+        f"the CAS-rejection reason must be recorded: {logged_reasons!r}"
+    )
+
+
 def test_checkpoint_keeps_shared_index_coherent(tmp_path: Path):
     """D3 (ADR-035 Test Contract #1979, 16710f62): after a successful
     checkpoint CAS, the workspace's ORDINARY (shared, not private) index

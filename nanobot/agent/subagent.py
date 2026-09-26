@@ -969,6 +969,7 @@ class SubagentManager:
 
         try:
             if not _on_expected_branch():
+                _abandon("HEAD not on expected branch")
                 return
             old_tip = _sp_ckpt.run(
                 git + ["rev-parse", expected_ref], capture_output=True, text=True, timeout=10,
