@@ -189,15 +189,20 @@ class ExecTool(Tool):
             try:
                 os.killpg(process_group_id, signal.SIGTERM)
             except ProcessLookupError:
-                pass
+                group_was_present = False
+            else:
+                group_was_present = True
 
             # The grace period applies to the group, not just the shell:
             # signaling is repeated even if the shell exits before SIGKILL.
-            try:
+            # Do not later signal a numeric PGID known to be absent: it could
+            # have been recycled during the grace interval.
+            if group_was_present:
                 await asyncio.sleep(1.0)
-                os.killpg(process_group_id, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+                try:
+                    os.killpg(process_group_id, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
         try:
             await asyncio.wait_for(process.wait(), timeout=5.0)
