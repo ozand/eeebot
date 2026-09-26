@@ -2962,6 +2962,75 @@ def test_planner_supplier_error_classified_as_supply(tmp_path: Path, monkeypatch
     )
 
 
+def test_planner_rest_resets_supply_streak(tmp_path: Path, monkeypatch):
+    """Small item (ADR-035 Test Contract, #1962): the supply-interruption
+    streak resets on ANY successful planner model call, including
+    ``rest`` -- not just the executor's own post-spawn path. A `rest`
+    never launches an executor, so the completion-reset call on that
+    path alone would leave the streak stuck even after the supplier
+    plainly answered again.
+    """
+    import asyncio
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge, open_increment
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    _task_writing_dir = bridge.RELEASE_ROOT / "nanobot" / "skills" / "task-writing"
+    _task_writing_dir.mkdir(parents=True, exist_ok=True)
+    (_task_writing_dir / "SKILL.md").write_text("task-writing contract (test stub)\n", encoding="utf-8")
+
+    # An existing supply-interruption streak from a PRIOR, already-resolved
+    # increment (no pending decision or hold left standing -- this test is
+    # about the supply streak, not open-increment resolution/backoff).
+    _oi_state = open_increment.load_state(state_dir)
+    _oi_state.consecutive_supply_interrupts = 2
+    _oi_state.pending = None
+    _oi_state.hold = None
+    open_increment._save_state(state_dir, _oi_state)
+
+    class _PlannerRestManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            if self._telemetry_component != "planner":
+                return "fake subagent spawned"
+            task_id = "planner-rest-01"
+            raw_rest = json.dumps({
+                "rest": {
+                    "wake_condition": {"kind": "main_commit", "ref": ""},
+                    "deadline": "2099-01-01T00:00:00Z",
+                },
+            })
+            (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+            (state_dir / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({"status": "ok", "result": raw_rest, "context_usage": {"iterations": [{}]}}),
+                encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
+            return "fake planner spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _PlannerRestManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    assert open_increment.load_state(state_dir).consecutive_supply_interrupts == 0, (
+        "a successful planner rest must reset the supply-interruption streak"
+    )
+
+
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
 # architect addendum, #1942 B2) -----------------------------------------------
 
