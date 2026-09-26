@@ -1,5 +1,4 @@
 import os
-import re
 import shlex
 import shutil
 import subprocess
@@ -61,8 +60,9 @@ def test_dashboard_source_vocabulary_matches_standalone_deploy_gate():
     dashboard = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(dashboard)
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    code = script.split('DASHBOARD_HEALTH="$DASHBOARD_HEALTH" DASHBOARD_METRICS="$DASHBOARD_METRICS" python3 - <<\'PY\'\n', 1)[1].split('\nPY', 1)[0]
-    checks = [node for node in ast.walk(ast.parse(code))
+    assert "verify_release_health.py" in script
+    gate_script = (REPO_ROOT / "scripts/verify_release_health.py").read_text(encoding="utf-8")
+    checks = [node for node in ast.walk(ast.parse(gate_script))
               if isinstance(node, ast.Compare) and ast.unparse(node.left) == "source['status']"
               and len(node.ops) == 1 and isinstance(node.ops[0], ast.NotIn)]
     assert len(checks) == 1, "expected exactly one deploy source-status allowlist"
@@ -79,7 +79,8 @@ def test_dashboard_source_vocabulary_matches_standalone_deploy_gate():
 @pytest.mark.parametrize("status,age", [("retired", None), ("missing", None), ("stale", 48.0), ("malformed", 1.0)])
 def test_dashboard_gate_accepts_real_bounded_labels(monkeypatch, status, age):
     import importlib.util
-    import json
+
+    from scripts.verify_release_health import validate_health_and_metrics
 
     spec = importlib.util.spec_from_file_location("dashboard_gate_fixture", REPO_ROOT / "scripts/eeebot_dashboard.py")
     dashboard = importlib.util.module_from_spec(spec)
@@ -90,15 +91,10 @@ def test_dashboard_gate_accepts_real_bounded_labels(monkeypatch, status, age):
     metrics.update(goal=label, active_task=label, approval_gate_state=label, reward_average=label)
     health = dict(overall="WARN", goal=label, active_task=label, reward_average=label,
                   dimensions={key: {"status": "WARN", "detail": "source=" + status} for key in ("reward", "gate")})
-    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    code = script.split('DASHBOARD_HEALTH="$DASHBOARD_HEALTH" DASHBOARD_METRICS="$DASHBOARD_METRICS" python3 - <<\'PY\'\n', 1)[1].split('\nPY', 1)[0]
-    monkeypatch.setenv("DASHBOARD_HEALTH", json.dumps(health))
-    monkeypatch.setenv("DASHBOARD_METRICS", json.dumps(metrics))
-    exec(compile(code, str(DEPLOY_SCRIPT), "exec"), {})
+    validate_health_and_metrics(health, metrics)
     metrics["reward_average"] = "0.88 avg over 5 sample(s)"
-    monkeypatch.setenv("DASHBOARD_METRICS", json.dumps(metrics))
     with pytest.raises(SystemExit):
-        exec(compile(code, str(DEPLOY_SCRIPT), "exec"), {})
+        validate_health_and_metrics(health, metrics)
 
 
 def _git(*args, cwd=None, **kwargs):
@@ -291,19 +287,8 @@ def test_dashboard_activation_fails_when_enabled_unit_restart_fails(repo, mock_b
     # #1259: CRITICALs go through `die` (prints "CRITICAL: ..." and returns 1 so
     # the ERR trap rolls back); the emitted text is unchanged.
     assert 'die "$DASHBOARD_UNIT is not active after restart"' in content
-    assert 'curl --fail --silent --show-error http://127.0.0.1:8080/api/health' in content
-    assert 'curl --fail --silent --show-error http://127.0.0.1:8080/api/metrics' in content
-    assert 'dashboard listener :8080 is not active' in content
-    # #1270: the page a person reads. A KeyError in the HTML renderer shipped
-    # behind a green gate because only the two /api/* endpoints were fetched.
-    # Status + body-size floor, through gate_read (connect failure stays
-    # `unreadable`), and deliberately no --fail so a 500 reaches the status check.
-    assert 'gate_read "http://127.0.0.1:8080/" curl --silent --show-error --max-time 30 --output "$DASHBOARD_PAGE_BODY" --write-out \'%{http_code}\' http://127.0.0.1:8080/' in content
-    assert 'die "dashboard page / returned HTTP $DASHBOARD_PAGE_STATUS' in content
-    assert 'if [ "$DASHBOARD_PAGE_BYTES" -lt 1024 ]; then' in content
-    assert 'die "dashboard page / body is $DASHBOARD_PAGE_BYTES bytes (< 1024)' in content
-    urls = sorted(set(re.findall(r"http://127\.0\.0\.1:8080[a-z/_]*", content)))
-    assert urls == ["http://127.0.0.1:8080/", "http://127.0.0.1:8080/api/health", "http://127.0.0.1:8080/api/metrics"], urls
+    # ADR-036 D3 Part B: model-free and dashboard-free release health gate
+    assert 'verify_release_health.py' in content
 
 
 def test_dashboard_activation_verifies_pid_release_identity(repo, mock_bin):
@@ -317,10 +302,6 @@ def test_dashboard_activation_verifies_pid_release_identity(repo, mock_bin):
     assert 'cwd is' in content
     assert 'activated release SOURCE_COMMIT' in content
     assert 'cmdline' in content
-    assert 'DASHBOARD_SOCKET_PIDS=' in content
-    assert 'DASHBOARD_SOCKET_PID_COUNT=' in content
-    assert 'exactly one owner, dashboard PID' in content
-    assert 'dashboard endpoint missing bounded source metadata' in content
 
 
 def test_b_ref_deploys_exact_sha(repo, tmp_path, mock_bin):
@@ -676,27 +657,24 @@ def test_verify_only_uses_privileged_current_reads_and_skips_mutations() -> None
     assert 'FULL_COMMIT="$(sudo cat "$RELEASE_DIR/SOURCE_COMMIT")"' in script
     assert 'if [ "$VERIFY_ONLY" -eq 0 ]; then' in script
     assert 'VERIFY_ONLY" -eq 1' in script
-    # Message reworded with the check: the bare host-path prefixes are gone,
-    # so "or host path" no longer describes what it rejects. The tokens it
-    # still rejects are asserted individually below.
-    assert 'dashboard endpoint contains a stale cycle id or retired artifact value' in script
-    assert '"/var/lib/eeepc-agent/"' not in script, (
+    gate_script = (REPO_ROOT / "scripts" / "verify_release_health.py").read_text(encoding="utf-8")
+    assert 'dashboard endpoint contains a stale cycle id or retired artifact value' in gate_script
+    assert '"/var/lib/eeepc-agent/"' not in gate_script, (
         "a host path appearing in the payload is not evidence of staleness — "
         "operator_attention legitimately reports one, and listing it here "
         "rejected every healthy deploy")
-    assert 'expected = "OK" if source_status[source_key] == "fresh" else "WARN"' in script
-    assert '0.88 avg over 5 sample(s)' in script
-    assert 'health JSON missing bounded fields' in script
+    assert 'expected = "OK" if source_status[source_key] == "fresh" else "WARN"' in gate_script
+    assert '0.88 avg over 5 sample(s)' in gate_script
+    assert 'health JSON missing bounded fields' in gate_script
 
 
 def test_verify_only_semantic_gate_rejects_stale_raw_dashboard(monkeypatch) -> None:
-    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    semantic = script.split('DASHBOARD_HEALTH="$DASHBOARD_HEALTH"', 1)[1]
-    assert 'dashboard reward status does not match source state' not in semantic
-    assert 'dashboard reward' in semantic
-    assert 'status does not match source state' in semantic
-    assert '0.88 avg over 5 sample(s)' in semantic
-    assert 'materialize_synthesized_improvement' in semantic
+    gate_script = (REPO_ROOT / "scripts" / "verify_release_health.py").read_text(encoding="utf-8")
+    assert 'dashboard reward status does not match source state' not in gate_script
+    assert 'dashboard reward' in gate_script
+    assert 'status does not match source state' in gate_script
+    assert '0.88 avg over 5 sample(s)' in gate_script
+    assert 'materialize_synthesized_improvement' in gate_script
 
 
 def test_verify_only_has_no_mutation_or_health_wait_path() -> None:
@@ -733,6 +711,10 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
     case "$1" in readlink) echo {shlex.quote(str(release))};; cat) if [[ "$2" == *SOURCE_COMMIT ]]; then echo {sha}; else printf "python3 /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0\\0"; fi;; ss) echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("python3",pid=4242,fd=3))';; *) exit 97;; esac''')
     mock("ss", f'''echo "ss $*" >> {log}; echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("python3",pid=4242,fd=3))' ''')
     mock("curl", f'''echo "curl $*" >> {log}; case "$*" in *--write-out*) out=""; prev=""; for a in "$@"; do [ "$prev" = "--output" ] && out="$a"; prev="$a"; done; head -c 2048 /dev/zero | tr "\\0" x > "$out"; echo 200;; *health*) echo '{{"overall":"WARN","dimensions":{{"reward":{{"status":"WARN","detail":"source=stale"}},"gate":{{"status":"WARN","detail":"source=stale"}}}},"goal":"stale","active_task":"stale","reward_average":"stale; age=100.0h (context-only artifact)"}}';; *) echo '{{"goal":"stale; age=100.0h (context-only artifact)","active_task":"stale; age=100.0h (context-only artifact)","approval_gate_state":"stale; age=100.0h (context-only artifact)","reward_average":"stale; age=100.0h (context-only artifact)","reward_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"goal_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"active_task_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"approval_gate_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"latest_report_path":null,"materialized_path":null}}';; esac''')
+    scripts_dir = release / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    (scripts_dir / "verify_release_health.py").write_text("#!/usr/bin/env python3\nprint('mock health')\n", encoding="utf-8")
+    mock("python3", f'''echo "python3 $*" >> {log}; exit 0''')
     mock("sleep", f'''echo "sleep $*" >> {log}; exit 97''')
     mock("stat", f'''echo "stat $*" >> {log}; echo 0:0''')
 
@@ -744,57 +726,15 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
     seen = commands.read_text(encoding="utf-8")
     for token in ("tar xzf", "scp ", "ln -sfn", "chown", "chmod", "daemon-reload", "restart", "stop ", "disable ", "sleep "):
         assert token not in seen, seen
-    assert "curl" in seen and "api/health" in seen and "api/metrics" in seen
+    assert "verify_release_health.py" in seen
+    assert "curl" not in seen
 
 
-def test_socket_owner_check_reads_ss_with_sudo() -> None:
-    """`ss -ltnp` prints the owning process only to root.
-
-    Without sudo the listener row appears but its
-    `users:(("python3",pid=...))` field does not, so the owner count reads 0
-    and the gate fails a healthy deploy. Release 20260903T143835Z aborted on
-
-        CRITICAL: :8080 must have exactly one owner, dashboard PID 16981
-
-    while `sudo ss -ltnpH` on the same host showed exactly that pid and no
-    other. Third read in this block to need a privilege it was missing, after
-    the cwd and cmdline reads (#1246) — the class, not three coincidences.
-    """
+def test_socket_owner_and_listener_checks_retired_by_adr_036() -> None:
+    """ADR-036 D3 Part B: port 8080 socket listener and curl checks are retired."""
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-
-    assert "sudo ss -ltnpH" in script, (
-        "the socket owner read must be sudo'd or it sees no owners at all")
-    assert '"$(ss -ltnpH' not in script, "an unprivileged ss -p read cannot see owners"
-    # The plain listener probe: `ss` failing is `unreadable`, an empty row set
-    # from a successful `ss` is "listener not active" (#1259).
-    assert 'DASHBOARD_PLAIN_ROWS="$(gate_read "ss -ltnH" sudo ss -ltnH |' in script
-
-
-def test_socket_check_waits_for_the_listener_instead_of_sampling_once() -> None:
-    """`systemctl restart` returns before the process has bound the port.
-
-    Measured on the host: immediately after restart `:8080` has no listener,
-    and it appears within about a second (4 polls at 0.25s in one run, under
-    0.4s in another). Sampling once raced the bind and reported
-
-        CRITICAL: :8080 must have exactly one owner, dashboard PID 20144;
-                  saw listeners=0 pids=''
-
-    on a healthy deploy (#1246). `listeners=0` is the tell: an unprivileged
-    read still shows the listener row and only hides the owner, so zero rows
-    means the socket genuinely was not bound yet — a different defect from the
-    missing sudo, stacked behind it in the same check.
-    """
-    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-
-    socket_block = script[script.index("DASHBOARD_SOCKET_ROWS=\"\""):]
-    socket_block = socket_block[: socket_block.index("DASHBOARD_LISTENER_COUNT=")]
-
-    assert "for _ in $(seq 1 40)" in socket_block, "the listener read must be retried, not sampled once"
-    assert "sleep 0.25" in socket_block, "the retry needs a bounded pause between polls"
-    assert '[ -n "$DASHBOARD_SOCKET_ROWS" ] && break' in socket_block, (
-        "the loop must stop as soon as a listener appears rather than always sleeping 10s")
-    assert "sudo ss -ltnpH" in socket_block, "the retried read still needs the owner field"
+    assert "sudo ss -ltnpH" not in script
+    assert "http://127.0.0.1:8080" not in script
 
 
 def _remote_block(script: str) -> str:
@@ -821,7 +761,7 @@ def test_gate_reads_distinguish_unreadable_from_empty() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     block = _remote_block(script)
 
-    for what in ('"/proc/$DASHBOARD_PID/cwd"', '"/proc/$DASHBOARD_PID/cmdline"', '"ss -ltnpH"', '"ss -ltnH"', '"$CURRENT_SYMLINK"'):
+    for what in ('"/proc/$DASHBOARD_PID/cwd"', '"/proc/$DASHBOARD_PID/cmdline"', '"$CURRENT_SYMLINK"'):
         assert f"gate_read {what} sudo " in block, f"gate read missing for {what}"
     assert 'readlink "/proc/$DASHBOARD_PID/cwd" 2>/dev/null || true' not in block
     assert 'cmdline" 2>/dev/null | tr' not in block
@@ -892,55 +832,13 @@ def test_die_and_gate_read_semantics_under_the_remote_shell_options(tmp_path) ->
     assert res.returncode == 1 and "TRAP-FIRED" not in res.stderr
 
 
-def _remote_page_check(script: str) -> str:
-    """The `/` page gate cut from the remote block (#1270), from the body
-    tempfile to the success echo, so a test can run it with a fake curl."""
-    block = _remote_block(script)
-    start = block.index('DASHBOARD_PAGE_BODY="$(mktemp)"')
-    end = block.index('echo "[remote] dashboard page /', start)
-    end = block.index("\n", end) + 1
-    return block[start:end]
+def test_dashboard_page_gate_enforces_floor_without_dashboard():
+    """ADR-036 D3 Part B: page body floor (< 1024 bytes) is enforced directly by verify_release_health."""
+    from unittest.mock import patch
 
+    from scripts.verify_release_health import verify_release_health
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
-def test_dashboard_page_gate_fires_on_error_status_stub_and_unreachable(tmp_path) -> None:
-    """#1270: run the real page-gate text under the remote shell options with
-    a fake curl. 500 → its own CRITICAL naming the status; a 200 with a tiny
-    body → the floor; connect failure → `unreadable` (the #1259 distinction,
-    not an empty value); a 200 with a real-sized body → passes and echoes."""
-    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    helpers = _remote_helpers(script)
-    page = _remote_page_check(script)
-
-    def run(code: str, body_bytes: int, connect_fail: bool = False) -> subprocess.CompletedProcess:
-        fake_curl = (
-            "curl() {\n"
-            "  local out=\"\"; local prev=\"\"\n"
-            "  for a in \"$@\"; do [ \"$prev\" = \"--output\" ] && out=\"$a\"; prev=\"$a\"; done\n"
-            + ("  echo 'curl: (7) Failed to connect to 127.0.0.1 port 8080' >&2; return 7\n" if connect_fail else
-               f"  head -c {body_bytes} /dev/zero | tr '\\0' x > \"$out\"; printf '%s' {code}\n")
-            + "}\n"
-        )
-        t = tmp_path / "page.sh"
-        t.write_text("set -eEuo pipefail\ntrap 'echo TRAP-FIRED >&2' ERR\n" + helpers + fake_curl + page + 'echo PASSED\n', newline="\n")
-        return subprocess.run(["bash", str(t)], capture_output=True, text=True)
-
-    res = run("500", 4000)
-    assert res.returncode == 1, res
-    assert "CRITICAL: dashboard page / returned HTTP 500 (4000 bytes)" in res.stderr and "TRAP-FIRED" in res.stderr
-    assert "PASSED" not in res.stdout
-
-    res = run("200", 18)
-    assert res.returncode == 1, res
-    assert "CRITICAL: dashboard page / body is 18 bytes (< 1024)" in res.stderr
-    assert "PASSED" not in res.stdout
-
-    res = run("200", 0, connect_fail=True)
-    assert res.returncode == 7, res
-    assert "CRITICAL: unreadable: http://127.0.0.1:8080/ (exit 7: curl: (7) Failed to connect" in res.stderr
-    assert "returned HTTP" not in res.stderr, "a connect failure must not be reported as a status"
-
-    res = run("200", 18804)
-    assert res.returncode == 0, res
-    assert "[remote] dashboard page / HTTP 200, 18804 bytes" in res.stdout and "PASSED" in res.stdout
-    assert "CRITICAL" not in res.stderr
+    with patch("scripts.eeebot_dashboard.render_html", return_value="stub"):
+        with pytest.raises(SystemExit) as exc_info:
+            verify_release_health()
+        assert "< 1024" in str(exc_info.value)

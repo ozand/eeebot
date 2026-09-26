@@ -24,6 +24,73 @@ ALLOWED_SOURCE_STATUSES = frozenset({
     "malformed", "valid-empty", "retired", "unavailable",
 })
 
+def validate_health_and_metrics(health: dict[str, Any], metrics: dict[str, Any]) -> None:
+    required_health = {"overall", "dimensions", "goal", "active_task", "reward_average"}
+    required_metrics = {
+        "goal", "active_task", "approval_gate_state",
+        "reward_source", "goal_source", "active_task_source", "approval_gate_source",
+    }
+    source_keys = ("goal_source", "active_task_source", "approval_gate_source", "reward_source")
+
+    for payload, required in ((health, required_health), (metrics, required_metrics)):
+        if not all(isinstance(payload.get(k), (str, dict, int, float, list)) for k in required):
+            raise SystemExit("dashboard endpoint has invalid bounded field types")
+
+    if not required_health <= health.keys() or not isinstance(health["dimensions"], dict):
+        raise SystemExit("dashboard health JSON missing bounded fields")
+    if not required_metrics <= metrics.keys():
+        raise SystemExit("dashboard metrics JSON missing bounded fields")
+
+    raw_markers = ("evolution-", "materialized-cycle-", "reward_signal")
+    payload = json.dumps({"health": health, "metrics": metrics}, sort_keys=True)
+    if any(marker in payload for marker in raw_markers):
+        raise SystemExit("dashboard endpoint contains raw retired artifact payload")
+
+    for key in source_keys:
+        source = metrics.get(key)
+        if not isinstance(source, dict) or not {"status", "age_hours", "authoritative", "context_only"} <= source.keys():
+            raise SystemExit(f"dashboard endpoint missing bounded source metadata for {key}")
+        if source["authoritative"] is not False or source["context_only"] is not True:
+            raise SystemExit(f"dashboard endpoint source authority flags are unsafe for {key}")
+        if source["status"] not in {"fresh", "stale", "missing", "permission", "unreadable", "malformed", "valid-empty", "retired", "unavailable"}:
+            raise SystemExit(f"dashboard endpoint source status is invalid: {source['status']}")
+        if source["status"] != "fresh" and source.get("age_hours") is not None and not isinstance(source["age_hours"], (int, float)):
+            raise SystemExit(f"dashboard endpoint source age is invalid for {key}")
+
+    if metrics.get("latest_report_path") is not None or metrics.get("materialized_path") is not None:
+        raise SystemExit("dashboard endpoint exposes an artifact path")
+
+    source_status = {key: metrics[key]["status"] for key in source_keys}
+    for dimension, source_key in (("reward", "reward_source"), ("gate", "approval_gate_source")):
+        detail = health.get("dimensions", {}).get(dimension, {})
+        if not isinstance(detail, dict) or detail.get("status") not in {"WARN", "OK", "CRIT"}:
+            raise SystemExit(f"dashboard health dimension {dimension} is not structured")
+        expected = "OK" if source_status[source_key] == "fresh" else "WARN"
+        if detail.get("status") != expected:
+            raise SystemExit(f"dashboard {dimension} status does not match source state: {detail.get('status')} != {expected}")
+        if source_status[source_key] != "fresh" and "source=" + source_status[source_key] not in detail.get("detail", ""):
+            raise SystemExit(f"dashboard {dimension} detail lacks bounded source state")
+
+    if source_status["reward_source"] != "fresh":
+        label = metrics.get("reward_average")
+        match = re.fullmatch(r"([a-z-]+)(?:; age=([0-9]+(?:\.[0-9]+)?)h)? \(context-only artifact\)", label) if isinstance(label, str) else None
+        age = metrics["reward_source"].get("age_hours")
+        if (match is None or match[1] != source_status["reward_source"]
+                or (match[2] is None) != (age is None)
+                or (age is not None and float(match[2]) != round(max(0.0, age), 1))):
+            raise SystemExit("dashboard reward payload is not bounded")
+
+    if source_status["approval_gate_source"] != "fresh" and metrics.get("approval_gate_state", "").startswith("materialize_"):
+        raise SystemExit("dashboard gate payload is not bounded")
+
+    if "0.88 avg over 5 sample(s)" in payload or "materialize_synthesized_improvement" in payload:
+        raise SystemExit("dashboard endpoint contains raw legacy dashboard values")
+
+    if any(token in payload for token in ("cycle-2f305bf18b42", "0.88 avg over 5 sample(s)", "materialize_synthesized_improvement")):
+        raise SystemExit("dashboard endpoint contains a stale cycle id or retired artifact value")
+
+
+
 def verify_release_health(state_dir: Path | None = None) -> dict[str, Any]:
     """Run model-free, dashboard-free release health verification (ADR-036)."""
     if str(REPO_ROOT) not in sys.path:
@@ -37,8 +104,8 @@ def verify_release_health(state_dir: Path | None = None) -> dict[str, Any]:
         from scripts.eeebot_dashboard import (
             collect_metrics,
             render_health_json,
-            render_json,
             render_html,
+            render_json,
         )
 
         metrics_raw = collect_metrics()
@@ -54,7 +121,7 @@ def verify_release_health(state_dir: Path | None = None) -> dict[str, Any]:
 
     html_bytes = len(html_content.encode("utf-8"))
     if html_bytes < 1024:
-        raise ValueError(
+        raise SystemExit(
             f"dashboard page / body is {html_bytes} bytes (< 1024); the HTML renderer produced a stub"
         )
 
@@ -62,72 +129,9 @@ def verify_release_health(state_dir: Path | None = None) -> dict[str, Any]:
         health = json.loads(health_json)
         metrics = json.loads(metrics_json)
     except Exception as exc:
-        raise ValueError(f"health or metrics payload is not valid JSON: {exc}") from exc
+        raise SystemExit(f"health or metrics payload is not valid JSON: {exc}") from exc
 
-    required_health = {"overall", "dimensions", "goal", "active_task", "reward_average"}
-    required_metrics = {
-        "goal", "active_task", "approval_gate_state",
-        "reward_source", "goal_source", "active_task_source", "approval_gate_source",
-    }
-    source_keys = ("goal_source", "active_task_source", "approval_gate_source", "reward_source")
-
-    for payload, required in ((health, required_health), (metrics, required_metrics)):
-        if not all(isinstance(payload.get(k), (str, dict, int, float, list)) for k in required):
-            raise ValueError("dashboard endpoint has invalid bounded field types")
-
-    if not required_health <= health.keys() or not isinstance(health["dimensions"], dict):
-        raise ValueError("dashboard health JSON missing bounded fields")
-    if not required_metrics <= metrics.keys():
-        raise ValueError("dashboard metrics JSON missing bounded fields")
-
-    raw_markers = ("evolution-", "materialized-cycle-", "reward_signal")
-    payload = json.dumps({"health": health, "metrics": metrics}, sort_keys=True)
-    if any(marker in payload for marker in raw_markers):
-        raise ValueError("dashboard endpoint contains raw retired artifact payload")
-
-    for key in source_keys:
-        source = metrics.get(key)
-        if not isinstance(source, dict) or not {"status", "age_hours", "authoritative", "context_only"} <= source.keys():
-            raise ValueError(f"dashboard endpoint missing bounded source metadata for {key}")
-        if source["authoritative"] is not False or source["context_only"] is not True:
-            raise ValueError(f"dashboard endpoint source authority flags are unsafe for {key}")
-        if source["status"] not in {"fresh", "stale", "missing", "permission", "unreadable", "malformed", "valid-empty", "retired", "unavailable"}:
-            raise ValueError(f"dashboard endpoint source status is invalid: {source['status']}")
-        if source["status"] != "fresh" and source.get("age_hours") is not None and not isinstance(source["age_hours"], (int, float)):
-            raise ValueError(f"dashboard endpoint source age is invalid for {key}")
-
-    if metrics.get("latest_report_path") is not None or metrics.get("materialized_path") is not None:
-        raise ValueError("dashboard endpoint exposes an artifact path")
-
-    source_status = {key: metrics[key]["status"] for key in source_keys}
-    for dimension, source_key in (("reward", "reward_source"), ("gate", "approval_gate_source")):
-        detail = health.get("dimensions", {}).get(dimension, {})
-        if not isinstance(detail, dict) or detail.get("status") not in {"WARN", "OK", "CRIT"}:
-            raise ValueError(f"dashboard health dimension {dimension} is not structured")
-        expected = "OK" if source_status[source_key] == "fresh" else "WARN"
-        if detail.get("status") != expected:
-            raise ValueError(f"dashboard {dimension} status does not match source state: {detail.get('status')} != {expected}")
-        if source_status[source_key] != "fresh" and "source=" + source_status[source_key] not in detail.get("detail", ""):
-            raise ValueError(f"dashboard {dimension} detail lacks bounded source state")
-
-    if source_status["reward_source"] != "fresh":
-        label = metrics.get("reward_average")
-        match = re.fullmatch(r"([a-z-]+)(?:; age=([0-9]+(?:\.[0-9]+)?)h)? \(context-only artifact\)", label) if isinstance(label, str) else None
-        age = metrics["reward_source"].get("age_hours")
-        if (match is None or match[1] != source_status["reward_source"]
-                or (match[2] is None) != (age is None)
-                or (age is not None and float(match[2]) != round(max(0.0, age), 1))):
-            raise ValueError("dashboard reward payload is not bounded")
-
-    if source_status["approval_gate_source"] != "fresh" and metrics.get("approval_gate_state", "").startswith("materialize_"):
-        raise ValueError("dashboard gate payload is not bounded")
-
-    if "0.88 avg over 5 sample(s)" in payload or "materialize_synthesized_improvement" in payload:
-        raise ValueError("dashboard endpoint contains raw legacy dashboard values")
-
-    if any(token in payload for token in ("cycle-2f305bf18b42", "0.88 avg over 5 sample(s)", "materialize_synthesized_improvement")):
-        raise ValueError("dashboard endpoint contains a stale cycle id or retired artifact value")
-
+    validate_health_and_metrics(health, metrics)
     return {
         "status": "ok",
         "overall": health.get("overall", "UNKNOWN"),
