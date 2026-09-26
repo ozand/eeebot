@@ -23,6 +23,7 @@ from nanobot.runtime.operator_documents import (
     PriorityResolution,
     render_priorities_block,
     resolve_charter,
+    resolve_derived_priorities,
     resolve_derived_priorities_split,
     resolve_operator_priorities,
 )
@@ -660,6 +661,7 @@ Skills with available="false" need dependencies installed first - you can try in
         if self.state_dir is None:
             operator_res = PriorityResolution(state=PRIORITY_UNAVAILABLE, reason="no_state_dir")
             derived_entries: "tuple[Any, ...]" = ()
+            derived_state = "unavailable"
         else:
             try:
                 operator_res = resolve_operator_priorities(self.state_dir, selfevo_repo_root=self.workspace)
@@ -669,9 +671,20 @@ Skills with available="false" need dependencies installed first - you can try in
                 derived_entries, _completed = resolve_derived_priorities_split(
                     self.state_dir, selfevo_repo_root=self.workspace,
                 )
+                _derived_res = resolve_derived_priorities(self.state_dir)
+                derived_state = _derived_res.state
+                if derived_state == "text":
+                    derived_state = (
+                        "present" if derived_entries else
+                        "all_completed" if _derived_res.entries else "empty"
+                    )
             except Exception:
                 derived_entries = ()
-        return render_priorities_block(operator_res, derived_entries, cap=PRIORITIES_BLOCK_CAP)
+                derived_state = "unreadable"
+        return render_priorities_block(
+            operator_res, derived_entries, derived_status=derived_state,
+            cap=PRIORITIES_BLOCK_CAP,
+        )
 
     def _build_loop_system_prompt(
         self,

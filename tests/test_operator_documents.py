@@ -35,6 +35,7 @@ from nanobot.runtime.operator_documents import (
     resolve_derived_priorities,
     resolve_derived_priorities_split,
     resolve_operator_priorities,
+    resolve_operator_priority_labels,
 )
 from nanobot.runtime.state import load_runtime_state_from_root
 
@@ -130,6 +131,88 @@ def test_each_document_resolves_from_its_one_root(tmp_path: Path, monkeypatch):
     )
     runtime = load_runtime_state_from_root(state_dir)
     assert runtime["active_goal"] == "goal-from-state-root"
+
+
+def test_operator_label_vector_tag_is_normalized_for_dedup(tmp_path: Path):
+    """ADR-034 rule 4: trailing vector metadata is not part of label identity."""
+    state = tmp_path / "state"
+    _goal_text_json(
+        state,
+        "Current priority targets:\n(A) Priority 14 — Existing label (V1): do work.",
+    )
+
+    assert "existing label" in resolve_operator_priority_labels(state)
+
+
+def test_derived_view_status_uses_repository_completion_evidence(tmp_path: Path):
+    """ADR-034 rule 3: status and ranked items share completion evidence."""
+    from tests.test_goal_backlog_routing import _make_git_repo_with_commit
+
+    state = tmp_path / "state"
+    _goal_text_json(
+        state,
+        "Current priority targets:\n(A) Priority 14 — Unique dashboard widget implementation: "
+        "Deliver the unique dashboard widget implementation. Commit.",
+    )
+    repo = _make_git_repo_with_commit(
+        tmp_path,
+        "feat: Priority 14 — Unique dashboard widget implementation",
+    )
+
+    view = demand.build_derived_view(state, repo)
+
+    assert view["operator_priorities_status"]["state"] == "all_completed"
+    assert view["operator_priorities_status"]["open_count"] == 0
+    assert view["operator_priorities_status"]["completed_count"] == 1
+    assert not any(item["provenance"] == demand.PROVENANCE_OPERATOR for item in view["priority_items"])
+
+
+def test_completed_parenthesized_priority_syntax_is_preserved(tmp_path: Path):
+    """ADR-034 F7: retain the established `Priority N (context, commit …)` form."""
+    state = tmp_path / "state"
+    _goal_text_json(
+        state,
+        "Completed (do not repeat): Priority 14 (demand dashboard, commit abc123).",
+    )
+
+    result = resolve_operator_priorities(state)
+
+    assert result.state == PRIORITY_ALL_COMPLETED
+    assert [(entry.number, entry.title) for entry in result.completed_entries] == [
+        (14, "demand dashboard"),
+    ]
+
+
+def test_completed_priority_parser_preserves_closing_vector_tag(tmp_path: Path):
+    """ADR-034: completed prose preserves a closing `(V1)`/`(V2)` title tag."""
+    state = tmp_path / "state"
+    _goal_text_json(
+        state,
+        "Completed (do not repeat): Priority 14 — Existing label (V1).",
+    )
+
+    result = resolve_operator_priorities(state)
+
+    assert [(entry.number, entry.title) for entry in result.completed_entries] == [
+        (14, "Existing label (V1)"),
+    ]
+    assert "existing label" in resolve_operator_priority_labels(state)
+
+
+def test_completed_em_dash_title_preserves_internal_punctuation(tmp_path: Path):
+    """ADR-034: punctuation inside an em-dash Completed title is not a delimiter."""
+    state = tmp_path / "state"
+    _goal_text_json(
+        state,
+        "Completed (do not repeat): Priority 14 — Improve parsing, logging and alerts.",
+    )
+
+    result = resolve_operator_priorities(state)
+
+    assert [(entry.number, entry.title) for entry in result.completed_entries] == [
+        (14, "Improve parsing, logging and alerts"),
+    ]
+    assert "improve parsing, logging and alerts" in resolve_operator_priority_labels(state)
 
 
 def test_four_priority_states_are_distinct(tmp_path: Path):
@@ -499,7 +582,7 @@ def test_missing_charter_keeps_diagnostics_running(tmp_path: Path, monkeypatch):
     from nanobot.runtime.health import read_derived_priorities_queue
 
     queue = read_derived_priorities_queue(state_dir)
-    assert queue == {"depth": 0, "limit": goal_review._DERIVED_PRIORITIES_MAX}
+    assert queue == {"depth": 0, "limit": goal_review._DERIVED_PRIORITIES_MAX, "status": "absent"}
 
     # The publisher (demand.build_derived_view/publish_derived_view) keeps
     # running too: it still produces a full, well-formed view — showing

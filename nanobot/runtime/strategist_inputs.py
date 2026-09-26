@@ -128,18 +128,23 @@ def charter_input(state_root: Path) -> tuple[str, dict[str, Any]]:
     from nanobot.runtime.operator_documents import STATE_TEXT, resolve_charter
 
     res = resolve_charter(_release_root_from_env())
+    original_chars = len(res.text) if res.state == STATE_TEXT else 0
+    truncated = res.state == STATE_TEXT and original_chars > _MAX_TEXT
     text = res.text[:_MAX_TEXT] if res.state == STATE_TEXT else ""
     source = "release_root" if text else "none"
-    # Missing is a genuine empty only when no file was even there to read;
-    # a present-but-unreadable/blank/oversize file remains unavailable. The
-    # refusal decision is intentionally unchanged in should_refuse() (#1444).
-    if text:
+    if truncated:
+        text = text[:_MAX_TEXT - 96] + f"\n[charter truncated; original length {original_chars}]"
+        status = "truncated"
+    elif text:
         status = "complete"
     elif res.reason == "no_file":
         status = "empty"
     else:
         status = "unavailable"
-    return text, {"chars": len(text), "source": source, "status": status}
+    return text, {
+        "chars": len(text), "source": source, "status": status,
+        "truncated": truncated, "original_chars": original_chars,
+    }
 
 def _history_rows(path: Path) -> list[dict[str, Any]]:
     """Newest :data:`_HISTORY_TAIL_ROWS` rows of ``path`` inside the 7-day window."""
@@ -383,9 +388,11 @@ def should_refuse(inputs_status: dict[str, Any]) -> bool:
     # inputs the _MAX_EMPTY_INPUTS budget below shares — absent or
     # unreadable, it alone stops the strategist (role does not run,
     # reason recorded via the SAME empty_inputs/unavailable_inputs
-    # mechanism run_strategist already journals on refusal).
+    # mechanism run_strategist already journals on refusal). An intentionally
+    # bounded but readable charter is still eligible; its truncation and
+    # original length remain visible in the input metadata.
     charter_status = (inputs_status.get("goals") or {}).get("status")
-    if charter_status != "complete":
+    if charter_status not in {"complete", "truncated"}:
         return True
     # Preserve the existing refusal decision exactly while #1444 records the
     # operator question separately: unavailable counts like empty for now.

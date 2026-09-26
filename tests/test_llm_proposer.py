@@ -92,6 +92,45 @@ def _write_derived_priority(state_dir: Path, *, number: int = 1, vector: str = "
     )
 
 
+def test_proposer_prompt_distinguishes_all_completed_derived_priorities(tmp_path):
+    """ADR-034 F4: don't render an all-completed derived list as empty."""
+    from nanobot.runtime.demand import _make_item
+
+    state_dir = _state_dir(tmp_path)
+    _write_goal_text(state_dir, "No operator priorities.")
+    entry = {"label": "Completed item", "body": "finished", "number": 4, "vector": "V1"}
+    path = state_dir / "goals" / "derived_priorities.json"
+    path.write_text(json.dumps({"schema_version": "derived-priorities-v1", "priorities": [entry]}), encoding="utf-8")
+    item = _make_item("priority", "Priority 4 — Completed item", "finished")
+    completed = state_dir / "demand" / "completed.json"
+    completed.parent.mkdir(parents=True, exist_ok=True)
+    completed.write_text(json.dumps({"schema_version": "demand-completed-v1", "entries": {item["id"]: {"kind": "priority"}}}), encoding="utf-8")
+
+    context = llm_proposer.build_context(state_dir, None)
+
+    assert "all priorities completed" in context.lower()
+    assert "none; document contains no open priorities" not in context.lower()
+
+
+def test_operator_priority_block_stays_atomic_under_context_cap(tmp_path, monkeypatch):
+    """ADR-034: a tiny residual context budget must not slice priority content."""
+    state_dir = _state_dir(tmp_path)
+    full_title = "A" * 1200
+    _write_goal_text(state_dir, f"Current priority targets:\n(A) Priority 14 — {full_title}: do work.")
+    monkeypatch.setattr(llm_proposer, "_MAX_CONTEXT_CHARS", 5000)
+    monkeypatch.setattr(
+        llm_proposer, "_captured_pattern_hint",
+        lambda _rows: "guardrail filler " * 230,
+    )
+    context = llm_proposer.build_context(state_dir, None)
+
+    assert len(context) <= 5000
+    assert full_title not in context
+    assert "priorities could not be shown here (unavailable, reason: oversize)" in context.lower()
+    assert "Open:" not in context
+    assert "14." not in context
+
+
 def _append_proposed(state_dir: Path, cycle_id: str, task_title: str) -> None:
     cycle_ledger.append_event(
         state_dir,

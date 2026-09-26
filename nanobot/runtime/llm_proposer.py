@@ -77,11 +77,13 @@ from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
 from nanobot.runtime.operator_documents import (
     PRIORITY_UNAVAILABLE,
+    STATE_ABSENT,
     STATE_TEXT,
     PriorityResolution,
     format_derived_priority_line,
     render_priorities_block,
     resolve_charter,
+    resolve_derived_priorities,
     resolve_derived_priorities_split,
     resolve_operator_priorities,
 )
@@ -1703,7 +1705,22 @@ def build_context(
         # filtered independently, rendered under their own heading — never
         # folded into the charter's own "## Goal" text (that was
         # goal_review.merged_goal_text, #860/#1665).
-        derived_text = _render_derived_priorities(_load_derived_priorities(state_dir, selfevo_repo))
+        try:
+            _derived_open, _derived_completed = resolve_derived_priorities_split(
+                state_dir, selfevo_repo_root=selfevo_repo
+            )
+            _derived_resolution = resolve_derived_priorities(state_dir)
+            derived_state = _derived_resolution.state
+            if derived_state == STATE_TEXT:
+                if _derived_open:
+                    derived_state = "present"
+                elif _derived_resolution.entries:
+                    derived_state = "all_completed"
+                else:
+                    derived_state = "empty"
+        except Exception:
+            _derived_open = ()
+            derived_state = "unreadable"
         # ADR-034 rule 5 (#1940, A4): the operator's OWN priority list (with
         # its Completed headers), which nothing in this context previously
         # showed -- "## Goal" above is the release charter, not this
@@ -1715,7 +1732,11 @@ def build_context(
             _operator_priorities_res = resolve_operator_priorities(state_dir, selfevo_repo_root=selfevo_repo)
         except Exception:
             _operator_priorities_res = PriorityResolution(state=PRIORITY_UNAVAILABLE, reason="resolve_failed")
-        operator_priorities_block = render_priorities_block(_operator_priorities_res, ())
+        operator_priorities_block = render_priorities_block(
+            _operator_priorities_res,
+            _derived_open if derived_state == "present" else (),
+            derived_status=derived_state,
+        )
         ledger_rows = _load_ledger_rows(state_dir)
         digest_lines = _digest_ledger(ledger_rows)
         recent_proposed_titles = _recent_proposed_titles(ledger_rows)
@@ -1747,13 +1768,11 @@ def build_context(
         # dedup caught them, but the wasted LLM call already happened). Now only
         # the blob is trimmed; guardrails + surface_rule are appended after.
         blob_parts = [
-            "## Goal (charter, filtered — already-completed priorities removed)",
-            filtered_goal.strip() or "(no goal text available)",
-            "",
+            "## Operator priorities (protected; rendered before lower-priority context)",
             operator_priorities_block,
             "",
-            "## Derived priorities (source: derived; filtered — already-completed removed)",
-            derived_text or "(none)",
+            "## Goal (charter, filtered — already-completed priorities removed)",
+            filtered_goal.strip() or "(no goal text available)",
             "",
             "## Recent cycle outcomes (most recent last — do not repeat done/failed work)",
             "\n".join(f"- {line}" for line in digest_lines) or "(no ledger history yet)",
@@ -1804,7 +1823,24 @@ def build_context(
         blob = "\n".join(blob_parts)
         budget = max(0, _MAX_CONTEXT_CHARS - reserved)
         if len(blob) > budget:
-            blob = blob[:budget]
+            marker = "\n[context truncated; earlier sections have priority]\n"
+            keep = max(0, budget - len(marker))
+            blob = blob[:keep] + marker[:budget - keep]
+            if operator_priorities_block not in blob:
+                # Codex P2: the renderer's block is atomic under its own
+                # cap. Never slice it again merely because other protected
+                # guardrails left too little room in the overall context;
+                # replace it with its fixed oversize/unavailable marker.
+                from nanobot.runtime.operator_documents import _PRIORITIES_BLOCK_OVERSIZE_TEXT
+
+                priority_fallback = (
+                    operator_priorities_block
+                    if len(operator_priorities_block) <= budget
+                    else _PRIORITIES_BLOCK_OVERSIZE_TEXT
+                )
+                marker = "\n[priorities truncated]\n"
+                keep = max(0, budget - len(marker))
+                blob = priority_fallback[:keep] + marker[:budget - keep]
         context = blob + "\n" + guardrail_tail + "\n" + surface_rule
 
         # #844: PROTECTED (never-truncated) stepping-stones section — optional
