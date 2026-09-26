@@ -81,7 +81,7 @@ class TestFinishPendingPushes:
         ])
         assert goal_gap_futility._demand_attempt_count(
             rows_for_futility, "goal-service-late", datetime(2025, 1, 1, tzinfo=timezone.utc),
-        ) == 6
+        ) == 7
         from nanobot.runtime import llm_proposer
         proposed_rows = [
             {"phase": "proposed", "cycle_id": "cid-service-late", "task_title": "service-only regression title"},
