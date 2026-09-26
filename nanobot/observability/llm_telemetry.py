@@ -43,7 +43,6 @@ from typing import Any, Iterator
 
 _CALL_CONTEXT: ContextVar[dict[str, str] | None] = ContextVar("_llm_call_context", default=None)
 _CALL_SEQ: ContextVar[int | None] = ContextVar("_llm_call_seq", default=None)
-_CALL_SEQ: ContextVar[int | None] = ContextVar("_llm_call_seq", default=None)
 
 # Monotonic within-process sequence per cycle_id, used to order prompt
 # captures belonging to the same self-evolving cycle. Process-local is
@@ -204,12 +203,8 @@ def record_llm_call(
             "cycle_id": cycle_id,
             "component": component,
             "seq": seq,
-            "system_prompt_chars": (
-                int(system_prompt_chars) if system_prompt_chars is not None else None
-            ),
-            "context_window": (
-                int(context_window) if context_window is not None else None
-            ),
+            "system_prompt_chars": int(system_prompt_chars) if system_prompt_chars is not None else None,
+            "context_window": int(context_window) if context_window is not None else None,
         }
 
         out_dir = _llm_calls_dir()
@@ -486,11 +481,6 @@ def _format_capped_jsonl_line(record: dict[str, Any], max_bytes: int = MAX_LLM_P
 
     return redacted
 
-
-
-def _next_call_seq(cycle_id: str, component: str) -> int:
-    """Next per-(cycle_id, component) sequence shared by call and prompt rows."""
-    return next(_PROMPT_SEQ.setdefault((cycle_id, component), count(1)))
 
 
 def record_llm_prompt(
