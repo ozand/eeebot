@@ -978,6 +978,25 @@ class SubagentManager:
                 return
             old_sha = old_tip.stdout.strip()
 
+            # Codex review of 984a133f (nanobot/agent/subagent.py:1015):
+            # an executor tool may have staged files itself (a bare `git
+            # add` covering a blocked file alongside an allowed edit,
+            # say) BEFORE this routine ever runs. The status-filter loop
+            # below only ADDS approved paths on top of whatever the
+            # shared index already holds -- it never clears a
+            # pre-existing stage -- so `write-tree` would serialize the
+            # WHOLE index, blocked file included, regardless of what the
+            # loop chose to `git add`. Reset the index to `old_sha`
+            # (mixed reset, working tree untouched -- `old_sha` IS HEAD,
+            # already confirmed by `_on_expected_branch()` above) so
+            # selective staging starts from a clean baseline every time.
+            reset_index = _sp_ckpt.run(
+                git + ["reset", "-q"], capture_output=True, text=True, timeout=10,
+            )
+            if reset_index.returncode != 0:
+                _abandon("pre-staging index reset failed")
+                return
+
             status = _sp_ckpt.run(
                 git + ["status", "--porcelain", "-uall"], capture_output=True, text=True, timeout=10,
             )
