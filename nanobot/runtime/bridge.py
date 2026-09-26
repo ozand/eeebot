@@ -3857,30 +3857,23 @@ async def _run_planning_session(
                         None if (_oi_decision != 'keep' or _keep_confirm) else parsed.get('plan')
                     ),
                 )
-                # 7/A (round 3 external re-check, architect resolution
-                # 2026-09-26): the CALLER must check resolve(delete)'s
-                # result. A failed inspection-ref write leaves `pending`
-                # set (see resolve()'s own docstring) -- accepting the
-                # decision anyway would hand off a valid but UNRELATED new
-                # plan while the old increment is still unresolved.
-                # Enforced as output validation, same shape as D8's
-                # missing/invalid-decision rejection just below.
-                if _oi_decision in ('delete', 'edit') and _oi_resolve_state.pending is not None:
-                    # Codex review of 984a133f
-                    # (nanobot/runtime/open_increment.py:499): `edit`
-                    # shares `delete`'s "clear pending, hand off a
-                    # brand-new plan" shape but had no caller-side check
-                    # at all -- only `delete`'s inspection-ref failure was
-                    # caught. `resolve()` now reverts `pending` on ANY
-                    # save failure (not just the inspection-ref one), so
-                    # this single check catches both decisions uniformly.
-                    _oi_fail_reason = (
-                        'inspection_ref_failed' if _oi_decision == 'delete' else 'save_failed'
-                    )
+                # P2-a (round 4 external re-check, architect resolution
+                # 2026-09-26): ONE check for every decision --
+                # resolve()'s own `resolve_saved` is True only once the
+                # FULL intended transition (delete/edit really cleared
+                # `pending`; keep, with or without an edit, matches the
+                # intended plan_text/plan_version/resumed_by) has been
+                # verified by reading the state back. Replaces the two
+                # separate ad hoc checks round 3 built (delete's own
+                # `pending is not None`, keep+edit's separate re-read of
+                # `pending_open_increment`) -- and, for the first time,
+                # also covers plain `keep` (no edit), which previously
+                # had no caller-side check at all.
+                if not _oi_resolve_state.resolve_saved:
                     record_planning_session(
                         state_dir, cycle_id, 'malformed',
                         iterations_used=iterations_used, iterations_planned=iterations_planned,
-                        reason=f'pending open increment {_oi_decision} failed ({_oi_fail_reason}); decision not accepted',
+                        reason=f'pending open increment {_oi_decision} failed to verify; decision not accepted',
                         parse_mode=parse_mode,
                         format_violation=format_violation,
                         task_writing_read=_task_writing_read,
@@ -3892,56 +3885,13 @@ async def _run_planning_session(
                     no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
                     planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
                     print(
-                        f'planning-session: malformed ({_oi_decision} failed to persist; '
+                        f'planning-session: malformed ({_oi_decision} failed to verify; '
                         'decision not accepted)'
                     )
                     return {
                         'ran': True, 'iterations_used': iterations_used, 'iterations_planned': iterations_planned,
                         'tampered_files': [], 'plan': None,
                     }
-                # N2 (round 3 external re-check, architect resolution
-                # 2026-09-26): resolve()'s `keep` branch never checks
-                # `_save_state`'s own result -- its IN-MEMORY return always
-                # shows the edited plan_text/plan_version whether or not
-                # that write actually landed on disk (unlike `delete`,
-                # which early-returns before ever touching `pending` on a
-                # protection failure). Verified here by reading the
-                # DURABLE record back (same discipline as N4's
-                # registration-write verification) rather than trusting
-                # the in-memory object -- a failed edit-persistence write
-                # must reject THIS session's plan, or a kill during the
-                # resumed execution would recover with the stale original,
-                # silently discarding the (never-actually-saved) revision.
-                if _oi_decision == 'keep' and not _keep_confirm:
-                    _oi_pending_after = _open_increment_mod.pending_open_increment(state_dir)
-                    _oi_intended_plan = parsed.get('plan')
-                    if not _oi_pending_after or _oi_pending_after.get('plan_text') != _oi_intended_plan:
-                        record_planning_session(
-                            state_dir, cycle_id, 'malformed',
-                            iterations_used=iterations_used, iterations_planned=iterations_planned,
-                            reason=(
-                                'pending open increment edit failed to persist '
-                                '(pending_write_failed); plan not accepted'
-                            ),
-                            parse_mode=parse_mode,
-                            format_violation=format_violation,
-                            task_writing_read=_task_writing_read,
-                            task_writing_source=_task_writing_source or None,
-                            task_writing_path=str(_task_writing_file) if _task_writing_read else None,
-                            task_writing_bytes=_task_writing_bytes_count,
-                            task_writing_sha256=_task_writing_sha256 or None,
-                        )
-                        no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
-                        planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
-                        print(
-                            'planning-session: malformed (keep+edit failed to persist; '
-                            'plan not accepted)'
-                        )
-                        return {
-                            'ran': True, 'iterations_used': iterations_used,
-                            'iterations_planned': iterations_planned,
-                            'tampered_files': [], 'plan': None,
-                        }
                 plan_lines.append(f'Open increment: {_oi_decision}')
             except Exception:
                 pass

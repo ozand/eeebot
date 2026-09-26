@@ -103,9 +103,19 @@ class OpenIncrementState:
     #: is exactly the durable proof a hard kill needs: the process that
     #: wrote it died before reaching a terminal outcome.
     running: "dict[str, Any] | None" = None
+    #: Round 4 external re-check, item P2-a (architect resolution
+    #: 2026-09-26): set ONLY by :func:`resolve`, on its return value --
+    #: True when the intended transition was verified by READING THE
+    #: SAVED STATE BACK (not merely a truthy ``_save_state`` return),
+    #: False otherwise. Never part of the persisted schema (excluded in
+    #: :meth:`as_dict`) and never set by :func:`load_state` -- it
+    #: describes what THIS resolve() call did, not a durable fact.
+    resolve_saved: "bool | None" = None
 
     def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d.pop("resolve_saved", None)
+        return d
 
 
 def _state_path(state_dir: "Path") -> "Path":
@@ -483,6 +493,18 @@ def resolve(
     durable ``pending`` record kept the OLD plan, so a kill before the
     resumed attempt's own terminal outcome recovered with the stale
     original, silently undoing the accepted revision.
+
+    P2-a (round 4 external re-check, architect resolution 2026-09-26):
+    the returned state's ``resolve_saved`` is the single, explicit
+    signal every caller should check -- True only once the FULL intended
+    transition has been verified by reading the state back from disk
+    (not merely a truthy ``_save_state`` return, which only proves the
+    write landed, not that it landed with the intended content). Replaces
+    each caller improvising its own bespoke check (``delete``'s
+    ``pending is not None``, ``keep``+edit's separate re-read of
+    :func:`pending_open_increment`) with one uniform contract that
+    covers every decision, including plain ``keep`` (no edit), which
+    previously had no caller-side check at all.
     """
     from nanobot.runtime.cycle_ledger import append_event
 
@@ -509,6 +531,7 @@ def resolve(
                 "retry_key": retry_key,
                 "reason": "inspection_ref_failed",
             })
+            state.resolve_saved = False
             return state
     if decision == "keep":
         if state.pending is not None:
@@ -538,7 +561,30 @@ def resolve(
             "decision": decision,
             "reason": "save_failed",
         })
+        state.resolve_saved = False
         return state
+
+    # Round 4 external re-check, item P2-a (architect resolution
+    # 2026-09-26): `_save_state` returning True means the write landed,
+    # not that it landed with the INTENDED content -- a concurrent writer
+    # could race between this save and now. Read the saved state back
+    # and verify the FULL intended transition before telling the caller
+    # it may proceed: `delete`/`edit` really cleared `pending`; `keep`
+    # (with or without an edit) matches the intended plan_text,
+    # plan_version, and resumed_by exactly.
+    _reloaded = load_state(state_dir)
+    _verified = (_reloaded.pending is None) if decision in ("edit", "delete") else (_reloaded.pending == state.pending)
+    if not _verified:
+        append_event(state_dir, {
+            "phase": "open_increment_resolve_failed",
+            "cycle_id": cycle_id or "",
+            "retry_key": retry_key,
+            "decision": decision,
+            "reason": "verify_failed",
+        })
+        _reloaded.resolve_saved = False
+        return _reloaded
+
     append_event(state_dir, {
         "phase": "open_increment_resolved",
         "cycle_id": cycle_id or "",
@@ -546,6 +592,7 @@ def resolve(
         "decision": decision,
         "reason": reason or None,
     })
+    state.resolve_saved = True
     return state
 
 
