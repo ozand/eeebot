@@ -416,7 +416,8 @@ def record_attempt_started(
     exit path is covered), the next cycle's :func:`check_running_for_kill`
     finds this registration still standing and converts it into a pending
     open increment (``reason: interrupted_kill``) instead of losing the
-    attempt silently."""
+    attempt silently. ``task_id`` starts unset -- the subagent's own id
+    does not exist yet at this point; see :func:`record_attempt_task_id`."""
     from nanobot.runtime.cycle_ledger import append_event
 
     state = load_state(state_dir)
@@ -426,6 +427,7 @@ def record_attempt_started(
         "attempt": int(attempt),
         "started_at": _now_iso(),
         "resumed_by": None,
+        "task_id": None,
     }
     _save_state(state_dir, state)
     append_event(state_dir, {
@@ -435,6 +437,46 @@ def record_attempt_started(
         "attempt": int(attempt),
     })
     return state
+
+
+def record_attempt_task_id(state_dir: "Path", cycle_id: str, task_id: str) -> OpenIncrementState:
+    """Attach the subagent's own telemetry ``task_id`` to the running
+    registration once it exists (right after ``spawn()`` returns -- the id
+    is minted inside it, so it cannot be known at
+    :func:`record_attempt_started` time). A kill in the narrow window
+    before this call leaves ``task_id`` unset, same as no telemetry at
+    all -- :func:`check_running_for_kill` treats both identically. Only
+    updates the registration when it still belongs to THIS ``cycle_id``,
+    so a race with a concurrent, already-superseded registration can
+    never attach the wrong task_id."""
+    state = load_state(state_dir)
+    if state.running and state.running.get("cycle_id") == (cycle_id or ""):
+        state.running["task_id"] = task_id
+        _save_state(state_dir, state)
+    return state
+
+
+def _read_executor_terminal_status(state_dir: "Path", task_id: str) -> "str | None":
+    """The executor's own terminal telemetry ``status`` for ``task_id``
+    (``ok``/``bounded_stop``/``blocked``/``cancelled``/``error``/``running``),
+    or ``None`` when there is no task_id yet (a kill before
+    :func:`record_attempt_task_id` ran) or its telemetry file is
+    unreadable/absent (a kill before the executor wrote ANY row). Both
+    ``None`` cases are equally "no evidence the executor ever finished" --
+    :func:`check_running_for_kill` treats them the same as any other
+    non-error status.
+
+    Delegates to :func:`nanobot.runtime.bridge._subagent_own_status`
+    (#1546) rather than re-reading the same telemetry file with its own
+    parsing -- the asymmetric-readers class of defect (two call sites
+    independently reading the same "did the subagent finish" question,
+    one of them drifting) is exactly what a second, divergent
+    implementation here would risk."""
+    if not task_id:
+        return None
+    from nanobot.runtime.bridge import _subagent_own_status
+
+    return _subagent_own_status(state_dir, task_id) or None
 
 
 def record_attempt_finished(state_dir: "Path", cycle_id: str) -> OpenIncrementState:
@@ -466,20 +508,43 @@ def check_running_for_kill(state_dir: "Path", current_cycle_id: str) -> "dict[st
     """Called once per bridge tick, before THIS tick's own attempt is
     registered (and before the planning session reads
     :func:`pending_open_increment`, so a detected kill is surfaced to it
-    like any other open increment). Returns the stale running record when
-    it belongs to a DIFFERENT cycle_id than the one about to run -- proof
-    the process that wrote it died before a terminal outcome -- or
-    ``None`` when there is nothing stale (no running record, it already
-    belongs to the cycle about to start, or an increment is already
-    pending for it, which already covers this attempt without needing a
-    second classification)."""
+    like any other open increment). Returns the stale running record
+    (with an added ``executor_status`` key -- see
+    :func:`_read_executor_terminal_status`) when it belongs to a
+    DIFFERENT cycle_id than the one about to run -- proof the process
+    that wrote it died before a terminal outcome -- or ``None`` when
+    there is nothing stale, or nothing THIS function should classify.
+
+    Full mapping (architect resolution, #1979 external-review followups):
+    the executor's own terminal telemetry status, whatever it is, does
+    NOT by itself mean the cycle finished -- the GATE (smoke tests, the
+    integration decision) never rendered a verdict for this cycle_id
+    either way, or :func:`record_attempt_finished` would have cleared
+    this registration. ``ok``/``bounded_stop``/``blocked``/``cancelled``,
+    or no telemetry at all (unwritten, or ``task_id`` never attached) --
+    all become ``interrupted_kill`` here. The ONE exception is
+    ``error``: a telemetry-confirmed executor error is classified as
+    supply/defect by the existing LLM-error classifier, synchronously,
+    in the SAME tick it happened -- this function must never
+    re-classify it as a kill. In practice that classification already
+    guards this: it sets ``pending`` before this tick ends, so the
+    ``state.pending`` check below already skips it on the next tick. The
+    explicit ``status == "error"`` check here is a second, independent
+    guard for the narrower race where the executor wrote its ``error``
+    row but the process died before the classifier ran -- ``running`` is
+    left standing for that case, on purpose, exactly like any other
+    not-yet-classified attempt, rather than being converted to
+    ``interrupted_kill`` out from under the classifier that owns it."""
     state = load_state(state_dir)
     if state.pending:
         return None
     running = state.running
     if not running or running.get("cycle_id") == (current_cycle_id or ""):
         return None
-    return running
+    executor_status = _read_executor_terminal_status(state_dir, running.get("task_id") or "")
+    if executor_status == "error":
+        return None
+    return {**running, "executor_status": executor_status}
 
 
 def record_kill_interruption(
@@ -490,6 +555,7 @@ def record_kill_interruption(
     plan_text: str,
     candidate_id: "str | None",
     branch: str = "",
+    executor_status: "str | None" = None,
 ) -> OpenIncrementState:
     """The running-attempt registration for ``cycle_id`` (see
     :func:`record_attempt_started`) had no terminal outcome by the time a
@@ -498,9 +564,13 @@ def record_kill_interruption(
     interrupted_kill`` -- same keep/edit/delete contract as
     ``interrupted_supply``, but with NO backoff hold: a kill is not
     evidence the supplier is unavailable, so the very next session may
-    resolve it immediately. Does not touch ``running`` -- :func:`resolve`
-    (``keep``) and :func:`record_attempt_finished` own its lifecycle from
-    here."""
+    resolve it immediately. ``executor_status`` (architect resolution,
+    #1979 external-review followups) is the evidence :func:`check_running_for_kill`
+    read from the executor's own telemetry (``None`` when there was
+    none) -- carried into the record so the operator/planner can see
+    WHAT the executor last reported, even though the gate never acted on
+    it. Does not touch ``running`` -- :func:`resolve` (``keep``) and
+    :func:`record_attempt_finished` own its lifecycle from here."""
     from nanobot.runtime.cycle_ledger import append_event
 
     state = load_state(state_dir)
@@ -513,6 +583,7 @@ def record_kill_interruption(
         "interrupted_at": _now_iso(),
         "branch": branch or "",
         "opening_entry_written": True,
+        "executor_status": executor_status,
     }
     state.hold = None
     state.held_ticks = 0
@@ -523,5 +594,6 @@ def record_kill_interruption(
         "status": "interrupted_kill",
         "retry_key": retry_key,
         "branch": branch or "",
+        "executor_status": executor_status,
     })
     return state

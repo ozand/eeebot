@@ -900,28 +900,46 @@ class SubagentManager:
         call is timeout-bounded so a stuck index.lock cannot hang the
         executor's own loop.
 
-        D3 (ADR-035 Test Contract, external review finding #3): the branch
-        guard below is an EXACT comparison against
-        ``self._expected_cycle_branch`` (what the bridge resolved for this
-        spawn via ``_setup_cycle_branch``), never a ``selfevo/cycle-``
-        prefix test -- a workspace sitting on a DIFFERENT cycle's branch
-        (stray checkout left by another process, a race) is a real
-        ``selfevo/cycle-*`` branch too, so a prefix match would silently
-        commit this executor's work onto it. ``expected_cycle_branch``
-        being unset (``None``) skips checkpointing entirely; it never falls
-        back to guessing from HEAD.
+        D3 (ADR-035 Test Contract, external review finding #3; architect
+        resolution on #1979 external-review followups): the branch guard
+        below is an EXACT comparison against ``self._expected_cycle_branch``
+        (what the bridge resolved for this spawn via
+        ``_setup_cycle_branch``), read via ``symbolic-ref HEAD`` (never a
+        ``selfevo/cycle-`` prefix test, and never ``rev-parse
+        --abbrev-ref``, which also answers for a detached HEAD) -- a
+        workspace sitting on a DIFFERENT cycle's branch (stray checkout
+        left by another process, a race) is a real ``selfevo/cycle-*``
+        branch too, so a prefix match would silently commit this
+        executor's work onto it. ``expected_cycle_branch`` being unset
+        (``None``) skips checkpointing entirely; it never falls back to
+        guessing from HEAD.
 
-        The commit itself is written through plumbing
-        (``write-tree`` / ``commit-tree`` / ``update-ref``) targeting
-        ``refs/heads/<expected_cycle_branch>`` directly, with the ref's
-        prior tip passed as the compare-and-swap old-value -- unlike
-        ``git commit``, this never reads or writes HEAD. If an external
-        checkout moves HEAD to another branch (main, say) between the
-        branch probe above and this write, the commit still lands on the
-        expected branch's ref, never on whatever HEAD now points to; if
-        something else already advanced the expected branch concurrently,
-        ``update-ref``'s CAS rejects the write instead of silently losing
-        that commit.
+        No private/temporary index: this stages the workspace's ORDINARY
+        index with ``git add``, exactly like a normal commit would -- the
+        architect's #1979 resolution retired an earlier private-index
+        design as unnecessary complexity. The commit is still written
+        through plumbing (``write-tree`` / ``commit-tree`` / ``update-ref``)
+        rather than ``git commit``, so it never reads or writes ``HEAD``
+        itself: ``update-ref refs/heads/<expected_cycle_branch> <new>
+        <old>`` targets the branch ref directly, with the ref's tip at the
+        START of this call passed as the compare-and-swap old-value.
+        Because ``write-tree`` builds the new commit FROM the same index
+        ``git add`` just staged, the index already equals the committed
+        tree once this succeeds -- no follow-up sync step, no desync.
+
+        HEAD is re-checked (same ``symbolic-ref`` test) after ``write-tree``
+        but before ``commit-tree`` -- a checkout racing in between the
+        first check and here must not let this commit land at all, even
+        onto the still-nominally-correct expected branch: the working tree
+        it just staged from may no longer coherently represent that
+        branch's state. Any failed check, or a rejected CAS (the branch
+        moved between capturing ``old`` and ``update-ref`` -- e.g. another
+        writer, or the same race from a different angle), unstages via
+        ``git reset -q`` (never ``--hard``: it must not touch the working
+        tree, only the index) and skips -- the fail-open, silent contract
+        below is unchanged; a debug log line records why for anyone
+        reading logs, but nothing here can fail the loop turn it rides
+        along on.
         """
         import subprocess as _sp_ckpt
 
@@ -932,15 +950,33 @@ class SubagentManager:
         expected_branch = self._expected_cycle_branch
         if not expected_branch:
             return
+        expected_ref = f"refs/heads/{expected_branch}"
         repo_root = self.workspace
-        try:
-            git = ["git", "-c", f"safe.directory={repo_root}", "-C", str(repo_root)]
-            branch = _sp_ckpt.run(
-                git + ["rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True, text=True, timeout=10,
+        git = ["git", "-c", f"safe.directory={repo_root}", "-C", str(repo_root)]
+
+        def _on_expected_branch() -> bool:
+            symref = _sp_ckpt.run(
+                git + ["symbolic-ref", "-q", "HEAD"], capture_output=True, text=True, timeout=10,
             )
-            if branch.returncode != 0 or branch.stdout.strip() != expected_branch:
+            return symref.returncode == 0 and symref.stdout.strip() == expected_ref
+
+        def _abandon(reason: str) -> None:
+            # Unstage only -- never touch the working tree (`-q`, no
+            # `--hard`). Best-effort: a failure here is still fail-open,
+            # the checkpoint was already being skipped either way.
+            _sp_ckpt.run(git + ["reset", "-q"], capture_output=True, text=True, timeout=10)
+            logger.debug("Subagent checkpoint skipped ({}): {}", expected_branch, reason)
+
+        try:
+            if not _on_expected_branch():
                 return
+            old_tip = _sp_ckpt.run(
+                git + ["rev-parse", expected_ref], capture_output=True, text=True, timeout=10,
+            )
+            if old_tip.returncode != 0 or not old_tip.stdout.strip():
+                return
+            old_sha = old_tip.stdout.strip()
+
             status = _sp_ckpt.run(
                 git + ["status", "--porcelain", "-uall"], capture_output=True, text=True, timeout=10,
             )
@@ -967,29 +1003,33 @@ class SubagentManager:
                 paths_desc = joined if len(joined) <= 60 and len(changed) <= 3 else f"{len(changed)} paths"
             subject = f"{CHECKPOINT_SUBJECT_PREFIX} — {paths_desc}"
 
-            old_tip = _sp_ckpt.run(
-                git + ["rev-parse", f"refs/heads/{expected_branch}"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if old_tip.returncode != 0 or not old_tip.stdout.strip():
-                return
-            old_sha = old_tip.stdout.strip()
             tree = _sp_ckpt.run(
                 git + ["write-tree"], capture_output=True, text=True, timeout=10,
             )
             if tree.returncode != 0 or not tree.stdout.strip():
+                _abandon("write-tree failed")
                 return
+
+            if not _on_expected_branch():
+                _abandon("HEAD moved during staging")
+                return
+
             commit = _sp_ckpt.run(
                 git + ["commit-tree", tree.stdout.strip(), "-p", old_sha, "-m", subject, "-m", CHECKPOINT_TRAILER],
                 capture_output=True, text=True, timeout=10,
             )
             if commit.returncode != 0 or not commit.stdout.strip():
+                _abandon("commit-tree failed")
                 return
             new_sha = commit.stdout.strip()
-            _sp_ckpt.run(
-                git + ["update-ref", f"refs/heads/{expected_branch}", new_sha, old_sha],
+
+            cas = _sp_ckpt.run(
+                git + ["update-ref", expected_ref, new_sha, old_sha],
                 capture_output=True, text=True, timeout=10,
             )
+            if cas.returncode != 0:
+                _abandon("update-ref CAS rejected (branch moved concurrently)")
+                return
         except Exception:
             pass
 

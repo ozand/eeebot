@@ -3941,6 +3941,7 @@ async def _main_impl_body():
                 ),
                 candidate_id=None,
                 branch=_stale_running.get('branch', ''),
+                executor_status=_stale_running.get('executor_status'),
             )
     except Exception:
         pass
@@ -4669,6 +4670,19 @@ async def _main_impl_body():
             # has back to the telemetry file the subagent will write its raw
             # final answer into (see _executor_reported_outcome below).
             _subagent_task_id = next(iter(mgr._running_tasks), None)
+            if _subagent_task_id:
+                # D2 (ADR-035 Test Contract, architect resolution #1979):
+                # attach the task_id to the running-attempt registration
+                # now that it exists (record_attempt_started, before spawn,
+                # could not know it yet) -- check_running_for_kill reads it
+                # back to fetch the executor's own terminal telemetry
+                # status as evidence for a stale registration.
+                try:
+                    from nanobot.runtime import open_increment as _open_increment_taskid
+
+                    _open_increment_taskid.record_attempt_task_id(STATE_DIR, _cycle_id, _subagent_task_id)
+                except Exception:
+                    pass
             if mgr._running_tasks:
                 try:
                     # Limit subagent execution time to remaining bridge wall allocation.

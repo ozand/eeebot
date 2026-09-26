@@ -1593,21 +1593,32 @@ def test_checkpoint_commit_never_lands_on_main(tmp_path: Path):
     assert head_after == head_before, "checkpoint committed on main -- the branch guard did not fire"
 
 
-def test_checkpoint_bound_to_expected_branch(tmp_path: Path):
-    """D3 (ADR-035 Test Contract, external review finding #3): the checkpoint
-    writer must bind to the SPECIFIC branch the bridge handed this executor
-    for THIS cycle, not to any branch merely matching the
-    ``selfevo/cycle-*`` prefix. An executor spawned for cycle A must never
-    checkpoint onto cycle B's branch just because a stray/racing checkout
-    left the workspace sitting there -- that would silently move A's work
-    onto B's history. ``SubagentManager`` is given ``expected_cycle_branch``
-    (what the bridge resolved via ``_setup_cycle_branch`` for this spawn);
-    ``_maybe_checkpoint_commit`` must compare the checked-out branch to
-    THAT value exactly, never a prefix test. Drives the real
-    ``_run_subagent`` loop (same pattern as
-    ``test_checkpoint_commit_never_lands_on_main``) with the workspace
-    deliberately left on a *different* cycle branch than the one this
-    executor was told to expect.
+def test_checkpoint_bound_to_expected_branch(tmp_path: Path, monkeypatch):
+    """D3 (ADR-035 Test Contract, external review finding #3; architect
+    resolution on #1979 external-review followups): the checkpoint writer
+    must bind to the SPECIFIC branch the bridge handed this executor for
+    THIS cycle, using the workspace's ORDINARY index (no private/temp
+    index) and a compare-and-swap ``update-ref`` -- never a prefix guess
+    from HEAD, and never a silent overwrite when the branch moved
+    concurrently. Three scenarios, all against real repos:
+
+    1. HEAD on a DIFFERENT ``selfevo/cycle-*`` branch than expected ->
+       skip, no commit anywhere, main untouched (drives the real
+       ``_run_subagent`` loop, same pattern as
+       ``test_checkpoint_commit_never_lands_on_main``).
+    2. HEAD on the expected branch, but the branch moves (a concurrent
+       writer lands a commit on it via plumbing, simulating a race)
+       between the checkpoint capturing that branch's tip and its final
+       ``update-ref`` -- the CAS must reject the write; the concurrent
+       commit stays the branch tip, the checkpoint's own attempt never
+       lands, and the uncommitted file change is left exactly as it was
+       (not lost).
+    3. A normal, uncontested checkpoint leaves the INDEX clean afterwards
+       (``git status --porcelain`` empty, ``git diff --cached --quiet``
+       exits 0 -- the index equals the new HEAD's tree, no desync from
+       skipping ``git commit``), and a subsequent ORDINARY ``git commit``
+       on that branch preserves the checkpoint's file rather than
+       reverting it.
     """
     import asyncio
     import subprocess
@@ -1615,26 +1626,7 @@ def test_checkpoint_bound_to_expected_branch(tmp_path: Path):
     from tests.test_cycle_ledger import _init_selfevo_repo
     from nanobot.agent.subagent import SubagentManager
     from nanobot.providers.base import ToolCallRequest
-
-    base = tmp_path / "base"
-    base.mkdir()
-    _origin, work = _init_selfevo_repo(base)
-
-    other_cycle_branch = "selfevo/cycle-B"
-    expected_branch = "selfevo/cycle-A"
-    # The workspace is checked out on cycle B's branch -- a real
-    # selfevo/cycle-* branch, so the old prefix check would have let this
-    # through -- while THIS executor was spawned for cycle A.
-    subprocess.run(["git", "-C", str(work), "checkout", "-b", other_cycle_branch], check=True, capture_output=True)
-
-    head_before = subprocess.run(
-        ["git", "-C", str(work), "rev-parse", "HEAD"], capture_output=True, text=True,
-    ).stdout.strip()
-    expected_branch_before = subprocess.run(
-        ["git", "-C", str(work), "rev-parse", "--verify", expected_branch],
-        capture_output=True, text=True,
-    )
-    assert expected_branch_before.returncode != 0, "expected_branch must not exist yet in this fixture"
+    from unittest.mock import AsyncMock
 
     class FakeResponse:
         def __init__(self, content="", has_tool_calls=False, tool_calls=None):
@@ -1647,8 +1639,10 @@ def test_checkpoint_bound_to_expected_branch(tmp_path: Path):
             self.thinking_blocks = None
 
     class FakeProvider:
-        def __init__(self):
+        def __init__(self, path: str, content: str):
             self.calls = 0
+            self._path = path
+            self._content = content
 
         async def chat_with_retry(self, *args, **kwargs):
             self.calls += 1
@@ -1657,15 +1651,34 @@ def test_checkpoint_bound_to_expected_branch(tmp_path: Path):
                     has_tool_calls=True,
                     tool_calls=[ToolCallRequest(
                         id="call-1", name="write_file",
-                        arguments={"path": "scripts/on_wrong_branch.py", "content": "X = 1\n"},
+                        arguments={"path": self._path, "content": self._content},
                     )],
                 )
             return FakeResponse(content="done")
 
-    from unittest.mock import AsyncMock
+    # --- Scenario 1: wrong branch -------------------------------------
+    base = tmp_path / "base"
+    base.mkdir()
+    _origin, work = _init_selfevo_repo(base)
+
+    other_cycle_branch = "selfevo/cycle-B"
+    expected_branch = "selfevo/cycle-A"
+    # The workspace is checked out on cycle B's branch -- a real
+    # selfevo/cycle-* branch, so a prefix check would have let this
+    # through -- while THIS executor was spawned for cycle A.
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", other_cycle_branch], check=True, capture_output=True)
+
+    head_before = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "HEAD"], capture_output=True, text=True,
+    ).stdout.strip()
+    expected_branch_before = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "--verify", expected_branch],
+        capture_output=True, text=True,
+    )
+    assert expected_branch_before.returncode != 0, "expected_branch must not exist yet in this fixture"
 
     manager = SubagentManager(
-        provider=FakeProvider(),
+        provider=FakeProvider("scripts/on_wrong_branch.py", "X = 1\n"),
         workspace=work,
         bus=AsyncMock(),
         model="fake/model",
@@ -1688,7 +1701,7 @@ def test_checkpoint_bound_to_expected_branch(tmp_path: Path):
     ).stdout.strip()
     assert head_after == head_before, (
         "checkpoint committed onto the checked-out branch (cycle B) despite "
-        "expecting cycle A -- a prefix match let a wrong-branch checkpoint through"
+        "expecting cycle A -- the exact-match guard did not fire"
     )
 
     expected_branch_after = subprocess.run(
@@ -1698,6 +1711,138 @@ def test_checkpoint_bound_to_expected_branch(tmp_path: Path):
     assert expected_branch_after.returncode != 0, (
         "checkpoint fabricated the expected branch out of thin air instead of skipping"
     )
+
+    # --- Scenario 2: concurrent branch move (race) --------------------
+    base2 = tmp_path / "base2"
+    base2.mkdir()
+    _origin2, work2 = _init_selfevo_repo(base2)
+    branch2 = "selfevo/cycle-race"
+    subprocess.run(["git", "-C", str(work2), "checkout", "-b", branch2], check=True, capture_output=True)
+    (work2 / "scripts").mkdir(exist_ok=True)
+    (work2 / "scripts" / "dirty.py").write_text("X = 1\n", encoding="utf-8")
+
+    old_tip = subprocess.run(
+        ["git", "-C", str(work2), "rev-parse", branch2], capture_output=True, text=True,
+    ).stdout.strip()
+
+    real_run = subprocess.run
+    advanced = {"done": False}
+
+    def _race_after_old_capture(cmd, *args, **kwargs):
+        result = real_run(cmd, *args, **kwargs)
+        if (
+            not advanced["done"]
+            and isinstance(cmd, list)
+            and cmd[-2:] == ["rev-parse", f"refs/heads/{branch2}"]
+            and result.returncode == 0
+        ):
+            advanced["done"] = True
+            # A concurrent writer lands a real commit on the SAME branch
+            # via plumbing -- this checkout's working tree/index are
+            # untouched by it, exactly like a race with another process.
+            tree_sha = real_run(
+                ["git", "-C", str(work2), "rev-parse", f"{old_tip}^{{tree}}"],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            concurrent_sha = real_run(
+                ["git", "-C", str(work2), "commit-tree", tree_sha, "-p", old_tip, "-m", "concurrent writer"],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            real_run(
+                ["git", "-C", str(work2), "update-ref", f"refs/heads/{branch2}", concurrent_sha, old_tip],
+                capture_output=True, text=True,
+            )
+        return result
+
+    manager2 = SubagentManager(
+        provider=FakeProvider("scripts/dirty.py", "X = 1\n"), workspace=work2, bus=AsyncMock(), model="fake/model",
+        expected_cycle_branch=branch2,
+    )
+
+    monkeypatch.setattr(subprocess, "run", _race_after_old_capture)
+    manager2._maybe_checkpoint_commit()
+    monkeypatch.undo()
+
+    branch2_subject = subprocess.run(
+        ["git", "-C", str(work2), "log", "-1", "--format=%s", branch2], capture_output=True, text=True,
+    ).stdout.strip()
+    assert branch2_subject == "concurrent writer", (
+        "the checkpoint's own commit landed despite the branch moving concurrently -- "
+        f"branch tip subject is {branch2_subject!r}"
+    )
+    assert (work2 / "scripts" / "dirty.py").read_text(encoding="utf-8") == "X = 1\n", (
+        "the uncommitted change was lost, not merely left uncommitted"
+    )
+
+
+def test_checkpoint_keeps_shared_index_coherent(tmp_path: Path):
+    """D3 (ADR-035 Test Contract #1979, 16710f62): after a successful
+    checkpoint CAS, the workspace's ORDINARY (shared, not private) index
+    must equal the new HEAD's tree -- ``git diff --cached --quiet`` exits
+    0 -- and a subsequent ORDINARY ``git commit`` on that branch must
+    preserve the checkpoint's file rather than reverting/losing it. This
+    is the direct consequence of building the commit's tree from
+    ``write-tree`` against the same index ``git add`` just staged
+    (``_maybe_checkpoint_commit`` never uses a private/temporary index),
+    but is worth proving directly: a checkpoint that looked successful
+    while secretly leaving the shared index out of sync would corrupt
+    every commit made after it.
+    """
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.providers.base import ToolCallRequest
+    from unittest.mock import AsyncMock
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat_with_retry(self, *args, **kwargs):
+            self.calls += 1
+            return None
+
+    base = tmp_path / "base"
+    base.mkdir()
+    _origin, work = _init_selfevo_repo(base)
+    branch = "selfevo/cycle-clean-index"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "clean.py").write_text("Y = 2\n", encoding="utf-8")
+
+    manager = SubagentManager(
+        provider=FakeProvider(), workspace=work, bus=AsyncMock(), model="fake/model",
+        expected_cycle_branch=branch,
+    )
+    manager._maybe_checkpoint_commit()
+
+    commit_subject = subprocess.run(
+        ["git", "-C", str(work), "log", "-1", "--format=%s", branch], capture_output=True, text=True,
+    ).stdout.strip()
+    assert "clean.py" in commit_subject, f"expected checkpoint did not land: {commit_subject!r}"
+
+    clean_status = subprocess.run(
+        ["git", "-C", str(work), "status", "--porcelain"], capture_output=True, text=True,
+    ).stdout
+    assert clean_status == "", f"index desynced from the committed tree after a checkpoint: {clean_status!r}"
+
+    diff_cached = subprocess.run(["git", "-C", str(work), "diff", "--cached", "--quiet"])
+    assert diff_cached.returncode == 0, "index does not match the new HEAD's tree after the checkpoint"
+
+    (work / "scripts" / "second.py").write_text("Z = 3\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/second.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "a normal follow-up commit"], check=True, capture_output=True,
+    )
+    tracked_files = subprocess.run(
+        ["git", "-C", str(work), "ls-tree", "-r", "--name-only", "HEAD"], capture_output=True, text=True,
+    ).stdout
+    assert "scripts/clean.py" in tracked_files, (
+        "the checkpoint's file was reverted/lost by the next ordinary commit instead of preserved"
+    )
+    assert "scripts/second.py" in tracked_files
+    assert (work / "scripts" / "clean.py").read_text(encoding="utf-8") == "Y = 2\n"
 
 
 # --- keep-work: a resumed increment keeps one opening entry (ADR-035,
@@ -1843,6 +1988,71 @@ def test_killed_attempt_becomes_interrupted_kill(tmp_path: Path, monkeypatch):
     assert pending["reason"] == "interrupted_kill"
     assert pending["cycle_id"] == old_cycle_id
     assert pending["branch"] == old_branch
+
+    state = open_increment.load_state(state_dir)
+    assert state.hold is None, "a kill is not supplier evidence -- it must not start a backoff hold"
+
+
+@pytest.mark.parametrize("executor_status", ["ok", "bounded_stop", "blocked", "cancelled", "error", None])
+def test_recovery_maps_every_executor_status(tmp_path: Path, executor_status):
+    """D2 (ADR-035 Test Contract #1979, 16710f62): full mapping. The GATE
+    never rendered a verdict for the killed attempt's cycle_id
+    (record_attempt_finished never ran) regardless of what the
+    executor's OWN telemetry says -- ``ok``/``bounded_stop``/``blocked``/
+    ``cancelled``, or no telemetry at all, all become ``interrupted_kill``,
+    with ``executor_status`` carried into the record as evidence. The ONE
+    exception is a telemetry-confirmed ``error``: that is the existing
+    supply/defect classifier's job (elsewhere, synchronous, same tick),
+    never re-classified as a kill here -- ``check_running_for_kill``
+    leaves the registration standing, untouched, for that classifier to
+    own.
+    """
+    from nanobot.runtime import open_increment
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    old_cycle_id = "cycle-killed-01"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    open_increment.record_attempt_started(state_dir, old_cycle_id, old_branch)
+
+    if executor_status is not None:
+        task_id = f"tid-{executor_status}"
+        open_increment.record_attempt_task_id(state_dir, old_cycle_id, task_id)
+        (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+        (state_dir / "subagents" / f"{task_id}.json").write_text(
+            json.dumps({"status": executor_status, "result": "whatever"}), encoding="utf-8",
+        )
+
+    stale = open_increment.check_running_for_kill(state_dir, "cycle-fresh-02")
+
+    if executor_status == "error":
+        assert stale is None, (
+            "a telemetry-confirmed error must be left to the existing "
+            "supply/defect classifier, never reclassified as a kill here"
+        )
+        assert open_increment.load_state(state_dir).running is not None, (
+            "the registration must survive untouched for the classifier that owns it"
+        )
+        return
+
+    assert stale is not None, f"executor_status={executor_status!r} must be classified as a kill"
+    assert stale["cycle_id"] == old_cycle_id
+    assert stale["branch"] == old_branch
+    assert stale["executor_status"] == executor_status
+
+    open_increment.record_kill_interruption(
+        state_dir, stale["cycle_id"],
+        retry_key=f"kill:{old_cycle_id}",
+        plan_text="(a prior attempt was interrupted by a hard kill)",
+        candidate_id=None, branch=stale["branch"], executor_status=stale["executor_status"],
+    )
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is not None
+    assert pending["reason"] == "interrupted_kill"
+    assert pending["cycle_id"] == old_cycle_id
+    assert pending["branch"] == old_branch
+    assert pending["executor_status"] == executor_status
 
     state = open_increment.load_state(state_dir)
     assert state.hold is None, "a kill is not supplier evidence -- it must not start a backoff hold"
