@@ -2519,6 +2519,73 @@ def test_failed_closing_commit_blocks_integration(tmp_path: Path, monkeypatch):
     )
 
 
+def test_delete_keeps_inspection_ref(tmp_path: Path):
+    """D7 (ADR-035 Test Contract, external review finding #7): `delete`
+    must protect the branch's commit from immediate pruning by pinning
+    it under `refs/selfevo/inspect/<cycle_id>` -- a ref namespace pruning
+    never queries (`_prune_stale_cycle_branches` only ever lists
+    `refs/heads/selfevo/cycle-*`) -- so the work stays inspectable even
+    after the next prune sweep removes an old, unmerged forensic branch
+    outside the normal retention window, exactly the external review's
+    own reproduction.
+    """
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import open_increment
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = base / "state"
+    state_dir.mkdir()
+    _origin, work = _init_selfevo_repo(base)
+
+    old_cycle_id = "cycle-delete-07"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", old_branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "inspect_me.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/inspect_me.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/inspect_me.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    branch_tip = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", old_branch], capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id,
+        retry_key="delete-test", plan_text="finish the wip feature", candidate_id=None,
+        selfevo_repo=work, branch=old_branch,
+    )
+    assert open_increment.pending_open_increment(state_dir) is not None
+
+    open_increment.resolve(state_dir, "cycle-deciding-08", "delete", selfevo_repo=work)
+
+    assert open_increment.pending_open_increment(state_dir) is None
+
+    inspection_ref = f"refs/selfevo/inspect/{old_cycle_id}"
+    inspect_sha = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", inspection_ref], capture_output=True, text=True,
+    ).stdout.strip()
+    assert inspect_sha == branch_tip, "delete must pin the branch's tip under the inspection ref"
+
+    # Prove pruning cannot touch it: force-delete the ORIGINAL branch ref
+    # directly (simulating the next prune sweep removing an old, unmerged
+    # forensic branch outside the retention window) and confirm the
+    # commit is still reachable and named via the inspection ref.
+    subprocess.run(["git", "-C", str(work), "branch", "-D", old_branch], check=True, capture_output=True)
+    still_reachable = subprocess.run(
+        ["git", "-C", str(work), "cat-file", "-e", inspection_ref], capture_output=True, text=True,
+    )
+    assert still_reachable.returncode == 0, (
+        "the commit must remain reachable via the inspection ref after the branch is pruned"
+    )
+
+
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
 # architect addendum, #1942 B2) -----------------------------------------------
 
