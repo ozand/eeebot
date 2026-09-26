@@ -80,11 +80,11 @@ async def test_watchdog_cancellation_kills_and_reaps_real_exec_subprocess(tmp_pa
 
         kernel32 = ctypes.windll.kernel32
         process = kernel32.OpenProcess(0x00100000 | 0x1000, False, child_pid)
-        assert process, f"child PID {child_pid} could not be inspected"
-        try:
-            assert kernel32.WaitForSingleObject(process, 0) == 0, f"child PID {child_pid} is still alive"
-        finally:
-            kernel32.CloseHandle(process)
+        if process:
+            try:
+                assert kernel32.WaitForSingleObject(process, 0) == 0, f"child PID {child_pid} is still alive"
+            finally:
+                kernel32.CloseHandle(process)
     else:
         for pid in (shell_pid, child_pid):
             assert pid is not None
@@ -100,6 +100,65 @@ async def test_watchdog_cancellation_kills_and_reaps_real_exec_subprocess(tmp_pa
                 assert len(stat_fields) > 2 and stat_fields[2] == "Z", (
                     f"PID {pid} remains running (state={stat_fields[2] if len(stat_fields) > 2 else 'unknown'})"
                 )
+
+
+@pytest.mark.asyncio
+async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path):
+    """A shell exit must not bypass process-group cleanup for a pipe-holding child."""
+    import asyncio
+    import os
+    import sys
+    import time
+
+    if os.name == "nt":
+        pytest.skip("POSIX process-group semantics")
+
+    child_pid_file = tmp_path / "background-child.pid"
+    shell_pid_file = tmp_path / "background-shell.pid"
+    child_script = tmp_path / "background_child.py"
+    child_script.write_text(
+        "import os, sys, time\\n"
+        "open(sys.argv[1], 'w').write(str(os.getpid()))\\n"
+        "time.sleep(60)\\n",
+        encoding="utf-8",
+    )
+    command = (
+        f'echo $$ > "{shell_pid_file}"; '
+        f'"{sys.executable}" "{child_script}" "{child_pid_file}" &'
+    )
+    execution = asyncio.create_task(ExecTool(timeout=60).execute(command))
+    deadline = time.monotonic() + 10
+    while not child_pid_file.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    assert child_pid_file.exists(), "background grandchild did not start"
+    shell_pid = int(shell_pid_file.read_text(encoding="utf-8"))
+    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+    assert os.getsid(shell_pid) == shell_pid
+    assert os.getpgid(child_pid) == shell_pid
+
+    # Wait until the shell has exited; communicate remains blocked because the
+    # grandchild inherited stdout/stderr. This is the regression window.
+    deadline = time.monotonic() + 5
+    while Path(f"/proc/{shell_pid}/stat").exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    shell_stat = Path(f"/proc/{shell_pid}/stat")
+    assert not shell_stat.exists() or shell_stat.read_text(encoding="utf-8").split()[2] == "Z"
+    assert execution.done() is False
+
+    execution.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(execution, timeout=8)
+
+    child_stat = Path(f"/proc/{child_pid}/stat")
+    deadline = time.monotonic() + 5
+    while child_stat.exists() and time.monotonic() < deadline:
+        fields = child_stat.read_text(encoding="utf-8").split()
+        if len(fields) > 2 and fields[2] == "Z":
+            break
+        await asyncio.sleep(0.01)
+    if child_stat.exists():
+        fields = child_stat.read_text(encoding="utf-8").split()
+        assert len(fields) > 2 and fields[2] == "Z", f"grandchild PID {child_pid} survived cancellation"
 
 
 def _fake_resolve_private(hostname, port, family=0, type_=0):
