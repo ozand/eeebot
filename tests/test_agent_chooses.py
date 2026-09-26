@@ -2896,6 +2896,72 @@ def test_stopped_and_minimal_mode_are_enforced(tmp_path: Path, monkeypatch):
     )
 
 
+def test_planner_supplier_error_classified_as_supply(tmp_path: Path, monkeypatch):
+    """D10 (ADR-035 Test Contract, external review finding #10): a
+    terminal supplier error in the PLANNER's own telemetry must be
+    classified BEFORE any attempt to JSON-parse its (nonexistent) final
+    answer -- family ``supply``, never ``planner``. Repeated supplier
+    failures must build ``consecutive_supply`` (leading eventually to
+    ``model_supply_degraded``), never ``consecutive_planner`` (which
+    would wrongly march toward ``stopped``/``minimal_mode`` for a
+    problem that is not the planner's own fault).
+    """
+    import asyncio
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge, no_plan_recovery
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _init_selfevo_repo(base)
+
+    _task_writing_dir = bridge.RELEASE_ROOT / "nanobot" / "skills" / "task-writing"
+    _task_writing_dir.mkdir(parents=True, exist_ok=True)
+    (_task_writing_dir / "SKILL.md").write_text("task-writing contract (test stub)\n", encoding="utf-8")
+
+    class _PlannerSupplierErrorManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            if self._telemetry_component != "planner":
+                return "fake subagent spawned"
+            task_id = "planner-supplier-error-01"
+            (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+            (state_dir / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({
+                    "status": "error",
+                    "summary": "Error: LLM execution failed: litellm.APIConnectionError (error code: 503)",
+                    "result": "Error: LLM execution failed: litellm.APIConnectionError (error code: 503)",
+                    "context_usage": {"iterations": [{}]},
+                }),
+                encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
+            return "fake planner spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _PlannerSupplierErrorManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    no_plan_state = no_plan_recovery.load_state(state_dir)
+    assert no_plan_state.consecutive_supply >= 1, (
+        "a terminal supplier error in planner telemetry must count as the supply family"
+    )
+    assert no_plan_state.consecutive_planner == 0, (
+        "a supplier error must never be counted toward the planner family "
+        "(malformed/no_plan/refused), which drives stopped/minimal_mode"
+    )
+
+
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
 # architect addendum, #1942 B2) -----------------------------------------------
 
