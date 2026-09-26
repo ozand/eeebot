@@ -3722,6 +3722,47 @@ def test_keep_edit_diary_records_edit_of_previous_plan(tmp_path: Path, monkeypat
     )
 
 
+def test_resolve_keep_with_edit_persists_revised_plan_before_handoff(tmp_path: Path):
+    """N2 (round 2 external re-check, architect resolution 2026-09-26): a
+    ``keep`` decision that also EDITS the plan must update the pending
+    increment's DURABLE ``plan_text`` (and bump a ``plan_version``)
+    BEFORE returning control for execution hand-off -- not merely the
+    current call's parsed response/executor task. Round 1's ``resolve``
+    only ever set ``resumed_by`` on ``keep``; a kill before the resumed
+    attempt's own terminal outcome would then recover with the STALE
+    original plan, silently undoing the accepted revision. Isolated unit
+    test against ``resolve()`` directly -- driving this through a full
+    ``_main_impl()`` cycle is unreliable: an unfinished resumed executor
+    (no telemetry) re-triggers D1's OWN interruption bookkeeping for the
+    same cycle_id, which independently overwrites ``pending['plan_text']``
+    from the resumed task text and would mask whether this fix fired.
+    """
+    from nanobot.runtime import open_increment
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    cycle_id = "cycle-keep-edit-unit-01"
+    original_plan = "Plan: finish the wip feature exactly as originally scoped."
+    open_increment.record_supply_interruption(
+        state_dir, cycle_id,
+        retry_key="n2-unit-test", plan_text=original_plan, candidate_id=None,
+        branch=f"selfevo/cycle-{cycle_id}",
+    )
+    assert open_increment.pending_open_increment(state_dir)["plan_text"] == original_plan
+
+    revised_plan = "finish the wip feature, but also add a regression test for the crash it fixes"
+    open_increment.resolve(state_dir, cycle_id, "keep", plan_text=revised_plan)
+
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is not None, "keep must never clear pending -- only annotate it"
+    assert pending["plan_text"] == revised_plan, (
+        f"resolve(keep, plan_text=...) must persist the revised plan into pending: {pending!r}"
+    )
+    assert pending.get("plan_version", 1) == 2, "a plan edit must bump the version"
+    assert pending["resumed_by"] == cycle_id
+
+
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
 # architect addendum, #1942 B2) -----------------------------------------------
 
