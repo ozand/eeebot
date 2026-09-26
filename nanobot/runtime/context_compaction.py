@@ -262,7 +262,10 @@ def _structural_summary(
         if role == "assistant":
             if "decision:" in text.lower() or "we will " in text.lower():
                 decisions.append(text[:500])
-            elif not msg.get("tool_calls"):
+            else:
+                # Assistant messages often carry both progress narration and
+                # tool_calls. The calls are metadata; do not discard the
+                # accompanying explicit text merely because calls are present.
                 progress.append(text[:500])
             for call in msg.get("tool_calls") or []:
                 fn = call.get("function") if isinstance(call, dict) else None

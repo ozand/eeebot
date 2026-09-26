@@ -321,6 +321,43 @@ def test_second_real_compaction_incorporates_newly_dropped_evidence(tmp_path):
     )
 
 
+def test_second_compaction_summarizes_assistant_progress_with_tool_calls(tmp_path):
+    """Assistant progress remains evidence even when that turn invokes tools."""
+    messages = _make_messages([_long_content(30_000)] * 4)
+    round1 = cc.compact_messages(
+        messages, cycle_id="assistant-progress", iteration=1, state_root=tmp_path,
+        threshold=0.01, keep_tokens=8_000, window_tokens=98_304,
+    )
+    marker = "ROUND_TWO_IMPLEMENTATION_COMPLETE"
+    progress_turn = {
+        "role": "assistant",
+        "content": "Implemented " + marker + ": " + _long_content(2_000),
+        "tool_calls": [{"id": "tc-progress", "type": "function",
+                        "function": {"name": "bash", "arguments": "{}"}}],
+    }
+    grown = round1 + [
+        progress_turn,
+        {"role": "tool", "tool_call_id": "tc-progress", "name": "bash",
+         "content": _long_content(1_000)},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "tc-filler", "type": "function",
+                         "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "tc-filler", "name": "bash",
+         "content": _long_content(40_000)},
+    ]
+    round2 = cc.compact_messages(
+        grown, cycle_id="assistant-progress", iteration=2, state_root=tmp_path,
+        threshold=0.01, keep_tokens=8_000, window_tokens=98_304,
+    )
+
+    carriers = [
+        str(message.get("content") or "") for message in round2
+        if str(message.get("content") or "").startswith("[Compaction summary")
+    ]
+    assert carriers
+    assert marker in "\n".join(carriers)
+
+
 def test_compaction_replaces_old_summary_carrier_instead_of_accumulating(tmp_path):
     """Only one summary carrier may remain in history after repeated passes."""
     messages = _make_messages([_long_content(20_000)] * 2)
