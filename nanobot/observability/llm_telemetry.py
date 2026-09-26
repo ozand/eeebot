@@ -67,7 +67,7 @@ def _redact_secrets(text: str) -> str:
     return text
 
 
-def set_call_context(cycle_id: str | None, component: str | None) -> Token:
+def set_call_context(cycle_id: str | None, component: str | None) -> tuple[Token, Token]:
     """Set the current (cycle_id, component) attribution context.
 
     Returns a token that must be passed to :func:`reset_call_context` to
@@ -76,15 +76,18 @@ def set_call_context(cycle_id: str | None, component: str | None) -> Token:
     """
     # A cached duration sequence belongs only to the active call context; never
     # let it leak into a later prompt-only call after this boundary.
-    _CALL_SEQ.set(None)
-    return _CALL_CONTEXT.set({"cycle_id": cycle_id or "", "component": component or ""})
+    seq_token = _CALL_SEQ.set(None)
+    context_token = _CALL_CONTEXT.set({"cycle_id": cycle_id or "", "component": component or ""})
+    return context_token, seq_token
 
 
-def reset_call_context(token: Token) -> None:
-    """Restore the call context captured by the matching ``set_call_context``."""
-    _CALL_SEQ.set(None)
+def reset_call_context(token: tuple[Token, Token]) -> None:
+    """Restore call attribution and the sequence captured at context entry."""
+    context_token, seq_token = token
     with contextlib.suppress(Exception):
-        _CALL_CONTEXT.reset(token)
+        _CALL_CONTEXT.reset(context_token)
+    with contextlib.suppress(Exception):
+        _CALL_SEQ.reset(seq_token)
 
 
 def current_cycle_id(component: str | None = None) -> str:

@@ -92,6 +92,31 @@ def test_call_sequence_does_not_leak_across_call_contexts(tmp_path, monkeypatch)
     )
 
 
+def test_nested_call_context_restores_outer_duration_sequence(tmp_path, monkeypatch):
+    """An inner call context must not erase the outer call's pending seq."""
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+    monkeypatch.delenv("LLM_CAPTURE_PROMPTS", raising=False)
+
+    with call_context("cycle-outer", "bridge"):
+        record_llm_call(model="m", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
+        with call_context("cycle-inner", "proposer"):
+            record_llm_call(model="m", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
+            record_llm_prompt(
+                messages=[], content="inner", reasoning_content=None,
+                finish_reason="stop", model="m", prompt_tokens=1, completion_tokens=1,
+            )
+        record_llm_prompt(
+            messages=[], content="outer", reasoning_content=None,
+            finish_reason="stop", model="m", prompt_tokens=1, completion_tokens=1,
+        )
+
+    rows = [json.loads(line) for path in tmp_path.rglob("*.jsonl") for line in path.read_text().splitlines()]
+    prompts = [row for row in rows if "messages" in row]
+    assert {(row["cycle_id"], row["component"], row["seq"]) for row in prompts} == {
+        ("cycle-inner", "proposer", 1), ("cycle-outer", "bridge", 1),
+    }
+
+
 def test_legacy_duration_row_without_seq_is_still_readable_by_duration_readers(
     tmp_path, monkeypatch
 ):
