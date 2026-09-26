@@ -354,9 +354,10 @@ def pending_open_increment(state_dir: "Path") -> "dict[str, Any] | None":
     return load_state(state_dir).pending
 
 
-def _create_inspection_ref(selfevo_repo: "Path", pending: "dict[str, Any] | None") -> None:
-    """D7 (ADR-035 Test Contract, external review finding #7): ``delete``
-    must not silently hand the branch to the next prune sweep --
+def _create_inspection_ref(selfevo_repo: "Path", pending: "dict[str, Any] | None") -> bool:
+    """D7 (ADR-035 Test Contract, external review finding #7; round 2
+    external re-check, architect resolution 2026-09-26): ``delete`` must
+    not silently hand the branch to the next prune sweep --
     ``refs/selfevo/inspect/<cycle_id>`` pins the branch's current tip
     under a ref namespace pruning never looks at
     (:func:`nanobot.runtime.bridge._prune_stale_cycle_branches` only ever
@@ -364,14 +365,21 @@ def _create_inspection_ref(selfevo_repo: "Path", pending: "dict[str, Any] | None
     reachable and named for inspection even after the original branch
     ref is eventually pruned as ordinary forensic history. Retention on
     the inspection ref itself (14 days) is a separate, not-yet-built
-    cleanup -- out of scope here. Fail-open, silent: a failed ref write
-    must never block the delete decision itself."""
+    cleanup -- out of scope here.
+
+    Returns True only when the ``update-ref`` write actually succeeded --
+    round 1 was fail-open/silent here (a failed write never blocked
+    ``resolve``'s ``delete``, so a stale lock on the ref, or any other
+    write failure, lost the branch's pending-pruning exemption without
+    ever gaining the protection it was traded for). The caller
+    (:func:`resolve`) now uses this return value to decide whether
+    ``delete`` may actually clear ``pending``."""
     if not pending:
-        return
+        return False
     branch = str(pending.get("branch") or "").strip()
     cycle_id = str(pending.get("cycle_id") or "").strip()
     if not branch or not cycle_id:
-        return
+        return False
     import subprocess
 
     try:
@@ -379,13 +387,15 @@ def _create_inspection_ref(selfevo_repo: "Path", pending: "dict[str, Any] | None
         tip = subprocess.run(
             git + ["rev-parse", f"refs/heads/{branch}"], capture_output=True, text=True, timeout=10,
         )
-        if tip.returncode == 0 and tip.stdout.strip():
-            subprocess.run(
-                git + ["update-ref", f"refs/selfevo/inspect/{cycle_id}", tip.stdout.strip()],
-                capture_output=True, text=True, timeout=10,
-            )
+        if tip.returncode != 0 or not tip.stdout.strip():
+            return False
+        update = subprocess.run(
+            git + ["update-ref", f"refs/selfevo/inspect/{cycle_id}", tip.stdout.strip()],
+            capture_output=True, text=True, timeout=10,
+        )
+        return update.returncode == 0
     except Exception:
-        pass
+        return False
 
 
 def resolve(
@@ -410,11 +420,16 @@ def resolve(
     ``resumed_by`` with the deciding cycle; only :func:`record_attempt_finished`
     (a REAL terminal outcome for this increment's ``cycle_id``) removes it.
 
-    D7 (ADR-035 Test Contract, external review finding #7): ``delete``,
-    given ``selfevo_repo``, pins the pending increment's branch under
-    ``refs/selfevo/inspect/<cycle_id>`` (see :func:`_create_inspection_ref`)
-    BEFORE ``pending`` is cleared below -- the branch's own pending-increment
-    pruning exemption disappears the instant this call returns.
+    D7 (ADR-035 Test Contract, external review finding #7; round 2
+    external re-check, architect resolution 2026-09-26): ``delete``
+    counts as resolved only if pinning the pending increment's branch
+    under ``refs/selfevo/inspect/<cycle_id>`` (see
+    :func:`_create_inspection_ref`) actually SUCCEEDED. A failed write
+    (a stale lock on that ref, a missing ``selfevo_repo``, or any other
+    error) leaves ``pending`` untouched -- the branch keeps its
+    pending-increment pruning exemption and the decision is asked again
+    next time, rather than silently trading one protection for the other
+    and getting neither.
     """
     from nanobot.runtime.cycle_ledger import append_event
 
@@ -424,8 +439,20 @@ def resolve(
         )
     state = load_state(state_dir)
     retry_key = (state.pending or {}).get("retry_key", "")
-    if decision == "delete" and selfevo_repo is not None:
-        _create_inspection_ref(selfevo_repo, state.pending)
+    if decision == "delete":
+        protected = selfevo_repo is not None and _create_inspection_ref(selfevo_repo, state.pending)
+        if not protected:
+            state.hold = None
+            state.held_ticks = 0
+            state.consecutive_supply_interrupts = 0
+            _save_state(state_dir, state)
+            append_event(state_dir, {
+                "phase": "open_increment_delete_failed",
+                "cycle_id": cycle_id or "",
+                "retry_key": retry_key,
+                "reason": "inspection_ref_failed",
+            })
+            return state
     if decision == "keep":
         if state.pending is not None:
             state.pending = {**state.pending, "resumed_by": cycle_id or ""}
