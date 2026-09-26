@@ -39,12 +39,12 @@ class TestRuleCDelivery:
         assert is_delivered(False, mixed) is False
 
     def test_service_only_ledger_contract_is_partial_inconclusive_and_not_real(self, tmp_path):
-        inputs = bridge._real_result_ledger_inputs("blocked")
+        inputs = bridge._real_result_ledger_inputs({"result_status": "blocked", "status": "blocked"})
         cycle_ledger.record_cycle_outcome(
             tmp_path, "cycle-service", "partial", "service_only", [
                 "diary/2026-09-21.md", "memory/MEMORY.md",
             ], "selfevo/cycle-service", verdict="inconclusive",
-            verdict_reason="service_only", real_result=inputs,
+            verdict_reason="service_only", real_result=inputs, delivered=False,
         )
         row = _read_ledger(tmp_path)[0]
         assert (row["outcome"], row["verdict"], row["reason"], row["verdict_reason"]) == (
@@ -198,6 +198,15 @@ class TestTypedHelpers:
         assert rows[0]["reason"] == "push_pending"
         assert rows[0]["branch"] == "selfevo/cycle-1"
 
+    def test_record_cycle_outcome_push_pending_preserves_changed_paths(self, tmp_path):
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c-service", "push_pending", "push_pending",
+            ["diary/2026-09-25.md", "memory/MEMORY.md"], "selfevo/cycle-service",
+            main_sha_before="abc123",
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert row["files_changed"] == ["diary/2026-09-25.md", "memory/MEMORY.md"]
+
     def test_record_cycle_outcome_push_pending_carries_main_sha_before(self, tmp_path):
         """#1709 increment 2: bridge._finish_pending_pushes reads this back
         to tell whether origin/main moved since the original attempt."""
@@ -231,6 +240,15 @@ class TestTypedHelpers:
         cycle_ledger.record_cycle_outcome(tmp_path, "c1", "success", None, ["a.py"], "selfevo/cycle-1")
         rows = _read_ledger(tmp_path)
         assert "real_result" not in rows[0]
+
+    def test_record_cycle_outcome_delivered_is_additive(self, tmp_path):
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c1", "partial", "service_only", ["diary/a.md"], "branch",
+            delivered=False,
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert row["delivered"] is False
+        assert row["outcome"] == "partial"
 
     def test_record_cycle_outcome_real_result_carries_inputs_plus_boolean(self, tmp_path):
         """The boolean is written ALONGSIDE the inputs, never in place of

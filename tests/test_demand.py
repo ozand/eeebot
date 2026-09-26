@@ -1431,6 +1431,8 @@ def _append_outcome(
     ts: str | None = None,
     files_changed: list[str] | None = None,
     demand_id: str | None = None,
+    delivered: bool | None = None,
+    delivery_state: str | None = None,
 ) -> None:
     event: dict = {"phase": "outcome", "cycle_id": cycle_id, "outcome": outcome}
     if ts:
@@ -1439,6 +1441,10 @@ def _append_outcome(
         event["files_changed"] = files_changed
     if demand_id:
         event["demand_id"] = demand_id
+    if delivered is not None:
+        event["delivered"] = delivered
+    if delivery_state is not None:
+        event["delivery_state"] = delivery_state
     cycle_ledger.append_event(state_dir, event)
 
 
@@ -1502,8 +1508,13 @@ class TestCompletedSidecar:
         _append_proposed(state_dir, "service-cycle", "priority-service123", ts=_now_iso(2))
         _append_outcome(
             state_dir, "service-cycle", "success", ts=_now_iso(1),
-            files_changed=["diary/2026-09-21.md", "memory/MEMORY.md"],
-            demand_id="priority-service123",
+            files_changed=["diary/2026-09-21.md"],
+            demand_id="priority-service123", delivered=False, delivery_state="known",
+        )
+        _append_proposed(state_dir, "late-old-empty", "priority-late-empty", ts=_now_iso(2))
+        _append_outcome(
+            state_dir, "late-old-empty", "pushed_late", ts=_now_iso(1),
+            files_changed=[], delivered=False, delivery_state="unknown",
         )
         assert demand._fold_completed(state_dir) == set()
         completed_path = state_dir / "demand" / "completed.json"

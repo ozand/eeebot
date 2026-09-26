@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 from nanobot.runtime import bridge
+from nanobot.runtime import demand
 from nanobot.runtime import cycle_ledger
 from tests.test_bridge_cycle_branch import (
     _commit_file,
@@ -28,23 +29,64 @@ def _read_ledger_rows(state_dir: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _stage_push_pending(tmp_path: Path, work: Path, cycle_id: str) -> dict:
-    """Set up a cycle branch with one commit, return HEAD to clean main (the
-    boundary precondition), and write the 'push_pending' ledger row that
-    _integrate_cycle_to_main would have written on exhausted retries."""
+def _stage_push_pending(
+    tmp_path: Path, work: Path, cycle_id: str, files_changed: list[str] | None = None,
+) -> dict:
+    """Set up a cycle branch and a push_pending row matching the real recorder."""
     state_dir = tmp_path / "state"
     setup = bridge._setup_cycle_branch(work, cycle_id)
     assert setup["ok"]
-    _commit_file(work, "feature.py", "def feature():\n    return 42\n", "feat: add feature")
+    changed_paths = ["feature.py"] if files_changed is None else files_changed
+    for index, path in enumerate(changed_paths):
+        (work / path).parent.mkdir(parents=True, exist_ok=True)
+        _commit_file(work, path, f"# test content {index}\n", f"feat: change {path}")
     _run(work, "checkout", "main")  # boundary precondition: HEAD on clean main
     cycle_ledger.record_cycle_outcome(
-        state_dir, cycle_id, "push_pending", "push_pending", [], setup["branch"],
+        state_dir, cycle_id, "push_pending", "push_pending", changed_paths, setup["branch"],
         main_sha_before=setup["main_sha"],
     )
     return {"state_dir": state_dir, "branch": setup["branch"], "main_sha": setup["main_sha"]}
 
 
 class TestFinishPendingPushes:
+    def test_late_push_carries_service_only_paths_and_does_not_complete_demand(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        service = ["diary/2026-09-25.md", "memory/MEMORY.md"]
+        staged = _stage_push_pending(tmp_path, work, "cid-service-late", service)
+
+        assert bridge._finish_pending_pushes(work, staged["state_dir"]) == 1
+        rows = _read_ledger_rows(staged["state_dir"])
+        pushed = [r for r in rows if r.get("phase") == "outcome" and r.get("outcome") == "pushed_late"][-1]
+        assert pushed["files_changed"] == service
+        assert pushed["delivered"] is False
+        assert pushed["delivery_state"] == "known"
+
+        (staged["state_dir"] / "demand").mkdir(parents=True, exist_ok=True)
+        cycle_ledger.append_event(staged["state_dir"], {
+            "phase": "proposed", "cycle_id": "cid-service-late", "demand_id": "priority-service-late",
+        })
+        assert demand._fold_completed(staged["state_dir"]) == set()
+
+    def test_late_push_with_old_empty_file_list_is_unknown_and_not_folded(self, tmp_path):
+        from nanobot.runtime import demand
+        _, work = _init_repo(tmp_path)
+        staged = _stage_push_pending(tmp_path, work, "cid-legacy-empty", [])
+        assert bridge._finish_pending_pushes(work, staged["state_dir"]) == 1
+        rows = _read_ledger_rows(staged["state_dir"])
+        pushed = [r for r in rows if r.get("phase") == "outcome" and r.get("outcome") == "pushed_late"][-1]
+        assert pushed["files_changed"] == []
+        assert pushed["delivered"] is False
+        assert pushed["delivery_state"] == "unknown"
+        (staged["state_dir"] / "demand").mkdir(parents=True, exist_ok=True)
+        cycle_ledger.append_event(staged["state_dir"], {
+            "phase": "proposed", "cycle_id": "cid-legacy-empty", "demand_id": "priority-legacy-empty",
+        })
+        assert demand._fold_completed(staged["state_dir"]) == set()
+        completed_path = staged["state_dir"] / "demand" / "completed.json"
+        if completed_path.exists():
+            completed = json.loads(completed_path.read_text(encoding="utf-8"))
+            assert "priority-legacy-empty" not in completed.get("entries", {})
+
     def test_unchanged_main_pushes_late(self, tmp_path):
         origin, work = _init_repo(tmp_path)
         staged = _stage_push_pending(tmp_path, work, "cid-late")
