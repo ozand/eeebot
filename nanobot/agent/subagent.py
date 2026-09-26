@@ -658,7 +658,27 @@ class SubagentManager:
                     for tool_call in response.tool_calls:
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.debug("Subagent [{}] executing: {} with arguments: {}", task_id, tool_call.name, args_str)
-                        result = await tools.execute(tool_call.name, tool_call.arguments)
+                        _tool_timeout = _watchdog.remaining_time()
+                        if _tool_timeout <= 0:
+                            stop_reason = "progress_watchdog_timeout"
+                            break
+                        try:
+                            result = await asyncio.wait_for(
+                                tools.execute(tool_call.name, tool_call.arguments),
+                                timeout=_tool_timeout,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "Subagent [{}] tool step timed out by progress watchdog ({:.1f}s)",
+                                task_id, _watchdog.timeout_secs,
+                            )
+                            stop_reason = "progress_watchdog_timeout"
+                            break
+                        if _watchdog.is_stalled():
+                            # A tool may suppress cancellation and return late; do not
+                            # let that completion revive an expired watchdog window.
+                            stop_reason = "progress_watchdog_timeout"
+                            break
                         if tool_call.name == "search_memory":
                             try:
                                 memory_result = json.loads(result)
@@ -681,6 +701,8 @@ class SubagentManager:
                             "content": result,
                         })
                         _watchdog.record_step_completed()
+                    if stop_reason == "progress_watchdog_timeout":
+                        break
                     if memory_unavailable_reason:
                         stop_reason = "memory_search_unavailable"
                         break
