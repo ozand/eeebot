@@ -97,6 +97,18 @@ class TestFinishPendingPushes:
         })
         assert demand._fold_completed(staged["state_dir"]) == set()
 
+        # A second recovery boundary must recognize partial/service_only as
+        # this cycle's resolution, not append a contradictory abandoned row.
+        assert bridge._finish_pending_pushes(work, staged["state_dir"]) == 0
+        repeated_rows = _read_ledger_rows(staged["state_dir"])
+        resolutions = [
+            row for row in repeated_rows
+            if row.get("phase") == "outcome" and row.get("cycle_id") == "cid-service-late"
+            and row.get("outcome") != "push_pending"
+        ]
+        assert len(resolutions) == 1
+        assert resolutions[0]["outcome"] == "partial"
+
     def test_late_push_with_old_empty_file_list_is_unknown_and_not_folded(self, tmp_path):
         from nanobot.runtime import demand
         _, work = _init_repo(tmp_path)
