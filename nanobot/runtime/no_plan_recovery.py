@@ -64,6 +64,12 @@ CAUSE_FAMILY: dict[str, str] = {
     "refused": "planner",
     "malformed": "planner",
     "no_plan": "planner",
+    # D10 (ADR-035 Test Contract, external review finding #10): a terminal
+    # supplier error in the planner's OWN telemetry (its LLM call itself
+    # failed -- no final answer to even attempt parsing) is supply family,
+    # same as a wall-clock timeout -- never planner family, which drives
+    # stopped/minimal_mode for a problem that is not the planner's fault.
+    "supplier_error": "supply",
 }
 
 _STATE_RELPATH = ("planner", "no_plan_recovery.json")

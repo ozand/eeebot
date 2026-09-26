@@ -3533,6 +3533,25 @@ async def _run_planning_session(
 
     iterations_used = len((telem.get('context_usage') or {}).get('iterations') or [])
     raw_result = str(telem.get('result') or '').strip()
+
+    # D10 (ADR-035 Test Contract, external review finding #10): classify a
+    # terminal supplier error in the planner's OWN telemetry BEFORE any
+    # attempt to JSON-parse `raw_result` -- there is no final answer to
+    # parse, and doing so anyway produced "malformed (invalid_json)",
+    # wrongly counted toward the planner family. Reuses the same
+    # classifier the executor's own LLM-error path uses
+    # (_classify_llm_error) so the two readers cannot drift apart on what
+    # "looks like a supplier outage" means.
+    if str(telem.get('status') or '').strip().lower() == 'error':
+        _planner_error_text = str(telem.get('summary') or telem.get('result') or '').strip()
+        _planner_error_class = _classify_llm_error(_planner_error_text)
+        if _planner_error_class == 'paused-supplier':
+            return _fail('supplier_error', f'planner supplier error: {_planner_error_text[:200]}')
+        # Our own defect (a genuine planner-side exception, not a
+        # supplier outage) still keeps the existing 'malformed' shape --
+        # D10 only fixes the misclassification of supplier errors.
+        return _fail('malformed', f'planner error: {_planner_error_text[:200]}')
+
     # #1893: exhausted tool-call budgets and bounded stops are not malformed
     # JSON attempts. They produced no final plan at all; keep their reason
     # instead of reporting the parser's incidental Expecting value error.
