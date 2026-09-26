@@ -423,6 +423,56 @@ class TestHandledMarker:
         assert llm_proposer.should_propose(state_dir, None) is True
 
 
+class TestRetireProposerRequestForCandidate:
+    """Codex review of 777ada1a (nanobot/runtime/llm_proposer.py:558), P1
+    (architect resolution 2026-09-26): ADR-035 rule 1 has the planner pick
+    a candidate by ``candidate_id``, never through the old
+    ``find_pending_request`` rotation path that used to write the
+    ``handled_<rid>.txt`` marker -- so a proposer request the planner
+    already selected and ran kept surfacing forever from
+    ``proposer_candidate_items``, offering the SAME candidate for
+    re-execution every cycle.
+    """
+
+    def test_retiring_a_run_candidate_stops_it_being_offered_again(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        request_id = "llm-proposer-cycle-retire01"
+        title = "Add regression coverage for the retry path"
+        (req_dir / "request.json").write_text(
+            json.dumps({"request_status": "queued", "request_id": request_id, "task_title": title}),
+            encoding="utf-8",
+        )
+        candidate_id = demand.item_id("proposer", title)
+        items_before = llm_proposer.proposer_candidate_items(state_dir)
+        assert any(i["id"] == candidate_id for i in items_before), (
+            "setup sanity check: the request must actually surface as this candidate_id"
+        )
+
+        retired = llm_proposer.retire_proposer_request_for_candidate(state_dir, candidate_id)
+        assert retired is True
+
+        items_after = llm_proposer.proposer_candidate_items(state_dir)
+        assert not any(i["id"] == candidate_id for i in items_after), (
+            "a proposer request whose candidate the planner already ran must stop being offered"
+        )
+
+    def test_retiring_an_unmatched_candidate_id_is_a_no_op(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        (req_dir / "request.json").write_text(
+            json.dumps({
+                "request_status": "queued", "request_id": "llm-proposer-cycle-other",
+                "task_title": "Unrelated proposal",
+            }),
+            encoding="utf-8",
+        )
+        assert llm_proposer.retire_proposer_request_for_candidate(state_dir, "proposer-doesnotexist") is False
+        assert llm_proposer.retire_proposer_request_for_candidate(state_dir, "demand-not-a-proposer-id") is False
+
+
 # ─── build_context ──────────────────────────────────────────────────────────
 
 
