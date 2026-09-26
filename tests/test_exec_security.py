@@ -143,7 +143,7 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
     if shell_stat.exists():
         try:
             shell_fields = shell_stat.read_text(encoding="utf-8").split()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             shell_fields = []
         assert not shell_fields or shell_fields[2] == "Z"
     assert execution.done() is False
@@ -161,14 +161,17 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
     child_stat = Path(f"/proc/{child_pid}/stat")
     deadline = time.monotonic() + 5
     while child_stat.exists() and time.monotonic() < deadline:
-        fields = child_stat.read_text(encoding="utf-8").split()
+        try:
+            fields = child_stat.read_text(encoding="utf-8").split()
+        except (FileNotFoundError, ProcessLookupError):
+            break
         if len(fields) > 2 and fields[2] == "Z":
             break
         await asyncio.sleep(0.01)
     if child_stat.exists():
         try:
             fields = child_stat.read_text(encoding="utf-8").split()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             fields = []
         assert not fields or fields[2] == "Z", f"grandchild PID {child_pid} survived cancellation"
 
