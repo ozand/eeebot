@@ -1383,6 +1383,24 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
             branch = str(row.get('branch') or '')
             main_sha_before = str(row.get('main_sha_before') or '')
             files_changed = row.get('files_changed')
+            if not isinstance(files_changed, list) or not files_changed:
+                # Older push_pending rows normalized missing path evidence to
+                # []. Recover the candidate diff while its branch still exists;
+                # otherwise successful recovery would delete the only source of
+                # delivery truth and leave the demand permanently unknown.
+                if branch:
+                    recovered = _sp_late.run(
+                        git + ['diff', '--name-only', f'{main_sha_before}...{branch}'],
+                        capture_output=True, text=True,
+                    )
+                    if recovered.returncode == 0:
+                        files_changed = [
+                            path for path in recovered.stdout.splitlines() if path.strip()
+                        ]
+                    else:
+                        files_changed = []
+                else:
+                    files_changed = []
             delivered, delivery_state = _delivery_from_changed_files(files_changed)
             if not branch:
                 # A push_pending row with no branch name is not something this
