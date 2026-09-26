@@ -70,6 +70,28 @@ def test_duration_and_matching_prompt_records_share_call_seq(tmp_path, monkeypat
     assert duration["seq"] == prompt["seq"]
 
 
+def test_call_sequence_does_not_leak_across_call_contexts(tmp_path, monkeypatch):
+    """An unpaired duration cannot lend its seq to another context's prompt."""
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+    monkeypatch.delenv("LLM_CAPTURE_PROMPTS", raising=False)
+
+    with call_context("cycle-first", "executor"):
+        record_llm_call(model="m", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
+        record_llm_call(model="m", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
+
+    with call_context("cycle-second", "proposer"):
+        record_llm_prompt(
+            messages=[{"role": "user", "content": "prompt only"}],
+            content="answer", reasoning_content=None, finish_reason="stop",
+            model="m", prompt_tokens=1, completion_tokens=1,
+        )
+
+    prompt = _read_jsonl(next((tmp_path / "prompts").glob("*.jsonl")))[0]
+    assert (prompt["cycle_id"], prompt["component"], prompt["seq"]) == (
+        "cycle-second", "proposer", 1,
+    )
+
+
 def test_legacy_duration_row_without_seq_is_still_readable_by_duration_readers(
     tmp_path, monkeypatch
 ):

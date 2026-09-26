@@ -74,11 +74,15 @@ def set_call_context(cycle_id: str | None, component: str | None) -> Token:
     restore whatever context was active before (so nested calls don't leak
     into the caller's context once they finish).
     """
+    # A cached duration sequence belongs only to the active call context; never
+    # let it leak into a later prompt-only call after this boundary.
+    _CALL_SEQ.set(None)
     return _CALL_CONTEXT.set({"cycle_id": cycle_id or "", "component": component or ""})
 
 
 def reset_call_context(token: Token) -> None:
     """Restore the call context captured by the matching ``set_call_context``."""
+    _CALL_SEQ.set(None)
     with contextlib.suppress(Exception):
         _CALL_CONTEXT.reset(token)
 

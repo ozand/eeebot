@@ -266,7 +266,9 @@ the whole write path is wrapped and swallows any exception.
 Each line has: `ts` (UTC ISO-8601), `model`, `duration_ms`, `prompt_tokens`,
 `completion_tokens`, `total_tokens` (0 when the provider's `usage` dict omits
 a field), `finish_reason`, `retries` (transient-error retry attempts before
-this call returned), `cycle_id`, `component`.
+this call returned), `cycle_id`, `component`, and `seq`. `seq` is a process-local,
+per-`(cycle_id, component)` monotonic call number that joins a duration row to
+its corresponding prompt row; legacy duration rows may omit it.
 
 `cycle_id`/`component` are attributed via a `contextvars.ContextVar` that
 entry points set for the duration of their work:
