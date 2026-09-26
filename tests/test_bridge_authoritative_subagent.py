@@ -47,11 +47,16 @@ class _PrimaryManager:
     """
 
     task_id = PRIMARY_TASK_ID
+    last_max_call_gap_s = 17.5
 
-    def __init__(self, *, workspace, **_kwargs):
+    def __init__(self, *, workspace, telemetry_component="", **_kwargs):
         self.workspace = workspace
+        self.telemetry_component = telemetry_component
         self._running_tasks: dict = {}
         self._skill_reads_this_cycle: list = []
+
+    def collect_day_file_reads(self):
+        return []
 
     async def spawn(self, **_kwargs):
         (self.workspace / "scripts").mkdir(exist_ok=True)
@@ -169,6 +174,15 @@ class TestAuthoritativeSpawnEndToEnd:
         budget_rows = [row for row in rows if row.get("reason") == "repair_skipped_no_budget"]
         assert budget_rows, "repair should be durably recorded as skipped when reserve cannot fit"
         assert not (state_dir / "subagents" / f"{REPAIR_TASK_ID}.json").exists()
+
+    def test_success_outcome_records_executor_call_gap(self, tmp_path, monkeypatch):
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
+        _seed_bridge_request(state_dir, "req-call-gap", "cycle-call-gap")
+        monkeypatch.setattr(bridge, "SubagentManager", _PrimaryManager)
+
+        assert asyncio.run(bridge._main_impl()) == 0
+        rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
+        assert rows[-1]["max_call_gap_s"] == 17.5
 
     def test_repair_turn_that_succeeds_is_read_not_the_stale_primary(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
