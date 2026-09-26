@@ -400,7 +400,7 @@ def _create_inspection_ref(selfevo_repo: "Path", pending: "dict[str, Any] | None
 
 def resolve(
     state_dir: "Path", cycle_id: str, decision: str, *, reason: str = "",
-    selfevo_repo: "Path | None" = None,
+    selfevo_repo: "Path | None" = None, plan_text: "str | None" = None,
 ) -> OpenIncrementState:
     """The planning session's keep/edit/delete decision on the pending open
     increment (ADR-035 rule 3, "I").
@@ -430,6 +430,16 @@ def resolve(
     pending-increment pruning exemption and the decision is asked again
     next time, rather than silently trading one protection for the other
     and getting neither.
+
+    N2 (round 2 external re-check, architect resolution 2026-09-26): a
+    ``keep`` decision that also EDITS the plan (``plan_text`` given, not
+    ``None``) updates the pending increment's durable ``plan_text``
+    (and bumps ``plan_version``) BEFORE this call returns control to the
+    caller for execution hand-off. Round 1 substituted the revised text
+    only into the CURRENT call's parsed response/executor task -- the
+    durable ``pending`` record kept the OLD plan, so a kill before the
+    resumed attempt's own terminal outcome recovered with the stale
+    original, silently undoing the accepted revision.
     """
     from nanobot.runtime.cycle_ledger import append_event
 
@@ -455,7 +465,11 @@ def resolve(
             return state
     if decision == "keep":
         if state.pending is not None:
-            state.pending = {**state.pending, "resumed_by": cycle_id or ""}
+            updated = {**state.pending, "resumed_by": cycle_id or ""}
+            if plan_text is not None:
+                updated["plan_text"] = plan_text
+                updated["plan_version"] = int(state.pending.get("plan_version") or 1) + 1
+            state.pending = updated
         state.hold = None
         state.held_ticks = 0
         state.consecutive_supply_interrupts = 0

@@ -3777,7 +3777,18 @@ async def _run_planning_session(
                             "Plan action: edit (this is an edit of the open increment's previous plan, "
                             'not a new plan)'
                         )
-                _open_increment_mod.resolve(state_dir, cycle_id, _oi_decision, selfevo_repo=selfevo_repo)
+                # N2 (round 2 external re-check, architect resolution
+                # 2026-09-26): keep+edit passes the revised plan through so
+                # `resolve` persists it into the DURABLE pending record --
+                # not just this call's `parsed['plan']` -- before handing
+                # off to the resumed executor. `_keep_confirm` reuses the
+                # existing plan verbatim, so nothing needs updating there.
+                _open_increment_mod.resolve(
+                    state_dir, cycle_id, _oi_decision, selfevo_repo=selfevo_repo,
+                    plan_text=(
+                        None if (_oi_decision != 'keep' or _keep_confirm) else parsed.get('plan')
+                    ),
+                )
                 plan_lines.append(f'Open increment: {_oi_decision}')
             except Exception:
                 pass
