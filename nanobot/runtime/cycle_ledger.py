@@ -461,6 +461,8 @@ def record_cycle_outcome(
     iterations_limit: int | None = None,
     iterations_predicted: int | None = None,
     max_call_gap_s: float | None = None,
+    delivered: bool | None = None,
+    delivery_state: str | None = None,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
 
@@ -546,6 +548,10 @@ def record_cycle_outcome(
         row["verdict"] = verdict
         if verdict_reason:
             row["verdict_reason"] = str(verdict_reason)[:200]
+    if delivered is not None:
+        row["delivered"] = bool(delivered)
+    if delivery_state in {"known", "unknown"}:
+        row["delivery_state"] = delivery_state
     if executor_llm_error:
         row["executor_llm_error"] = True
     if lane:
