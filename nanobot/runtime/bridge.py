@@ -5553,14 +5553,29 @@ async def _main_impl_body():
                     # invisible to `_repair_added_commits` alone. Any tip
                     # change at all is "the repair turn touched the
                     # branch", whether by amend or by a fresh commit.
+                    #
+                    # Round 5 external re-check, item N1 (architect
+                    # resolution 2026-09-26): `_current_tip_sha` returns
+                    # `''` on a git failure or exception -- the OLD
+                    # comparison required BOTH reads truthy before calling
+                    # them different, so a single failed read read as
+                    # "unchanged", the exact same result as a genuinely
+                    # no-op repair. An unavailable snapshot is UNVERIFIABLE,
+                    # not a proof of no change: default to "changed" (block
+                    # a non-ok repair) unless both reads succeeded AND
+                    # agree.
                     _repair_tip_after = _current_tip_sha(_selfevo_repo)
-                    _repair_tip_changed = (
+                    _repair_tip_verified_unchanged = (
                         bool(_repair_tip_before) and bool(_repair_tip_after)
-                        and _repair_tip_before != _repair_tip_after
+                        and _repair_tip_before == _repair_tip_after
                     )
+                    _repair_tip_changed = not _repair_tip_verified_unchanged
                     _repair_changed = _repair_added_commits or _repair_tip_changed
                     if _repair_tip_changed and not _repair_added_commits:
-                        print(f'cycle-branch: tip amended (repair {_repair_attempts}), commit count unchanged')
+                        print(
+                            f'cycle-branch: tip changed or unverifiable (repair {_repair_attempts}), '
+                            'commit count unchanged'
+                        )
                     # Round 3 external re-check, item 1 (architect
                     # resolution 2026-09-26): the repair spawn's OWN
                     # terminal telemetry must say 'ok', same positive-only
