@@ -112,19 +112,18 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
 
     if os.name == "nt":
         pytest.skip("POSIX process-group semantics")
+    if sys.platform != "linux":
+        pytest.skip("/proc process-state inspection requires Linux")
 
     child_pid_file = tmp_path / "background-child.pid"
     shell_pid_file = tmp_path / "background-shell.pid"
-    child_script = tmp_path / "background_child.py"
-    child_script.write_text(
-        "import os, sys, time\\n"
-        "open(sys.argv[1], 'w').write(str(os.getpid()))\\n"
-        "time.sleep(60)\\n",
-        encoding="utf-8",
-    )
+    child_pid_posix = child_pid_file.as_posix()
+    shell_pid_posix = shell_pid_file.as_posix()
     command = (
-        f'echo $$ > "{shell_pid_file}"; '
-        f'"{sys.executable}" "{child_script}" "{child_pid_file}" &'
+        f"python3 -c 'import os,sys; open(sys.argv[1], \"w\").write(str(os.getpid()))' "
+        f'"{shell_pid_posix}"; '
+        f"python3 -c 'import os,sys,time; open(sys.argv[1], \"w\").write(str(os.getpid())); time.sleep(60)' "
+        f'"{child_pid_posix}" &'
     )
     execution = asyncio.create_task(ExecTool(timeout=60).execute(command))
     deadline = time.monotonic() + 10
