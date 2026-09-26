@@ -56,10 +56,40 @@ class TestFinishPendingPushes:
 
         assert bridge._finish_pending_pushes(work, staged["state_dir"]) == 1
         rows = _read_ledger_rows(staged["state_dir"])
-        pushed = [r for r in rows if r.get("phase") == "outcome" and r.get("outcome") == "pushed_late"][-1]
+        pushed = [r for r in rows if r.get("phase") == "outcome" and r.get("cycle_id") == "cid-service-late"][-1]
         assert pushed["files_changed"] == service
         assert pushed["delivered"] is False
         assert pushed["delivery_state"] == "known"
+        assert pushed["outcome"] == "partial"
+        assert pushed["reason"] == "service_only"
+        assert (pushed["verdict"], pushed["verdict_reason"]) == ("inconclusive", "service_only")
+        from nanobot.runtime import goal_gap_futility
+        from datetime import datetime, timezone
+        rows_for_futility = []
+        for index in range(5):
+            cycle = f"failed-{index}"
+            ts = f"2026-01-01T00:00:0{index}Z"
+            rows_for_futility.extend([
+                {"phase": "proposed", "cycle_id": cycle, "demand_id": "goal-service-late", "ts": ts},
+                {"phase": "outcome", "cycle_id": cycle, "outcome": "validation_failed", "ts": ts},
+            ])
+        rows_for_futility.extend([
+            {"phase": "proposed", "cycle_id": "cid-service-late", "demand_id": "goal-service-late", "ts": "2026-01-01T00:00:06Z"},
+            {**pushed, "ts": "2026-01-01T00:00:06Z"},
+            {"phase": "proposed", "cycle_id": "failed-after", "demand_id": "goal-service-late", "ts": "2026-01-01T00:00:07Z"},
+            {"phase": "outcome", "cycle_id": "failed-after", "outcome": "validation_failed", "ts": "2026-01-01T00:00:07Z"},
+        ])
+        assert goal_gap_futility._demand_attempt_count(
+            rows_for_futility, "goal-service-late", datetime(2025, 1, 1, tzinfo=timezone.utc),
+        ) == 6
+        from nanobot.runtime import llm_proposer
+        proposed_rows = [
+            {"phase": "proposed", "cycle_id": "cid-service-late", "task_title": "service-only regression title"},
+        ]
+        pushed_for_recent_failures = {**pushed, "outcome": "partial"}
+        assert llm_proposer._recent_failed_titles([*proposed_rows, pushed_for_recent_failures]) == [
+            "service-only regression title",
+        ]
 
         (staged["state_dir"] / "demand").mkdir(parents=True, exist_ok=True)
         cycle_ledger.append_event(staged["state_dir"], {
@@ -73,8 +103,10 @@ class TestFinishPendingPushes:
         staged = _stage_push_pending(tmp_path, work, "cid-legacy-empty", [])
         assert bridge._finish_pending_pushes(work, staged["state_dir"]) == 1
         rows = _read_ledger_rows(staged["state_dir"])
-        pushed = [r for r in rows if r.get("phase") == "outcome" and r.get("outcome") == "pushed_late"][-1]
+        pushed = [r for r in rows if r.get("phase") == "outcome" and r.get("cycle_id") == "cid-legacy-empty"][-1]
         assert pushed["files_changed"] == []
+        assert pushed["outcome"] == "pushed_late"
+        assert pushed["reason"] == "delivery_unknown"
         assert pushed["delivered"] is False
         assert pushed["delivery_state"] == "unknown"
         (staged["state_dir"] / "demand").mkdir(parents=True, exist_ok=True)
