@@ -1895,6 +1895,86 @@ def test_keep_record_survives_kill_before_execution(tmp_path: Path):
     assert state.consecutive_supply_interrupts == 0
 
 
+def test_keep_never_falls_back_to_reset(tmp_path: Path, monkeypatch):
+    """D4 (ADR-035 Test Contract, external review finding #4): a `keep`
+    resume must never fall through to `git checkout -B <branch>
+    <origin/main>` -- that resets the very branch the keep decision was
+    meant to preserve, destroying its checkpoints. Two sub-scenarios,
+    both against a real repo:
+
+    1. The branch exists but its reuse checkout fails (e.g. a rejecting
+       post-checkout hook) -- must stop with reason
+       ``resume_checkout_failed``, the branch's tip untouched, and the
+       workspace left where it was, never silently switched onto a
+       freshly reset branch.
+    2. The branch does not exist at all -- must stop with an explicit
+       reason (``resume_branch_missing``), never silently start a fresh
+       cycle off main as if nothing was being resumed.
+    """
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "base"
+    base.mkdir()
+    _origin, work = _init_selfevo_repo(base)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    cycle_id = "cycle-keep-checkout-fail"
+    branch = f"selfevo/cycle-{cycle_id}"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "retained.py").write_text("def retained():\n    return 'kept'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/retained.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/retained.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+    branch_tip_before = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", branch], capture_output=True, text=True,
+    ).stdout.strip()
+
+    real_run = subprocess.run
+
+    def _fail_reuse_checkout(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and cmd[-2:] == ["checkout", branch]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="simulated post-checkout hook failure")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _fail_reuse_checkout)
+    result = bridge._setup_cycle_branch(work, cycle_id, state_dir, reuse_existing_branch=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "resume_checkout_failed"
+
+    branch_tip_after = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", branch], capture_output=True, text=True,
+    ).stdout.strip()
+    assert branch_tip_after == branch_tip_before, "keep fell back to a reset despite a failed reuse checkout"
+
+    current_branch = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True,
+    ).stdout.strip()
+    assert current_branch == "main", "workspace was left on the target branch despite a failed checkout"
+
+    # Sub-scenario 2: the branch does not exist at all.
+    missing_cycle_id = "cycle-keep-branch-missing"
+    missing_branch = f"selfevo/cycle-{missing_cycle_id}"
+    result2 = bridge._setup_cycle_branch(work, missing_cycle_id, state_dir, reuse_existing_branch=True)
+    assert result2["ok"] is False
+    assert result2["reason"] == "resume_branch_missing"
+
+    missing_exists = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "--verify", "--quiet", missing_branch],
+        capture_output=True, text=True,
+    )
+    assert missing_exists.returncode != 0, "keep silently created a fresh branch instead of reporting it missing"
+
+
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
 # architect addendum, #1942 B2) -----------------------------------------------
 
