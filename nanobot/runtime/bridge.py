@@ -5482,7 +5482,11 @@ async def _main_impl_body():
         from nanobot import crash_record as _run_record
         if not _res.get('run_stop_reason'):
             _run_record.set_run_metadata(
-                classification=("completion" if _cycle_outcome == "success" else "failed"),
+                # A service-only cycle merged cleanly and the bridge run
+                # completed; only its delivery verdict is non-success.
+                classification=(
+                    "completion" if _cycle_outcome == "success" or _service_only else "failed"
+                ),
                 reason=_rollback_reason or _cycle_outcome,
             )
     except Exception:
