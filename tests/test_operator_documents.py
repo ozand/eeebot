@@ -221,14 +221,19 @@ def test_completed_prose_is_not_appended_to_open_entry_instructions(tmp_path: Pa
     _goal_text_json(
         state,
         "Current priority targets:\n(A) Priority 8 — Next: Next task.\n"
-        "Completed (do not repeat): Priority 7 — Already shipped.",
+        "Completed (do not repeat): Priority 7 — Already shipped.\n"
+        "(B) Priority 9 — Final open entry (V1): Keep the vector tag.",
     )
 
     result = resolve_operator_priorities(state)
 
-    assert len(result.open_entries) == 1
+    assert len(result.open_entries) == 2
     assert "Completed (do not repeat)" not in result.open_entries[0].instructions
     assert "Already shipped" not in result.open_entries[0].instructions
+    assert [(entry.number, entry.title) for entry in result.open_entries] == [
+        (8, "Next"),
+        (9, "Final open entry (V1)"),
+    ]
 
 
 def test_completed_em_dash_title_stops_before_next_section(tmp_path: Path):
