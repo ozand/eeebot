@@ -7,6 +7,7 @@ import pytest
 from nanobot.observability.llm_telemetry import (
     call_context,
     record_llm_call,
+    record_llm_prompt,
     reset_call_context,
     set_call_context,
 )
@@ -44,6 +45,24 @@ def test_record_llm_call_writes_well_formed_line(tmp_path, monkeypatch):
     assert rec["cycle_id"] == ""
     assert rec["component"] == ""
     assert rec["ts"].endswith("Z")
+
+
+def test_duration_and_matching_prompt_records_share_call_seq(tmp_path, monkeypatch):
+    """Duration records must carry the same sequence as their prompt row."""
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+    monkeypatch.delenv("LLM_CAPTURE_PROMPTS", raising=False)
+
+    with call_context("cycle-duration-seq", "bridge"):
+        record_llm_call(model="m", duration_ms=1.0, usage={}, finish_reason="stop", retries=0)
+        record_llm_prompt(
+            messages=[{"role": "user", "content": "call one"}], content="one",
+            reasoning_content=None, finish_reason="stop", model="m",
+            prompt_tokens=1, completion_tokens=1,
+        )
+
+    duration = _read_jsonl(next(tmp_path.glob("*.jsonl")))[0]
+    prompt = _read_jsonl(next((tmp_path / "prompts").glob("*.jsonl")))[0]
+    assert duration["seq"] == prompt["seq"]
 
 
 def test_record_llm_call_defaults_missing_usage_fields_to_zero(tmp_path, monkeypatch):
