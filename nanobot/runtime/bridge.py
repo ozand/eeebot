@@ -1312,6 +1312,11 @@ def _delivery_from_changed_files(files_changed: object) -> tuple[bool, str]:
     return not is_service_only(files_changed), "known"
 
 
+def _mark_integrated_delivery(result: dict) -> None:
+    """Recompute provisional candidate delivery after integration succeeds."""
+    from nanobot.runtime.service_paths import is_delivered
+    result['delivered'] = is_delivered(True, result.get('files_changed'))
+
 
 def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
     """#1709 increment 2: at the same safe cycle-start boundary as
@@ -5309,6 +5314,7 @@ async def _main_impl_body():
                     )
                     if _integ['ok']:
                         _winner['integrated'] = True
+                        _mark_integrated_delivery(_winner)
                         _winner['rollback_reason'] = ''
                         _winner['main_sha_after'] = _integ.get('main_sha_after', _winner['main_sha_before'])
                         try:

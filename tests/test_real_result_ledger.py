@@ -114,6 +114,13 @@ class TestRealResultLedgerInputsAgreeWithCriterion:
 
 
 class TestEndToEndAgreement:
+    def test_explore_winner_delivery_is_recomputed_from_integrated_files(self):
+        # Candidate evaluation is non-integrating and reports false; after
+        # winner integration, bridge must recalculate delivery from its diff.
+        candidate = {"delivered": False, "files_changed": ["src/feature.py"]}
+        bridge._mark_integrated_delivery(candidate)
+        assert candidate["delivered"] is True
+
     def test_green_cycle_result_artifact_and_ledger_row_agree(self, tmp_path, monkeypatch):
         """A real (non-blocked) result: both the artifact _is_real_result
         would read and the ledger row's real_result say True."""
