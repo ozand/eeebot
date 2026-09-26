@@ -242,6 +242,73 @@ class TestUnfinishedRepairNeverIntegrates:
         assert pending is not None, "an unfinished repair must leave the branch as a pending open increment"
 
 
+def _make_amending_repair_manager(status: str, result: str):
+    """Round 4 P1-b (architect resolution 2026-09-26): a repair turn that
+    runs ``git commit --amend`` changes the branch tip WITHOUT growing
+    the commit count -- ``_repair_added_commits`` (round 3 item 1) keyed
+    purely on ``rev-list --count`` growth, so this shape slipped past the
+    barrier entirely: the amended tip could integrate even with a
+    non-``ok`` repair status.
+    """
+    class _AmendingRepairManager:
+        task_id = REPAIR_TASK_ID
+
+        def __init__(self, *, workspace, **_kwargs):
+            self.workspace = workspace
+            self._running_tasks: dict = {}
+            self._skill_reads_this_cycle: list = []
+
+        async def spawn(self, **_kwargs):
+            (self.workspace / "scripts" / "feature.py").write_text(
+                "def feature():\n    return 43  # repaired\n"
+            )
+            _run(self.workspace, "add", "scripts/feature.py")
+            _run(self.workspace, "commit", "--amend", "--no-edit")
+            _write_telemetry(bridge.STATE_DIR, self.task_id, status, result)
+
+            async def _done():
+                return None
+
+            self._running_tasks[self.task_id] = asyncio.ensure_future(_done())
+            return "fake repair spawned"
+
+    return _AmendingRepairManager
+
+
+class TestUnfinishedAmendedRepairNeverIntegrates:
+    def test_repair_amend_with_non_ok_status_blocks_the_whole_cycle(self, tmp_path, monkeypatch):
+        """The repair turn amends the primary's OWN commit (same commit
+        count, new tip sha) and ends with a non-'ok' status -- the
+        barrier must still catch it, exactly as it does a repair that
+        ADDS a new commit.
+        """
+        import subprocess
+
+        repair_cls = _make_amending_repair_manager("error", "Error: repair turn crashed mid-fix")
+        state_dir = _wire(tmp_path, monkeypatch, repair_cls)
+        _seed_bridge_request(state_dir, "req-repair-amend-unfinished", "cycle-repair-amend-unfinished")
+        _stub_planning_session(monkeypatch, "add feature")
+
+        rc = asyncio.run(bridge._main_impl())
+        assert rc == 0
+
+        work = tmp_path / "eeebot-self-evolving"
+        main_blob = subprocess.run(
+            ["git", "-C", str(work), "show", "main:scripts/feature.py"],
+            capture_output=True, text=True,
+        )
+        assert main_blob.returncode != 0 or "repaired" not in main_blob.stdout, (
+            "an unfinished (amended) repair session's own commit must never integrate"
+        )
+
+        from nanobot.runtime import open_increment
+
+        pending = open_increment.pending_open_increment(state_dir)
+        assert pending is not None, (
+            "an unfinished amended repair must leave the branch as a pending open increment"
+        )
+
+
 class TestHelpers:
     def test_authoritative_resolution_prefers_latest_ok_repair(self, tmp_path):
         _write_telemetry(tmp_path, "primary", "ok", PRIMARY_TEXT)
