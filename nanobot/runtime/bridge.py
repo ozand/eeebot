@@ -4932,7 +4932,7 @@ async def _main_impl_body():
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'failed', 'registration_failed', [], cycle_branch,
                 verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
-                real_result=_real_result_ledger_inputs('blocked'),
+                real_result=_real_result_ledger_inputs({'result_status': 'blocked', 'status': 'blocked', 'materialized_from': 'bridge_llm_execution'}),
             )
             _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
             return {'status': 0}
@@ -5537,7 +5537,7 @@ async def _main_impl_body():
                 record_cycle_outcome(
                     STATE_DIR, _cycle_id, 'failed', 'closing_commit_failed', files_changed, cycle_branch,
                     verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
-                    real_result=_real_result_ledger_inputs('blocked'),
+                    real_result=_real_result_ledger_inputs({'result_status': 'blocked', 'status': 'blocked', 'materialized_from': 'bridge_llm_execution'}),
                     retry_key=req.get('retry_key') or None,
                 )
                 _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
@@ -5600,7 +5600,7 @@ async def _main_impl_body():
                     STATE_DIR, _cycle_id, 'failed', _unfinished_reason, files_changed, cycle_branch,
                     verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
                     executor_llm_error=True,
-                    real_result=_real_result_ledger_inputs('blocked'),
+                    real_result=_real_result_ledger_inputs({'result_status': 'blocked', 'status': 'blocked', 'materialized_from': 'bridge_llm_execution'}),
                     llm_error_classification=(
                         {'class': _unfinished_error_class, 'raw_error': _executor_llm_error_text[:400]}
                         if _executor_llm_error_text else None
@@ -5891,7 +5891,7 @@ async def _main_impl_body():
                     STATE_DIR, _cycle_id, 'failed', _repair_unfinished_reason, files_changed, cycle_branch,
                     verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
                     executor_llm_error=True,
-                    real_result=_real_result_ledger_inputs('blocked'),
+                    real_result=_real_result_ledger_inputs({'result_status': 'blocked', 'status': 'blocked', 'materialized_from': 'bridge_llm_execution'}),
                     llm_error_classification=(
                         {'class': _repair_error_class, 'raw_error': _repair_error_text[:400]}
                         if _repair_error_text else None
