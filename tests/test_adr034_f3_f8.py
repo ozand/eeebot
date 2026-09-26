@@ -32,7 +32,6 @@ def test_f3_unreadable_operator_priorities_do_not_stop_bridge(tmp_path, monkeypa
     (state / "subagents" / "requests" / "pending.json").write_text(json.dumps({"request_status": "queued"}), encoding="utf-8")
     class ReachedRequestLookup(Exception): pass
     monkeypatch.setattr(bridge, "find_pending_request", lambda: (_ for _ in ()).throw(ReachedRequestLookup()))
-    from nanobot.agent import subagent
     class FakeManager:
         def __init__(self, *args, **kwargs): pass
         def __getattr__(self, _name): return lambda *args, **kwargs: None
