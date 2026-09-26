@@ -709,6 +709,20 @@ def record_cycle_outcome(
         state_dir,
         row,
     )
+    # D2 (ADR-035 Test Contract, #1942 B2): this IS the terminal outcome for
+    # `cycle_id` -- every code path that reaches integration, a blocked/
+    # failed classification, or a rollback funnels through this single
+    # function (rather than each of its many call sites remembering to say
+    # so separately), so clearing the in-flight running-attempt
+    # registration here guarantees it happens whenever a cycle actually
+    # finishes. Fail-open: a failure here must never turn an otherwise-
+    # written outcome row into a bookkeeping error.
+    try:
+        from nanobot.runtime import open_increment as _open_increment_terminal
+
+        _open_increment_terminal.record_attempt_finished(state_dir, cycle_id or "")
+    except Exception:
+        pass
 
 def read_events(state_dir: Path) -> list[dict]:
     """Read all rows from the ACTIVE ledger file. Best-effort — never raises.

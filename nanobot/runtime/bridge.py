@@ -3893,6 +3893,35 @@ async def _main_impl_body():
     provider = _make_provider(config)
     bus = MessageBus()
     _planning_cycle_id = f'cycle-{uuid.uuid4().hex[:12]}'
+
+    # D2 (ADR-035 Test Contract, #1942 B2): a running-attempt registration
+    # with no terminal outcome by the time THIS cycle starts means the
+    # process that wrote it (record_attempt_started, in _evaluate_candidate
+    # below) died before reaching one -- a hard kill, or an exact imitation
+    # of one. Converted to a pending open increment (interrupted_kill)
+    # BEFORE the planning session runs, so it is surfaced exactly like any
+    # other open increment (keep/edit/delete) rather than losing the
+    # attempt silently. Deliberately placed here, not inside
+    # _run_planning_session -- every _main_impl-level test in this file
+    # stubs that function wholesale, and this check must still run.
+    try:
+        from nanobot.runtime import open_increment as _open_increment_killcheck
+
+        _stale_running = _open_increment_killcheck.check_running_for_kill(STATE_DIR, _planning_cycle_id)
+        if _stale_running:
+            _open_increment_killcheck.record_kill_interruption(
+                STATE_DIR, _stale_running.get('cycle_id', ''),
+                retry_key=f"kill:{_stale_running.get('cycle_id', '')}",
+                plan_text=(
+                    '(a prior attempt on this branch was interrupted by a hard '
+                    'kill before it reached a terminal outcome)'
+                ),
+                candidate_id=None,
+                branch=_stale_running.get('branch', ''),
+            )
+    except Exception:
+        pass
+
     _planner_model = resolve_model('executor', config_fallback=config.tools.subagent.model)
     _planning_denied_paths = {(STATE_DIR / rel).resolve() for rel in _FITNESS_SIDECARS}
     try:
@@ -4390,6 +4419,19 @@ async def _main_impl_body():
         # #721: pre-cycle tag at main_sha_before, right after cycle-branch setup
         # succeeds — the pre half of the pre/post bracket (see _tag_cycle_pre).
         _tag_cycle_pre(_selfevo_repo, _cycle_id, main_sha_before)
+
+        # D2 (ADR-035 Test Contract, #1942 B2): register the in-flight
+        # attempt BEFORE the executor can be killed -- cycle-branch setup
+        # just succeeded, the subagent has not spawned yet. Cleared only by
+        # a terminal outcome (record_cycle_outcome -> record_attempt_finished);
+        # a kill between here and that terminal write leaves this standing
+        # for the next cycle's kill-check to find.
+        try:
+            from nanobot.runtime import open_increment as _open_increment_register
+
+            _open_increment_register.record_attempt_started(STATE_DIR, _cycle_id, cycle_branch)
+        except Exception:
+            pass
 
         # #718: the subagent must write into the git checkout the bridge branches,
         # commits, gates, and integrates (_selfevo_repo) — not TARGET_WORKSPACE
