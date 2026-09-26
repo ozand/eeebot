@@ -5345,9 +5345,11 @@ async def _main_impl_body():
             pass  # planning-overhead write errors are non-blocking
     else:
         candidates_results = []
+        _explore_candidate_gaps: list[float | None] = []
         for cand_idx in range(_explore_n):
             _cand_id = f"{_cycle_id}-{cand_idx+1}"
             _cres = await _evaluate_candidate(_cand_id, False, _explore_metric)
+            _explore_candidate_gaps.append(_cres.get('max_call_gap_s'))
             if _cres.get('status') == 0:
                 continue
             
@@ -5397,6 +5399,20 @@ async def _main_impl_body():
                 except Exception: pass
                 
                 _res = _winner
+
+        # Bridge planning and telemetry use the base cycle ID; candidate
+        # execution also returns a suffixed-ID local gap. Aggregate both after
+        # every explore candidate has completed.
+        try:
+            from nanobot.runtime.session_clock import compute_explore_cycle_max_call_gap
+            _res['max_call_gap_s'] = compute_explore_cycle_max_call_gap(
+                STATE_DIR, _cycle_id, _explore_candidate_gaps,
+            )
+        except Exception:
+            _res['max_call_gap_s'] = max(
+                (gap for gap in _explore_candidate_gaps if gap is not None),
+                default=None,
+            )
 
     if _res.get('status') == 0:
         return 0

@@ -175,6 +175,21 @@ class ProgressWatchdog:
         return max(0.0, self.timeout_secs - elapsed)
 
 
+def compute_explore_cycle_max_call_gap(
+    state_dir: Path | str | None,
+    cycle_id: str | None,
+    candidate_gaps: list[float | None],
+) -> float | None:
+    """Aggregate bridge-attributed telemetry and candidate-local explore gaps.
+
+    Planning and provider calls carry the base bridge cycle ID, whereas each
+    executor candidate may carry a suffixed cycle ID. Preserve the measured
+    cross-phase gaps by taking the maximum of both sources.
+    """
+    fallback = max((gap for gap in candidate_gaps if gap is not None), default=None)
+    return compute_cycle_max_call_gap(state_dir, cycle_id, fallback_gap=fallback)
+
+
 def compute_cycle_max_call_gap(
     state_dir: Path | str | None,
     cycle_id: str | None,
