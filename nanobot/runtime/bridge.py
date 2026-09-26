@@ -3635,6 +3635,34 @@ async def _run_planning_session(
     # `rest` and `plan` are mutually exclusive shapes of the SAME final
     # JSON, never both required at once.
     _rest_candidate = parsed.get('rest') if isinstance(parsed, dict) else None
+    _rest_and_plan_both_present = (
+        parse_error is None and _rest_candidate is not None
+        and isinstance(parsed, dict) and isinstance(parsed.get('plan'), str) and parsed['plan'].strip()
+    )
+    if _rest_and_plan_both_present:
+        # Codex review of 984a133f (nanobot/runtime/bridge.py:3638):
+        # `rest` is checked before "plan required" below, so a response
+        # carrying BOTH fields was accepted as rest solely because
+        # `rest` was non-null -- silently discarding the plan and never
+        # spawning the executor. `plan`/`rest` are mutually exclusive
+        # shapes of the one final JSON (roles/planner.md); a model
+        # returning both is a format violation, not a legitimate rest.
+        record_planning_session(
+            state_dir, cycle_id, 'malformed',
+            iterations_used=iterations_used, iterations_planned=None,
+            reason='response contains both "plan" and "rest"; mutually exclusive',
+            parse_mode=parse_mode,
+            format_violation=format_violation,
+            task_writing_read=_task_writing_read,
+            task_writing_source=_task_writing_source or None,
+            task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+            task_writing_bytes=_task_writing_bytes_count,
+            task_writing_sha256=_task_writing_sha256 or None,
+        )
+        no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
+        planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
+        print('planning-session: malformed (response contains both plan and rest)')
+        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
     if parse_error is None and _rest_candidate is not None:
         try:
             _wake_condition, _deadline = planner_rest.parse_rest(_rest_candidate)
@@ -3817,11 +3845,22 @@ async def _run_planning_session(
                 # plan while the old increment is still unresolved.
                 # Enforced as output validation, same shape as D8's
                 # missing/invalid-decision rejection just below.
-                if _oi_decision == 'delete' and _oi_resolve_state.pending is not None:
+                if _oi_decision in ('delete', 'edit') and _oi_resolve_state.pending is not None:
+                    # Codex review of 984a133f
+                    # (nanobot/runtime/open_increment.py:499): `edit`
+                    # shares `delete`'s "clear pending, hand off a
+                    # brand-new plan" shape but had no caller-side check
+                    # at all -- only `delete`'s inspection-ref failure was
+                    # caught. `resolve()` now reverts `pending` on ANY
+                    # save failure (not just the inspection-ref one), so
+                    # this single check catches both decisions uniformly.
+                    _oi_fail_reason = (
+                        'inspection_ref_failed' if _oi_decision == 'delete' else 'save_failed'
+                    )
                     record_planning_session(
                         state_dir, cycle_id, 'malformed',
                         iterations_used=iterations_used, iterations_planned=iterations_planned,
-                        reason='pending open increment delete failed (inspection_ref_failed); decision not accepted',
+                        reason=f'pending open increment {_oi_decision} failed ({_oi_fail_reason}); decision not accepted',
                         parse_mode=parse_mode,
                         format_violation=format_violation,
                         task_writing_read=_task_writing_read,
@@ -3833,7 +3872,7 @@ async def _run_planning_session(
                     no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
                     planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
                     print(
-                        'planning-session: malformed (delete failed to protect the branch; '
+                        f'planning-session: malformed ({_oi_decision} failed to persist; '
                         'decision not accepted)'
                     )
                     return {
