@@ -122,6 +122,32 @@ def _state_path(state_dir: "Path") -> "Path":
     return Path(state_dir).joinpath(*_STATE_RELPATH)
 
 
+def _load_state_strict(state_dir: "Path") -> "OpenIncrementState | None":
+    """Round 5 external re-check, item N2 (architect resolution
+    2026-09-26): like :func:`load_state`, but returns ``None`` when the
+    file is missing, unreadable, or malformed -- distinguishing
+    "successfully read a valid state with ``pending=None``" from "could
+    not read state at all". Used ONLY by :func:`resolve`'s own post-save
+    verification: :func:`load_state`'s permissive default (a fresh
+    ``OpenIncrementState()``) is indistinguishable from a genuine
+    ``pending=None``, silently turning "couldn't verify" into "verified
+    cleared" for ``delete``/``edit``."""
+    path = _state_path(state_dir)
+    try:
+        if not path.is_file():
+            return None
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    known = set(OpenIncrementState.__dataclass_fields__)
+    try:
+        return OpenIncrementState(**{k: v for k, v in raw.items() if k in known})
+    except Exception:
+        return None
+
+
 def load_state(state_dir: "Path") -> OpenIncrementState:
     path = _state_path(state_dir)
     try:
@@ -572,18 +598,36 @@ def resolve(
     # it may proceed: `delete`/`edit` really cleared `pending`; `keep`
     # (with or without an edit) matches the intended plan_text,
     # plan_version, and resumed_by exactly.
-    _reloaded = load_state(state_dir)
-    _verified = (_reloaded.pending is None) if decision in ("edit", "delete") else (_reloaded.pending == state.pending)
+    #
+    # Round 5 external re-check, item N2 (architect resolution
+    # 2026-09-26): the readback uses :func:`_load_state_strict`, not
+    # :func:`load_state` -- the latter's permissive default (a fresh
+    # ``OpenIncrementState()``, ``pending=None``) is indistinguishable
+    # from a genuinely verified `delete`/`edit` the instant the
+    # verification READ itself fails (a corrupt file, a transient I/O
+    # error) right after a real, successful write. "Could not verify"
+    # must never read as "verified cleared".
+    _reloaded = _load_state_strict(state_dir)
+    _verified = _reloaded is not None and (
+        (_reloaded.pending is None) if decision in ("edit", "delete") else (_reloaded.pending == state.pending)
+    )
     if not _verified:
         append_event(state_dir, {
             "phase": "open_increment_resolve_failed",
             "cycle_id": cycle_id or "",
             "retry_key": retry_key,
             "decision": decision,
-            "reason": "verify_failed",
+            "reason": "verify_failed" if _reloaded is not None else "verify_unreadable",
         })
-        _reloaded.resolve_saved = False
-        return _reloaded
+        if _reloaded is not None:
+            _reloaded.resolve_saved = False
+            return _reloaded
+        state.pending = original_pending
+        state.hold = original_hold
+        state.held_ticks = original_held_ticks
+        state.consecutive_supply_interrupts = original_consecutive
+        state.resolve_saved = False
+        return state
 
     append_event(state_dir, {
         "phase": "open_increment_resolved",
