@@ -23,7 +23,7 @@ import json
 import pytest
 
 from nanobot.runtime import bridge
-from tests.test_cycle_ledger import _init_selfevo_repo, _run, _seed_bridge_request
+from tests.test_cycle_ledger import _init_selfevo_repo, _read_ledger, _run, _seed_bridge_request
 
 PRIMARY_TASK_ID = "acf80d1f"
 REPAIR_TASK_ID = "a6ca8f4c"
@@ -138,6 +138,38 @@ def _core_smoke_set(monkeypatch, tmp_path):
 
 
 class TestAuthoritativeSpawnEndToEnd:
+    def test_repair_skipped_when_primary_consumes_wall_budget(self, tmp_path, monkeypatch):
+        """A real bridge cycle must not spawn repair without wall+reserve budget (#1899 F1)."""
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
+        _seed_bridge_request(state_dir, "req-repair-budget", "cycle-repair-budget")
+        monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "1000")
+        monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "300")
+        now = [0.0]
+        monkeypatch.setattr(bridge.time, "monotonic", lambda: now[0])
+
+        class _SlowPrimary(_PrimaryManager):
+            def __init__(self, *, workspace, telemetry_component="", **kwargs):
+                super().__init__(workspace=workspace, **kwargs)
+                self.telemetry_component = telemetry_component
+
+            def collect_day_file_reads(self):
+                return []
+
+            async def spawn(self, **kwargs):
+                result = await super().spawn(**kwargs)
+                if self.telemetry_component == "executor":
+                    now[0] = 750.0
+                return result
+
+        monkeypatch.setattr(bridge, "SubagentManager", _SlowPrimary)
+        rc = asyncio.run(bridge._main_impl())
+
+        assert rc == 0
+        rows = _read_ledger(state_dir)
+        budget_rows = [row for row in rows if row.get("reason") == "repair_skipped_no_budget"]
+        assert budget_rows, "repair should be durably recorded as skipped when reserve cannot fit"
+        assert not (state_dir / "subagents" / f"{REPAIR_TASK_ID}.json").exists()
+
     def test_repair_turn_that_succeeds_is_read_not_the_stale_primary(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-repair-ok", "cycle-repair-ok")
