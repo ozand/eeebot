@@ -172,6 +172,76 @@ class TestAuthoritativeSpawnEndToEnd:
         assert row["scanned_chars"] != len(REPAIR_TEXT_CANCELLED)
 
 
+def _make_committing_repair_manager(status: str, result: str):
+    """Unlike ``_make_repair_manager`` above, this repair spawn also commits
+    a REAL file change -- round 3 item 1 (architect resolution
+    2026-09-26): "its commits integrate only if the repair session's OWN
+    telemetry has status=ok. Otherwise the cycle is unfinished." Round 2's
+    barrier only ever read the PRIMARY spawn's status; a repair session
+    that commits real work but ends in anything other than ``ok`` must
+    still block the whole cycle from integrating.
+    """
+    class _CommittingRepairManager:
+        task_id = REPAIR_TASK_ID
+
+        def __init__(self, *, workspace, **_kwargs):
+            self.workspace = workspace
+            self._running_tasks: dict = {}
+            self._skill_reads_this_cycle: list = []
+
+        async def spawn(self, **_kwargs):
+            (self.workspace / "scripts").mkdir(exist_ok=True)
+            (self.workspace / "scripts" / "repair_fix.py").write_text("def fix():\n    return True\n")
+            _run(self.workspace, "add", "scripts/repair_fix.py")
+            _run(self.workspace, "commit", "-m", "fix: repair turn commits a partial fix")
+            _write_telemetry(bridge.STATE_DIR, self.task_id, status, result)
+
+            async def _done():
+                return None
+
+            self._running_tasks[self.task_id] = asyncio.ensure_future(_done())
+            return "fake repair spawned"
+
+    return _CommittingRepairManager
+
+
+class TestUnfinishedRepairNeverIntegrates:
+    def test_repair_commit_with_non_ok_status_blocks_the_whole_cycle(self, tmp_path, monkeypatch):
+        """Static execution path the re-check named: primary executor
+        finishes normally (status ok) -> initial smoke fails -> repair
+        commits a partial fix and ends with status 'error' -> smoke now
+        passes -> integration must NOT be reachable, for either the
+        repair's commit or the primary's own otherwise-finished work.
+        """
+        import subprocess
+
+        repair_cls = _make_committing_repair_manager("error", "Error: repair turn crashed mid-fix")
+        state_dir = _wire(tmp_path, monkeypatch, repair_cls)
+        _seed_bridge_request(state_dir, "req-repair-unfinished", "cycle-repair-unfinished")
+        _stub_planning_session(monkeypatch, "add feature")
+
+        rc = asyncio.run(bridge._main_impl())
+        assert rc == 0
+
+        work = tmp_path / "eeebot-self-evolving"
+        main_tree = subprocess.run(
+            ["git", "-C", str(work), "ls-tree", "-r", "--name-only", "main"],
+            capture_output=True, text=True,
+        ).stdout
+        assert "scripts/repair_fix.py" not in main_tree, (
+            "an unfinished repair session's own commit must never integrate"
+        )
+        assert "scripts/feature.py" not in main_tree, (
+            "the whole cycle must not integrate when the repair session never finished, "
+            "even though the primary executor's own status was ok"
+        )
+
+        from nanobot.runtime import open_increment
+
+        pending = open_increment.pending_open_increment(state_dir)
+        assert pending is not None, "an unfinished repair must leave the branch as a pending open increment"
+
+
 class TestHelpers:
     def test_authoritative_resolution_prefers_latest_ok_repair(self, tmp_path):
         _write_telemetry(tmp_path, "primary", "ok", PRIMARY_TEXT)
