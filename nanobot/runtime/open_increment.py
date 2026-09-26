@@ -214,6 +214,17 @@ def record_supply_interruption(
     _prior_pending = state.pending if (state.pending and state.pending.get("cycle_id") == (cycle_id or "")) else None
     plan_version = (_prior_pending or {}).get("plan_version", 1)
 
+    # Round 4 external re-check, item P1-a (architect resolution
+    # 2026-09-26): `running` -> `pending` in ONE save, not two. Left
+    # standing, a stale `running` for THIS SAME cycle_id (the common
+    # case: this very registration is what just went stale) survives
+    # into the very next tick's `check_running_for_kill`, which then
+    # misclassifies it as a FRESH kill of the resumed attempt and
+    # re-interrupts using `running`'s own (possibly pre-edit) plan_text
+    # -- silently discarding an edit already accepted into `pending`.
+    if state.running and state.running.get("cycle_id") == (cycle_id or ""):
+        state.running = None
+
     state.pending = {
         "retry_key": retry_key,
         "cycle_id": cycle_id or "",
@@ -438,6 +449,20 @@ def resolve(
     ``resumed_by`` with the deciding cycle; only :func:`record_attempt_finished`
     (a REAL terminal outcome for this increment's ``cycle_id``) removes it.
 
+    Codex review of 984a133f (``nanobot/runtime/open_increment.py:499``):
+    a generic ``_save_state`` failure (permissions, full disk, I/O error)
+    for ``edit``/``delete`` was silently ignored -- the caller trusted the
+    mutated in-memory ``pending=None`` although nothing landed on disk,
+    and would go on to hand off a brand-new, unrelated plan while the old
+    increment sat unresolved forever. This function now reverts the
+    mutation and returns the state AS IT ACTUALLY IS ON DISK (the load
+    from the top of this call, since ``_save_state``'s failure mode is an
+    atomic temp-file write that never replaces the real file -- see
+    :func:`_save_state`) whenever its own save fails, same shape as the
+    ``delete``/inspection-ref-failure branch just above. Callers that
+    already check ``resolve(...).pending is not None`` (``delete``, and
+    now ``edit``) catch this uniformly with the inspection-ref case.
+
     D7 (ADR-035 Test Contract, external review finding #7; round 2
     external re-check, architect resolution 2026-09-26): ``delete``
     counts as resolved only if pinning the pending increment's branch
@@ -467,6 +492,10 @@ def resolve(
         )
     state = load_state(state_dir)
     retry_key = (state.pending or {}).get("retry_key", "")
+    original_pending = state.pending
+    original_hold = state.hold
+    original_held_ticks = state.held_ticks
+    original_consecutive = state.consecutive_supply_interrupts
     if decision == "delete":
         protected = selfevo_repo is not None and _create_inspection_ref(selfevo_repo, state.pending)
         if not protected:
@@ -496,7 +525,20 @@ def resolve(
         state.hold = None
         state.held_ticks = 0
         state.consecutive_supply_interrupts = 0
-    _save_state(state_dir, state)
+    persisted = _save_state(state_dir, state)
+    if not persisted:
+        state.pending = original_pending
+        state.hold = original_hold
+        state.held_ticks = original_held_ticks
+        state.consecutive_supply_interrupts = original_consecutive
+        append_event(state_dir, {
+            "phase": "open_increment_resolve_failed",
+            "cycle_id": cycle_id or "",
+            "retry_key": retry_key,
+            "decision": decision,
+            "reason": "save_failed",
+        })
+        return state
     append_event(state_dir, {
         "phase": "open_increment_resolved",
         "cycle_id": cycle_id or "",
@@ -796,6 +838,12 @@ def _record_interruption_without_backoff(
     # plan_version to the default.
     _prior_pending = state.pending if (state.pending and state.pending.get("cycle_id") == (cycle_id or "")) else None
     plan_version = (_prior_pending or {}).get("plan_version", 1)
+    # Round 4 external re-check, item P1-a (architect resolution
+    # 2026-09-26): same "running -> pending in ONE save" fix as
+    # record_supply_interruption -- see its comment for the full
+    # rationale.
+    if state.running and state.running.get("cycle_id") == (cycle_id or ""):
+        state.running = None
     state.pending = {
         "retry_key": retry_key,
         "cycle_id": cycle_id or "",
@@ -841,9 +889,11 @@ def record_kill_interruption(
     :func:`check_running_for_kill` read from the executor's own
     telemetry (``None`` when there was none) -- carried into the record
     so the operator/planner can see WHAT the executor last reported,
-    even though the gate never acted on it. Does not touch ``running``
-    -- :func:`resolve` (``keep``) and :func:`record_attempt_finished`
-    own its lifecycle from here."""
+    even though the gate never acted on it. Clears ``running`` when it
+    still belongs to THIS ``cycle_id`` (round 4 external re-check, item
+    P1-a, architect resolution 2026-09-26) -- left standing, the stale
+    entry would survive into the NEXT tick's :func:`check_running_for_kill`
+    and be misclassified as a fresh kill of the resumed attempt."""
     return _record_interruption_without_backoff(
         state_dir, cycle_id, "interrupted_kill",
         retry_key=retry_key, plan_text=plan_text, candidate_id=candidate_id, branch=branch,
@@ -867,9 +917,9 @@ def record_defect_interruption(
     pending open increment with ``reason: interrupted_defect`` -- same
     keep/edit/delete contract as ``interrupted_supply``, but with NO
     backoff hold: our own defect is not supplier evidence, so the very
-    next session may resolve it immediately. Does not touch ``running``
-    -- :func:`resolve` (``keep``) and :func:`record_attempt_finished` own
-    its lifecycle from here."""
+    next session may resolve it immediately. Clears ``running`` when it
+    still belongs to THIS ``cycle_id`` (round 4 external re-check, item
+    P1-a) -- see :func:`record_kill_interruption`'s docstring."""
     return _record_interruption_without_backoff(
         state_dir, cycle_id, "interrupted_defect",
         retry_key=retry_key, plan_text=plan_text, candidate_id=candidate_id, branch=branch,
