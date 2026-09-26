@@ -3860,6 +3860,38 @@ class TestPublishDerivedView:
         if os.name != "nt":
             assert (out.stat().st_mode & 0o777) == 0o644
 
+    def test_operator_priority_text_never_reaches_the_public_view(self, tmp_path):
+        """ADR-034 F1 (external review of 3d67221f): derived_view.json is 0644
+        and the public dashboard reads it. An operator priority is private
+        goal_text.json wording — its title, (V-tag) and instructions must not
+        be written there. Only number, provenance, state and rank are public
+        for provenance=operator; self-derived labels stay public."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(
+            state_dir,
+            "Current priority targets:\n"
+            "(A) Priority 11 — CANARYTITLE7f3a (V2): CANARYBODY91c2 do the thing\n",
+        )
+        self._write_derived(state_dir, [{
+            "label": "Night reflections batch (V1)", "vector": "V1",
+            "body": "run overnight", "number": 19,
+            "direction": "reflection", "added_utc": "2026-09-15T21:36:00Z",
+        }])
+
+        result = demand.publish_derived_view(state_dir, None)
+
+        raw = Path(result["path"]).read_text(encoding="utf-8")
+        assert "CANARYTITLE7f3a" not in raw
+        assert "CANARYBODY91c2" not in raw
+        view = json.loads(raw)
+        operator = [i for i in view["priority_items"] if i["provenance"] == "operator"]
+        assert operator == [{
+            "rank": 1, "kind": "priority", "number": 11,
+            "provenance": "operator", "state": "open",
+        }]
+        derived = [i for i in view["priority_items"] if i["provenance"] == "self-derived"]
+        assert derived and derived[0]["label"] == "Night reflections batch"
+
     def test_missing_derived_file_is_absent_not_an_empty_list(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, self.CHARTER)
