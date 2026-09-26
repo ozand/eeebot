@@ -901,9 +901,17 @@ def _setup_cycle_branch(
     *delete* (and every ordinary, non-resumed cycle) take the ``-B`` path
     below, which force-resets the branch pointer to ``origin/main`` -- ADR
     text: "the branch is never reset to main for a kept increment. Only
-    edit or delete may start from main". A reuse that finds no local branch
-    (pruned, fresh clone) falls back to the ordinary ``-B`` path rather than
-    failing the cycle -- there is nothing left to resume.
+    edit or delete may start from main".
+
+    D4 (ADR-035 Test Contract, external review finding #4): ``keep`` NEVER
+    falls through to the ``-B`` path, whatever goes wrong with the reuse.
+    A missing branch (pruned, fresh clone) stops the attempt with reason
+    ``resume_branch_missing`` rather than silently starting a fresh cycle
+    off ``origin/main`` as if nothing was being resumed. A branch that
+    exists but fails to check out (e.g. a rejecting ``post-checkout``
+    hook) stops with reason ``resume_checkout_failed`` -- falling back to
+    ``-B`` here would force-reset the very branch the keep decision was
+    meant to preserve, discarding its checkpoints.
 
     The #877 line switch that used to live here (branch the cycle off a
     stronger dormant sha when ``CycleArchive.stalled()`` said the line had
@@ -958,16 +966,26 @@ def _setup_cycle_branch(
     base = main_sha
     _sd = state_dir if state_dir is not None else STATE_DIR
 
-    resumed = False
     if reuse_existing_branch:
         exists = _sp_setup.run(
             git + ['rev-parse', '--verify', '--quiet', branch], capture_output=True, text=True,
         ).returncode == 0
-        if exists:
-            reuse_checkout = _sp_setup.run(git + ['checkout', branch], capture_output=True, text=True)
-            resumed = reuse_checkout.returncode == 0
-
-    if not resumed:
+        if not exists:
+            # D4: never a silent fresh start -- this IS the failure, reported
+            # as such, not papered over by branching a new one off main.
+            return {
+                'ok': False, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha,
+                'reason': 'resume_branch_missing',
+            }
+        reuse_checkout = _sp_setup.run(git + ['checkout', branch], capture_output=True, text=True)
+        if reuse_checkout.returncode != 0:
+            # D4: never fall back to `-B` here -- that would force-reset the
+            # very branch this keep decision was meant to preserve.
+            return {
+                'ok': False, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha,
+                'reason': 'resume_checkout_failed',
+            }
+    else:
         checkout = _sp_setup.run(git + ['checkout', '-B', branch, base], capture_output=True, text=True)
         if checkout.returncode != 0:
             return {'ok': False, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha, 'reason': 'checkout_failed'}
@@ -980,7 +998,9 @@ def _setup_cycle_branch(
 
     return {
         'ok': True, 'branch': branch, 'main_sha': base, 'origin_main_sha': main_sha, 'reason': None,
-        'resumed': resumed,
+        # Reaching here means whichever branch above (reuse or fresh `-B`)
+        # succeeded -- every failure path already returned early.
+        'resumed': bool(reuse_existing_branch),
     }
 
 
