@@ -366,6 +366,75 @@ class TestUnfinishedAmendedRepairWithFailedTipReadNeverIntegrates:
         )
 
 
+class TestTimedOutRepairNeverIntegrates:
+    def test_timed_out_repair_with_real_commits_blocks_the_whole_cycle(self, tmp_path, monkeypatch):
+        """Codex review of 777ada1a (nanobot/runtime/bridge.py:5636), P2
+        (architect resolution 2026-09-26): the ``except asyncio.TimeoutError``
+        branch for a repair turn only prints and ``break``s -- it never
+        sets ``_repair_unfinished_status``/``_repair_unfinished_task_id``,
+        so the barrier right after the loop never fires. A repair that
+        commits a real (partial) fix and then hits the wall-clock timeout
+        (instead of finishing with a bad status) integrates anyway, the
+        exact same risk item 1/round 3 already closed for a non-'ok'
+        status.
+        """
+        import asyncio as _asyncio_mod
+        import subprocess
+
+        repair_cls = _make_committing_repair_manager("ok", "irrelevant -- the wait_for call itself times out")
+        state_dir = _wire(tmp_path, monkeypatch, repair_cls)
+        _seed_bridge_request(state_dir, "req-repair-timeout", "cycle-repair-timeout")
+        _stub_planning_session(monkeypatch, "add feature")
+
+        _real_wait_for = _asyncio_mod.wait_for
+
+        class _TimeoutOnRepairWaitAsyncio:
+            """Delegates every asyncio attribute to the real module except
+            wait_for's REPAIR-specific call (the literal 1200.0s timeout) --
+            awaits the real coroutine (so the repair's own commit actually
+            lands, exactly as it would in the real race where the repair
+            finishes writing its commit just as the harness gives up
+            waiting on it) then reports a timeout regardless."""
+
+            def __getattr__(self, name):
+                return getattr(_asyncio_mod, name)
+
+            async def wait_for(self, coro, timeout=None):
+                if timeout == 1200.0:
+                    try:
+                        await coro
+                    except Exception:
+                        pass
+                    raise _asyncio_mod.TimeoutError()
+                return await _real_wait_for(coro, timeout=timeout)
+
+        monkeypatch.setattr(bridge, "asyncio", _TimeoutOnRepairWaitAsyncio())
+
+        rc = asyncio.run(bridge._main_impl())
+        assert rc == 0
+
+        work = tmp_path / "eeebot-self-evolving"
+        main_tree = subprocess.run(
+            ["git", "-C", str(work), "ls-tree", "-r", "--name-only", "main"],
+            capture_output=True, text=True,
+        ).stdout
+        assert "scripts/repair_fix.py" not in main_tree, (
+            "a timed-out repair's own commit must never integrate"
+        )
+        assert "scripts/feature.py" not in main_tree, (
+            "the whole cycle must not integrate when the repair session timed out with real "
+            "changes on the branch, even though the primary executor's own status was ok"
+        )
+
+        from nanobot.runtime import open_increment
+
+        pending = open_increment.pending_open_increment(state_dir)
+        assert pending is not None, (
+            "a timed-out repair with real branch changes must leave the branch as a pending "
+            "open increment, not be silently treated as a clean break"
+        )
+
+
 class TestHelpers:
     def test_authoritative_resolution_prefers_latest_ok_repair(self, tmp_path):
         _write_telemetry(tmp_path, "primary", "ok", PRIMARY_TEXT)
