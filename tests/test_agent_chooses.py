@@ -3931,6 +3931,76 @@ def test_planner_rest_resets_supply_streak(tmp_path: Path, monkeypatch):
     )
 
 
+def test_response_with_both_plan_and_rest_is_rejected_as_malformed(tmp_path: Path, monkeypatch):
+    """Codex review of 984a133f (``nanobot/runtime/bridge.py:3638``): the
+    rest-branch accepted a response as ``rest`` SOLELY because ``rest``
+    was non-null, silently discarding an ``plan`` field present in the
+    SAME response and never spawning the executor. ``plan``/``rest`` are
+    documented (``roles/planner.md``) as mutually exclusive shapes of the
+    one final JSON -- a model returning both is a format violation, not a
+    legitimate rest, and must be rejected as ``malformed`` (planner
+    family) rather than silently treated as a rest.
+    """
+    import asyncio
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge, no_plan_recovery, open_increment, planner_rest
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    _task_writing_dir = bridge.RELEASE_ROOT / "nanobot" / "skills" / "task-writing"
+    _task_writing_dir.mkdir(parents=True, exist_ok=True)
+    (_task_writing_dir / "SKILL.md").write_text("task-writing contract (test stub)\n", encoding="utf-8")
+
+    class _PlannerBothPlanAndRestManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            if self._telemetry_component != "planner":
+                return "fake subagent spawned"
+            task_id = "planner-both-plan-rest-01"
+            raw_both = json.dumps({
+                "insight": "found real work, but also filled in rest by habit",
+                "plan": "a brand new, unrelated task the executor should never see",
+                "iterations_planned": 1,
+                "rest": {
+                    "wake_condition": {"kind": "main_commit", "ref": ""},
+                    "deadline": "2099-01-01T00:00:00Z",
+                },
+            })
+            (state_dir / "subagents").mkdir(parents=True, exist_ok=True)
+            (state_dir / "subagents" / f"{task_id}.json").write_text(
+                json.dumps({"status": "ok", "result": raw_both, "context_usage": {"iterations": [{}]}}),
+                encoding="utf-8",
+            )
+
+            async def _noop():
+                return None
+
+            self._running_tasks[task_id] = asyncio.create_task(_noop())
+            return "fake planner spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _PlannerBothPlanAndRestManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    _rest_state = planner_rest.load_state(state_dir)
+    assert _rest_state.active_rest is None and _rest_state.consecutive_rests == 0, (
+        "a response carrying both plan and rest must never be recorded as a rest"
+    )
+    no_plan_state = no_plan_recovery.load_state(state_dir)
+    assert no_plan_state.consecutive_planner >= 1, (
+        "a response carrying both plan and rest must count as a planner-family malformed outcome"
+    )
+
+
 def test_planner_rest_snapshot_checks_returncode(tmp_path: Path, monkeypatch):
     """Small item (ADR-035 Test Contract, #1962): ``planner_rest``'s
     version snapshot must check the returncode of ``git rev-parse``, not
