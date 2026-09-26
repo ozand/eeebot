@@ -103,6 +103,7 @@ class ExecTool(Tool):
             return guard_error
 
         effective_timeout = min(timeout or self.timeout, self._MAX_TIMEOUT)
+        process: asyncio.subprocess.Process | None = None
 
         env = os.environ.copy()
         for var in SCRUBBED_STATE_ENV_VARS:
@@ -117,6 +118,8 @@ class ExecTool(Tool):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 env=env,
+                start_new_session=(os.name != "nt"),
+                creationflags=(0x00000200 if os.name == "nt" else 0),
             )
 
             try:
@@ -125,11 +128,7 @@ class ExecTool(Tool):
                     timeout=effective_timeout,
                 )
             except asyncio.TimeoutError:
-                process.kill()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    pass
+                await self._terminate_and_reap(process)
                 return f"Error: Command timed out after {effective_timeout} seconds"
 
             output_parts = []
@@ -158,8 +157,44 @@ class ExecTool(Tool):
 
             return result
 
+        except asyncio.CancelledError:
+            if process is not None:
+                await self._terminate_and_reap(process)
+            raise
         except Exception as e:
             return f"Error executing command: {str(e)}"
+
+    @staticmethod
+    async def _terminate_and_reap(process: asyncio.subprocess.Process) -> None:
+        """Terminate the command tree and reap the shell process."""
+        if process.returncode is not None:
+            await process.wait()
+            return
+
+        if os.name == "nt":
+            cleanup = await asyncio.create_subprocess_exec(
+                "taskkill.exe", "/PID", str(process.pid), "/T", "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await cleanup.wait()
+        else:
+            import signal
+
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+        # The original communicate() coroutine is cancelled by wait_for on
+        # timeout/cancellation; drain and close its pipe transports after exit.
+        await process.communicate()
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
         """Best-effort safety guard for potentially destructive commands."""

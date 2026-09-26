@@ -10,6 +10,68 @@ import pytest
 from nanobot.agent.tools.shell import ExecTool
 
 
+@pytest.mark.asyncio
+async def test_watchdog_cancellation_kills_and_reaps_real_exec_subprocess(tmp_path):
+    """Cancelling ExecTool.execute must not leave its real child process alive."""
+    import asyncio
+    import os
+    import sys
+    import time
+
+    pid_file = tmp_path / "child.pid"
+    if os.name == "nt":
+        child_script = tmp_path / "child.py"
+        child_script.write_text(
+            "import os, sys, time\n"
+            "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+            "time.sleep(60)\n",
+            encoding="utf-8",
+        )
+        command_file = tmp_path / "spawn_child.ps1"
+        command_file.write_text(
+            "$python = $args[0]; $script = $args[1]; $pidfile = $args[2]; "
+            "$p = Start-Process -FilePath $python -ArgumentList @($script, $pidfile) -PassThru; "
+            "Wait-Process -Id $p.Id",
+            encoding="utf-8",
+        )
+        child_command = (
+            f'powershell -NoProfile -File "{command_file}" '
+            f'"{sys.executable}" "{child_script}" "{pid_file}"'
+        )
+    else:
+        child_code = (
+            "import os, sys, time; "
+            "open(sys.argv[1], 'w').write(str(os.getpid())); "
+            "time.sleep(60)"
+        )
+        child_command = f'{sys.executable} -c "{child_code}" "{pid_file}"'
+    tool = ExecTool(timeout=60)
+    execution = asyncio.create_task(tool.execute(child_command))
+    deadline = time.monotonic() + 10
+    while not pid_file.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    assert pid_file.exists(), "exec child did not start"
+    pid = int(pid_file.read_text(encoding="utf-8"))
+
+    execution.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(execution, timeout=8)
+
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        process = kernel32.OpenProcess(0x00100000 | 0x1000, False, pid)
+        assert process, f"child PID {pid} could not be inspected"
+        try:
+            assert kernel32.WaitForSingleObject(process, 0) == 0, f"child PID {pid} is still alive"
+        finally:
+            kernel32.CloseHandle(process)
+    else:
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+
 def _fake_resolve_private(hostname, port, family=0, type_=0):
     return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("169.254.169.254", 0))]
 
