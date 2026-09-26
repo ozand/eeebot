@@ -232,11 +232,7 @@ def _is_real_result(result: dict) -> bool:
 
 
 def _real_result_ledger_inputs(
-    result_status: str,
-    *,
-    terminal_reason: str | None = None,
-    materialized_from: str = 'bridge_llm_execution',
-    blocker: dict | None = None,
+    result: dict[str, Any],
 ) -> dict:
     """#1748: the same five inputs :func:`_is_real_result` reads from a result
     artifact (``result_status``, ``status``, ``terminal_reason``,
@@ -259,21 +255,14 @@ def _real_result_ledger_inputs(
     the criterion changes -- the boolean is written ALONGSIDE the inputs it
     was computed from, never in place of them.
     """
-    candidate = {
-        'result_status': result_status,
-        'status': result_status,
-        'terminal_reason': terminal_reason,
-        'materialized_from': materialized_from,
-        'blocker': blocker or {},
-    }
-    blocker_reason = (blocker or {}).get('reason') if isinstance(blocker, dict) else None
+    blocker = result.get('blocker') if isinstance(result.get('blocker'), dict) else {}
     return {
-        'result_status': result_status,
-        'status': result_status,
-        'terminal_reason': terminal_reason,
-        'materialized_from': materialized_from,
-        'blocker_reason': blocker_reason,
-        'is_real_result': _is_real_result(candidate),
+        'result_status': result.get('result_status'),
+        'status': result.get('status'),
+        'terminal_reason': result.get('terminal_reason'),
+        'materialized_from': result.get('materialized_from'),
+        'blocker_reason': blocker.get('reason'),
+        'is_real_result': _is_real_result(result),
     }
 
 
@@ -1315,6 +1304,20 @@ def _cleanup_cycle_branch(repo_root: 'Path', cycle_branch: str) -> bool:
 _LATE_PUSH_RESOLUTIONS = frozenset({'pushed_late', 'superseded', 'abandoned'})
 
 
+def _delivery_from_changed_files(files_changed: object) -> tuple[bool, str]:
+    """Resolve delivery conservatively; an empty/unknown path list is unknown."""
+    if not isinstance(files_changed, list) or not files_changed:
+        return False, "unknown"
+    from nanobot.runtime.service_paths import is_service_only
+    return not is_service_only(files_changed), "known"
+
+
+def _mark_integrated_delivery(result: dict) -> None:
+    """Recompute provisional candidate delivery after integration succeeds."""
+    from nanobot.runtime.service_paths import is_delivered
+    result['delivered'] = is_delivered(True, result.get('files_changed'))
+
+
 def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
     """#1709 increment 2: at the same safe cycle-start boundary as
     :func:`_pickup_staged_promotions` (bridge lock held, HEAD on clean
@@ -1364,7 +1367,11 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
             outcome = str(row.get('outcome') or '')
             if outcome == 'push_pending':
                 pending_by_cycle[cid] = row
-            elif outcome in _LATE_PUSH_RESOLUTIONS:
+            elif outcome in _LATE_PUSH_RESOLUTIONS or (
+                outcome == 'partial' and row.get('reason') == 'service_only'
+            ):
+                # A service-only late push is recorded as the ordinary
+                # Rule-C partial outcome; it still resolves its pending push.
                 resolved_cycles.add(cid)
         todo = {cid: row for cid, row in pending_by_cycle.items() if cid not in resolved_cycles}
         if not todo:
@@ -1375,6 +1382,8 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
         for cycle_id, row in todo.items():
             branch = str(row.get('branch') or '')
             main_sha_before = str(row.get('main_sha_before') or '')
+            files_changed = row.get('files_changed')
+            delivered, delivery_state = _delivery_from_changed_files(files_changed)
             if not branch:
                 # A push_pending row with no branch name is not something this
                 # boundary can act on either way — skip rather than guess.
@@ -1387,8 +1396,9 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
             if branch_ref.returncode != 0:
                 _v, _vr = _derive_cycle_verdict('abandoned', 'push_pending_branch_missing')
                 record_cycle_outcome(
-                    state_dir, cycle_id, 'abandoned', 'push_pending_branch_missing', [], branch,
-                    verdict=_v, verdict_reason=_vr,
+                    state_dir, cycle_id, 'abandoned', 'push_pending_branch_missing', files_changed, branch,
+                    verdict=_v, verdict_reason=_vr, delivered=False,
+                    delivery_state=delivery_state,
                 )
                 print(f'bridge: late push: {branch} (cycle {cycle_id}) no longer exists — recorded abandoned')
                 resolved_count += 1
@@ -1406,8 +1416,9 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
             if main_sha_before and current_origin_main != main_sha_before:
                 _v, _vr = _derive_cycle_verdict('superseded', 'push_pending_main_moved')
                 record_cycle_outcome(
-                    state_dir, cycle_id, 'superseded', 'push_pending_main_moved', [], branch,
-                    verdict=_v, verdict_reason=_vr,
+                    state_dir, cycle_id, 'superseded', 'push_pending_main_moved', files_changed, branch,
+                    verdict=_v, verdict_reason=_vr, delivered=False,
+                    delivery_state=delivery_state,
                 )
                 print(
                     f"bridge: late push: origin/main moved past {branch}'s recorded base "
@@ -1446,10 +1457,24 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
             main_sha_after = _sp_late.run(
                 git + ['rev-parse', 'HEAD'], capture_output=True, text=True,
             ).stdout.strip()
-            _v, _vr = _derive_cycle_verdict('pushed_late', None)
+            # A late-pushed service-only change integrated into Git but did
+            # not deliver work. Preserve the ordinary Rule-C non-delivery
+            # outcome/verdict so futility and recent-failure readers agree.
+            if delivered:
+                late_outcome, late_reason = 'pushed_late', None
+            elif delivery_state == 'known':
+                late_outcome, late_reason = 'partial', 'service_only'
+            else:
+                # Historical rows with no paths are not enough evidence to
+                # classify the branch as service-only or delivered.
+                late_outcome, late_reason = 'pushed_late', 'delivery_unknown'
+            _v, _vr = _derive_cycle_verdict(late_outcome, late_reason)
+            if delivery_state == 'unknown':
+                _v, _vr = 'inconclusive', 'delivery_unknown'
             record_cycle_outcome(
-                state_dir, cycle_id, 'pushed_late', None, [], branch,
-                verdict=_v, verdict_reason=_vr,
+                state_dir, cycle_id, late_outcome, late_reason, files_changed, branch,
+                verdict=_v, verdict_reason=_vr, delivered=delivered,
+                delivery_state=delivery_state,
             )
             _cleanup_cycle_branch(repo_root, branch)
             print(f'bridge: late push: {branch} (cycle {cycle_id}) pushed to main at {main_sha_after}')
@@ -3692,7 +3717,7 @@ async def _main_impl_body():
                 record_cycle_outcome(
                     STATE_DIR, _cycle_id, 'failed', fail_reason, [], None,
                     verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
-                    real_result=_real_result_ledger_inputs('blocked'),
+                    real_result=_real_result_ledger_inputs({'result_status': 'blocked', 'status': 'blocked', 'materialized_from': 'bridge_llm_execution'}),
                 )
                 # #721: no cycle branch exists yet on this path — tag at current HEAD.
                 _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'failed')
@@ -3798,7 +3823,7 @@ async def _main_impl_body():
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done_tag', [], None,
                 verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
-                real_result=_real_result_ledger_inputs('already_done'),
+                real_result=_real_result_ledger_inputs({'result_status': 'already_done', 'status': 'already_done', 'materialized_from': 'bridge_llm_execution'}),
             )
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-already-done')
             _record_diary_fitness_marker(STATE_DIR, _cycle_id)
@@ -3863,6 +3888,7 @@ async def _main_impl_body():
                 commits_pushed=0,
                 result_status='blocked',
                 backlog_title=backlog_title,
+                delivered=False,
                 key_learnings=[
                     f'Task "{_dup_check_title[:60]}" matches recently-failed/rejected proposal '
                     f'"{_recent_failure_title[:60]}" (within {FAILURE_SUPPRESS_HOURS}h); suppressed '
@@ -3881,7 +3907,8 @@ async def _main_impl_body():
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'skipped-duplicate', 'recent_duplicate_failure', [], None,
                 verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
-                real_result=_real_result_ledger_inputs('blocked'),
+                real_result=_real_result_ledger_inputs({'result_status': 'blocked', 'status': 'blocked', 'materialized_from': 'bridge_llm_execution'}),
+                delivered=False,
             )
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-recent-failure')
@@ -3934,6 +3961,7 @@ async def _main_impl_body():
                 commits_pushed=0,
                 result_status='blocked',
                 backlog_title=backlog_title,
+                delivered=False,
                 key_learnings=[
                     f'Task "{_dup_check_title[:60]}" matched an existing artifact '
                     f'({_existence_match}) via the #750 existence index (semantic '
@@ -3953,7 +3981,8 @@ async def _main_impl_body():
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'skipped-duplicate', 'existence_index_duplicate', [], None,
                 verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
-                real_result=_real_result_ledger_inputs('blocked'),
+                real_result=_real_result_ledger_inputs({'result_status': 'blocked', 'status': 'blocked', 'materialized_from': 'bridge_llm_execution'}),
+                delivered=False,
             )
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-existence-duplicate')
@@ -4053,6 +4082,7 @@ async def _main_impl_body():
                 commits_pushed=0,
                 result_status='blocked',
                 backlog_title=backlog_title,
+                delivered=False,
                 key_learnings=[
                     f"Cycle-branch setup failed ({_cycle_setup['reason']}); "
                     'the eeebot-self-evolving checkout was left untouched, no subagent was spawned.',
@@ -4069,7 +4099,8 @@ async def _main_impl_body():
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'failed', _cycle_setup['reason'], [], cycle_branch,
                 verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
-                real_result=_real_result_ledger_inputs('blocked'),
+                real_result=_real_result_ledger_inputs({'result_status': 'blocked', 'status': 'blocked', 'materialized_from': 'bridge_llm_execution'}),
+                delivered=False,
             )
             # #721: cycle branch setup itself failed — tag at main_sha_before
             # (may be '' if even the pre-checkout rev-parse failed; _tag_cycle_post
@@ -5303,6 +5334,7 @@ async def _main_impl_body():
                     )
                     if _integ['ok']:
                         _winner['integrated'] = True
+                        _mark_integrated_delivery(_winner)
                         _winner['rollback_reason'] = ''
                         _winner['main_sha_after'] = _integ.get('main_sha_after', _winner['main_sha_before'])
                         try:
@@ -5388,6 +5420,13 @@ async def _main_impl_body():
         # a git commit despite having a dirty working tree.
         'auto_committed': _auto_committed,
     }
+    _result_artifact = {
+        'result_status': _bridge_status,
+        'status': _bridge_status,
+        'materialized_from': 'bridge_llm_execution',
+        'terminal_reason': None,
+        'blocker': {},
+    }
     _write_bridge_completed_result(
         state_dir=STATE_DIR,
         req=req,
@@ -5399,6 +5438,7 @@ async def _main_impl_body():
         result_status=_bridge_status,
         revisions=_revision_record,
         backlog_title=backlog_title,
+        delivered=_delivered,
         rollback=_rollback,
         # #789: a spawn-window fitness-sidecar write is surfaced in the
         # cycle's own learnings so the gate/history reflects the incident.
@@ -5594,7 +5634,10 @@ async def _main_impl_body():
         # merged against — _finish_pending_pushes reads this back to tell
         # "origin/main unchanged" (safe to redo) from "moved" (superseded).
         main_sha_before=(main_sha_before if _cycle_outcome == 'push_pending' else None),
-        real_result=_real_result_ledger_inputs('blocked' if _service_only else _bridge_status),
+        real_result=_real_result_ledger_inputs(_result_artifact),
+        delivered=_delivered,
+        delivery_state="known" if files_changed else "unknown",
+        # #1959 F5: ledger real_result derives from the same artifact payload.
         # #1765: the classifier's decision AND the raw error text, together,
         # so a misclassification is auditable after the fact — never just
         # the derived outcome/reason with the evidence discarded.
@@ -7233,6 +7276,7 @@ def _write_bridge_completed_result(
     backlog_title: str = '',
     rollback: dict | None = None,
     extra_learnings: list[str] | None = None,
+    delivered: bool | None = None,
 ) -> None:
     """Write a real subagent-result-v1 artifact after bridge LLM execution.
 
@@ -7314,6 +7358,7 @@ def _write_bridge_completed_result(
         'created_at': _dt.datetime.now(_dt.timezone.utc).isoformat(),
         'files_changed': files_changed,
         'commits_pushed': commits_pushed,
+        'delivered': bool(delivered) if delivered is not None else None,
         'summary': summary,
         'key_learnings': key_learnings,
         'learning_classification': (

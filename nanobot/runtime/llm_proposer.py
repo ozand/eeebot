@@ -650,15 +650,14 @@ def _recent_proposed_titles(rows: list[dict[str, Any]], n: int = _RECENT_PROPOSE
     return titles
 
 
-# #716: outcomes that mean "attempted, but not integrated" — the opposite of
-# 'success'/'promotion_candidate', which DID land. Deliberately excludes
-# 'skipped-duplicate' (never an attempt at new work; already covered by
-# _recent_proposed_titles/git-log dedup).
-_NON_INTEGRATED_OUTCOMES = frozenset({"failed", "partial", "timeout"})
+# #716: outcomes that mean attempted but NOT DELIVERED. `partial` includes
+# Rule-C service-only merges: Git integrated them, but they did not deliver work.
+# `skipped-duplicate` is not an attempt at new work.
+_NOT_DELIVERED_OUTCOMES = frozenset({"failed", "partial", "timeout"})
+
 # #716: gate rollback reasons that mean the cycle produced real work but it
-# was blocked from integrating — same "attempted, not integrated" bucket as
-# _NON_INTEGRATED_OUTCOMES above, just recorded on a 'gate' row instead of an
-# 'outcome' row.
+# was blocked from delivery — same "not delivered" bucket as the outcome set,
+# just recorded on a 'gate' row instead of an 'outcome' row.
 _NON_INTEGRATED_GATE_REASONS = frozenset(
     {"mutation_surface_violation", "blocked_file_present", "gate_failed"}
 )
@@ -669,7 +668,7 @@ def _recent_failed_titles(
     n: int = _RECENT_FAILED_TITLES_N,
     window_cycles: int = _RECENT_FAILED_WINDOW_CYCLES,
 ) -> list[str]:
-    """Titles of recent attempts that were NEVER integrated (#716).
+    """Titles of recent attempts that were never delivered (#716).
 
     Before this, the proposer's context only showed already-INTEGRATED work
     (git log) and its OWN recently-proposed titles
@@ -677,15 +676,17 @@ def _recent_failed_titles(
     already tried that failed, timed out, or was rolled back by the gate, so
     it kept re-proposing the same dead-end idea (observed live: 26
     ``proposer_reject reason=self_dedup`` in one loop run, each a re-hit of
-    an already-attempted-but-failed theme).
+    an already-attempted-but-undelivered theme). A service-only ``partial``
+    is included even though Git merged it: Rule C says it delivered no work.
 
     Joins two ledger phases back to their originating ``'proposed'`` row via
     ``cycle_id`` (the only field that links a title to its terminal result):
 
     - an ``'outcome'`` row whose ``outcome`` is in
-      :data:`_NON_INTEGRATED_OUTCOMES` (``failed``/``partial``/``timeout`` —
-      attempted, but never integrated; ``success`` and
-      ``promotion_candidate`` are excluded on purpose, they DID integrate);
+      :data:`_NOT_DELIVERED_OUTCOMES` (``failed``/``partial``/``timeout`` —
+      attempted but not delivered; ``partial`` also covers an integrated
+      Rule-C service-only branch, while ``success`` and
+      ``promotion_candidate`` mean delivered/integrated work);
     - a ``'gate'`` row that blocked integration (``allowed`` falsy) with a
       rollback ``reason`` in :data:`_NON_INTEGRATED_GATE_REASONS`.
 
@@ -706,7 +707,7 @@ def _recent_failed_titles(
 
         failed_cycle_ids: list[str] = []
         for row in _terminal_rows(rows)[-window_cycles:]:
-            if str(row.get("outcome") or "") in _NON_INTEGRATED_OUTCOMES:
+            if str(row.get("outcome") or "") in _NOT_DELIVERED_OUTCOMES:
                 cycle_id = str(row.get("cycle_id") or "").strip()
                 if cycle_id:
                     failed_cycle_ids.append(cycle_id)

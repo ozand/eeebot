@@ -1431,6 +1431,8 @@ def _append_outcome(
     ts: str | None = None,
     files_changed: list[str] | None = None,
     demand_id: str | None = None,
+    delivered: bool | None = None,
+    delivery_state: str | None = None,
 ) -> None:
     event: dict = {"phase": "outcome", "cycle_id": cycle_id, "outcome": outcome}
     if ts:
@@ -1439,6 +1441,10 @@ def _append_outcome(
         event["files_changed"] = files_changed
     if demand_id:
         event["demand_id"] = demand_id
+    if delivered is not None:
+        event["delivered"] = delivered
+    if delivery_state is not None:
+        event["delivery_state"] = delivery_state
     cycle_ledger.append_event(state_dir, event)
 
 
@@ -1502,8 +1508,13 @@ class TestCompletedSidecar:
         _append_proposed(state_dir, "service-cycle", "priority-service123", ts=_now_iso(2))
         _append_outcome(
             state_dir, "service-cycle", "success", ts=_now_iso(1),
-            files_changed=["diary/2026-09-21.md", "memory/MEMORY.md"],
-            demand_id="priority-service123",
+            files_changed=["diary/2026-09-21.md"],
+            demand_id="priority-service123", delivered=False, delivery_state="known",
+        )
+        _append_proposed(state_dir, "late-old-empty", "priority-late-empty", ts=_now_iso(2))
+        _append_outcome(
+            state_dir, "late-old-empty", "pushed_late", ts=_now_iso(1),
+            files_changed=[], delivered=False, delivery_state="unknown",
         )
         assert demand._fold_completed(state_dir) == set()
         completed_path = state_dir / "demand" / "completed.json"
@@ -1522,6 +1533,18 @@ class TestCompletedSidecar:
         entries = _completed_sidecar(state_dir)["entries"]
         assert "priority-normal123" in entries
         assert "fallback:normal-cycle" not in entries
+
+    def test_legacy_success_with_normalized_empty_paths_still_folds(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "legacy-empty-success", "priority-legacy-empty", ts=_now_iso(2))
+        # Historical writers commonly normalized unknown paths to [] rather
+        # than omitting the field altogether.
+        _append_outcome(
+            state_dir, "legacy-empty-success", "success", ts=_now_iso(1), files_changed=[],
+        )
+
+        assert demand._fold_completed(state_dir) == {"priority-legacy-empty"}
+        assert "priority-legacy-empty" in _completed_sidecar(state_dir)["entries"]
 
     def test_pushed_late_folds_the_same_as_success(self, tmp_path):
         """#1709 increment 2: 'pushed_late' is a genuine success delayed by

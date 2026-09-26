@@ -76,7 +76,7 @@ class TestRealResultLedgerInputsAgreeWithCriterion:
         """The fixture where they COULD disagree: a status value that flips
         the criterion. Both computations must agree because the helper calls
         ``_is_real_result`` itself — this pins that it still does."""
-        inputs = bridge._real_result_ledger_inputs(result_status)
+        inputs = bridge._real_result_ledger_inputs({"result_status": result_status, "status": result_status, "materialized_from": "bridge_llm_execution"})
         assert inputs["is_real_result"] is expected
         # Rebuild the artifact shape _is_real_result actually reads and
         # confirm it returns the identical answer — not a re-derivation,
@@ -94,14 +94,18 @@ class TestRealResultLedgerInputsAgreeWithCriterion:
         """The other two inputs _is_real_result reads (dead in bridge's own
         writer today, but part of the contract) must also be threaded
         through and agree."""
-        inputs = bridge._real_result_ledger_inputs(
-            "completed", terminal_reason="local_executor_unavailable",
-        )
+        inputs = bridge._real_result_ledger_inputs({
+            "result_status": "completed", "status": "completed",
+            "terminal_reason": "local_executor_unavailable",
+            "materialized_from": "bridge_llm_execution",
+        })
         assert inputs["is_real_result"] is False
 
-        inputs = bridge._real_result_ledger_inputs(
-            "completed", blocker={"reason": "local_executor_unavailable"},
-        )
+        inputs = bridge._real_result_ledger_inputs({
+            "result_status": "completed", "status": "completed",
+            "materialized_from": "bridge_llm_execution",
+            "blocker": {"reason": "local_executor_unavailable"},
+        })
         assert inputs["is_real_result"] is False
         assert inputs["blocker_reason"] == "local_executor_unavailable"
 
@@ -110,6 +114,13 @@ class TestRealResultLedgerInputsAgreeWithCriterion:
 
 
 class TestEndToEndAgreement:
+    def test_explore_winner_delivery_is_recomputed_from_integrated_files(self):
+        # Candidate evaluation is non-integrating and reports false; after
+        # winner integration, bridge must recalculate delivery from its diff.
+        candidate = {"delivered": False, "files_changed": ["src/feature.py"]}
+        bridge._mark_integrated_delivery(candidate)
+        assert candidate["delivered"] is True
+
     def test_green_cycle_result_artifact_and_ledger_row_agree(self, tmp_path, monkeypatch):
         """A real (non-blocked) result: both the artifact _is_real_result
         would read and the ledger row's real_result say True."""
@@ -134,7 +145,8 @@ class TestEndToEndAgreement:
         assert row["real_result"]["is_real_result"] == bridge._is_real_result(artifact)
         assert row["real_result"]["is_real_result"] is True
         assert row["real_result"]["materialized_from"] == artifact["materialized_from"]
-        assert row["real_result"]["result_status"] == artifact["result_status"]
+        assert row["real_result"] == bridge._real_result_ledger_inputs(artifact)
+        assert row["delivered"] is True
 
     def test_suppressed_duplicate_result_artifact_and_ledger_row_agree(self, tmp_path, monkeypatch):
         """A blocked-stub result (recent-failure suppression): both the
@@ -175,6 +187,7 @@ class TestEndToEndAgreement:
         result_path = state_dir / "subagents" / "results" / "result-req-dup.json"
         artifact = json.loads(result_path.read_text(encoding="utf-8"))
         assert artifact["result_status"] == "blocked"
+        assert artifact["delivered"] is False
 
         outcome_rows = [
             r for r in _read_ledger(state_dir)
@@ -183,6 +196,28 @@ class TestEndToEndAgreement:
         row = outcome_rows[-1]
         assert row["real_result"]["is_real_result"] == bridge._is_real_result(artifact)
         assert row["real_result"]["is_real_result"] is False
+        assert row["real_result"] == bridge._real_result_ledger_inputs(artifact)
+        assert row["delivered"] is False
+
+    def test_cycle_branch_setup_failure_artifact_records_non_delivery(self, tmp_path, monkeypatch):
+        base = tmp_path
+        state_dir = base / "state"
+        state_dir.mkdir()
+        _init_selfevo_repo(base)
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+        monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
+        monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        monkeypatch.setattr(bridge, "_setup_cycle_branch", lambda *args, **kwargs: {
+            "ok": False, "reason": "setup_test_failure", "branch": None, "main_sha": "abc",
+        })
+
+        _seed_bridge_request(state_dir, "req-setup-fail", "cycle-setup-fail")
+        assert asyncio.run(bridge._main_impl()) == 0
+        artifact = json.loads((state_dir / "subagents" / "results" / "result-req-setup-fail.json").read_text(encoding="utf-8"))
+        assert artifact["result_status"] == "blocked"
+        assert artifact["delivered"] is False
 
 
 # ─── an old row (pre-#1748, no real_result key) is handled by every reader ─
@@ -278,7 +313,7 @@ class TestReplayAuditCompleteFromPostFixRows:
         return (self._BASE + timedelta(hours=offset_h)).isoformat().replace("+00:00", "Z")
 
     def test_audit_is_complete_when_every_prior_outcome_row_carries_real_result(self):
-        prior_real_result = bridge._real_result_ledger_inputs("blocked")
+        prior_real_result = bridge._real_result_ledger_inputs({"result_status": "blocked", "status": "blocked"})
         rows = [
             {
                 "phase": "proposed", "cycle_id": "c1", "demand_id": "d1",
@@ -297,7 +332,7 @@ class TestReplayAuditCompleteFromPostFixRows:
             },
             {
                 "phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": self._ts(2),
-                "real_result": bridge._real_result_ledger_inputs("completed"),
+                "real_result": bridge._real_result_ledger_inputs({"result_status": "completed", "status": "completed"}),
             },
         ]
         cycles = replay.build_cycles(rows)
@@ -336,7 +371,7 @@ class TestReplayAuditCompleteFromPostFixRows:
             },
             {
                 "phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": self._ts(2),
-                "real_result": bridge._real_result_ledger_inputs("completed"),
+                "real_result": bridge._real_result_ledger_inputs({"result_status": "completed", "status": "completed"}),
             },
         ]
         cycles = replay.build_cycles(rows)
