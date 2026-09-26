@@ -366,6 +366,47 @@ class TestUnfinishedAmendedRepairWithFailedTipReadNeverIntegrates:
         )
 
 
+class TestRepairBarrierInterruptionPersistFailure:
+    def test_repair_barrier_does_not_finish_cycle_when_interruption_persist_fails(self, tmp_path, monkeypatch):
+        """Codex review of 22e1aeb8, P1 (architect resolution 2026-09-27):
+        same fix as the primary D1 barrier, applied to the repair
+        barrier's own interruption-recording call -- if that write fails
+        to verifiably persist, the barrier must not mark the cycle
+        "finished" (handled marker, terminal ledger row) regardless.
+        """
+        from nanobot.runtime import open_increment
+
+        repair_cls = _make_committing_repair_manager("error", "Error: repair turn crashed mid-fix")
+        state_dir = _wire(tmp_path, monkeypatch, repair_cls)
+        _seed_bridge_request(state_dir, "req-repair-persistfail", "cycle-repair-persistfail")
+        _stub_planning_session(monkeypatch, "add feature")
+
+        _real_save_state = open_increment._save_state
+
+        def _fail_on_pending_write(sd, st):
+            if st.pending is not None:
+                return False
+            return _real_save_state(sd, st)
+
+        monkeypatch.setattr(open_increment, "_save_state", _fail_on_pending_write)
+
+        rc = asyncio.run(bridge._main_impl())
+        assert rc == 0
+
+        pending = open_increment.pending_open_increment(state_dir)
+        assert pending is None, (
+            f"the interruption write genuinely failed -- no pending increment should have landed: {pending!r}"
+        )
+
+        from tests.test_cycle_ledger import _read_ledger
+
+        outcome_rows = [r for r in _read_ledger(state_dir) if r.get("phase") == "outcome"]
+        assert not outcome_rows, (
+            f"a cycle whose repair-barrier interruption record failed to persist must not be "
+            f"recorded as finished at all: {outcome_rows!r}"
+        )
+
+
 class TestTimedOutRepairNeverIntegrates:
     def test_timed_out_repair_with_real_commits_blocks_the_whole_cycle(self, tmp_path, monkeypatch):
         """Codex review of 777ada1a (nanobot/runtime/bridge.py:5636), P2
