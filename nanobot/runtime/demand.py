@@ -972,7 +972,9 @@ def build_derived_view(
         )
 
     ts = now or datetime.now(timezone.utc)
-    operator_status = resolve_operator_priorities_status(state_dir)
+    operator_status = resolve_operator_priorities_status(
+        state_dir, selfevo_repo_root=selfevo_repo
+    )
     return {
         "schema_version": DERIVED_VIEW_SCHEMA,
         "generated_at_utc": ts.isoformat().replace("+00:00", "Z"),

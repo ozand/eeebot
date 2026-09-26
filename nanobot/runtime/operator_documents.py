@@ -375,9 +375,13 @@ def resolve_operator_priority_labels(state_dir: "Path | str") -> "frozenset[str]
     return frozenset(labels)
 
 
-def resolve_operator_priorities_status(state_dir: "Path | str") -> PriorityStatus:
+def resolve_operator_priorities_status(
+    state_dir: "Path | str",
+    *,
+    selfevo_repo_root: "Path | str | None" = None,
+) -> PriorityStatus:
     """Status-only adapter for operator priorities (privacy-safe)."""
-    return operator_priorities_status(state_dir)
+    return operator_priorities_status(state_dir, selfevo_repo_root=selfevo_repo_root)
 
 
 def resolve_operator_priority_numbers(state_dir: "Path | str") -> "frozenset[int]":
@@ -579,7 +583,8 @@ def render_priorities_block(
 
 
 _COMPLETED_PRIORITY_RE = re.compile(
-    r"Priority\s+(\d+)\s*(?:[—-]\s*|\(\s*)([^,.;)\n]+)", re.IGNORECASE
+    r"Priority\s+(\d+)\s*(?:[—-]\s*|\(\s*)((?:[^,.;)\n]|\([Vv][12]\))+)(?:\))?",
+    re.IGNORECASE,
 )
 
 
@@ -596,6 +601,8 @@ def _completed_prose_entries(raw_text: str) -> tuple[PriorityEntry, ...]:
         except ValueError:
             continue
         title = match.group(2).strip()
+        if title.endswith(("(V1", "(V2", "(v1", "(v2")):
+            title += ")"
         if number > 0 and title:
             entries.append(PriorityEntry(number=number, source=SOURCE_OPERATOR, title=title, instructions=""))
     return tuple(entries)
