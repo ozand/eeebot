@@ -582,9 +582,13 @@ def render_priorities_block(
     return text
 
 
-_COMPLETED_PRIORITY_RE = re.compile(
-    r"Priority\s+(\d+)\s*(?:[—-]\s*|\(\s*)((?:[^,.;)\n]|\([Vv][12]\))+)(?:\))?",
+_COMPLETED_EM_DASH_RE = re.compile(
+    r"Priority\s+(\d+)\s*[—-]\s*([^\n]*?)"
+    r"(?=\s*(?:Priority\s+\d+\s*[—-]|[.;]\s*(?:Priority\s+\d+|$)|$))",
     re.IGNORECASE,
+)
+_COMPLETED_PAREN_PRIORITY_RE = re.compile(
+    r"Priority\s+(\d+)\s*\(\s*([^,.;)\n]+)", re.IGNORECASE
 )
 
 
@@ -595,14 +599,14 @@ def _completed_prose_entries(raw_text: str) -> tuple[PriorityEntry, ...]:
         return ()
     tail = raw_text[idx + len(marker):]
     entries: list[PriorityEntry] = []
-    for match in _COMPLETED_PRIORITY_RE.finditer(tail):
+    matches = list(_COMPLETED_EM_DASH_RE.finditer(tail))
+    matches += list(_COMPLETED_PAREN_PRIORITY_RE.finditer(tail))
+    for match in matches:
         try:
             number = int(match.group(1))
         except ValueError:
             continue
-        title = match.group(2).strip()
-        if title.endswith(("(V1", "(V2", "(v1", "(v2")):
-            title += ")"
+        title = match.group(2).strip().rstrip(".; ")
         if number > 0 and title:
             entries.append(PriorityEntry(number=number, source=SOURCE_OPERATOR, title=title, instructions=""))
     return tuple(entries)

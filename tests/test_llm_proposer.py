@@ -126,7 +126,7 @@ def test_operator_priority_block_stays_atomic_under_context_cap(tmp_path, monkey
 
     assert len(context) <= 5000
     assert full_title not in context
-    assert "Operator priorities could not be shown here (unavailable, reason: oversize)" in context
+    assert "priorities could not be shown here (unavailable, reason: oversize)" in context.lower()
     assert "Open:" not in context
     assert "14." not in context
 

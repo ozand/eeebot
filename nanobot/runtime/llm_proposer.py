@@ -1827,9 +1827,20 @@ def build_context(
             keep = max(0, budget - len(marker))
             blob = blob[:keep] + marker[:budget - keep]
             if operator_priorities_block not in blob:
+                # Codex P2: the renderer's block is atomic under its own
+                # cap. Never slice it again merely because other protected
+                # guardrails left too little room in the overall context;
+                # replace it with its fixed oversize/unavailable marker.
+                from nanobot.runtime.operator_documents import _PRIORITIES_BLOCK_OVERSIZE_TEXT
+
+                priority_fallback = (
+                    operator_priorities_block
+                    if len(operator_priorities_block) <= budget
+                    else _PRIORITIES_BLOCK_OVERSIZE_TEXT
+                )
                 marker = "\n[priorities truncated]\n"
                 keep = max(0, budget - len(marker))
-                blob = operator_priorities_block[:keep] + marker[:budget - keep]
+                blob = priority_fallback[:keep] + marker[:budget - keep]
         context = blob + "\n" + guardrail_tail + "\n" + surface_rule
 
         # #844: PROTECTED (never-truncated) stepping-stones section — optional
