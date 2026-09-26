@@ -1874,10 +1874,6 @@ def test_unfinished_session_never_integrates(tmp_path: Path, monkeypatch):
     state_dir = _setup_planner_chooses_harness(base, monkeypatch)
     _origin, work = _init_selfevo_repo(base)
 
-    main_sha_before = subprocess.run(
-        ["git", "-C", str(work), "rev-parse", "main"], capture_output=True, text=True,
-    ).stdout.strip()
-
     class _CheckpointThenErrorManager:
         def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
             self.workspace = workspace
@@ -1925,10 +1921,19 @@ def test_unfinished_session_never_integrates(tmp_path: Path, monkeypatch):
     rc = asyncio.run(bridge._main_impl())
     assert rc == 0
 
-    main_sha_after = subprocess.run(
-        ["git", "-C", str(work), "rev-parse", "main"], capture_output=True, text=True,
-    ).stdout.strip()
-    assert main_sha_after == main_sha_before, "an errored session with checkpoints must never integrate onto main"
+    # `main` legitimately advances for unrelated bookkeeping (the opening
+    # diary entry, pushed before the executor even spawns) -- what must
+    # NEVER happen is the checkpoint's own work reaching it.
+    main_tree = subprocess.run(
+        ["git", "-C", str(work), "ls-tree", "-r", "--name-only", "main"], capture_output=True, text=True,
+    ).stdout
+    assert "scripts/partial.py" not in main_tree, (
+        "an errored session with checkpoints must never integrate onto main"
+    )
+    main_subjects = subprocess.run(
+        ["git", "-C", str(work), "log", "--format=%s", "main"], capture_output=True, text=True,
+    ).stdout
+    assert "merge: integrate" not in main_subjects
 
     # No manufactured closing commit -- exactly the one checkpoint commit
     # this test wrote, nothing else, on whatever branch it landed on.
@@ -2291,6 +2296,135 @@ def test_keep_never_falls_back_to_reset(tmp_path: Path, monkeypatch):
         capture_output=True, text=True,
     )
     assert missing_exists.returncode != 0, "keep silently created a fresh branch instead of reporting it missing"
+
+
+def test_increment_accounting_uses_merge_base(tmp_path: Path, monkeypatch):
+    """D5 (ADR-035 Test Contract, external review finding #5): work,
+    closing-commit eligibility, files_changed and commit counts must be
+    measured from the INCREMENT's base (``merge-base(origin/main,
+    branch)``), not the attempt's own pre-spawn HEAD. Two scenarios,
+    both a `keep`-resumed cycle against a branch that already holds a
+    checkpoint:
+
+    1. The resumed executor verifies the retained work and makes NO new
+       commit itself -- measured from the attempt's own pre-spawn HEAD
+       (which IS the retained tip, since nothing moved it before the
+       spawn) this would read as zero new commits and skip the
+       closing-commit/gate entirely; measured from the increment's
+       merge-base it correctly sees the checkpoint as real, unintegrated
+       work and integrates it.
+    2. The resumed executor adds ONE more commit -- files_changed (and
+       the written result artifact) must cover the retained checkpoint's
+       file AND the new commit's file, not just the latter.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.runtime import bridge
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    # --- Scenario 1: resumed, zero new commits ------------------------
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    old_cycle_id = "cycle-retained-05"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", old_branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "retained.py").write_text("def retained():\n    return 'kept'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/retained.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/retained.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    class _NoNewCommitManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            # The resumed executor verifies the retained work and
+            # finishes WITHOUT making any new commit itself.
+            return "fake subagent spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _NoNewCommitManager)
+    _stub_planning_session(
+        monkeypatch, "finish the retained feature (merge-base test)",
+        resume_branch=old_branch, resume_cycle_id=old_cycle_id, resume_skip_opening_entry=True,
+    )
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+
+    main_tree = subprocess.run(
+        ["git", "-C", str(work), "ls-tree", "-r", "--name-only", "main"], capture_output=True, text=True,
+    ).stdout
+    assert "scripts/retained.py" in main_tree, (
+        "a resumed attempt making zero new commits must still integrate the retained checkpoint "
+        "work when measured from the increment's merge-base"
+    )
+
+    # --- Scenario 2: resumed, one new commit on top of the retained one ---
+    base2 = tmp_path / "base2"
+    base2.mkdir()
+    state_dir2 = _setup_planner_chooses_harness(base2, monkeypatch)
+    _origin2, work2 = _init_selfevo_repo(base2)
+
+    old_cycle_id2 = "cycle-retained-06"
+    old_branch2 = f"selfevo/cycle-{old_cycle_id2}"
+    subprocess.run(["git", "-C", str(work2), "checkout", "-b", old_branch2], check=True, capture_output=True)
+    (work2 / "scripts").mkdir(exist_ok=True)
+    (work2 / "scripts" / "retained2.py").write_text("def retained():\n    return 'kept'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work2), "add", "scripts/retained2.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work2), "commit", "-m", "selfevo: checkpoint — scripts/retained2.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(work2), "checkout", "main"], check=True, capture_output=True)
+
+    class _OneNewCommitManager:
+        def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
+            self.workspace = workspace
+            self._telemetry_component = telemetry_component
+            self._running_tasks: dict = {}
+
+        async def spawn(self, **_kwargs):
+            (self.workspace / "scripts" / "finishing.py").write_text(
+                "def finishing():\n    return 'done'\n", encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "-C", str(self.workspace), "add", "scripts/finishing.py"], check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(self.workspace), "commit", "-m", "feat: finish the increment"],
+                check=True, capture_output=True,
+            )
+            return "fake subagent spawned"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _OneNewCommitManager)
+    _stub_planning_session(
+        monkeypatch, "finish the retained feature (merge-base test 2)",
+        resume_branch=old_branch2, resume_cycle_id=old_cycle_id2, resume_skip_opening_entry=True,
+    )
+
+    rc2 = asyncio.run(bridge._main_impl())
+    assert rc2 == 0
+
+    result_files = list((state_dir2 / "subagents" / "results").glob("result-*.json"))
+    assert len(result_files) == 1, f"expected exactly one result artifact, got {result_files!r}"
+    result_payload = json.loads(result_files[0].read_text(encoding="utf-8"))
+    files_changed = result_payload.get("files_changed") or []
+    assert "scripts/retained2.py" in files_changed, (
+        f"files_changed omitted the retained checkpoint's file, measured only from this attempt's own "
+        f"pre-spawn HEAD instead of the increment's merge-base: {files_changed!r}"
+    )
+    assert "scripts/finishing.py" in files_changed
 
 
 # --- keep-work: checkpoint commits excluded from "done work" readers (ADR-035,
