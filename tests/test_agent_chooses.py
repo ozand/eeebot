@@ -2103,6 +2103,60 @@ def test_checkpoint_git_add_failure_and_post_staging_exception_both_abandon(tmp_
     )
 
 
+def test_checkpoint_never_commits_a_pre_staged_blocked_file(tmp_path: Path):
+    """Codex review of 984a133f (``nanobot/agent/subagent.py:1015``): if
+    an executor tool stages a blocked file itself (for example a bare
+    ``git add`` covering ``.env`` alongside an allowed source edit), the
+    status-filter loop above only ADDS the approved paths on top of
+    whatever the shared index already holds -- it never clears the
+    pre-existing stage. ``write-tree`` then serializes the WHOLE index,
+    blocked file included, despite ``is_blocked_checkpoint_filename``
+    correctly excluding it from the loop. The index must be reset to
+    ``old_sha`` before selective staging so a pre-staged blocked file can
+    never survive into the checkpoint tree.
+    """
+    import subprocess
+
+    from tests.test_cycle_ledger import _init_selfevo_repo
+    from nanobot.agent.subagent import SubagentManager
+
+    class _NeverCalledProvider:
+        async def chat_with_retry(self, *args, **kwargs):
+            raise AssertionError("provider must never be called by _maybe_checkpoint_commit")
+
+    base = tmp_path / "base"
+    base.mkdir()
+    _origin, work = _init_selfevo_repo(base)
+    branch = "selfevo/cycle-pre-staged-secret"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", branch], check=True, capture_output=True)
+
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "feature.py").write_text("EXECUTOR_EDIT = 1\n", encoding="utf-8")
+    (work / ".env").write_text("SECRET_TOKEN=super-secret-value\n", encoding="utf-8")
+    # The executor tool itself stages the blocked file -- BEFORE the
+    # checkpoint routine ever runs, and separately from whatever it
+    # decides to `git add` on its own.
+    subprocess.run(["git", "-C", str(work), "add", ".env"], check=True, capture_output=True)
+
+    manager = SubagentManager(
+        provider=_NeverCalledProvider(), workspace=work, bus=object(), model="fake/model",
+        expected_cycle_branch=branch,
+    )
+    manager._maybe_checkpoint_commit()
+
+    new_tip = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", branch], capture_output=True, text=True,
+    ).stdout.strip()
+    tree_paths = subprocess.run(
+        ["git", "-C", str(work), "ls-tree", "-r", "--name-only", new_tip],
+        capture_output=True, text=True,
+    ).stdout.splitlines()
+    assert "scripts/feature.py" in tree_paths, "the allowed edit must still be checkpointed"
+    assert ".env" not in tree_paths, (
+        f"a pre-staged blocked file must never survive into the checkpoint tree: {tree_paths!r}"
+    )
+
+
 def test_checkpoint_keeps_shared_index_coherent(tmp_path: Path):
     """D3 (ADR-035 Test Contract #1979, 16710f62): after a successful
     checkpoint CAS, the workspace's ORDINARY (shared, not private) index
