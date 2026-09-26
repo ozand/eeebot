@@ -3919,8 +3919,38 @@ async def _run_planning_session(
                         'tampered_files': [], 'plan': None,
                     }
                 plan_lines.append(f'Open increment: {_oi_decision}')
-            except Exception:
-                pass
+            except Exception as _oi_resolve_exc:
+                # Codex review of 777ada1a (nanobot/runtime/bridge.py:3897),
+                # P2 (architect resolution 2026-09-26): this bare
+                # `except: pass` used to swallow ANY exception
+                # resolve()/_create_inspection_ref/etc. could raise --
+                # not just the resolve_saved check just above, which is
+                # the only failure mode it actually verified. An
+                # exception here means the mandatory keep/edit/delete
+                # decision never resolved at all; failing CLOSED (same
+                # malformed/planner-family rejection as a failed
+                # resolve_saved) is the only safe default -- silently
+                # falling through would hand the executor a plan while
+                # the pending increment's true state is unknown.
+                record_planning_session(
+                    state_dir, cycle_id, 'malformed',
+                    iterations_used=iterations_used, iterations_planned=iterations_planned,
+                    reason=f'pending open increment {_oi_decision} resolution raised: {_oi_resolve_exc}',
+                    parse_mode=parse_mode,
+                    format_violation=format_violation,
+                    task_writing_read=_task_writing_read,
+                    task_writing_source=_task_writing_source or None,
+                    task_writing_path=str(_task_writing_file) if _task_writing_read else None,
+                    task_writing_bytes=_task_writing_bytes_count,
+                    task_writing_sha256=_task_writing_sha256 or None,
+                )
+                no_plan_recovery.record_outcome(state_dir, cycle_id, 'malformed')
+                planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'malformed')
+                print(f'planning-session: malformed ({_oi_decision} resolution raised: {_oi_resolve_exc})')
+                return {
+                    'ran': True, 'iterations_used': iterations_used, 'iterations_planned': iterations_planned,
+                    'tampered_files': [], 'plan': None,
+                }
         else:
             # D8 (ADR-035 Test Contract, external review finding #8): a
             # pending increment with a MISSING or INVALID
@@ -5579,6 +5609,39 @@ async def _main_impl_body():
                         )
                     except asyncio.TimeoutError:
                         print(f'repair turn {_repair_attempts} timed out')
+                        # Codex review of 777ada1a
+                        # (nanobot/runtime/bridge.py:5636), P2 (architect
+                        # resolution 2026-09-26): a timeout never set
+                        # `_repair_unfinished_status` -- the ONLY signal
+                        # the barrier below reads to route an unfinished
+                        # repair through record_supply_interruption/
+                        # record_defect_interruption (creating a resumable
+                        # pending open increment). A repair that commits
+                        # real work and then hits the wall-clock timeout
+                        # instead of finishing with a bad status fell
+                        # through to a bookkeeping-free "kept for
+                        # forensics" limbo -- same risk class as a non-ok
+                        # status, gated the same way: only when the repair
+                        # actually changed the branch.
+                        _repair_timeout_new = _count_commits_since(_selfevo_repo, _increment_base)
+                        _repair_timeout_added_commits = _repair_timeout_new > cycle_commit_count
+                        if _repair_timeout_added_commits:
+                            cycle_commit_count = _repair_timeout_new
+                        _repair_timeout_tip_after = _current_tip_sha(_selfevo_repo)
+                        _repair_timeout_tip_verified_unchanged = (
+                            bool(_repair_tip_before) and bool(_repair_timeout_tip_after)
+                            and _repair_tip_before == _repair_timeout_tip_after
+                        )
+                        _repair_timeout_changed = (
+                            _repair_timeout_added_commits or not _repair_timeout_tip_verified_unchanged
+                        )
+                        if _repair_timeout_changed:
+                            _repair_unfinished_status = 'timeout'
+                            _repair_unfinished_task_id = _repair_spawn_id
+                            print(
+                                f'repair turn {_repair_attempts}: unfinished (timed out with branch '
+                                'changes); cycle will be treated as interrupted'
+                            )
                         break
                     # Merge repair-turn read receipts into the primary harness-owned
                     # accumulator; persistence still happens only after integration.
