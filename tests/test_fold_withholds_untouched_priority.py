@@ -109,7 +109,7 @@ def test_bookkeeping_close_is_withheld(tmp_path: Path):
     retiring commit changed only MEMORY.md."""
     completed = demand._fold_completed(
         tmp_path,
-        ledger_rows=_rows("priority-abc", ["memory/MEMORY.md"]),
+        ledger_rows=_rows("priority-abc", ["memory/facts/ledger-completion-proof.md"]),
         summaries_by_id={
             "priority-abc": "Priority 4 - Implement render_cycle_strip in scripts/eeebot_dashboard.py",
         },
@@ -131,7 +131,7 @@ def test_a_real_delivery_still_folds(tmp_path: Path):
 def test_a_title_naming_no_path_folds_as_before(tmp_path: Path):
     completed = demand._fold_completed(
         tmp_path,
-        ledger_rows=_rows("priority-xyz", ["memory/MEMORY.md"]),
+        ledger_rows=_rows("priority-xyz", ["memory/facts/ledger-completion-proof.md"]),
         summaries_by_id={"priority-xyz": "Priority 20 - Consolidate the skills catalogue"},
     )
     assert "priority-xyz" in completed
@@ -146,7 +146,7 @@ def test_an_unknown_id_folds_as_before(tmp_path: Path):
     reflection id, used here, stays outside it."""
     completed = demand._fold_completed(
         tmp_path,
-        ledger_rows=_rows("reflection-123", ["memory/MEMORY.md"]),
+        ledger_rows=_rows("reflection-123", ["memory/facts/ledger-completion-proof.md"]),
         summaries_by_id={},
     )
     assert "reflection-123" in completed
@@ -166,7 +166,7 @@ def test_creation_counts_as_touching(tmp_path: Path):
 def test_withholding_is_recorded_with_its_evidence(tmp_path: Path):
     demand._fold_completed(
         tmp_path,
-        ledger_rows=_rows("priority-abc", ["memory/MEMORY.md"]),
+        ledger_rows=_rows("priority-abc", ["memory/facts/ledger-completion-proof.md"]),
         summaries_by_id={"priority-abc": "Priority 4 - render_cycle_strip in scripts/eeebot_dashboard.py"},
     )
     data = json.loads((tmp_path / "demand" / "fold_withheld.json").read_text(encoding="utf-8"))
@@ -175,7 +175,7 @@ def test_withholding_is_recorded_with_its_evidence(tmp_path: Path):
     entry = data["withheld"][0]
     assert entry["demand_id"] == "priority-abc"
     assert entry["named_paths"] == ["scripts/eeebot_dashboard.py"]
-    assert entry["files_changed"] == ["memory/MEMORY.md"]
+    assert entry["files_changed"] == ["memory/facts/ledger-completion-proof.md"]
 
 
 def test_the_record_is_written_even_when_nothing_was_withheld(tmp_path: Path):
@@ -197,7 +197,7 @@ def test_a_withheld_priority_folds_later_when_a_cycle_does_the_work(tmp_path: Pa
     rule would strand exactly what it means to protect."""
     summaries = {"priority-abc": "Priority 4 - Implement scripts/eeebot_dashboard.py"}
     demand._fold_completed(
-        tmp_path, ledger_rows=_rows("priority-abc", ["memory/MEMORY.md"], "cycle-1"),
+        tmp_path, ledger_rows=_rows("priority-abc", ["memory/facts/ledger-completion-proof.md"], "cycle-1"),
         summaries_by_id=summaries,
     )
     completed = demand._fold_completed(

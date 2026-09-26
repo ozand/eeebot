@@ -111,7 +111,7 @@ def test_a_defect_bookkeeping_close_is_withheld(tmp_path: Path):
     script and a retiring cycle that never touched it."""
     completed = demand._fold_completed(
         tmp_path,
-        ledger_rows=_rows("defect-abc", ["memory/MEMORY.md"]),
+        ledger_rows=_rows("defect-abc", ["memory/facts/ledger-completion-proof.md"]),
         summaries_by_id={
             "defect-abc": "repair: re-wire idle skill skills/foo/SKILL.md — extend or consume it",
         },
@@ -168,7 +168,7 @@ def test_a_defect_genuine_delivery_still_folds(tmp_path: Path):
 def test_a_defect_naming_no_path_folds_as_before(tmp_path: Path):
     completed = demand._fold_completed(
         tmp_path,
-        ledger_rows=_rows("defect-xyz", ["memory/MEMORY.md"]),
+        ledger_rows=_rows("defect-xyz", ["memory/facts/ledger-completion-proof.md"]),
         summaries_by_id={"defect-xyz": "curator: 3 staged fact(s) have no keyword overlap"},
     )
     assert "defect-xyz" in completed
@@ -181,7 +181,7 @@ def test_goal_gap_is_not_widened_here(tmp_path: Path):
     before, same as any other unwidened kind."""
     completed = demand._fold_completed(
         tmp_path,
-        ledger_rows=_rows("goal-gap-abc", ["memory/MEMORY.md"]),
+        ledger_rows=_rows("goal-gap-abc", ["memory/facts/ledger-completion-proof.md"]),
         summaries_by_id={},
     )
     assert "goal-gap-abc" in completed
@@ -300,7 +300,7 @@ def test_collect_demand_withholds_an_untouched_defect_end_to_end(tmp_path, monke
     })
     cycle_ledger.append_event(state_dir, {
         "phase": "outcome", "cycle_id": "cycle-1", "outcome": "success",
-        "files_changed": ["memory/MEMORY.md"],
+        "files_changed": ["memory/facts/ledger-completion-proof.md"],
     })
 
     demand.collect_demand(state_dir, None)
