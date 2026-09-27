@@ -4992,6 +4992,7 @@ async def _main_impl_body():
         # in _prepare_repository_for_cycle guards against.
         _restore_to_main(_selfevo_repo, STATE_DIR)
         _candidate_max_call_gap_s: float | None = None
+
         # _cycle_id was already resolved up front (right after request_id, before
         # the write-ahead ledger marker) — reused here unchanged.
         # ADR-035 keep-work (#1942 B2): a `keep` decision resumes its OWN
@@ -5250,6 +5251,8 @@ async def _main_impl_body():
         # exists).
         _closing_commit_failed = False
         _cycle_tier = 'script'  # #812: 'script' | 'runtime' (set by surface classify below)
+        _candidate_max_call_gap_s: float | None = None
+        _last_call_gap_manager = None
         _integrated = False
         _delivered = False
         _service_only = False
@@ -5412,6 +5415,7 @@ async def _main_impl_body():
                     print("All timed-out subagent tasks cancelled.")
 
             _candidate_max_call_gap_s = getattr(mgr, "last_max_call_gap_s", None)
+            _last_call_gap_manager = mgr
             try:
                 from nanobot import crash_record as _run_record
                 _telem = json.loads((STATE_DIR / 'subagents' / f'{_subagent_task_id}.json').read_text(encoding='utf-8')) if _subagent_task_id else {}
@@ -5878,7 +5882,9 @@ async def _main_impl_body():
                         expected_cycle_branch=cycle_branch,
                         wall_deadline=_bridge_wall_deadline,
                     )
+                    _last_call_gap_manager = _repair_mgr
                     _repair_tip_before = _current_tip_sha(_selfevo_repo)
+
                     await _repair_mgr.spawn(
                         task=_repair_prompt,
                         task_id=f'selfevo-repair-{_repair_attempts}',
@@ -5889,6 +5895,32 @@ async def _main_impl_body():
                     _repair_spawn_id = next(iter(_repair_mgr._running_tasks), None)
                     if _repair_spawn_id:
                         _repair_task_ids.append(_repair_spawn_id)
+                    # Prompt construction/provider setup may consume meaningful
+                    # wall time after the first budget check. Recompute at the
+                    # await boundary so a stale positive timeout cannot burn the
+                    # finalization reserve while the manager's pre-call guard
+                    # would reject its first model request.
+                    _repair_wait = repair_wait_budget_secs(
+                        _bridge_wall_deadline,
+                        max_wait_secs=1200.0,
+                        clock=time.monotonic,
+                    )
+                    if _repair_wait is None:
+                        for _repair_task in list(_repair_mgr._running_tasks.values()):
+                            _repair_task.cancel()
+                        await asyncio.gather(
+                            *list(_repair_mgr._running_tasks.values()),
+                            return_exceptions=True,
+                        )
+                        append_event(STATE_DIR, {
+                            'phase': 'repair_skipped_no_budget',
+                            'cycle_id': _cycle_id,
+                            'reason': 'repair_skipped_no_budget_before_wait',
+                            'repair_attempt': _repair_attempts,
+                        })
+                        print('repair_skipped_no_budget: pre-await work consumed model-call budget')
+                        _repair_attempts -= 1
+                        break
                     try:
                         await asyncio.wait_for(
                             asyncio.gather(*list(_repair_mgr._running_tasks.values()), return_exceptions=True),
@@ -6743,6 +6775,11 @@ async def _main_impl_body():
             print(f'bridge: unexpected error during cycle {cycle_branch}: {exc}')
             _rollback_reason = _rollback_reason or 'internal_error'
             commits_pushed = cycle_commit_count if _integrated else 0
+            _candidate_max_call_gap_s = getattr(
+                _last_call_gap_manager,
+                "last_max_call_gap_s",
+                _candidate_max_call_gap_s,
+            )
         finally:
             # Never leave the shared checkout stranded on a cycle branch.
             if not _integrated:
@@ -6755,6 +6792,11 @@ async def _main_impl_body():
                 pass
         try:
             from nanobot.runtime.session_clock import compute_cycle_max_call_gap
+            _candidate_max_call_gap_s = getattr(
+                _last_call_gap_manager,
+                "last_max_call_gap_s",
+                _candidate_max_call_gap_s,
+            )
             _candidate_max_call_gap_s = compute_cycle_max_call_gap(
                 STATE_DIR,
                 _cycle_id,
