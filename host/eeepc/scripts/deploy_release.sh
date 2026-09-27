@@ -146,9 +146,9 @@ log "installing on $HOST..."
 REMOTE_ENV="REMOTE_ARCHIVE='${REMOTE_ARCHIVE:-}' RELEASE_NAME='${RELEASE_NAME:-}' FULL_COMMIT='${FULL_COMMIT:-}' PREV_RELEASE_PATH='${PREV_RELEASE_PATH:-}' VERIFY_ONLY='$VERIFY_ONLY'"
 if [ "$VERIFY_ONLY" -eq 1 ]; then
   GATE_TMP="$(git -C "$REPO_ROOT" archive --format=tar "$COMMIT" scripts nanobot host/eeepc/etc | \
-    ssh "ozand@${HOST}" 'set -e; d=$(mktemp -d /tmp/eeebot-verify-gate.XXXXXX); tar -x -C "$d"; chmod -R a+rX "$d"; printf "%s" "$d"')"
+    ssh "ozand@${HOST}" 'set -e; d=$(mktemp -d /tmp/eeebot-verify-gate.XXXXXX); trap '\''sudo -n rm -rf -- "$d"'\'' EXIT; tar -x -C "$d"; chmod -R a+rX "$d"; printf "%s" "$d"; trap - EXIT')"
   cleanup_candidate_gate() {
-    if [[ "$GATE_TMP" == /tmp/eeebot-verify-gate.* && "$GATE_TMP" != *[!A-Za-z0-9_./-]* ]]; then
+    if [[ "$GATE_TMP" =~ ^/tmp/eeebot-verify-gate\.[A-Za-z0-9]{6}$ ]]; then
       ssh "ozand@${HOST}" "sudo -n rm -rf -- '$GATE_TMP'" || log "WARNING: candidate gate temp cleanup failed: $GATE_TMP"
     else
       log "WARNING: refusing unsafe candidate gate temp cleanup path: $GATE_TMP"
