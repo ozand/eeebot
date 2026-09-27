@@ -1208,3 +1208,142 @@ def test_message_tokens_counts_reasoning_content_and_thinking_blocks():
     baseline = cc._message_tokens(content_only)
     assert cc._message_tokens(with_reasoning) > baseline + 900
     assert cc._message_tokens(with_thinking) > baseline + 900
+
+
+# ---------------------------------------------------------------------------
+# #1930 convergence round: scope = reasoning_content only. Anthropic
+# extended-thinking forms (thinking_blocks, including redacted_thinking) are
+# not supported for shrink/clear -- fail-safe leaves them untouched, still
+# counted.
+# ---------------------------------------------------------------------------
+
+def test_thinking_blocks_message_is_left_completely_untouched(tmp_path):
+    """A message carrying `thinking_blocks` is never a compaction candidate,
+    regardless of size: this runtime only supports shrinking/clearing
+    `reasoning_content` (the host's provider, qwen via LiteLLM, is the only
+    one observed to populate it). Anthropic's thinking forms require a
+    signed thinking block to be replayed unmodified alongside its
+    `tool_calls` turn; this module has no logic that preserves that
+    constraint while shrinking, so the fail-safe is to not shrink at all."""
+    thinking_blocks = [{"type": "thinking", "thinking": _long_content(5_000)}]
+    old_msg = {
+        "role": "assistant",
+        "content": "ok",
+        "thinking_blocks": thinking_blocks,
+        "tool_calls": [{"id": "tc0", "type": "function",
+                         "function": {"name": "bash", "arguments": "{}"}}],
+    }
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "Do a thing."},
+        old_msg,
+        {"role": "tool", "tool_call_id": "tc0", "name": "bash", "content": _short_content(10)},
+        {"role": "assistant", "content": _long_content(2_000)},
+    ]
+    assert cc._worth_compacting(old_msg) is False
+
+    result = cc.compact_messages(
+        messages, cycle_id="thinking-untouched", iteration=1, state_root=tmp_path,
+        threshold=0.001, keep_tokens=600, window_tokens=98_304,
+    )
+    untouched = result[2]
+    assert untouched["content"] == "ok"
+    assert untouched["thinking_blocks"] == thinking_blocks
+    assert untouched.get("tool_calls") == old_msg["tool_calls"]
+
+
+def test_redacted_thinking_payload_under_data_key_is_counted():
+    """#1930 (Codex 4115692517): a `redacted_thinking` block's payload lives
+    under `data`, not `thinking`/`text`/`content`. Even though such a
+    message is never shrunk (previous test), it must still be sized
+    correctly so the trigger/protected-span accounting isn't blind to it."""
+    redacted = [{"type": "redacted_thinking", "data": _long_content(4_000)}]
+    baseline = cc._message_tokens({"role": "assistant", "content": "ok"})
+    with_redacted = cc._message_tokens({"role": "assistant", "content": "ok", "thinking_blocks": redacted})
+    assert with_redacted > baseline + 900
+
+
+def test_later_candidate_carries_summary_when_the_first_is_too_small(tmp_path):
+    """#1930 (Codex 4113995954): with an existing carrier, a small first
+    candidate, and a much larger later candidate, only the first was ever
+    tried as this round's carrier -- if the summary didn't fit it, the
+    fresh evidence was discarded even though the large candidate could
+    easily have carried it. The later candidate must get the chance."""
+    marker = "SECOND_ROUND_FRESH_EVIDENCE_MARKER"
+    old_summary = "[Compaction summary — deterministic, evidence-only]\n" + "P" * 2_000
+    small_first_candidate = "x" * (cc._min_compact_len() + 2) + marker
+    large_second_candidate = "y" * 80_000
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "Do a thing."},
+        {"role": "assistant", "content": old_summary},
+        {"role": "assistant", "content": small_first_candidate,
+         "tool_calls": [{"id": "tc-small", "type": "function",
+                         "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "tc-small", "name": "bash", "content": "ok"},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "tc-large", "type": "function",
+                         "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "tc-large", "name": "bash", "content": large_second_candidate},
+        {"role": "assistant", "content": "keep me recent"},
+    ]
+    result = cc.compact_messages(
+        messages, cycle_id="later-candidate", iteration=1, state_root=tmp_path,
+        threshold=0.001, keep_tokens=50, window_tokens=98_304,
+    )
+    carriers = [m for m in result if isinstance(m.get("content"), str)
+                and m["content"].startswith("[Compaction summary")]
+    assert len(carriers) == 1, f"expected exactly one carrier, found {len(carriers)}"
+    assert marker in carriers[0]["content"], (
+        "this round's fresh evidence must survive by moving to a candidate "
+        "that can actually hold it, not be discarded"
+    )
+
+
+def test_marker_header_survives_when_fresh_evidence_nearly_fills_the_cap():
+    """#1930 (Codex 4115719536): when this round's fresh decisions/progress
+    alone are close to MAX_SUMMARY_CHARS, the header ("[Compaction summary")
+    must still be the start of the returned text -- both prior-carrier
+    discovery and the "did this round install a carrier" check depend on
+    it. Six long assistant progress turns (each capped at 1,200 chars by
+    `_representative_excerpt`, and only the last 6 kept) push fresh_text
+    close to the 6,000-char default cap on its own."""
+    evidence_span = [
+        {"role": "assistant", "content": _long_content(2_000) + f"PROGRESS_{i}" + _long_content(2_000)}
+        for i in range(6)
+    ]
+    summary = cc._structural_summary(evidence_span, goal="g", previous="")
+    assert summary.startswith("[Compaction summary"), (
+        f"header must survive truncation; got prefix: {summary[:80]!r}"
+    )
+    assert len(summary) <= cc.MAX_SUMMARY_CHARS
+
+
+def test_tool_result_containing_marker_text_is_not_treated_as_already_compacted(tmp_path):
+    """#1930 (Codex 4115719563): compaction state must be a flag the code
+    sets itself, never inferred from a message's own text -- an ordinary
+    tool result (e.g. `cat`-ing this very module, or a copy of this PR's
+    diff) can legitimately contain the literal strings "[Compaction
+    summary" and the excerpt marker. Such a result must still be compacted
+    normally, not mistaken for an already-compacted message and skipped."""
+    lookalike = "[Compaction summary — deterministic, evidence-only]\n" + cc._OMIT_MARKER + ("z" * 80_000)
+    fake_msg = {"role": "tool", "tool_call_id": "tc0", "name": "bash", "content": lookalike}
+    assert cc._worth_compacting(fake_msg) is True
+
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "Do a thing."},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "tc0", "type": "function",
+                         "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "tc0", "name": "bash", "content": lookalike},
+        {"role": "assistant", "content": "keep me recent"},
+    ]
+    result = cc.compact_messages(
+        messages, cycle_id="marker-lookalike", iteration=1, state_root=tmp_path,
+        threshold=0.001, keep_tokens=50, window_tokens=98_304,
+    )
+    assert len(str(result[3]["content"])) < len(lookalike), (
+        "a tool result that merely CONTAINS marker-like text must still be "
+        "compacted, not skipped as if it were already compacted"
+    )
