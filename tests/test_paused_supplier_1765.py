@@ -425,8 +425,36 @@ class TestExitStreakAndHealthDoNotCountAnOutage:
         )
         progress = health.read_cycle_progress(state, since_ts="2026-08-01T00:00:00Z")
         assert progress["consecutive_non_integrating_cycles"] == 0
-        assert progress["state"] != "stalled"
+        # The count threshold is exempt, but the independent time-based alert
+        # still fires because the last successful cycle is older than 8 hours.
+        assert progress["state"] == "stalled"
+        assert progress["alert"] is True
         assert progress["dominant_reason"] is None
+
+    def test_incomplete_calls_still_trigger_time_based_stall_alert(self, tmp_path):
+        from nanobot.runtime import health
+
+        state = tmp_path / "state"
+        ledger_dir = state / "ledger"
+        ledger_dir.mkdir(parents=True)
+        rows = [{"phase": "outcome", "cycle_id": "c-success", "outcome": "success",
+                 "ts": "2026-09-01T00:00:00Z"}]
+        for i in range(3):
+            rows.append({
+                "phase": "outcome", "cycle_id": f"c-incomplete-{i}",
+                "outcome": "model_call_incomplete", "reason": "model_call_incomplete",
+                "ts": f"2026-09-01T00:{i + 1:02d}:00Z",
+            })
+        (ledger_dir / "cycles.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8",
+        )
+        progress = health.read_cycle_progress(
+            state, since_ts="2026-08-01T00:00:00Z",
+            now=datetime(2026, 9, 3, tzinfo=timezone.utc).timestamp(),
+        )
+        assert progress["state"] == "stalled"
+        assert progress["alert"] is True
+        assert progress["consecutive_non_integrating_cycles"] == 0
 
     def test_health_a_real_failure_streak_of_the_same_length_still_alerts(self, tmp_path):
         """Control: this is not a change to the threshold itself -- a

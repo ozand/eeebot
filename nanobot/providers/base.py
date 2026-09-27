@@ -102,6 +102,8 @@ class LLMProvider(ABC):
         "504",
         "overloaded",
         "connection",
+        "timed out",
+        "timeout",
         "server error",
         "temporarily unavailable",
     )
