@@ -223,11 +223,9 @@ class TestAuthoritativeSpawnEndToEnd:
 
     def test_executor_exception_path_records_observed_call_gap(self, tmp_path, monkeypatch):
         class _ExceptionPrimary(_PrimaryManager):
-            last_max_call_gap_s = 37.0
-
             async def spawn(self, **kwargs):
-                result = await super().spawn(**kwargs)
-                return result
+                self.last_max_call_gap_s = 37.0
+                return await super().spawn(**kwargs)
 
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("cancelled", REPAIR_TEXT_CANCELLED))
         _seed_bridge_request(state_dir, "req-gap-unexpected", "cycle-gap-unexpected")
