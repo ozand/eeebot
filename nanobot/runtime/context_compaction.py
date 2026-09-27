@@ -618,7 +618,16 @@ def compact_messages(
             if i == carrier:
                 excerpt, _ = _excerpt_content(msg.get("content"))
                 excerpt_text = excerpt if isinstance(excerpt, str) else _message_text(dict(msg, content=excerpt))
-                new_content = f"{summary}\n{excerpt_text}"
+                candidate_content = f"{summary}\n{excerpt_text}"
+                # A summary is useful only if adding it does not defeat
+                # compaction. If it would grow this carrier, keep the
+                # bounded excerpt instead and let other candidates reclaim
+                # space without a summary payload.
+                new_content = (
+                    candidate_content
+                    if len(candidate_content) < len(old_text)
+                    else excerpt_text
+                )
             else:
                 new_content, _ = _excerpt_content(msg.get("content"))
             new_messages[i] = dict(msg, content=new_content)
