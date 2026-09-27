@@ -6350,8 +6350,14 @@ def _classify_llm_error(error_text: str, *, model_call_failure: dict | None = No
         return 'failed'
     if _SUPPLIER_UNAVAILABLE_RX.search(error_text):
         return 'paused-supplier'
+    if isinstance(model_call_failure, dict) and model_call_failure.get('stage') == 'response_handling' and model_call_failure.get('call_stage') == 'model_call':
+        error_type = str(model_call_failure.get('error_type') or '').rsplit('.', 1)[-1].lower()
+        if error_type in {'ratelimiterror', 'internalservererror', 'serviceunavailableerror', 'apiconnectionerror', 'timeout', 'timeouterror', 'connecttimeout', 'readtimeout', 'remoteprotocolerror'}:
+            return 'paused-supplier'
+        return 'model_call_incomplete'
     if isinstance(model_call_failure, dict) and model_call_failure.get('stage') == 'model_call':
         error_type = str(model_call_failure.get('error_type') or '').rsplit('.', 1)[-1].lower()
+        call_stage = str(model_call_failure.get('call_stage') or model_call_failure.get('stage') or '')
         message = str(model_call_failure.get('message') or error_text).lower()
         # Provider client errors are affirmative evidence that the request was
         # rejected, not that the call was incomplete. Unknown errors remain in
@@ -6361,7 +6367,7 @@ def _classify_llm_error(error_text: str, *, model_call_failure: dict | None = No
             'apiconnectionerror', 'timeout', 'timeouterror', 'connecttimeout',
             'readtimeout', 'remoteprotocolerror',
         }
-        if error_type in supplier_error_types:
+        if call_stage == 'model_call' and error_type in supplier_error_types:
             return 'paused-supplier'
         definitive_request_errors = {
             'badrequesterror', 'contextwindowexceedederror',

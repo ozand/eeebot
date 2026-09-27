@@ -583,6 +583,7 @@ class SubagentManager:
                     model_call_failure = {
                         "error_type": str(getattr(response, "error_type", None) or "provider_error"),
                         "stage": model_call_stage,
+                        "call_stage": "model_call",
                         "model": str(self.model or ""),
                         "prompt_size_chars": sum(
                             len(str(message.get("content") or ""))

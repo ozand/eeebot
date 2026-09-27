@@ -222,6 +222,7 @@ async def test_subagent_model_call_failure_preserves_response_handling_stage(tmp
     payloads = [json.loads(path.read_text(encoding="utf-8")) for path in manager._telemetry_dir.glob("*.json")]
     failure = next(payload["model_call_failure"] for payload in payloads if payload.get("model_call_failure"))
     assert failure["stage"] == "response_handling"
+    assert failure["call_stage"] == "model_call"
 
 
 @pytest.mark.asyncio
