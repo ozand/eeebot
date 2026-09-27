@@ -441,6 +441,20 @@ def test_compaction_replaces_old_summary_carrier_instead_of_accumulating(tmp_pat
     assert sum(map(len, payloads)) <= cc.MAX_SUMMARY_CHARS + 3_000
 
 
+def test_verbose_decision_phrase_is_preserved_in_summary(tmp_path):
+    """Extract the decision itself, not an unrelated prefix before it."""
+    decision = "decision: SWITCH_TO_PLAN_B"
+    evidence = [
+        {"role": "assistant", "content": "P" * 1_000 + decision + "S" * 1_000,
+         "tool_calls": [{"id": "decision-call", "type": "function",
+                         "function": {"name": "bash", "arguments": "{}"}}]},
+    ]
+
+    summary = cc._structural_summary(evidence, goal="task")
+
+    assert decision in summary
+
+
 def test_prior_summary_survives_when_new_carrier_is_unavailable(tmp_path):
     """Do not retire the old carrier if this pass cannot install a replacement."""
     messages = _make_messages([_long_content(30_000)] * 4)
