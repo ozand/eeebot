@@ -30,6 +30,13 @@ an index of what's inside: one line per preserved message (turn index,
 role, first line ≤ 80 chars, size), stating explicitly that the full text
 lives at that path.
 
+**Retrievable in full through the real tool.** The preservation file is
+read in full through the real `ReadFileTool`: no line in it exceeds the
+tool's limit. Long lines are split at a fixed width with an explicit
+continuation marker, so reconstruction is unambiguous. The implementation
+test restores the payload byte-for-byte through the real tool, including a
+line longer than 128,000 characters.
+
 **What gets measured.** For a given compaction call: `written_bytes` (sum
 of the full pre-compaction text of every message touched this round) and
 `file_path`. A round that touches N messages writes N sections (or one
