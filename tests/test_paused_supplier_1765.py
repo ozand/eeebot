@@ -125,6 +125,8 @@ class TestClassifyLlmError:
         assert bridge._classify_llm_error(text, model_call_failure={"stage": "response_handling", "call_stage": "model_call"}) == "model_call_incomplete"
 
     @pytest.mark.parametrize("error_type, message", [
+        ("BadRequestError", "Azure OpenAI API Error 400: invalid temperature"),
+        ("BadRequestError", "Azure OpenAI API Error 404: deployment not found"),
         ("BadRequestError", "invalid temperature"),
         ("AuthenticationError", "Incorrect API key provided"),
         ("PermissionDeniedError", "model access denied"),
@@ -134,7 +136,8 @@ class TestClassifyLlmError:
     ])
     def test_definitive_client_rejection_with_model_call_telemetry_stays_failed(self, error_type, message):
         failure = {
-            "stage": "model_call",
+            "stage": "response_handling",
+            "call_stage": "model_call",
             "error_type": error_type,
             "message": message,
         }
