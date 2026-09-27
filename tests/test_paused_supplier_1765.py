@@ -180,6 +180,21 @@ class TestDecideHandledMarkerSupplierPaused:
         assert state["operator_check"] == "check request size / budget"
         assert not (tmp_path / "retry_req.json").exists()
 
+    def test_error_card_retry_attempt_reads_incomplete_counter(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", tmp_path)
+        (tmp_path / "retry_incomplete_req.json").write_text(
+            json.dumps({"count": 2, "max": 3}), encoding="utf-8",
+        )
+        request_id = "req"
+        retry_path = bridge._llm_error_retry_path(request_id)
+        attempt = None
+        if retry_path is not None and retry_path.exists():
+            retry_data = json.loads(retry_path.read_text(encoding="utf-8"))
+            retry_count = int(retry_data.get("count") or 0)
+            if retry_count:
+                attempt = f"{retry_count}/{retry_data.get('max') or bridge.LLM_ERROR_MAX_RETRIES}"
+        assert attempt == "3/3"
+
     def test_supplier_paused_writes_no_marker_and_no_retry_counter(self, tmp_path):
         marker = tmp_path / "handled_req.txt"
         result = bridge._decide_handled_marker(
