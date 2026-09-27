@@ -185,6 +185,25 @@ class TestAuthoritativeSpawnEndToEnd:
         assert budget_rows, "repair should be durably recorded as skipped when reserve cannot fit"
         assert not repair_spawned["value"]
 
+    def test_primary_call_gap_survives_repair_manager_without_gap(self, tmp_path, monkeypatch):
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
+        _seed_bridge_request(state_dir, "req-primary-gap-repair-none", "cycle-primary-gap-repair-none")
+        monkeypatch.setattr(bridge, "SubagentManager", _PrimaryManager)
+        repair_base = _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)
+
+        class _OneCallRepair(repair_base):
+            last_max_call_gap_s = None
+
+        import nanobot.agent.subagent as subagent_module
+        monkeypatch.setattr(subagent_module, "SubagentManager", _OneCallRepair)
+        monkeypatch.setattr(
+            "nanobot.runtime.session_clock.compute_cycle_max_call_gap",
+            lambda *args, **kwargs: kwargs.get("fallback_gap"),
+        )
+        assert asyncio.run(bridge._main_impl()) == 0
+        rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
+        assert rows[-1]["max_call_gap_s"] == 17.5
+
     def test_success_outcome_records_executor_call_gap(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-call-gap", "cycle-call-gap")
@@ -247,6 +266,49 @@ class TestAuthoritativeSpawnEndToEnd:
         assert asyncio.run(bridge._main_impl()) == bridge.EXIT_EXECUTOR_LLM_ERROR
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
         assert rows[-1]["max_call_gap_s"] == 31.0
+
+    def test_repair_cancelled_before_first_step_finalizes_telemetry(self, tmp_path, monkeypatch):
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
+        _seed_bridge_request(state_dir, "req-repair-cancel-telemetry", "cycle-repair-cancel-telemetry")
+        monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "4000")
+        monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "100")
+        monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "100")
+        monkeypatch.setattr(bridge, "_BRIDGE_PROCESS_START_MONO", 0.0)
+        now = [0.0]
+        monkeypatch.setattr(bridge.time, "monotonic", lambda: now[0])
+        repair_ids = []
+        finalized = []
+        import nanobot.agent.subagent as subagent_module
+        repair_base = _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)
+
+        class _PendingRepair(repair_base):
+            def _build_subagent_telemetry_payload(self, **kwargs):
+                return kwargs
+
+            def _read_subagent_started_at(self, _task_id):
+                return "2026-09-27T12:00:00Z"
+
+            def _utc_now(self):
+                return "2026-09-27T12:01:00Z"
+
+            def _write_subagent_telemetry(self, task_id, payload):
+                _write_telemetry(bridge.STATE_DIR, task_id, payload["status"], payload["result"])
+                finalized.append(payload)
+
+            async def spawn(self, **kwargs):
+                result = await super().spawn(**kwargs)
+                repair_ids.extend(self._running_tasks)
+                now[0] = 3801.0
+                return result
+
+        monkeypatch.setattr(bridge, "SubagentManager", _PrimaryManager)
+        monkeypatch.setattr(subagent_module, "SubagentManager", _PendingRepair)
+        assert asyncio.run(bridge._main_impl()) == 0
+        assert repair_ids
+        telemetry = json.loads((state_dir / "subagents" / f"{repair_ids[0]}.json").read_text())
+        assert telemetry["status"] == "cancelled"
+        assert finalized[0]["stop_reason"] == "repair_skipped_no_budget"
+        assert finalized[0]["finished_at"]
 
     def test_repair_wait_is_recomputed_immediately_before_wait(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
