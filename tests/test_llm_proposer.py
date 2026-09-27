@@ -112,6 +112,26 @@ def test_proposer_prompt_distinguishes_all_completed_derived_priorities(tmp_path
     assert "none; document contains no open priorities" not in context.lower()
 
 
+def test_charter_survives_atomic_priority_fallback(tmp_path, monkeypatch, synthetic_release_charter):
+    """When priorities replace the truncated blob, keep the charter visible too."""
+    state_dir = _state_dir(tmp_path)
+    _write_goal_text(state_dir, "Current priority targets:\n(A) Priority 14 — Do work: do work.")
+    charter = "CHARTER_CANARY: preserve this mandatory charter text."
+    monkeypatch.setattr(llm_proposer, "_MAX_CONTEXT_CHARS", 3000)
+    # This context hits the fallback yet leaves enough budget for the charter.
+    monkeypatch.setattr(llm_proposer, "_captured_pattern_hint", lambda _rows: "guardrail filler " * 130)
+    monkeypatch.setattr(llm_proposer, "_load_goal_text", lambda *_args, **_kwargs: charter)
+    _write_charter(tmp_path, charter)
+    monkeypatch.setenv("RELEASE_ROOT", str(tmp_path / "_release_root"))
+
+    assert llm_proposer._load_goal_text(state_dir) == charter
+    context = llm_proposer.build_context(state_dir, None)
+
+    assert charter in context
+    assert "## Operator priorities" in context
+    assert len(context) <= 3000
+
+
 def test_operator_priority_block_stays_atomic_under_context_cap(tmp_path, monkeypatch):
     """ADR-034: a tiny residual context budget must not slice priority content."""
     state_dir = _state_dir(tmp_path)
