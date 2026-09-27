@@ -5,11 +5,12 @@ import os
 import shlex
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
 
-from tests.test_deploy_release import DEPLOY_SCRIPT, _write_mock
+from tests.test_deploy_release import DEPLOY_SCRIPT, _write_mock, run_deploy, repo, mock_bin
 
 
 def _extract_remote(script: str) -> str:
@@ -118,35 +119,56 @@ def test_remote_verify_runs_candidate_and_never_mutates_units_or_current(tmp_pat
     assert not any(x in logged for x in ("systemctl restart", "systemctl stop", "systemctl start", "ln -sfn"))
 
 
-def test_staging_failure_after_mktemp_cleans_remote_directory(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    source.mkdir()
-    tar_bin = tmp_path / "bin"
-    tar_bin.mkdir()
+def test_staging_failure_after_mktemp_cleans_remote_directory(tmp_path: Path, repo: Path, mock_bin: Path, monkeypatch) -> None:
+    # Exercise the exact staging command embedded in production deploy_release.sh.
+    deploy = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    staging_line = next(line.strip() for line in deploy.splitlines() if line.lstrip().startswith("GATE_TMP=\"$(git -C"))
+    production_command = textwrap.dedent(deploy.split('run ssh "ozand@${HOST}" "$REMOTE_ENV bash -s" <<\'REMOTE\'', 1)[1].split("\nREMOTE", 1)[0])
+
+    # Create a second commit with the candidate gate. It differs from the
+    # initial HEAD and gives the real archive pipeline a requested path, while
+    # the mocked remote tar fails after mktemp has created its directory.
+    (repo / "scripts").mkdir()
+    (repo / "scripts/verify_release_health.py").write_text("print('candidate')\\n", encoding="utf-8")
+    git_identity = dict(os.environ, GIT_AUTHOR_NAME="test", GIT_AUTHOR_EMAIL="test@example.invalid",
+                   GIT_COMMITTER_NAME="test", GIT_COMMITTER_EMAIL="tests@example.invalid")
+    subprocess.run(["git", "add", "unrelated.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "candidate gate"], cwd=repo, check=True, env=git_identity)
+    candidate = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=repo, text=True).strip()
+
+    staging_dir = tmp_path / "eeebot-verify-gate.A1B2C3"
     tar_log = tmp_path / "tar.log"
-    _write_mock(tar_bin / "tar", f'echo "$*" >> {tar_log}; exit 23')
-    ssh_log = tmp_path / "ssh.log"
-    ssh_path = tar_bin / "ssh"
-    _write_mock(ssh_path, f'''echo "$*" >> {ssh_log}
+    _write_mock(mock_bin / "tar", f'echo "$*" >> {str(tar_log).replace(chr(92), "/")}; exit 23')
+    remote_commands = tmp_path / "remote-commands.log"
+    remote_mock_log = str(remote_commands).replace("\\", "/")
+    mock_body = f'''echo "$*" >> {remote_mock_log}
+if [[ "$*" == *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"* ]]; then
+  echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/previous
+  exit 0
+fi
 if [[ "$*" == *mktemp* ]]; then
-  d="{tmp_path}/eeebot-verify-gate.A1B2C3"
+  d="{staging_dir}"
   mkdir -p "$d"
   trap 'rm -rf -- "$d"' EXIT
-  tar -x -C "$d" < /dev/null || exit $?
+  tar -x -C "$d" || exit $?
 fi
-''')
-    (tmp_path / "eeebot-verify-gate.A1B2C3").mkdir()
-    stage = tmp_path / "stage.sh"
-    stage.write_text(f'''#!/usr/bin/env bash
-set -euo pipefail
-GATE_TMP="$(printf archive | ssh staging 'set -e; d=$(mktemp -d /tmp/eeebot-verify-gate.XXXXXX); trap cleanup EXIT; tar -x -C "$d"; printf %s "$d"; trap - EXIT')"
-''', encoding="utf-8")
-    result = subprocess.run(["bash", str(stage)], env=dict(os.environ, PATH=str(tar_bin) + os.pathsep + os.environ["PATH"]), capture_output=True)
+'''
+    _write_mock(mock_bin / "ssh", mock_body)
+    # Run the production script so its COMMIT selection and staging pipeline
+    # execute unchanged; ``candidate`` is HEAD but differs from the fixture's
+    # initial checkout commit and its tree lacks all three archive paths.
+    monkeypatch.setenv("REPO_ROOT", str(repo))
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", candidate])
     assert result.returncode != 0
-    assert not (tmp_path / "eeebot-verify-gate.A1B2C3").exists()
-    deploy = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    staging = deploy.split("GATE_TMP=\"$(git -C", 1)[1].split("  cleanup_candidate_gate", 1)[0]
-    assert "trap" in staging and "trap - EXIT" in staging
+    assert not staging_dir.exists()
+    staging_text = deploy.split('  GATE_TMP="$(git -C "$REPO_ROOT" archive', 1)[1].split("\\n  cleanup_candidate_gate", 1)[0]
+    assert "mktemp -d /tmp/eeebot-verify-gate.XXXXXX" in staging_text
+    assert "trap " in staging_text and "trap - EXIT" in staging_text
+    assert "tar -x -C \"$d\"" in staging_text
+    assert 'sudo chown -R eeepc-agent:eeepc-agent "$GATE_TMP"' in production_command
+    assert "[remote] candidate $FULL_COMMIT gate temp=$GATE_TMP" in production_command
+    assert "mktemp -d /tmp/eeebot-verify-gate.XXXXXX" in remote_commands.read_text(encoding="utf-8")
+
 
 
 def test_sudo_n_rm_stub_parses_options_before_dispatch(tmp_path: Path) -> None:

@@ -106,6 +106,12 @@ def _git(*args, cwd=None, **kwargs):
     the environment rather than depending on the host's git configuration.
     """
     env = dict(kwargs.pop("env", None) or os.environ)
+    # Test commits must not inherit user/system signing keys or executable hooks.
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_COUNT"] = "1"
+    env["GIT_CONFIG_KEY_0"] = "commit.gpgSign"
+    env["GIT_CONFIG_VALUE_0"] = "false"
     env.setdefault("GIT_AUTHOR_NAME", "eeebot tests")
     env.setdefault("GIT_AUTHOR_EMAIL", "tests@eeebot.invalid")
     env.setdefault("GIT_COMMITTER_NAME", "eeebot tests")
@@ -128,6 +134,9 @@ def repo(tmp_path):
     shutil.copy(DEPLOY_SCRIPT.with_name("lib_bridge_exit.sh"), script_dir / "lib_bridge_exit.sh")
 
     _git("init", cwd=repo_root, check=True)
+    hooks_dir = repo_root / ".test-hooks"
+    hooks_dir.mkdir()
+    _git("config", "core.hooksPath", str(hooks_dir), cwd=repo_root, check=True)
     (repo_root / "README").write_text("hello")
     _git("add", ".", cwd=repo_root, check=True)
     _git("commit", "-m", "init", cwd=repo_root, check=True)
@@ -157,9 +166,11 @@ def mock_bin(tmp_path):
     _write_mock(bin_dir / "ssh", "exit 0")
     return bin_dir
 
-def run_deploy(repo_root, mock_bin, args):
+def run_deploy(repo_root, mock_bin, args, *, env_overrides=None):
     env = os.environ.copy()
     env["PATH"] = str(mock_bin).replace('\\', '/') + ":" + env["PATH"]
+    if env_overrides:
+        env.update(env_overrides)
     script = repo_root / "host" / "eeepc" / "scripts" / "deploy_release.sh"
     res = subprocess.run(
         ["bash", str(script)] + args,
