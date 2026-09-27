@@ -94,6 +94,31 @@ def get_bridge_wall_secs() -> float:
     return DEFAULT_WALL_SECS
 
 
+def bridge_wall_deadline(process_start_mono: float, *, total_wall_secs: float | None = None) -> float:
+    """Build the one invocation-wide wall deadline from earliest process anchor."""
+    total = get_bridge_wall_secs() if total_wall_secs is None else total_wall_secs
+    return process_start_mono + total
+
+
+def repair_wait_budget_secs(
+    wall_deadline: float,
+    *,
+    now: float | None = None,
+    max_wait_secs: float = 1200.0,
+    final_reserve_secs: float | None = None,
+    clock: Callable[[], float] | None = None,
+) -> float | None:
+    """Bound a repair turn inside the shared bridge wall, preserving final reserve."""
+    current = (clock or time.monotonic)() if now is None else now
+    reserve = get_final_budget_secs() if final_reserve_secs is None else max(0.0, final_reserve_secs)
+    remaining_for_repair = wall_deadline - current - reserve
+    # A repair manager enforces the same p99 + final reserve before starting
+    # its first model call. Avoid spawning a no-op repair that cannot reach it.
+    if remaining_for_repair < get_wall_safety_margin_secs():
+        return None
+    return min(max(0.0, max_wait_secs), remaining_for_repair)
+
+
 def should_stop_for_wall_clock(
     wall_deadline: float | None,
     *,
@@ -152,6 +177,21 @@ class ProgressWatchdog:
         return max(0.0, self.timeout_secs - elapsed)
 
 
+def compute_explore_cycle_max_call_gap(
+    state_dir: Path | str | None,
+    cycle_id: str | None,
+    candidate_gaps: list[float | None],
+) -> float | None:
+    """Aggregate bridge-attributed telemetry and candidate-local explore gaps.
+
+    Planning and provider calls carry the base bridge cycle ID, whereas each
+    executor candidate may carry a suffixed cycle ID. Preserve the measured
+    cross-phase gaps by taking the maximum of both sources.
+    """
+    fallback = max((gap for gap in candidate_gaps if gap is not None), default=None)
+    return compute_cycle_max_call_gap(state_dir, cycle_id, fallback_gap=fallback)
+
+
 def compute_cycle_max_call_gap(
     state_dir: Path | str | None,
     cycle_id: str | None,
@@ -168,7 +208,11 @@ def compute_cycle_max_call_gap(
         return round(fallback_gap, 1) if fallback_gap is not None else None
 
     try:
-        llm_dir = Path(state_dir) / "llm_calls"
+        # Read exactly where the telemetry writer records calls. In the bridge
+        # unit, STATE_DIR is set by systemd; LLM_CALLS_DIR remains an explicit
+        # override owned by the telemetry writer.
+        from nanobot.observability.llm_telemetry import _llm_calls_dir
+        llm_dir = _llm_calls_dir()
         if not llm_dir.is_dir():
             return round(fallback_gap, 1) if fallback_gap is not None else None
 

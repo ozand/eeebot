@@ -335,14 +335,10 @@ class TestAppend:
         )
 
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        # ADR-034 rule 3: goal review's numbering baseline is charter +
-        # derived only (A2 does not fold the operator's own priority
-        # section in — that is A4's job) — this test's synthetic charter
-        # (the module's autouse RELEASE_ROOT fixture) has no "Priority N"
-        # of its own, so numbering starts fresh, not "past 16".
+        # ADR-034 F8: operator numbers participate in the minting baseline.
         assert titles == [
-            "Priority 1 — Trim proposer retry burn",
-            "Priority 2 — Dashboard usage ping",
+            "Priority 17 — Trim proposer retry burn",
+            "Priority 18 — Dashboard usage ping",
         ]
 
         # #860: goal_text.json is the operator's canon — goal_review never
@@ -369,8 +365,8 @@ class TestAppend:
         assert [i["summary"] for i in items] == [
             "Priority 11 — Loop health in dashboard",
             "Priority 16 — Cycle strip line in dashboard",
-            "Priority 1 — Trim proposer retry burn",
-            "Priority 2 — Dashboard usage ping",
+            "Priority 17 — Trim proposer retry burn",
+            "Priority 18 — Dashboard usage ping",
         ]
         assert [i["provenance"] for i in items] == [
             demand.PROVENANCE_OPERATOR, demand.PROVENANCE_OPERATOR,
@@ -388,11 +384,9 @@ class TestAppend:
         assert rows[0]["direction_at_review"] is None
 
     def test_dedup_keeps_existing_derived_entries_untouched(self, tmp_path, monkeypatch, enabled):
-        """ADR-034 rule 3: goal review's dedup/numbering baseline is
-        charter + derived — NOT the operator's own priority list (a
-        separate document; A2 does not fold it in here, that is A4's
-        structured, four-state rollout on top of A3). A candidate
-        duplicating an EXISTING DERIVED priority is rejected (recorded);
+        """ADR-034 rule 4/F8: goal review includes operator labels and
+        numbers as well as derived data in its dedup/numbering baseline. A
+        candidate duplicating an EXISTING DERIVED priority is rejected;
         nothing existing is overwritten or removed."""
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
@@ -414,7 +408,7 @@ class TestAppend:
         )
 
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        assert titles == ["Priority 6 — Trim proposer retry burn"]
+        assert titles == ["Priority 17 — Trim proposer retry burn"]
 
         derived = goal_review.read_derived_priorities(state_dir)
         assert [d["label"] for d in derived] == [
@@ -461,7 +455,7 @@ class TestValidation:
         )
 
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        assert titles == ["Priority 1 — Trim proposer retry burn"]
+        assert titles == ["Priority 17 — Trim proposer retry burn"]
         rejected = _goal_review_rows(state_dir)[0]["rejected"]
         assert {(r["label"], r["reason"]) for r in rejected} == {
             ("Uncited invention", "evidence_not_in_inputs"),
@@ -848,7 +842,7 @@ class TestDerivedPriorities:
         monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY]})
 
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        assert titles == ["Priority 1 — Trim proposer retry burn"]
+        assert titles == ["Priority 17 — Trim proposer retry burn"]
 
         assert _read_goal_text(state_dir) == GOAL_TEXT
         derived = goal_review.read_derived_priorities(state_dir)
@@ -860,7 +854,7 @@ class TestDerivedPriorities:
         # #860 review: the number IS stored at accept time (1 = next past
         # merged base) so the rendered title/demand id stays stable across
         # deploy reseeds; the label itself stays number-free.
-        assert derived[0]["number"] == 1
+        assert derived[0]["number"] == 17
         assert "1" not in derived[0]["label"]
 
     def test_derived_item_inserts_with_correct_number_and_ranks_after_operator(self, tmp_path):
@@ -1085,6 +1079,23 @@ class TestDerivedPriorities:
         assert all(d["label"] != "Old task 0" for d in stored)
         assert stored[0]["label"] == "Old task 1"  # oldest (index 0) evicted
 
+    def test_completed_operator_prose_rejects_derived_candidate_by_title(self, tmp_path, monkeypatch):
+        from nanobot.runtime import operator_documents
+
+        state_dir = tmp_path / "state"
+        _write_goal_text(
+            state_dir,
+            "Completed (do not repeat): Priority 17 — Trim proposer retry burn: "
+            "cut wasted retries.",
+        )
+        labels = operator_documents.resolve_operator_priority_labels(state_dir)
+        normalized, reason = goal_review.validate_priority(
+            dict(VALID_PRIORITY), {"E1": "test evidence"}, labels
+        )
+
+        assert normalized is None
+        assert reason == "duplicate"
+
     def test_operator_readding_derived_label_is_not_doubled(self, tmp_path):
         """#860 review: if the operator later bakes a derived label into
         goal_text itself, the reader must NOT present it twice (two
@@ -1230,7 +1241,7 @@ class TestSupportedHypothesisEvidence:
 
         monkeypatch.setattr(goal_review, "_call_llm", _fake_llm)
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        assert titles == ["Priority 1 — Land the widget cache"]
+        assert titles == ["Priority 17 — Land the widget cache"]
         assert "supported hypothesis: Cache the widget lookup" in captured_context["text"]
 
 
@@ -1368,7 +1379,7 @@ class TestNightContourCandidates:
 
         monkeypatch.setattr(goal_review, "_call_llm", _fake_llm)
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        assert titles == ["Priority 1 — Stream archive dirs"]
+        assert titles == ["Priority 17 — Stream archive dirs"]
 
 
 class TestADR020Rule1Contract:
@@ -1451,7 +1462,7 @@ class TestADR020Rule1Contract:
         state = tmp_path / "state"
         state.mkdir(parents=True)
         queue_info = read_derived_priorities_queue(state)
-        assert queue_info == {"depth": 0, "limit": 10}
+        assert queue_info == {"depth": 0, "limit": 10, "status": "absent"}
 
         # Seed 10 priorities (saturation)
         goal_review._write_derived_priorities(
@@ -1461,7 +1472,7 @@ class TestADR020Rule1Contract:
             ]
         )
         queue_saturated = read_derived_priorities_queue(state)
-        assert queue_saturated == {"depth": 10, "limit": 10}
+        assert queue_saturated == {"depth": 10, "limit": 10, "status": "present"}
 
         summary = build_cycle_health_summary(state)
         assert summary["success_signals"]["derived_priorities_queue_depth"] == 10
