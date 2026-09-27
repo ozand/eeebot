@@ -45,7 +45,7 @@ jobs:
     # redefined name (imports included) before that can happen again,
     # silently, a second time.
     - name: Check for redefined names (F811)
-      run: ruff check --select F811 tests/ scripts/ nanobot/ host/
+      run: ruff check --select F811 tests/ scripts/ nanobot/ host/ eeebot/
 
     - name: Run tests
       env:
