@@ -414,6 +414,72 @@ def test_spawn_failure_degrades_to_the_ranked_queue(tmp_path: Path, monkeypatch)
     assert rows[0]["outcome"] == "spawn_failed"
 
 
+def test_dedup_evidence_survives_a_planner_spawn_failure(tmp_path: Path, monkeypatch):
+    """#2011 (Codex re-check on PR #1962, P2, bridge.py:3524): the pending
+    rejected-duplicate record used to be consumed (read-and-cleared)
+    BEFORE SubagentManager construction/spawn -- a construction or spawn
+    failure removed the only explicit sha/reason hand-off without ever
+    presenting it to a planner, letting the next session pick the same
+    duplicate again. Peeking (not consuming) it here, then clearing only
+    once planner startup is confirmed, means a failed spawn must leave it
+    intact for the next attempt."""
+    from nanobot.runtime import planner_dedup_evidence
+
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    planner_dedup_evidence.record_rejected_duplicate(
+        state, "cycle-old", "some increment", "deadbeef", "already done by that commit",
+    )
+    assert planner_dedup_evidence.peek_pending_evidence(state) is not None, (
+        "setup sanity check: the record must exist before the failing spawn"
+    )
+
+    monkeypatch.setattr(bridge, "SubagentManager", _make_fake_mgr_factory(state, {}, raise_on_init=True))
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+    assert outcome["ran"] is False
+
+    evidence = planner_dedup_evidence.peek_pending_evidence(state)
+    assert evidence is not None, "a failed planner spawn must not consume the dedup evidence record"
+    assert evidence["evidence_sha"] == "deadbeef"
+
+
+def test_priority_not_marked_seen_on_a_planner_spawn_failure(tmp_path: Path, monkeypatch):
+    """#2012 (Codex re-check on PR #1962, P2, bridge.py:3505): every
+    current priority id used to be persisted as already-seen while the
+    prompt was still being assembled, before SubagentManager
+    construction/spawn. If spawn failed, the priority was never actually
+    shown, but the next healthy session would render it without the
+    required "(new)" marker. Peeking (not persisting) it here, then
+    committing only once planner startup is confirmed, means a failed
+    spawn must leave it still markable as new."""
+    from nanobot.runtime import demand as demand_mod
+    from nanobot.runtime import planner_candidates
+
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    priority_item = {"kind": "priority", "id": "priority-p1-deadbeef", "summary": "P1: fix the thing"}
+    monkeypatch.setattr(demand_mod, "collect_demand", lambda *_a, **_k: [priority_item])
+
+    new_ids_before, _merged = planner_candidates.peek_new_priority_items(state, [priority_item])
+    assert priority_item["id"] in new_ids_before, (
+        "setup sanity check: the priority must read as new before the failing spawn"
+    )
+
+    monkeypatch.setattr(bridge, "SubagentManager", _make_fake_mgr_factory(state, {}, raise_on_init=True))
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+    assert outcome["ran"] is False
+
+    assert not (state / "planner" / "seen_priority_ids.json").exists(), (
+        "a failed planner spawn must not persist the priority as seen"
+    )
+    new_ids_after, _merged_after = planner_candidates.peek_new_priority_items(state, [priority_item])
+    assert priority_item["id"] in new_ids_after, (
+        "the priority must still read as new on the next session after a failed spawn"
+    )
+
+
 def test_a_dirty_workspace_after_the_session_is_hard_reset(tmp_path: Path, monkeypatch):
     """Safety net: whatever the session's own tools touched must not
     survive -- only this function's own diary write may change main."""
