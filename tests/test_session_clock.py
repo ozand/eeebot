@@ -54,6 +54,15 @@ class _MockProvider(LLMProvider):
 class TestWallClockSafetyMargin:
     """Requirement 1 (#1899): stop before starting model call when budget < p99 + final."""
 
+    def test_repair_is_skipped_when_remaining_wall_cannot_start_model_call(self, monkeypatch):
+        monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "243")
+        monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "300")
+        # Only 400s remain: after the 300s final reserve, 100s cannot cover
+        # the 243s call safety margin, so do not start a no-op repair.
+        assert repair_wait_budget_secs(400.0, now=0.0) is None
+        # At exactly the required pre-call margin there is no positive repair wait.
+        assert repair_wait_budget_secs(543.0, now=0.0) is None
+
     def test_repair_wait_is_capped_by_shared_wall_and_final_reserve(self):
         deadline = 1000.0
         assert repair_wait_budget_secs(deadline, now=100.0, final_reserve_secs=300.0) == 600.0
