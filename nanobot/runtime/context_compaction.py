@@ -323,14 +323,16 @@ def _structural_summary(
     lines = ["[Compaction summary — deterministic, evidence-only]", f"Goal: {goal[:1000] or 'not available'}"]
     if previous:
         lines.extend(["Earlier summary (preserved):", previous])
-    lines.append("Progress:")
-    lines.extend(f"- {x}" for x in progress[-6:])
     lines.append("Key decisions (explicit statements only):")
     lines.extend(f"- {x}" for x in decisions[-6:])
     lines.append("Files read (paths observed in tool calls/results):")
     lines.extend(f"- {x}" for x in sorted(read_files))
     lines.append("Files modified (paths observed in write/edit/patch tools):")
     lines.extend(f"- {x}" for x in sorted(modified_files))
+    # Put recent progress last so the hard-cap tail retains it even when an
+    # unusually large previous summary and path inventory consume the budget.
+    lines.append("Progress:")
+    lines.extend(f"- {x}" for x in progress[-6:])
     return _bounded_summary("\n".join(lines), MAX_SUMMARY_CHARS)
 
 
