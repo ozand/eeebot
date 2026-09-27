@@ -732,8 +732,7 @@ if [[ "$*" == *"mktemp -d /tmp/eeebot-verify-gate."* ]]; then
 fi
 case "$*" in
   *"sudo rm -rf {candidate_tmp}"*) rm -rf {candidate_tmp}; exit 0 ;;
-  *"GATE_TMP="*) echo candidate-gate-v2 >> {mock_log}; exit 0 ;;
-  *) exit 0 ;;
+  *) : ;;
 esac
 if [[ "$*" == *"VERIFY_ONLY=1"* ]]; then
   echo candidate-gate-v2 >> {mock_log}
