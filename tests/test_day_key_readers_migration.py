@@ -219,9 +219,9 @@ def test_explore_quota_skips_malformed_ts_row_and_continues_counting(tmp_path, m
 
     from nanobot.runtime import day_key
 
-    # Freeze one timezone-aware instant at local noon; derive the day key and
-    # both row timestamps from it, away from the midnight boundary.
-    instant = datetime(2026, 9, 27, 12, 0, tzinfo=timezone.utc).astimezone()
+    # Anchor directly at noon in the selected local timezone. Converting a
+    # UTC noon instant can land on the prior/next local date near the dateline.
+    instant = datetime(2026, 9, 27, 12, 0).astimezone()
     today = day_key.day_key(instant)
     valid_ts1 = instant.isoformat()
     valid_ts2 = (instant - timedelta(minutes=5)).isoformat()
