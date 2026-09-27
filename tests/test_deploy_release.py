@@ -773,7 +773,7 @@ def test_verify_only_remote_cleanup_happens_after_gate_invocation(repo, mock_bin
     gate_command = '"$GATE_TMP/scripts/verify_release_health.py"'
     cleanup_command = "trap 'sudo rm -rf \"$GATE_TMP\"' EXIT"
     assert gate_command in remote and cleanup_command in remote
-    assert "trap 'ssh \"ozand@${HOST}\" \"rm -rf ${GATE_TMP}\"' EXIT" in script
+    assert "trap 'ssh \"ozand@${HOST}\" \"sudo -n rm -rf -- ${GATE_TMP}\"' EXIT" in script
     assert 'VERIFY_GATE_REMOTE_STARTED=0' not in script
 
     # --dry-run is an offline plan: no SSH call (including staging) is allowed.

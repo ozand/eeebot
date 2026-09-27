@@ -34,7 +34,7 @@ def test_remote_verify_runs_candidate_and_never_mutates_units_or_current(tmp_pat
 case "$1" in
   env) shift; while [[ "$1" == *=* ]]; do export "$1"; shift; done; exec "$@" ;;
   chown|chmod|mkdir|cp|install|tee|rmdir|ln|tar) echo "sudo $*" >> {log}; exit 0 ;;
-  rm) echo "sudo $*" >> {log}; shift; command rm "$@" ;;
+  rm) echo "sudo $*" >> {log}; shift; if [[ "$1" == "-n" ]]; then shift; fi; command rm "$@" ;;
   stat) echo 0:0 ;;
   *) exit 0 ;;
 esac
