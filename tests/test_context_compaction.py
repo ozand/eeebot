@@ -1089,3 +1089,58 @@ def test_compactable_indices_includes_assistant_excludes_system_and_user():
     assert candidates.isdisjoint(system_or_user_indices)
     # at least one assistant index must actually be a candidate here
     assert any(messages[i]["role"] == "assistant" for i in candidates)
+
+
+# ---------------------------------------------------------------------------
+# reasoning_content / thinking_blocks accounting (#1930)
+# ---------------------------------------------------------------------------
+
+def test_reasoning_content_is_counted_and_cleared_by_compaction(tmp_path):
+    """A thinking model's `reasoning_content` can dwarf its visible `content`
+    (`build_assistant_message` in nanobot/utils/helpers.py keeps it, and
+    litellm_provider.py resends it to the model on every later call — see
+    #1930). An old turn with a short `content` but a large `reasoning_content`
+    must be counted toward the token estimate (so it isn't invisibly kept as
+    "recent") and, once compacted, have its content shrunk and its
+    reasoning payload cleared, exactly as `content` itself would be."""
+    old_reasoning = _long_content(6_000)
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Do a thing."},
+        {
+            "role": "assistant",
+            "content": "ok",
+            "reasoning_content": old_reasoning,
+            "tool_calls": [{"id": "tc0", "type": "function",
+                             "function": {"name": "bash", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "tc0", "name": "bash", "content": _short_content(10)},
+        {"role": "assistant", "content": _long_content(2_000)},
+    ]
+    result = cc.compact_messages(
+        messages,
+        cycle_id="reasoning-content",
+        iteration=1,
+        state_root=tmp_path,
+        threshold=0.001,
+        keep_tokens=600,
+        window_tokens=98_304,
+    )
+    compacted = result[2]
+    assert "reasoning_content" not in compacted
+    assert "thinking_blocks" not in compacted
+    assert len(str(compacted.get("content", ""))) < len(old_reasoning)
+    # the newest turn, protected by keep_tokens, must stay untouched
+    assert result[4] == messages[4] or result[4]["content"] == _long_content(2_000)
+
+
+def test_message_tokens_counts_reasoning_content_and_thinking_blocks():
+    """Unit-level: the token estimate itself must see reasoning payloads,
+    not only `content` — otherwise the compaction trigger and the
+    protected-span cut both silently underestimate a thinking-model turn."""
+    content_only = {"role": "assistant", "content": _long_content(400)}
+    with_reasoning = dict(content_only, reasoning_content=_long_content(4_000))
+    with_thinking = dict(content_only, thinking_blocks=[{"type": "thinking", "thinking": _long_content(4_000)}])
+    baseline = cc._message_tokens(content_only)
+    assert cc._message_tokens(with_reasoning) > baseline + 900
+    assert cc._message_tokens(with_thinking) > baseline + 900
