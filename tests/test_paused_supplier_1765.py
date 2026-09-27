@@ -239,6 +239,43 @@ class TestOutageCycleOffersTheSameItemAgainUnchanged:
         # Consecutive interruption of the SAME retry_key -- backoff doubled.
         assert open_increment.load_state(state_dir).consecutive_supply_interrupts == 2
 
+    def test_zero_commit_interruption_persist_failure_aborts_the_tick(self, tmp_path, monkeypatch):
+        """Codex re-check on `bf8f0537` (P1): the zero-commit branch of
+        this same interruption path (cycle_commit_count == 0, no D1
+        barrier to gate it) used to discard record_supply_interruption's
+        `.persisted` signal entirely, letting the tick reach the normal
+        finishing path even when the write was never verified -- the
+        interrupted plan then ends up in neither `pending` nor `running`.
+        """
+        from nanobot.runtime import open_increment
+
+        state_dir = _wire(tmp_path, monkeypatch, _LLMDeadSubagentManager)
+        title = "Add markdown catalog link path resolver to workspace_validation_helpers.py"
+        _seed_bridge_request(state_dir, "req-outage-persistfail", "cycle-outage-persistfail", task_title=title)
+        _stub_planning_session(monkeypatch, title)
+
+        # Only the interruption write itself fails -- a blanket
+        # _save_state stub would also break the registration write that
+        # already landed before this call (record_attempt_started only
+        # ever touches `running`, never `pending`).
+        _real_save_state = open_increment._save_state
+
+        def _fail_on_pending_write(sd, st):
+            if st.pending is not None:
+                return False
+            return _real_save_state(sd, st)
+
+        monkeypatch.setattr(open_increment, "_save_state", _fail_on_pending_write)
+
+        rc = asyncio.run(bridge._main_impl())
+        assert rc == 0
+
+        assert open_increment.pending_open_increment(state_dir) is None, (
+            "an unverified interruption write must not be trusted as a real pending increment"
+        )
+        state = open_increment.load_state(state_dir)
+        assert state.running is not None, "the registration must survive for the next tick's kill-check to retry"
+
     def test_once_the_supplier_recovers_the_same_request_completes_normally(self, tmp_path, monkeypatch):
         """The candidate that survived the outage above is not stuck -- once
         the supplier is healthy again (a normal manager) and the backoff
