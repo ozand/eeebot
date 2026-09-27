@@ -968,6 +968,19 @@ def test_die_and_gate_read_semantics_under_the_remote_shell_options(tmp_path) ->
     assert res.returncode == 1 and "TRAP-FIRED" not in res.stderr
 
 
+def test_release_health_validation_error_is_critical_and_returns_one(capsys, monkeypatch):
+    import scripts.verify_release_health as gate
+
+    monkeypatch.setattr(
+        gate,
+        "verify_release_health",
+        lambda **_kwargs: (_ for _ in ()).throw(SystemExit("dashboard endpoint has invalid bounded field types")),
+    )
+    assert gate.main([]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "CRITICAL: dashboard endpoint has invalid bounded field types"
+
+
 def test_dashboard_page_gate_enforces_floor_without_dashboard():
     """ADR-036 D3 Part B: page body floor (< 1024 bytes) is enforced directly by verify_release_health."""
     from unittest.mock import patch
