@@ -394,6 +394,17 @@ def test_trust_order_new_priority_then_defect():
     assert block.index("Priority 3") < block.index("recurring test failure") < block.index("coverage gap")
 
 
+def test_rendered_candidates_include_their_stable_id():
+    """Codex re-check on `bf8f0537` (P1): the planner response contract
+    requires `candidate_id`, and defect declines / candidate wake
+    conditions likewise key on the item's stable `demand.item_id` hash --
+    but the rendered block never showed it, so the model had no way to
+    reconstruct the id it is required to echo back."""
+    item = _make_item("defect", "recurring test failure in X", "3 cycles")
+    block = planner_candidates.render_candidates_block([item])
+    assert item["id"] in block
+
+
 # --- test_new_operator_priority_wakes_the_planner ---------------------------
 
 def test_new_operator_priority_wakes_the_planner(tmp_path: Path):
