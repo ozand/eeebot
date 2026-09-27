@@ -729,7 +729,7 @@ def _loop_section(
                 fallback_cycles += 1
                 if outcome == "success":
                     fallback_successes += 1
-            if outcome == "success":
+            if outcome in {"success", "pushed_late"} and row.get("delivery_state") != "unknown":
                 shape = str(row.get("change_shape") or "unclassified")
                 if shape not in {"feature", "maintenance", "documentation", "testing", "performance", "knowledge", "unclassified"}:
                     shape = "unclassified"

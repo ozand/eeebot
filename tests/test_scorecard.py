@@ -277,6 +277,17 @@ class TestLoopSection:
         }
         assert sum(loop["change_shape_distribution"].values()) == loop["integrations"]
 
+    def test_late_push_unknown_and_service_only_accounting(self, tmp_path):
+        rows = [
+            {"phase": "outcome", "cycle_id": "late-unknown", "outcome": "pushed_late", "delivery_state": "unknown"},
+            {"phase": "outcome", "cycle_id": "late-known", "outcome": "pushed_late", "delivery_state": "known"},
+            {"phase": "outcome", "cycle_id": "service-only", "outcome": "partial", "reason": "service_only"},
+        ]
+        loop = scorecard._loop_section(rows)
+        assert loop["integrations"] == 1
+        assert loop["execution_failure_events"] == 1
+        assert sum(loop["change_shape_distribution"].values()) == 1
+
     def test_decay_successes_split_from_integrations(self, tmp_path):
         """#800 churn split: a success whose proposed row served a decay
         demand is an archival (bookkeeping churn) — it counts as
