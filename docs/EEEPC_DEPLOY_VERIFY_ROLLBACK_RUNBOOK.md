@@ -242,6 +242,47 @@ If activation occurred:
 - [ ] live authority status still coherent
 - [ ] rollback target identified and ready
 
+## Release Window: Forecast, Check, External Review
+
+Every behaviour release gets a 24 h window, measured from the flip time of `current`. The release issue records the window's four steps in order. (Architect decision, 2026-09-27; first applied to R1, #1993.)
+
+### Before the flip — forecast
+
+Publish the forecast in the release issue before activation. Each line states:
+
+1. the change it tests;
+2. its **instrument**: the exact rendered string or ledger/telemetry field, with the `file:line` of the writer at the release sha. Name the text the reader actually sees, not an internal enum name;
+3. its **denominator**, for example per success cycle, per unit start or per outcome row, never "per day";
+4. whether the writer is **live on the host now**;
+5. the **baseline** read on the host before the flip;
+6. the expected result.
+
+Rules for the reader:
+- **Rotating streams:** every count reads the live file plus the rotated archives that cover the window. That means `state/ledger/cycles.jsonl` + `cycles-<day>.jsonl.gz`, and `state/bridge/runs.jsonl` + `runs-<day>.jsonl.gz`. This applies to the baseline and to the check. Reading the live file alone undercounted by 4× on 2026-09-27.
+- **The flip cycle:** exclude the cycle running at the flip, and name it by `cycle_id` or run id in the flip comment. Count only cycles first started after the flip.
+- **A guard line:** at least one line must catch harm, not only the intended effect. Examples: unit failures per start from the unit journal; the wall-clock-abort share with a stop threshold.
+- **Changes with no forecast line:** list any change whose trigger is unlikely within 24 h under "no forecast line", with the reason.
+
+The gate precheck of the release sha against live state (`verify_release_health.py`, per-dimension statuses) runs before the flip. Retired sources (`reward`, `gate`) are WARN by construction. `cpu` and `queue` are read against load at that moment. Any other dimension at WARN or CRIT stops the release.
+
+### At the flip — flip comment
+
+Record the flip time and `SOURCE_COMMIT`, the activation self-check result, the publisher drop-ins, and the flip cycle.
+
+### At +24 h — forecast check
+
+Check every line with its own instrument. Before accepting a "broken" verdict, reproduce the count from the writer's literal output and confirm the reader covered the archives. A miss is one of three kinds, and the check names which:
+- a code defect;
+- a wrong forecast: volume, premise or instrument;
+- no qualifying event in the window.
+
+### After the check — external diary review
+
+The architect commissions a ChatGPT review (skill `chatgpt-github-review`, one job at a time). ChatGPT reads the instance repo's public `diary/` for the window, pinned to the instance sha at the window's end. Then the architect reconciles each claim with private host data ChatGPT cannot see: the ledger with archives, `llm_calls`, `bridge/runs`. Each claim is tagged confirmed, refuted or unverifiable. The result goes to the release issue, and findings go to their owners.
+- The prompt carries only public material: diary paths, instance sha, public repo code. Never goal text, host prompts or responses, or env values.
+- The diary records intentions, not a result log. The reconciliation weighs host data over diary numbers.
+- On 2026-09-27 the pairing worked in both directions. ChatGPT's "duplicates are caught too late" became, on host data, "duplicates cost 2 calls each; service-only cycles cost 23% of all calls". ChatGPT's validator finding reproduced (#2004). The architect's own unrotated-ledger error surfaced (#1976 correction).
+
 ## Operational Rule
 
 Prefer this order:
