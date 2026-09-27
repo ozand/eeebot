@@ -322,24 +322,88 @@ def test_second_real_compaction_incorporates_newly_dropped_evidence(tmp_path):
 
 
 def test_summary_carrier_is_not_inserted_when_it_would_increase_history(tmp_path):
-    """A small candidate and verbose goal must not turn compaction into growth."""
-    goal = "G" * 1_000
+    """A small candidate must not turn compaction into growth.
+
+    Regression coverage: pF found the previous version of this test did not
+    actually catch the defect it names. That version paired the small
+    candidate with an 80,000-char tool result; ``_worth_compacting`` also
+    shrinks that tool result to a bounded excerpt regardless of the carrier
+    guard, and that single shrink (~80,000 chars -> ~420) dominates the
+    total so completely that the assertion passed even on 450ee6d3 -- the
+    commit right before the growth guard (225b6e70, "avoid growing summary
+    carrier") was added, where the carrier is inserted unconditionally.
+
+    This version isolates the carrier: nothing else in the fixture is worth
+    compacting (every tool result is well under
+    ``cc._min_compact_len()``), so only the guard's own choice can move the
+    total. A sizeable pre-existing summary carrier (comfortably under the
+    ~4,000-char budget ``_structural_summary`` embeds ``previous`` into, so
+    it is carried forward whole rather than re-truncated -- see
+    ``MAX_SUMMARY_CHARS - 2_000``) supplies real "previous round" content, as
+    a live cycle would have after an earlier compaction.
+    """
+    goal = "Investigate the flaky release-gate test."
+    old_summary = (
+        "[Compaction summary — deterministic, evidence-only]\n" + "P" * 3_500
+    )
+    small_carrier_content = "x" * (cc._min_compact_len() + 2)
     messages = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": goal},
-        {"role": "assistant", "content": "x" * 420,
+        {"role": "assistant", "content": old_summary},
+        {"role": "tool", "tool_call_id": "tc-old", "name": "bash", "content": "ok"},
+        {"role": "assistant", "content": small_carrier_content,
          "tool_calls": [{"id": "tc-small", "type": "function",
                          "function": {"name": "bash", "arguments": "{}"}}]},
         {"role": "tool", "tool_call_id": "tc-small", "name": "bash",
-         "content": "y" * 80_000},
+         "content": "short result"},
     ]
+    before_tokens = cc._total_tokens(messages)
 
     result = cc.compact_messages(
-        messages, cycle_id="carrier-growth", iteration=1, state_root=tmp_path,
+        list(messages), cycle_id="carrier-growth", iteration=1, state_root=tmp_path,
         threshold=0.01, keep_tokens=1, window_tokens=98_304,
     )
+    after_tokens = cc._total_tokens(result)
 
-    assert cc._total_tokens(result) <= cc._total_tokens(messages)
+    assert after_tokens <= before_tokens, (
+        f"compaction must not grow the history: before={before_tokens} "
+        f"after={after_tokens}"
+    )
+    new_carrier = result[4]
+    assert not str(new_carrier.get("content", "")).startswith("[Compaction summary"), (
+        "the new candidate's own excerpt is smaller than a fresh summary "
+        "carrying the old one forward would be -- the guard must keep the "
+        "plain excerpt, not install a carrier that grows this turn"
+    )
+
+
+def test_carrier_growth_guard_keeps_exactly_one_live_summary_across_rounds(tmp_path):
+    """#1930 follow-up (pF): after many compactions in one cycle, history
+    must carry exactly one live ``[Compaction summary`` message -- every
+    earlier carrier is retired to a short placeholder once a new one is
+    installed, never left to accumulate alongside it."""
+    messages = _make_messages([_long_content(20_000)] * 2)
+    for round_n in range(10):
+        messages = messages + [
+            {"role": "assistant", "content": f"decision: round {round_n} note",
+             "tool_calls": [{"id": f"tc-r{round_n}", "type": "function",
+                              "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": f"tc-r{round_n}", "name": "bash",
+             "content": _long_content(20_000) + f" marker_round_{round_n}"},
+        ]
+        messages = cc.compact_messages(
+            messages, cycle_id="single-carrier", iteration=round_n, state_root=tmp_path,
+            threshold=0.01, keep_tokens=8_000, window_tokens=98_304,
+        )
+
+    live_carriers = [
+        m for m in messages
+        if isinstance(m.get("content"), str) and m["content"].startswith("[Compaction summary")
+    ]
+    assert len(live_carriers) == 1, (
+        f"expected exactly one live summary carrier, found {len(live_carriers)}"
+    )
 
 
 def test_second_compaction_summarizes_assistant_progress_with_tool_calls(tmp_path):
