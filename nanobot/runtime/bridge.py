@@ -5480,7 +5480,7 @@ async def _main_impl_body():
             from nanobot.runtime import open_increment as _open_increment_exec
 
             if _llm_error_class == 'paused-supplier':
-                _open_increment_exec.record_supply_interruption(
+                _zero_commit_interruption_persisted = _open_increment_exec.record_supply_interruption(
                     STATE_DIR, _cycle_id,
                     retry_key=req.get('retry_key') or '',
                     plan_text=req.get('task') or '',
@@ -5490,7 +5490,25 @@ async def _main_impl_body():
                     # checkpoint commits live on, so a later `keep` decision
                     # can resume it instead of branching fresh off main.
                     branch=cycle_branch,
-                )
+                ).persisted
+                # Codex re-check on `bf8f0537` (P1): this zero-commit call
+                # site (cycle_commit_count == 0) sits ABOVE the D1 barrier,
+                # which only gates cycle_commit_count > 0 -- an unverified
+                # write here fell straight through to the normal finishing
+                # path below, whose cleanup clears `running` with the
+                # interrupted plan durable in neither `pending` nor
+                # `running`. `_decide_handled_marker` above never writes a
+                # marker for `supplier_paused` (its own docstring), so
+                # there is nothing to undo -- abort here, same
+                # no-bookkeeping shape as every other unverified-persist
+                # barrier, so the next tick's kill-check retries.
+                if not _zero_commit_interruption_persisted:
+                    print(
+                        'zero-commit supply interruption record failed to persist; '
+                        'not marking cycle finished, retrying next tick'
+                    )
+                    _restore_to_main(_selfevo_repo, STATE_DIR, _cycle_id)
+                    return {'status': 0}
             else:
                 _open_increment_exec.record_model_call_completed(STATE_DIR)
 
