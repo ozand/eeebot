@@ -114,12 +114,16 @@ else
     COMMIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
   fi
   FULL_COMMIT="$(git -C "$REPO_ROOT" rev-parse "$COMMIT^{commit}")"
-  if [ "$ALLOW_DIRTY" -eq 0 ] && ! git -C "$REPO_ROOT" diff-index --quiet "$COMMIT" --; then
+  if [ "$ALLOW_DIRTY" -eq 0 ] && ! git -C "$REPO_ROOT" diff-index --quiet HEAD --; then
     echo "CRITICAL: Working tree is dirty. Refuse to verify unless --allow-dirty is passed." >&2
     exit 1
   fi
   log "host:    $HOST"
   log "VERIFY-ONLY mode: candidate $COMMIT; stream candidate gate only"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "DRY-RUN: skipping candidate staging and all remote execution."
+    exit 0
+  fi
   REMOTE_ARCHIVE=""
   RELEASE_NAME=""
 fi
@@ -143,12 +147,13 @@ REMOTE_ENV="REMOTE_ARCHIVE='${REMOTE_ARCHIVE:-}' RELEASE_NAME='${RELEASE_NAME:-}
 if [ "$VERIFY_ONLY" -eq 1 ]; then
   GATE_TMP="$(git -C "$REPO_ROOT" archive --format=tar "$COMMIT" scripts nanobot host/eeepc/etc | \
     ssh "ozand@${HOST}" 'set -e; d=$(mktemp -d /tmp/eeebot-verify-gate.XXXXXX); tar -x -C "$d"; chmod -R a+rX "$d"; printf "%s" "$d"')"
-  VERIFY_GATE_REMOTE_TEMP="$(ssh "ozand@${HOST}" "rm -rf '$GATE_TMP'")"
+  trap 'if [ "$VERIFY_GATE_REMOTE_STARTED" -ne 1 ]; then ssh "ozand@${HOST}" "rm -rf ${GATE_TMP}"; fi' EXIT
   if [ -z "$GATE_TMP" ]; then
     echo "CRITICAL: could not stage candidate gate on $HOST" >&2
     exit 1
   fi
   log "candidate gate staged at $GATE_TMP"
+  VERIFY_GATE_REMOTE_STARTED=1
   REMOTE_ENV="GATE_TMP='$GATE_TMP' REMOTE_ARCHIVE='' RELEASE_NAME='' FULL_COMMIT='${FULL_COMMIT}' PREV_RELEASE_PATH='${PREV_RELEASE_PATH:-}' VERIFY_ONLY=1"
 fi
 run ssh "ozand@${HOST}" "$REMOTE_ENV bash -s" <<'REMOTE'

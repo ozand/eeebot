@@ -777,7 +777,7 @@ def test_verify_only_remote_cleanup_happens_after_gate_invocation(repo, mock_bin
     _write_mock(mock_bin / "ssh", f'''printf '%s\\n' "$*" >> {log}
 stdin="$(cat)"
 printf '%s\\n' "$stdin" >> {log}
-case "$*" in *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/old;; *"mktemp -d /tmp/eeebot-verify-gate."*) echo /tmp/gate-candidate;; esac
+case "$*" in *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/old;; *"mktemp -d /tmp/eeebot-verify-gate."*) echo /tmp/gate-candidate;; *"rm -rf /tmp/gate-candidate"*) : ;; esac
 ''')
     candidate = repo / "scripts" / "verify_release_health.py"
     candidate.parent.mkdir(parents=True)
@@ -793,7 +793,8 @@ case "$*" in *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*)
     assert result.returncode == 0, result.stdout + result.stderr
     logged = calls.read_text(encoding="utf-8").splitlines()
     gate_call = next(i for i, row in enumerate(logged) if "VERIFY_ONLY=1 bash -s" in row)
-    cleanup_call = next(i for i, row in enumerate(logged) if "rm -rf '/tmp/gate-candidate'" in row)
+    cleanup_call = next((i for i, row in enumerate(logged) if "rm -rf" in row and "/tmp/gate-candidate" in row), None)
+    assert cleanup_call is not None, logged
     assert cleanup_call > gate_call, logged
     assert "verify_release_health.py" in logged[gate_call + 1]
 
