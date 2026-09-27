@@ -209,7 +209,7 @@ class TestAuthoritativeSpawnEndToEnd:
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
         assert rows[-1]["max_call_gap_s"] == 17.5
 
-    def test_primary_call_gap_survives_repair_none_on_exception_path(self, tmp_path, monkeypatch):
+    def test_primary_max_call_gap_survives_smaller_repair_gap_on_exception(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-primary-gap-repair-exception", "cycle-primary-gap-repair-exception")
         monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "4000")
@@ -220,13 +220,13 @@ class TestAuthoritativeSpawnEndToEnd:
         monkeypatch.setattr(bridge.time, "monotonic", lambda: now[0])
 
         class _MeasuredPrimary(_PrimaryManager):
-            last_max_call_gap_s = 17.5
+            last_max_call_gap_s = 40.0
 
         monkeypatch.setattr(bridge, "SubagentManager", _MeasuredPrimary)
         repair_base = _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)
 
         class _OneCallRepair(repair_base):
-            last_max_call_gap_s = None
+            last_max_call_gap_s = 5.0
 
             async def spawn(self, **kwargs):
                 result = await super().spawn(**kwargs)
@@ -236,12 +236,16 @@ class TestAuthoritativeSpawnEndToEnd:
         import nanobot.agent.subagent as subagent_module
         monkeypatch.setattr(subagent_module, "SubagentManager", _OneCallRepair)
         monkeypatch.setattr(
+            bridge, "_check_test_weakening",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("injected post-repair failure")),
+        )
+        monkeypatch.setattr(
             "nanobot.runtime.session_clock.compute_cycle_max_call_gap",
             lambda *args, **kwargs: kwargs.get("fallback_gap"),
         )
         assert asyncio.run(bridge._main_impl()) == 0
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
-        assert rows[-1]["max_call_gap_s"] == 17.5
+        assert rows[-1]["max_call_gap_s"] == 40.0
 
     def test_success_outcome_records_executor_call_gap(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))

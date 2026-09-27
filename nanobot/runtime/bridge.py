@@ -5297,7 +5297,10 @@ async def _main_impl_body():
             commits_pushed = cycle_commit_count if _integrated else 0
             _latest_manager_gap = getattr(_last_call_gap_manager, "last_max_call_gap_s", None)
             if _latest_manager_gap is not None:
-                _candidate_max_call_gap_s = _latest_manager_gap
+                _candidate_max_call_gap_s = max(
+                    gap for gap in (_candidate_max_call_gap_s, _latest_manager_gap)
+                    if gap is not None
+                )
         finally:
             # Never leave the shared checkout stranded on a cycle branch.
             if not _integrated:
