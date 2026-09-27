@@ -926,6 +926,79 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
     assert "curl" not in seen
 
 
+@pytest.mark.parametrize(("baseline", "candidate", "expected_status", "expected_output", "should_pass"), [
+    ({"disk": "OK", "reward": "WARN", "gate": "WARN", "cpu": "OK", "queue": "OK"},
+     {"disk": "CRIT", "reward": "WARN", "gate": "WARN", "cpu": "OK", "queue": "OK"},
+     "CRIT", "disk", False),
+    ({"disk": "OK", "reward": "WARN", "gate": "WARN", "cpu": "OK", "queue": "OK"},
+     {"disk": "OK", "reward": "WARN", "gate": "WARN", "cpu": "CRIT", "queue": "OK"},
+     "CRIT", "cpu", True),
+    ({"disk": "OK", "reward": "WARN", "gate": "WARN", "memory": "OK", "cycle_progress": "OK"},
+     {"disk": "OK", "reward": "WARN", "gate": "WARN"},
+     None, "cycle_progress", False),
+    ({"disk": "OK", "reward": "WARN", "gate": "WARN"},
+     {"disk": "OK", "reward": "WARN", "gate": "WARN", "new_check": "CRIT"},
+     None, "new_check", False),
+])
+def test_verify_only_dimension_delta_through_production_path(
+    tmp_path, repo, mock_bin, monkeypatch,
+    baseline, candidate, expected_status, expected_output, should_pass,
+):
+    import json
+
+    baseline_path = tmp_path / "baseline.json"
+    candidate_path = tmp_path / "candidate.json"
+    baseline_path.write_text(json.dumps({"dimensions": [f"dim {k} {v}" for k, v in baseline.items()]}), encoding="utf-8")
+    candidate_path.write_text(json.dumps({"dimensions": [f"dim {k} {v}" for k, v in candidate.items()]}), encoding="utf-8")
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    (repo / "nanobot").mkdir()
+    (repo / "nanobot/__init__.py").write_text("# test runtime package\\n", encoding="utf-8")
+    (repo / "host/eeepc/etc/presets").mkdir(parents=True)
+    (repo / "host/eeepc/etc/presets/test.env").write_text("TEST=1\\n", encoding="utf-8")
+    (scripts / "verify_release_health.py").write_text("import json, os; from pathlib import Path; p = Path(os.environ['REPORT']); print(json.dumps({'health': {'dimensions': {r.split()[1]: {'status': r.split()[2]} for r in json.loads(p.read_text())['dimensions']}}})); print('CANDIDATE_GATE_EXECUTED')\n", encoding="utf-8")
+    original_head = _git("rev-parse", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    _git("add", "scripts/verify_release_health.py", "nanobot", "host/eeepc/etc/presets", cwd=repo, check=True)
+    _git("commit", "-m", "candidate dimension gate", cwd=repo, check=True, env={
+        **os.environ,
+        "GIT_AUTHOR_NAME": "eeebot tests",
+        "GIT_AUTHOR_EMAIL": "tests@eeebot.invalid",
+        "GIT_COMMITTER_NAME": "eeebot tests",
+        "GIT_COMMITTER_EMAIL": "tests@eeebot.invalid",
+    })
+    candidate_commit = _git("rev-parse", "--short", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    assert candidate_commit != original_head
+    monkeypatch.setenv("REPO_ROOT", str(repo))
+    monkeypatch.setenv("REPORT", str(candidate_path))
+    commands = repo / "verify-only-commands.log"
+    log = shlex.quote(str(commands))
+    ssh = f'''echo "$*" >> {log}
+case "$*" in
+  *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/baseline; exit 0 ;;
+  *"mktemp -d /tmp/eeebot-verify-gate."*) mkdir -p /tmp/eeebot-verify-gate.ABC123; cp -R {shlex.quote(str(repo / "scripts"))} /tmp/eeebot-verify-gate.ABC123/; echo /tmp/eeebot-verify-gate.ABC123; exit 0 ;;
+  *"VERIFY_ONLY=1"*)
+    export REPORT={shlex.quote(str(candidate_path))}
+    bash -c "${{@: -1}}"; exit $? ;;
+esac
+exit 0
+'''
+    _write_mock(mock_bin / "ssh", ssh)
+    env = {"REPORT": str(candidate_path)}
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", candidate_commit], env_overrides=env)
+    output = result.stdout + result.stderr
+    print(output)
+    assert (result.returncode == 0) is should_pass, output
+    assert "candidate gate staged at /tmp/eeebot-verify-gate.ABC123" in output
+    assert expected_output in output
+    if expected_status:
+        assert f"{expected_output} {expected_status}" in output
+    assert "VERIFY_ONLY DIMENSION cpu " in output
+    assert "VERIFY_ONLY DIMENSION queue " in output
+    for exempt in ("reward", "gate"):
+        assert f"VERIFY_ONLY DIMENSION {exempt} WARN -> WARN" in output
+    assert not (repo / "candidate-temp").exists()  # the deploy EXIT cleanup ran
+
+
 def test_socket_owner_and_listener_checks_retired_by_adr_036() -> None:
     """ADR-036 D3 Part B: port 8080 socket listener and curl checks are retired."""
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
