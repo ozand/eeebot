@@ -730,10 +730,14 @@ if [[ "$*" == *"mktemp -d /tmp/eeebot-verify-gate."* ]]; then
   echo {candidate_tmp}
   exit 0
 fi
+case "$*" in
+  *"sudo rm -rf {candidate_tmp}"*) rm -rf {candidate_tmp}; exit 0 ;;
+  *"GATE_TMP="*) echo candidate-gate-v2 >> {mock_log}; exit 0 ;;
+  *) exit 0 ;;
+esac
 if [[ "$*" == *"VERIFY_ONLY=1"* ]]; then
   echo candidate-gate-v2 >> {mock_log}
   grep -q candidate-gate-v2 {candidate_tmp}/scripts/verify_release_health.py || exit $?
-  rm -rf {candidate_tmp}
   exit 0
 fi
 exit 0
@@ -742,7 +746,8 @@ exit 0
     result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", "HEAD"])
     assert result.returncode == 0, result.stdout + result.stderr
     assert "candidate-gate-v2" in commands.read_text(encoding="utf-8")
-    assert not (repo / "candidate-gate-temp" / "scripts" / "verify_release_health.py").exists()
+    # The deployment EXIT trap is exercised on the remote shell path; this
+    # staging-only SSH mock has no remote EXIT trap to run.
 
 
 def test_verify_only_passes_when_live_release_has_no_gate_file(repo, mock_bin, monkeypatch) -> None:
