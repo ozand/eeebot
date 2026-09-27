@@ -5853,18 +5853,25 @@ async def _main_impl_body():
             _rec_skip_reason = f"exception:{type(_rec_exc).__name__}"
             pass  # fail-open
 
-        # #1710: name the attempt (e.g. "2/3") when this rollback is an
-        # executor-LLM-error retry of the same cycle_id -- the same counter
-        # `_decide_handled_marker` above just wrote/read. Absent for every
-        # other rollback reason, which has no retry structure to name.
+        # Name the attempt for the retry policy that produced this rollback;
+        # incomplete model calls and ordinary executor errors use independent counters.
         _rec_attempt: str | None = None
         try:
-            _retry_path = _llm_error_retry_path(request_id)
+            _retry_path = (
+                _model_call_incomplete_retry_path(request_id)
+                if _rollback_reason == 'model_call_incomplete'
+                else _llm_error_retry_path(request_id)
+            )
             if _retry_path is not None and _retry_path.exists():
                 _retry_data = json.loads(_retry_path.read_text(encoding='utf-8'))
                 _retry_count = int(_retry_data.get('count') or 0)
                 if _retry_count:
-                    _retry_max = int(_retry_data.get('max') or LLM_ERROR_MAX_RETRIES)
+                    _retry_max_default = (
+                        MODEL_CALL_INCOMPLETE_MAX_RETRIES
+                        if _rollback_reason == 'model_call_incomplete'
+                        else LLM_ERROR_MAX_RETRIES
+                    )
+                    _retry_max = int(_retry_data.get('max') or _retry_max_default)
                     _rec_attempt = f"{_retry_count}/{_retry_max}"
         except Exception:
             pass
