@@ -754,6 +754,7 @@ case "$*" in
   *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/old; exit 0 ;;
   *"mktemp -d /tmp/eeebot-verify-gate."*) mkdir -p {candidate_tmp}/scripts; cp {candidate_py} {candidate_tmp}/scripts/verify_release_health.py; echo {candidate_tmp}; exit 0 ;;
   *"rm -rf '{candidate_tmp}'"*) rm -rf {candidate_tmp}; exit 0 ;;
+  *"rm -rf /tmp/eeebot-verify-gate."*) exit 0 ;;
   *"VERIFY_ONLY=1"*) test -f {candidate_tmp}/scripts/verify_release_health.py; echo candidate-gate-v2 >> {mock_log}; exit 0 ;;
 esac
 exit 0
