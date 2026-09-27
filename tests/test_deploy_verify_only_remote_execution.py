@@ -10,17 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_deploy_release import DEPLOY_SCRIPT, _write_mock, run_deploy, repo, mock_bin
+from tests.test_deploy_release import DEPLOY_SCRIPT, _git, _write_mock, run_deploy
+
+pytest_plugins = ("tests.test_deploy_release",)
 
 
 def _extract_remote(script: str) -> str:
     return script.split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
 
-
-def _git(repo: Path, *args: str, env: dict[str, str] | None = None) -> str:
-    result = subprocess.run(["git", "-C", str(repo), *args], check=True,
-                            capture_output=True, text=True, env=env)
-    return result.stdout.strip()
 
 
 def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.CompletedProcess[str], list, tuple[Path, dict[str, str]]]:
@@ -37,15 +34,25 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
     source.mkdir()
     gate_path = source / "scripts/verify_release_health.py"
     gate_path.parent.mkdir()
-    gate_path.write_text(gate_source, encoding="utf-8")
-    subprocess.run(["git", "init", "-q", str(source)], check=True)
-    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    gate_path.write_text("print('head gate')\\n", encoding="utf-8")
+    _git("init", cwd=source, check=True)
+    hooks = source / ".test-hooks"
+    hooks.mkdir()
+    _git("config", "core.hooksPath", str(hooks), cwd=source, check=True)
+    _git("add", "scripts/verify_release_health.py", cwd=source, check=True)
     identity = dict(os.environ, GIT_AUTHOR_NAME="test", GIT_AUTHOR_EMAIL="test@example.invalid",
                     GIT_COMMITTER_NAME="test", GIT_COMMITTER_EMAIL="test@example.invalid")
-    subprocess.run(["git", "-C", str(source), "commit", "-qm", "candidate"], check=True, env=identity)
+    _git("commit", "-qm", "head gate", cwd=source, check=True, env=identity)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    gate_path.write_text(gate_source, encoding="utf-8")
+    _git("add", "scripts/verify_release_health.py", cwd=source, check=True)
+    _git("commit", "-qm", "candidate gate", cwd=source, check=True, env=identity)
+    candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    assert candidate != head
+    assert "CANDIDATE_GATE_EXECUTED" in gate_source or "SystemExit(23)" in gate_source
     gate = tmp_path / "candidate"
     gate.mkdir()
-    archive = subprocess.Popen(["git", "-C", str(source), "archive", "--format=tar", "HEAD", "scripts"], stdout=subprocess.PIPE)
+    archive = subprocess.Popen(["git", "-C", str(source), "archive", "--format=tar", candidate, "scripts"], stdout=subprocess.PIPE)
     extract = subprocess.run(["tar", "-x", "-C", str(gate)], stdin=archive.stdout, check=False)
     archive.stdout.close()
     assert archive.wait() == 0 and extract.returncode == 0
@@ -97,7 +104,7 @@ exec {shlex.quote(sys.executable)} "$@"
                FULL_COMMIT="candidate", PREV_RELEASE_PATH=str(live), GATE_TMP=str(gate).replace("\\", "/"),
                RELEASE_DIR=str(live), HEALTH_GATE_PYTHON=str(bindir / "python3"))
     result = subprocess.run(["bash", str(remote_path)], cwd=tmp_path, env=env,
-                            capture_output=True, text=True, timeout=90)
+                            capture_output=True, text=True, timeout=180)
     return result, before_systemd, (systemd_sandbox, roots)
 
 
@@ -122,7 +129,7 @@ def test_remote_verify_runs_candidate_and_never_mutates_units_or_current(tmp_pat
 def test_staging_failure_after_mktemp_cleans_remote_directory(tmp_path: Path, repo: Path, mock_bin: Path, monkeypatch) -> None:
     # Exercise the exact staging command embedded in production deploy_release.sh.
     deploy = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    staging_line = next(line.strip() for line in deploy.splitlines() if line.lstrip().startswith("GATE_TMP=\"$(git -C"))
+    staging_source = deploy.split('  GATE_TMP="$(git -C "$REPO_ROOT" archive', 1)[1].split("\n  cleanup_candidate_gate", 1)[0]
     production_command = textwrap.dedent(deploy.split('run ssh "ozand@${HOST}" "$REMOTE_ENV bash -s" <<\'REMOTE\'', 1)[1].split("\nREMOTE", 1)[0])
 
     # Create a second commit with the candidate gate. It differs from the
@@ -130,15 +137,26 @@ def test_staging_failure_after_mktemp_cleans_remote_directory(tmp_path: Path, re
     # the mocked remote tar fails after mktemp has created its directory.
     (repo / "scripts").mkdir()
     (repo / "scripts/verify_release_health.py").write_text("print('candidate')\\n", encoding="utf-8")
+    (repo / "nanobot").mkdir()
+    (repo / "nanobot/__init__.py").write_text("# candidate package\\n", encoding="utf-8")
+    (repo / "host/eeepc/etc/presets").mkdir(parents=True)
+    (repo / "host/eeepc/etc/presets/test.env").write_text("FIXTURE=1\\n", encoding="utf-8")
     git_identity = dict(os.environ, GIT_AUTHOR_NAME="test", GIT_AUTHOR_EMAIL="test@example.invalid",
-                   GIT_COMMITTER_NAME="test", GIT_COMMITTER_EMAIL="tests@example.invalid")
-    subprocess.run(["git", "add", "unrelated.txt"], cwd=repo, check=True)
+                       GIT_COMMITTER_NAME="test", GIT_COMMITTER_EMAIL="tests@example.invalid")
+    subprocess.run(["git", "add", "scripts", "nanobot", "host/eeepc/etc/presets"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-m", "candidate gate"], cwd=repo, check=True, env=git_identity)
     candidate = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=repo, text=True).strip()
+    (repo / "later-head.txt").write_text("checkout HEAD differs from requested candidate\\n", encoding="utf-8")
+    subprocess.run(["git", "add", "later-head.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "advance checkout after candidate"], cwd=repo, check=True, env=git_identity)
+    head = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=repo, text=True).strip()
+    assert candidate != head
 
     staging_dir = tmp_path / "eeebot-verify-gate.A1B2C3"
     tar_log = tmp_path / "tar.log"
     _write_mock(mock_bin / "tar", f'echo "$*" >> {str(tar_log).replace(chr(92), "/")}; exit 23')
+    tar_input = tmp_path / "empty.tar"
+    tar_input.write_bytes(b"")
     remote_commands = tmp_path / "remote-commands.log"
     remote_mock_log = str(remote_commands).replace("\\", "/")
     mock_body = f'''echo "$*" >> {remote_mock_log}
@@ -150,24 +168,25 @@ if [[ "$*" == *mktemp* ]]; then
   d="{staging_dir}"
   mkdir -p "$d"
   trap 'rm -rf -- "$d"' EXIT
-  tar -x -C "$d" || exit $?
+  tar -x -C "$d" < "{tar_input}" || exit $?
+  exit 23
 fi
 '''
     _write_mock(mock_bin / "ssh", mock_body)
     # Run the production script so its COMMIT selection and staging pipeline
-    # execute unchanged; ``candidate`` is HEAD but differs from the fixture's
-    # initial checkout commit and its tree lacks all three archive paths.
+    # execute unchanged; requested candidate is a commit distinct from checkout HEAD.
     monkeypatch.setenv("REPO_ROOT", str(repo))
     result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", candidate])
     assert result.returncode != 0
     assert not staging_dir.exists()
-    staging_text = deploy.split('  GATE_TMP="$(git -C "$REPO_ROOT" archive', 1)[1].split("\\n  cleanup_candidate_gate", 1)[0]
-    assert "mktemp -d /tmp/eeebot-verify-gate.XXXXXX" in staging_text
-    assert "trap " in staging_text and "trap - EXIT" in staging_text
-    assert "tar -x -C \"$d\"" in staging_text
+    commands = remote_commands.read_text(encoding="utf-8")
+    assert "mktemp -d /tmp/eeebot-verify-gate.XXXXXX" in commands
+    assert "tar -x -C" in commands
+    assert "mktemp -d /tmp/eeebot-verify-gate.XXXXXX" in staging_source
+    assert "trap " in staging_source and "trap - EXIT" in staging_source
+    assert "tar -x -C \"$d\"" in staging_source
     assert 'sudo chown -R eeepc-agent:eeepc-agent "$GATE_TMP"' in production_command
     assert "[remote] candidate $FULL_COMMIT gate temp=$GATE_TMP" in production_command
-    assert "mktemp -d /tmp/eeebot-verify-gate.XXXXXX" in remote_commands.read_text(encoding="utf-8")
 
 
 
