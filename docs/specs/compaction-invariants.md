@@ -1,6 +1,7 @@
 # Context compaction — invariants
 
-_Status: proposal, pending architect approval. Written 2026-09-27 during
+_Status: approved with conditions A–E (architect review, PR #2023), folded
+into I1's mechanics below. Written 2026-09-27 during
 #1930 (ADR #1776 follow-up), after three rounds in which Codex found a new
 way for the heuristic to lose progress: carrier accumulation, reasoning
 payloads, "no candidate fits the summary", and "progress plus decision in
@@ -18,7 +19,10 @@ never destroyed. Every character dropped from `content`, `reasoning_content`,
 or `thinking_blocks` (the last only if it is ever intentionally shrunk —
 see I5) is written in full to a per-cycle file before the in-context copy
 is replaced. The carrier (or excerpt) references that file's path so the
-executor can retrieve the original with an existing file-reading tool.
+executor can retrieve the original with an existing file-reading tool, plus
+an index of what's inside: one line per preserved message (turn index,
+role, first line ≤ 80 chars, size), stating explicitly that the full text
+lives at that path.
 
 **What gets measured.** For a given compaction call: `written_bytes` (sum
 of the full pre-compaction text of every message touched this round) and
@@ -34,7 +38,12 @@ file with N sections) — never fewer.
   the same way). One file per compaction call, named by the same
   `cycle_id`/`iteration` the journal entry for that call already carries —
   the carrier's reference is exactly that path, not a new identifier
-  scheme.
+  scheme. This directory must be inside the executor's existing allowed
+  read paths (no permission changes) and outside the instance repo
+  checkout — the restore step erases uncommitted files there (#1966). If
+  `{state_root}/compaction/<cycle_id>/` is outside the executor's read
+  allowlist, the implementation picks a location that is, keeping the same
+  per-call naming.
 - **When:** synchronously, before any message's in-context content is
   mutated. If the write fails, the whole call fails open (existing
   fail-open contract) — no message is modified without an on-disk copy of
@@ -42,26 +51,41 @@ file with N sections) — never fewer.
 - **Atomicity:** write to `<path>.tmp`, `fsync`, then `os.replace` onto the
   final path — the existing on-disk file (if any, from a retried call) is
   either fully replaced or untouched, never partially written.
-- **Retention/rotation:** one file per compaction call for the lifetime of
-  the cycle; deleted with the rest of `{state_root}/compaction/<cycle_id>/`
-  when the cycle's state directory itself is retired (existing state
-  lifecycle — no new rotation policy). Not rotated independently, so a
-  reader never finds a path the carrier references already gone while the
-  cycle is still active.
+- **Retention/rotation:** one file per compaction call, never rotated
+  independently while the cycle is active (a reader never finds a path the
+  carrier references already gone). Bounded, not tied to an assumed
+  cycle-retirement lifecycle: preservation dirs of *finished* cycles older
+  than 7 days are deleted, plus a total size cap enforced oldest-first;
+  an active cycle's directory is never touched. First implementation step:
+  measure the current volume from the existing journal — `ts` buckets
+  compaction calls per day, `before_tokens - after_tokens` on
+  `reason == "compacted"` rows estimates bytes preserved per call, and
+  `cycle_id` groups per-cycle totals.
 - **Privacy class:** private executor state, same class as the rest of
   `{state_root}` — contains full tool outputs and assistant reasoning,
   never published, never included in any public dashboard or gh-pages
-  artifact. Same handling as the existing compaction journal already gets.
-- **Size bounds:** unbounded by design (that's the point — I1 exists so
-  the *in-context* copy can be bounded without losing data); the file
-  lives in already-git-ignored runtime state, not in context, so it does
-  not compete with the token budget it exists to protect.
+  artifact. Formalized on ADR-036's private-only inputs list; if D2's
+  private pages ever render this text, it goes through the same sanitizer
+  as other call text. Canary test (dashboard repo): a marker planted inside
+  a preservation file never reaches the public sink.
+- **Size bounds:** the *in-context* copy is bounded without losing data;
+  the file itself lives in already-git-ignored runtime state, not in
+  context, so it does not compete with the token budget it exists to
+  protect — bounded instead by the retention rule above.
+- **Usage:** a counter (from the action index) of reads of preservation
+  paths per cycle with compaction, so it's measurable whether the executor
+  ever uses them. A low count doesn't argue for dropping I1 — the file is
+  still a correctness guarantee — it argues the carrier's index (above)
+  isn't doing its job, and becomes the next hypothesis to test.
 
 **How it's tested.** A property test embeds a unique marker token in the
 original text of every message a random history hands to `compact_messages`
 before compaction, then asserts every marker is found either still
 literally present in the returned in-context messages, or inside the
-per-cycle preservation file this round wrote. See Test plan.
+per-cycle preservation file this round wrote. See Test plan. Separately: a
+test through the executor's real tool layer confirms `read_file` on the
+path named in the carrier succeeds — the file being written is not enough
+if the executor's tools can't open it.
 
 ## I2 — Monotonicity
 
@@ -75,7 +99,9 @@ before this call). A new `reason` value in the journal (e.g.
 `declined_no_reduction`) records this as distinct from `already_compact`.
 
 **What gets measured.** `_total_tokens(before)` vs. `_total_tokens(after)`
-for every call whose `reason` is `"compacted"`.
+for every call whose `reason` is `"compacted"`. The carrier's per-message
+index (I1/B) counts toward `after` here — it's real returned-history
+bytes, not a free addition outside the budget it's meant to respect.
 
 **How it's tested.** A property test asserts, for every random-history
 compaction call: if `reason == "compacted"`, `after <= before`; if any
@@ -228,11 +254,14 @@ calls (simulating an ongoing cycle) and re-asserting I1-I5 after every
 single call, not only at the end — a property that only holds at the end
 of a fixed sequence would hide an intermediate-round violation.
 
-## Rules for implementation (once approved)
+## Rules for implementation
 
-One pass, after this page is approved. I1 requires a new
-write-then-reference step in `compact_messages`; I2 and I4 restructure the
-carrier-decision path to a single commit/decline branch instead of the
-current per-candidate loop; I3 and I5 are already implemented (this page
-documents them, doesn't change them). No implementation until the
-architect approves this page.
+One pass. I1 requires a new write-then-reference step in
+`compact_messages`, including the read-allowlist check and index format
+from conditions A/B; I2 and I4 restructure the carrier-decision path to a
+single commit/decline branch instead of the current per-candidate loop;
+I3 and I5 are already implemented (this page documents them, doesn't
+change them). Conditions C (retention), D (ADR-036 + canary), and E (usage
+counter) ship alongside I1, not deferred. First implementation step per C:
+measure current volume from the compaction journal before picking the size
+cap.
