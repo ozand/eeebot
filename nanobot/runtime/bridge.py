@@ -4402,15 +4402,6 @@ async def _main_impl_body():
             # re-offered (bounded) instead of retired with nothing done.
             _executor_llm_error_text = _executor_llm_error(STATE_DIR, _subagent_task_id)
             _model_call_failure = _executor_model_call_failure(STATE_DIR, _subagent_task_id)
-            if _model_call_failure:
-                _run_stop_reason = 'model_call_incomplete'
-                try:
-                    from nanobot import crash_record as _run_record
-                    _run_record.set_run_metadata(
-                        classification='model_call_incomplete', reason=_run_stop_reason,
-                    )
-                except Exception:
-                    pass
             if _executor_llm_error_text:
                 _executor_llm_error_text = (
                     f"model={config.agents.defaults.model}; "
@@ -5635,15 +5626,18 @@ async def _main_impl_body():
     _verdict, _verdict_reason = _derive_cycle_verdict(_cycle_outcome, _verdict_reason_hint)
     try:
         from nanobot import crash_record as _run_record
-        if not _res.get('run_stop_reason'):
-            _run_record.set_run_metadata(
-                # A service-only cycle merged cleanly and the bridge run
-                # completed; only its delivery verdict is non-success.
-                classification=(
-                    "completion" if _cycle_outcome == "success" or _service_only else "failed"
-                ),
-                reason=_rollback_reason or _cycle_outcome,
-            )
+        if _cycle_outcome == 'model_call_incomplete':
+            run_classification = 'model_call_incomplete'
+        elif _cycle_outcome == 'paused-supplier':
+            run_classification = 'paused_supplier'
+        elif _cycle_outcome == 'success' or _service_only:
+            run_classification = 'completion'
+        else:
+            run_classification = 'failed'
+        _run_record.set_run_metadata(
+            classification=run_classification,
+            reason=_rollback_reason or _cycle_outcome,
+        )
     except Exception:
         pass
     _lesson_candidate: dict[str, object] | None = None

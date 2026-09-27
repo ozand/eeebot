@@ -120,6 +120,21 @@ def test_model_call_incomplete_run_classification_survives_failure_process_exit(
     assert row["outcome"] == "failure"
 
 
+def test_supplier_pause_run_classification_is_preserved(tmp_path):
+    from nanobot import crash_record
+    from nanobot.runtime import bridge
+
+    state = tmp_path / "state"
+    crash_record._start_run_marker(state)
+    crash_record.set_run_metadata(classification="model_call_incomplete", reason="model_call_incomplete")
+    crash_record.set_run_metadata(classification="paused_supplier", reason="llm_supplier_paused")
+    crash_record.record_exit(state, outcome="failure", exit_status=bridge.EXIT_SUPPLIER_PAUSED)
+
+    row = _run_rows(state)[0]
+    assert row["classification"] == "paused_supplier"
+    assert row["outcome"] == "failure"
+
+
 def test_loop_breaker_run_classification_is_preserved(tmp_path):
     from nanobot import crash_record
 
