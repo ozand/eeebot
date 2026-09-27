@@ -238,6 +238,38 @@ _PATH_RE = re.compile(
 )
 
 
+def _representative_excerpt(text: str, limit: int) -> str:
+    """Retain representative text from the head, middle, and tail."""
+    if len(text) <= limit:
+        return text
+    marker = "\n[…middle omitted…]\n"
+    remaining = max(0, limit - len(marker))
+    head = remaining // 3
+    tail = remaining // 3
+    middle = remaining - head - tail
+    midpoint = len(text) // 2
+    return (
+        text[:head] + marker
+        + text[max(head, midpoint - middle // 2): midpoint + (middle + 1) // 2]
+        + marker + text[-tail:]
+    )
+
+
+def _bounded_summary(text: str, limit: int) -> str:
+    """Enforce one hard character cap over the complete summary payload."""
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    marker = "\n... [summary truncated] ...\n"
+    if limit <= len(marker):
+        return text[:limit]
+    remaining = limit - len(marker)
+    head = remaining // 2
+    tail = remaining - head
+    return text[:head] + marker + text[-tail:]
+
+
 def _structural_summary(
     evidence_span: list[dict[str, Any]], *, goal: str = "", previous: str = "",
 ) -> str:
@@ -266,7 +298,9 @@ def _structural_summary(
                 # Assistant messages often carry both progress narration and
                 # tool_calls. The calls are metadata; do not discard the
                 # accompanying explicit text merely because calls are present.
-                progress.append(text[:500])
+                # Keep a head, a bounded middle window, and the tail; the
+                # progress evidence may be anywhere in a long assistant turn.
+                progress.append(_representative_excerpt(text, 1_200))
             for call in msg.get("tool_calls") or []:
                 fn = call.get("function") if isinstance(call, dict) else None
                 args = fn.get("arguments") if isinstance(fn, dict) else None
@@ -297,7 +331,7 @@ def _structural_summary(
     lines.extend(f"- {x}" for x in sorted(read_files))
     lines.append("Files modified (paths observed in write/edit/patch tools):")
     lines.extend(f"- {x}" for x in sorted(modified_files))
-    return "\n".join(lines)
+    return _bounded_summary("\n".join(lines), MAX_SUMMARY_CHARS)
 
 
 def _compact_content(content: str) -> str:
