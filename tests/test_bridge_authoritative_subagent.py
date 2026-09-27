@@ -268,7 +268,7 @@ class TestAuthoritativeSpawnEndToEnd:
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
         assert rows[-1]["max_call_gap_s"] == 31.0
 
-    def test_repair_cancelled_before_first_step_finalizes_telemetry(self, tmp_path, monkeypatch):
+    def test_repair_cancelled_before_first_step_finalizes_telemetry_and_preserves_metadata(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-repair-cancel-telemetry", "cycle-repair-cancel-telemetry")
         monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "4000")
