@@ -358,6 +358,22 @@ def test_second_compaction_summarizes_assistant_progress_with_tool_calls(tmp_pat
     assert marker in "\n".join(carriers)
 
 
+def test_middle_progress_survives_near_budget_prior_summary_and_path_flood():
+    """Fresh progress is prioritized over old summary and large file lists."""
+    marker = "FRESH_MIDDLE_PROGRESS_SURVIVES"
+    previous = "P" * 4_000
+    paths = [f"src/generated/module_{i:04d}.py" for i in range(1_000)]
+    evidence = [
+        {"role": "assistant", "content": _long_content(2_000) + marker + _long_content(2_000),
+         "tool_calls": [{"id": "paths", "type": "function",
+                         "function": {"name": "read_file", "arguments": " ".join(paths)}}]},
+        {"role": "tool", "name": "read_file", "content": "\\n".join(paths)},
+    ]
+    summary = cc._structural_summary(evidence, goal="task", previous=previous)
+    assert len(summary) <= cc.MAX_SUMMARY_CHARS
+    assert marker in summary
+
+
 def test_summary_is_capped_including_large_file_lists(tmp_path, monkeypatch):
     """New paths and progress together cannot exceed the summary hard cap."""
     monkeypatch.setattr(cc, "MAX_SUMMARY_CHARS", 6_000)
