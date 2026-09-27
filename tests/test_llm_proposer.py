@@ -548,6 +548,38 @@ class TestRetireProposerRequestForCandidate:
         assert llm_proposer.retire_proposer_request_for_candidate(state_dir, "demand-not-a-proposer-id") is False
 
 
+class TestProposerCandidateItemsTargetPath:
+    """#2013: write_request() deliberately never adds a top-level
+    ``target_path`` key to the request payload (kept out to preserve the C1
+    schema-equality invariant) -- it embeds the target ONLY as a literal
+    ``Target path: <path>`` line inside the ``task`` text (mirrored in
+    ``recommended_next_action`` as ``(target: <path>)``). A real request
+    file on disk therefore never has ``target_path`` at the top level, so
+    ``proposer_candidate_items``'s old ``req.get("target_path") or ""``
+    always resolved to the empty string, silently dropping the proposal's
+    target path when the candidate is offered to the planner.
+    """
+
+    def test_proposer_candidate_items_recovers_target_path_from_task_marker(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        req_dir = state_dir / "subagents" / "requests"
+        req_dir.mkdir(parents=True)
+        title = "Add regression coverage for the retry path"
+        (req_dir / "request.json").write_text(
+            json.dumps({
+                "request_status": "queued",
+                "request_id": "llm-proposer-cycle-target01",
+                "task_title": title,
+                "task": "Cover the retry path with a regression test.\n\nTarget path: nanobot/runtime/llm_proposer.py",
+            }),
+            encoding="utf-8",
+        )
+        items = llm_proposer.proposer_candidate_items(state_dir)
+        matching = [i for i in items if i["summary"] == title]
+        assert matching, "the request must surface as a candidate item"
+        assert matching[0]["affected_path"] == "nanobot/runtime/llm_proposer.py"
+
+
 # ─── build_context ──────────────────────────────────────────────────────────
 
 
