@@ -55,9 +55,10 @@ esac
 ''')
     python = shutil.which("python3")
     assert python, "python3 is required for the remote gate replay"
+    marker_path = str(marker).replace(chr(92), "/")
     _write_mock(bindir / "python3", f'''if [[ "$*" == *verify_release_health.py* ]]; then
   test -f "$GATE_TMP/scripts/verify_release_health.py" || exit 9
-  echo ran > {str(marker).replace("\\", "/")}
+  echo ran > {marker_path}
   echo "gate $*" >> {log}
   exit 0
 fi
