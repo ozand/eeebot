@@ -4246,7 +4246,7 @@ async def _main_impl_body():
                     # returns None for a missing repo, so precheck reads
                     # every subsequent tick as "input_changed" and the
                     # backoff never actually holds.
-                    _open_increment_killcheck.record_supply_interruption(
+                    _killcheck_result = _open_increment_killcheck.record_supply_interruption(
                         STATE_DIR, _stale_cycle_id,
                         retry_key=f"kill:{_stale_cycle_id}",
                         plan_text=_stale_plan_text,
@@ -4255,7 +4255,7 @@ async def _main_impl_body():
                         branch=_stale_branch,
                     )
                 else:
-                    _open_increment_killcheck.record_defect_interruption(
+                    _killcheck_result = _open_increment_killcheck.record_defect_interruption(
                         STATE_DIR, _stale_cycle_id,
                         retry_key=f"kill:{_stale_cycle_id}",
                         plan_text=_stale_plan_text,
@@ -4263,7 +4263,7 @@ async def _main_impl_body():
                         branch=_stale_branch,
                     )
             else:
-                _open_increment_killcheck.record_kill_interruption(
+                _killcheck_result = _open_increment_killcheck.record_kill_interruption(
                     STATE_DIR, _stale_cycle_id,
                     retry_key=f"kill:{_stale_cycle_id}",
                     plan_text=_stale_plan_text,
@@ -4271,6 +4271,22 @@ async def _main_impl_body():
                     branch=_stale_branch,
                     executor_status=_stale_running.get('executor_status'),
                 )
+            # Codex re-check on `787c0acf` (P1): unlike the D1/repair
+            # barriers, this stale-attempt recovery block used to discard
+            # the writer's `.persisted` signal entirely -- a transient
+            # write failure here left the dead attempt's `running`
+            # registration reloadable as if nothing had happened, so
+            # planning proceeded and a fresh `record_attempt_started`
+            # could overwrite the only pointer to the interrupted branch.
+            # Abort this tick with no bookkeeping (same shape as every
+            # other unverified-persist barrier): the next tick's
+            # kill-check finds the SAME stale `running` and retries.
+            if not _killcheck_result.persisted:
+                print(
+                    f'bridge: kill-recovery interruption for {_stale_cycle_id} did not '
+                    'verify as persisted; aborting this tick so the next kill-check retries'
+                )
+                return 0
     except Exception:
         pass
 
