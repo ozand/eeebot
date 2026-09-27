@@ -4386,6 +4386,13 @@ async def _main_impl_body():
             _model_call_failure = _executor_model_call_failure(STATE_DIR, _subagent_task_id)
             if _model_call_failure:
                 _run_stop_reason = 'model_call_incomplete'
+                try:
+                    from nanobot import crash_record as _run_record
+                    _run_record.set_run_metadata(
+                        classification='model_call_incomplete', reason=_run_stop_reason,
+                    )
+                except Exception:
+                    pass
             if _executor_llm_error_text:
                 _executor_llm_error_text = (
                     f"model={config.agents.defaults.model}; "
@@ -6259,7 +6266,10 @@ def _authoritative_subagent_task_id(
 _SUPPLIER_UNAVAILABLE_RX = re.compile(
     r'connection (?:refused|reset|error)'
     r'|notfounderror.{0,40}(?:model route|no route|not found)'
-    r'|\b(?:429|500|502|503|504)\b'
+    # HTTP status numbers need an HTTP/error-code anchor: an output ceiling
+    # such as "maximum output is 500 tokens" is client-request trouble, not an
+    # outage signal. Match error responses, never bare numeric payload data.
+    r'|(?:error\s+code|http(?:\s+status)?|status\s+code)\s*[:=]?\s*(?:429|500|502|503|504)\b'
     r'|ratelimiterror'
     r'|internalservererror'
     r'|serviceunavailableerror'

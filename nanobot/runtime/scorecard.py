@@ -775,7 +775,6 @@ def _loop_section(
                 task_id = proposed_task_by_cycle.get(cycle_id) or str(row.get("task_id") or row.get("demand_id") or "").strip()
                 if task_id:
                     model_call_incomplete_task_ids.add(task_id)
-                    execution_failure_task_ids.add(task_id)
             elif outcome == "paused-supplier":
                 # #1765: never folds into failed_outcomes/wasted_attempts —
                 # its own counter, reported as a distinct dashboard line.

@@ -54,12 +54,21 @@ def _wire(tmp_path, monkeypatch, manager_cls):
 
 class TestClassifyLlmError:
     @pytest.mark.parametrize("text", [
+        "Error code: 429 - rate limited",
+        "HTTP 503 Service Unavailable",
+        "received status code 500 from upstream",
+    ])
+    def test_http_contextual_supplier_status_remains_paused(self, text):
+        assert bridge._classify_llm_error(text) == "paused-supplier"
+
+    @pytest.mark.parametrize("text", [
         "Error: LLM execution failed: Error calling LLM: litellm.InternalServerError: "
         "OpenAIException - Connection error.",
         "litellm.APIConnectionError: connection refused",
         "connection reset by peer",
         "Error code: 429 - {'error': 'rate limited'}",
         "Error code: 503 - Service Unavailable",
+        "HTTP 502 Bad Gateway",
         "litellm.RateLimitError: Error code: 429",
         "litellm.ServiceUnavailableError: Error code: 502",
         "No deployments available for selected model",
@@ -474,6 +483,7 @@ class TestScorecardPausedSupplierCounters:
         assert loop["model_call_incomplete_tasks"] == 1
         assert loop["model_call_incomplete_share"] == 1.0
         assert loop["execution_failure_and_incomplete_events"] == 1
+        assert loop["execution_failure_tasks"] == 0
         assert loop["execution_failure_events"] == 0
         assert loop["wasted_attempts"] == 0
 
