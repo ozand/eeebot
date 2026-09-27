@@ -385,6 +385,30 @@ class TestMaxCallGapRecording:
         assert telem.get("max_call_gap_s") is not None
         assert telem["max_call_gap_s"] == round(mgr.last_max_call_gap_s, 1)
 
+    async def test_error_before_watchdog_initialization_omits_call_gap(self, tmp_path):
+        """Early setup exceptions must not mask the original error with UnboundLocalError."""
+        class _DivergentManager(SubagentManager):
+            def registered_tool_names(self):
+                return super().registered_tool_names()[:-1]
+
+        class _Provider:
+            def get_default_model(self):
+                return "test-model"
+
+            async def chat_with_retry(self, **_kwargs):
+                raise AssertionError("tool parity assertion should run before provider call")
+
+        mgr = _DivergentManager(
+            provider=_Provider(), workspace=tmp_path, bus=MessageBus(), max_iterations=2,
+        )
+        await mgr.spawn(task="setup-failure", label="setup_error")
+        await asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True)
+        files = list((tmp_path / "state" / "subagents").glob("*.json"))
+        telem = json.loads(files[0].read_text(encoding="utf-8"))
+        assert telem["status"] == "error"
+        assert "registered tool set must match" in telem["result"]
+        assert "max_call_gap_s" not in telem
+
     async def test_subagent_run_records_max_call_gap_in_telemetry(self, tmp_path):
         """Subagent telemetry records max_call_gap_s across turns (#1899)."""
         (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
