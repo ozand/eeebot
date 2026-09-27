@@ -749,6 +749,54 @@ exit 0
     # staging-only SSH mock has no remote EXIT trap to run.
 
 
+def test_verify_only_runs_gate_from_requested_commit_not_checkout_head(repo, mock_bin, monkeypatch, tmp_path) -> None:
+    """The production archive selection must deliver and run the requested gate."""
+    gate = repo / "scripts/verify_release_health.py"
+    gate.parent.mkdir(parents=True)
+    gate.write_text("print('CANDIDATE_GATE_ONLY')\n", encoding="utf-8")
+    (repo / "nanobot").mkdir()
+    (repo / "nanobot/__init__.py").write_text("# fixture\n", encoding="utf-8")
+    (repo / "host/eeepc/etc/presets").mkdir(parents=True)
+    (repo / "host/eeepc/etc/presets/test.env").write_text("FIXTURE=1\n", encoding="utf-8")
+    _git("add", "scripts", "nanobot", "host/eeepc/etc/presets", cwd=repo, check=True)
+    _git("commit", "-m", "candidate verifier", cwd=repo, check=True)
+    candidate = _git("rev-parse", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    gate.write_text("print('ADVANCED_HEAD_ONLY')\n", encoding="utf-8")
+    _git("add", "scripts/verify_release_health.py", cwd=repo, check=True)
+    _git("commit", "-m", "advance verifier after candidate", cwd=repo, check=True)
+    head = _git("rev-parse", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    assert candidate != head
+
+    stage = tmp_path / "candidate-stage"
+    stage_arg = shlex.quote(str(stage).replace("\\", "/"))
+    _write_mock(mock_bin / "mktemp", f'mkdir -p {stage_arg}; printf "%s\\n" {stage_arg}')
+    _write_mock(mock_bin / "sudo", 'exit 0')
+    ssh_log = shlex.quote(str(tmp_path / "ssh.log").replace("\\", "/"))
+    _write_mock(mock_bin / "ssh", f'''echo "$*" >> {ssh_log}
+case "$*" in
+  *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/old; exit 0 ;;
+esac
+case "$*" in
+  *"mktemp -d /tmp/eeebot-verify-gate."*)
+    archive_ref={shlex.quote(candidate)}
+    output=$(git -C {shlex.quote(str(repo))} archive --format=tar "$archive_ref" scripts nanobot host/eeepc/etc | bash -c "$2") || exit $?
+    staged=$(printf '%s\\n' "$output" | tail -n 1)
+    python3 "$staged/scripts/verify_release_health.py" >&2 || exit $?
+    rm -rf "$staged"
+    printf '%s\\n' "$staged"
+    ;;
+  *"GATE_TMP="*) cat >/dev/null; exit 0 ;;
+  *) exit 0 ;;
+esac
+''')
+    monkeypatch.setenv("REPO_ROOT", str(repo))
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", candidate])
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "CANDIDATE_GATE_ONLY" in output
+    assert "ADVANCED_HEAD_ONLY" not in output
+
+
 def test_verify_only_passes_when_live_release_has_no_gate_file(repo, mock_bin, monkeypatch) -> None:
     """The live release must not supply or be required to contain the candidate gate."""
     for relative in ("scripts/verify_release_health.py", "nanobot/__init__.py", "host/eeepc/etc/presets/test.env"):
