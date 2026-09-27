@@ -331,7 +331,7 @@ def test_second_compaction_summarizes_assistant_progress_with_tool_calls(tmp_pat
     marker = "ROUND_TWO_IMPLEMENTATION_COMPLETE"
     progress_turn = {
         "role": "assistant",
-        "content": "Implemented " + marker + ": " + _long_content(2_000),
+        "content": _long_content(2_000) + marker + _long_content(2_000),
         "tool_calls": [{"id": "tc-progress", "type": "function",
                         "function": {"name": "bash", "arguments": "{}"}}],
     }
@@ -358,6 +358,21 @@ def test_second_compaction_summarizes_assistant_progress_with_tool_calls(tmp_pat
     assert marker in "\n".join(carriers)
 
 
+def test_summary_is_capped_including_large_file_lists(tmp_path, monkeypatch):
+    """New paths and progress together cannot exceed the summary hard cap."""
+    monkeypatch.setattr(cc, "MAX_SUMMARY_CHARS", 6_000)
+    paths = [f"src/generated/module_{i:05d}.py" for i in range(6_000)]
+    evidence = [
+        {"role": "assistant", "content": "progress " + _long_content(800),
+         "tool_calls": [{"id": "paths", "type": "function",
+                         "function": {"name": "read_file", "arguments": " ".join(paths)}}]},
+        {"role": "tool", "name": "read_file", "content": "\n".join(paths)},
+    ]
+    summary = cc._structural_summary(evidence, goal="task")
+    assert len(summary) <= cc.MAX_SUMMARY_CHARS
+    assert "... [summary truncated] ..." in summary
+
+
 def test_compaction_replaces_old_summary_carrier_instead_of_accumulating(tmp_path):
     """Only one summary carrier may remain in history after repeated passes."""
     messages = _make_messages([_long_content(20_000)] * 2)
@@ -380,6 +395,13 @@ def test_compaction_replaces_old_summary_carrier_instead_of_accumulating(tmp_pat
         and m["content"].startswith("[Compaction summary")
     ]
     assert len(carriers) == 1, f"expected one current summary carrier, found {len(carriers)}"
+    payloads = [
+        str(message.get("content") or "") for message in messages
+        if isinstance(message.get("content"), str)
+        and (message["content"].startswith("[Compaction summary")
+             or message["content"].startswith("[Earlier compaction summary"))
+    ]
+    assert sum(map(len, payloads)) <= cc.MAX_SUMMARY_CHARS + 3_000
 
 
 def test_cumulative_summary_growth_is_bounded_across_many_compactions(tmp_path):
