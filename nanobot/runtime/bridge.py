@@ -6350,6 +6350,24 @@ def _classify_llm_error(error_text: str, *, model_call_failure: dict | None = No
     if _SUPPLIER_UNAVAILABLE_RX.search(error_text):
         return 'paused-supplier'
     if isinstance(model_call_failure, dict) and model_call_failure.get('stage') == 'model_call':
+        error_type = str(model_call_failure.get('error_type') or '').rsplit('.', 1)[-1].lower()
+        message = str(model_call_failure.get('message') or error_text).lower()
+        # Provider client errors are affirmative evidence that the request was
+        # rejected, not that the call was incomplete. Unknown errors remain in
+        # the existing incomplete bucket, with raw evidence retained by caller.
+        definitive_request_errors = {
+            'badrequesterror', 'contextwindowexceedederror',
+            'invalidrequesterror', 'unprocessableentityerror',
+        }
+        request_rejection_markers = (
+            'invalid parameter', 'invalid temperature', 'unsupported parameter',
+            'maximum context length', 'context length exceeded',
+            'invalid tool call arguments', 'malformed tool-call',
+        )
+        if error_type in definitive_request_errors or any(
+            marker in message for marker in request_rejection_markers
+        ):
+            return 'failed'
         return 'model_call_incomplete'
     return 'failed'
 
@@ -6851,7 +6869,7 @@ def _recent_failure_match(
                 continue
             if not reason and status not in ('blocked', 'no_commit'):
                 continue
-            if reason == 'model_call_incomplete':
+            if reason == 'model_call_incomplete' and not _model_call_incomplete_retries_exhausted(data.get('request_id')):
                 continue
             if reason == 'executor_llm_error' and not _llm_error_retries_exhausted(data.get('request_id')):
                 # #1280: a cycle that died on the LLM call says nothing about

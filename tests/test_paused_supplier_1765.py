@@ -122,6 +122,17 @@ class TestClassifyLlmError:
         assert bridge._classify_llm_error(text, model_call_failure={"stage": "model_call"}) == "model_call_incomplete"
         assert bridge._classify_llm_error(text, model_call_failure={"stage": "tool_execution"}) == "failed"
 
+    def test_definitive_client_rejection_with_model_call_telemetry_stays_failed(self):
+        failure = {
+            "stage": "model_call",
+            "error_type": "BadRequestError",
+            "message": "invalid temperature: must be between 0 and 2",
+        }
+        assert bridge._classify_llm_error(
+            "litellm.BadRequestError: invalid temperature: must be between 0 and 2",
+            model_call_failure=failure,
+        ) == "failed"
+
     def test_default_is_conservative_not_a_catch_all(self):
         """An error text mentioning neither class's vocabulary at all stays
         'failed' -- the default direction the issue specifies, and the proof

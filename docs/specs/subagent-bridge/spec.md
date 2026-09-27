@@ -1462,9 +1462,9 @@ freeze that record points to._
 
 ## #1765 — provider failures, incomplete calls, and retry evidence
 
-Supplier outages (`paused-supplier`) are distinct from ordinary executor/request failures and from `model_call_incomplete`. Supplier classification is positive-evidence-only; numeric status codes require HTTP/error-code context, so payload values such as `maximum output is 500 tokens` remain ordinary failures. `model_call_incomplete` requires telemetry from the model-call stage and is not assigned for tool or local-code failures.
+Supplier outages (`paused-supplier`) are distinct from ordinary executor/request failures and from `model_call_incomplete`. Supplier classification is positive-evidence-only; numeric status codes require HTTP/error-code context, so payload values such as `maximum output is 500 tokens` remain ordinary failures. `model_call_incomplete` requires telemetry from the model-call stage and is not assigned for tool or local-code failures. Affirmative client/request rejection evidence (known request-validation error types or invalid-parameter/context/tool-payload markers) remains an ordinary failure even when the model-call stage is known.
 
-Incomplete model calls persist bounded diagnostic evidence and use `retry_incomplete_<request>.json`, separate from the ordinary executor-error retry counter. Exhaustion pauses automatic re-offer and directs the operator to inspect request size/budget. Error-card recording reports the matching retry counter's attempt. Scorecard and daily movement expose incomplete calls separately; lessons/futility readers treat them as infrastructure rather than code defects.
+Incomplete model calls persist bounded diagnostic evidence and use `retry_incomplete_<request>.json`, separate from the ordinary executor-error retry counter. Exhaustion pauses automatic re-offer and directs the operator to inspect request size/budget. While retries remain, incomplete calls do not seed recent-failure suppression; after exhaustion, matching proposals are eligible for the normal bounded suppression window. Error-card recording reports the matching retry counter's attempt. Scorecard and daily movement expose incomplete calls separately; lessons/futility readers treat them as infrastructure rather than code defects.
 
 Design record: `docs/changes/1765-incomplete-model-call/proposal.md` and `design.md`.
 

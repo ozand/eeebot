@@ -79,6 +79,32 @@ def test_matches_recent_result_via_rollback_reason(tmp_path: Path):
     ) == "Refactor coordinator materializer split logic"
 
 
+@pytest.mark.parametrize("retry_count, expected", [
+    (1, None),
+    (bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES, "Wire host_metrics dashboard integration panel"),
+])
+def test_model_call_incomplete_retry_cools_only_after_exhaustion(
+    tmp_path: Path, monkeypatch, retry_count: int, expected: str | None,
+):
+    state_dir = tmp_path / "state"
+    results_dir = state_dir / "subagents" / "results"
+    title = "Wire host_metrics dashboard integration panel"
+    _write_result(
+        results_dir, "incomplete.json", backlog_title=title,
+        request_id="request-incomplete", result_status="blocked",
+        rollback={"reason": "model_call_incomplete"},
+    )
+    bridge_state = state_dir / "subagent_bridge"
+    bridge_state.mkdir(parents=True)
+    (bridge_state / "retry_incomplete_request-incomplete.json").write_text(
+        json.dumps({"count": retry_count, "max": bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", bridge_state)
+
+    assert _recent_failure_match(title, state_dir) == expected
+
+
 def test_non_matching_title_returns_false(tmp_path: Path):
     state_dir = tmp_path / "state"
     results_dir = state_dir / "subagents" / "results"
