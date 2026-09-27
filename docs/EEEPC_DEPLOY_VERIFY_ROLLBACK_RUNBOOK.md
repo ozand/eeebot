@@ -272,7 +272,21 @@ The health stop is an **operator step**. Whoever runs the release compares the p
 - **`cpu` and `queue`:** read against the load at that moment.
 - **Any other dimension:** a new WARN or CRIT, compared with the live baseline, means the operator does not activate.
 
-Automating this comparison inside `--verify-only` is a separate follow-up; until it lands, the release issue must show the comparison.
+Automating this comparison inside `--verify-only` is follow-up #2016. Until it lands, use the command below to take the dimension report, and show the comparison in the release issue.
+
+Run the command twice from the dev machine. The first run uses `REF` = the candidate sha. The second uses `REF` = the live release's `SOURCE_COMMIT`, which is the baseline. Each run streams that ref's `scripts/` and `nanobot/` to a temp dir on the host. It runs the gate as `eeepc-agent` and prints the gate result, then one `dim <name> <status>` line per dimension. It then deletes the temp dir. It never touches `current`, units or the release dirs.
+
+```bash
+REF=<sha>; HOST=eeepc-lan
+git archive --format=tar "$REF" scripts nanobot | ssh "ozand@$HOST" '
+  set -u; d=$(mktemp -d /tmp/gate-dims.XXXXXX); trap "sudo -n rm -rf -- \"$d\"" EXIT
+  tar -x -C "$d"; chmod -R a+rX "$d"
+  PY=/opt/eeepc-agent/venv/bin/python; [ -x "$PY" ] || PY=python3
+  sudo -n -u eeepc-agent env PYTHONPATH="$d" PYTHONDONTWRITEBYTECODE=1 "$PY" "$d/scripts/verify_release_health.py"; echo "gate rc=$?"
+  sudo -n -u eeepc-agent env PYTHONPATH="$d" PYTHONDONTWRITEBYTECODE=1 "$PY" -c "import sys; sys.path.insert(0, sys.argv[1]); from scripts.verify_release_health import verify_release_health as v; [print(\"dim\", k, d.get(\"status\")) for k, d in v()[\"health\"][\"dimensions\"].items()]" "$d"'
+```
+
+Both runs read the same live state within minutes of each other, so `cpu` and `queue` can differ from load alone. Always take the baseline at the same time as the candidate, never from an earlier reading. Some dimensions change with the time of day. For example, `host_probe` turns WARN later in the day because the probe runs once a day. A baseline from the morning would make that look like a new WARN. (Verified on 2026-09-27 against live 582bd126: gate rc=0, 10 dimension lines, no temp dir left behind.)
 
 ### At the flip — flip comment
 
