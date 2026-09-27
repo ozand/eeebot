@@ -134,15 +134,19 @@ def render_candidates_block(
     returns them -- order preserved, never re-sorted here) for the
     planner's context, tagging new priorities.
 
-    Each line is ``N. [kind] summary (new)?`` -- the item's own already-
-    capped ``summary`` (see ``demand._make_item``), never the fuller
-    ``evidence``/instructions body a candidate might carry.
+    Each line is ``N. [kind] (id: item_id) summary (new)?`` -- the item's
+    own already-capped ``summary`` (see ``demand._make_item``), never the
+    fuller ``evidence``/instructions body a candidate might carry. The id
+    is rendered because the planner response contract requires
+    ``candidate_id``, and defect declines / candidate wake conditions
+    likewise key on this same stable ``demand.item_id`` hash -- the model
+    has no other way to reconstruct it.
     """
     new_priority_ids = new_priority_ids or set()
     lines = ["## Ranked candidates (trust order: priority > defect > goal-gap > rest)"]
     for idx, item in enumerate(items[:limit], start=1):
         tag = " (new)" if item.get("kind") == "priority" and item.get("id") in new_priority_ids else ""
-        lines.append(f"{idx}. [{item.get('kind', '?')}] {item.get('summary', '')}{tag}")
+        lines.append(f"{idx}. [{item.get('kind', '?')}] (id: {item.get('id', '')}) {item.get('summary', '')}{tag}")
     if len(items) > limit:
         lines.append(f"... and {len(items) - limit} more, not shown")
     return "\n".join(lines)
