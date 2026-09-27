@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -278,12 +279,17 @@ class TestAuthoritativeSpawnEndToEnd:
         monkeypatch.setattr(bridge.time, "monotonic", lambda: now[0])
         repair_ids = []
         finalized = []
+        captured_spawn = []
         import nanobot.agent.subagent as subagent_module
         repair_base = _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)
 
         class _PendingRepair(repair_base):
-            def _build_subagent_telemetry_payload(self, **kwargs):
-                return kwargs
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self._telemetry_dir = Path(bridge.STATE_DIR) / "subagents"
+
+            def _subagent_path(self, task_id):
+                return self._telemetry_dir / f"{task_id}.json"
 
             def _read_subagent_started_at(self, _task_id):
                 return "2026-09-27T12:00:00Z"
@@ -292,14 +298,32 @@ class TestAuthoritativeSpawnEndToEnd:
                 return "2026-09-27T12:01:00Z"
 
             def _write_subagent_telemetry(self, task_id, payload):
-                _write_telemetry(bridge.STATE_DIR, task_id, payload["status"], payload["result"])
-                finalized.append(payload)
+                path = self._subagent_path(task_id)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                if payload.get("stop_reason"):
+                    finalized.append(payload)
 
             async def spawn(self, **kwargs):
-                result = await super().spawn(**kwargs)
+                captured_spawn.append(kwargs.copy())
+                origin = {
+                    "channel": kwargs.get("origin_channel", "cli"),
+                    "chat_id": kwargs.get("origin_chat_id", "direct"),
+                    "session_key": kwargs.get("session_key"),
+                }
+                self._write_subagent_telemetry(self.task_id, {
+                    "task": kwargs["task"], "origin": origin,
+                    "parent_context": {"origin": origin},
+                    "correlation_context": {"cycle_id": "cycle-repair-cancel-telemetry"},
+                    "status": "running", "result": None,
+                    "started_at": self._utc_now(),
+                })
+                async def _pending():
+                    await asyncio.Event().wait()
+                self._running_tasks[self.task_id] = asyncio.create_task(_pending())
                 repair_ids.extend(self._running_tasks)
                 now[0] = 3801.0
-                return result
+                return "pending repair spawned"
 
         monkeypatch.setattr(bridge, "SubagentManager", _PrimaryManager)
         monkeypatch.setattr(subagent_module, "SubagentManager", _PendingRepair)
@@ -309,6 +333,16 @@ class TestAuthoritativeSpawnEndToEnd:
         assert telemetry["status"] == "cancelled"
         assert finalized[0]["stop_reason"] == "repair_skipped_no_budget"
         assert finalized[0]["finished_at"]
+        assert finalized[0]["task"] == captured_spawn[0]["task"]
+        assert finalized[0]["origin"] == {
+            "channel": "cli",
+            "chat_id": "direct",
+            "session_key": None,
+        }
+        assert finalized[0]["parent_context"] == {"origin": finalized[0]["origin"]}
+        assert finalized[0]["correlation_context"] == {
+            "cycle_id": "cycle-repair-cancel-telemetry",
+        }
 
     def test_repair_wait_is_recomputed_immediately_before_wait(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
