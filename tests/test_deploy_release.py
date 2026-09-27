@@ -765,6 +765,39 @@ exit 0
     assert "candidate-gate-v2" in (repo / "commands.log").read_text(encoding="utf-8")
 
 
+def test_verify_only_remote_cleanup_happens_after_gate_invocation(repo, mock_bin, monkeypatch) -> None:
+    """The staged candidate tree must not be removed before remote bash uses it."""
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    remote = _remote_block(script)
+    assert "VERIFY_ONLY=1" in script
+    calls = repo / "ssh-calls.jsonl"
+    log = shlex.quote(str(calls))
+    # Do not run any SSH command. Record the exact command and stdin separately;
+    # assertions below establish that cleanup is sequenced after the gate call.
+    _write_mock(mock_bin / "ssh", f'''printf '%s\\n' "$*" >> {log}
+stdin="$(cat)"
+printf '%s\\n' "$stdin" >> {log}
+case "$*" in *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/old;; *"mktemp -d /tmp/eeebot-verify-gate."*) echo /tmp/gate-candidate;; esac
+''')
+    candidate = repo / "scripts" / "verify_release_health.py"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("print('candidate')\\n", encoding="utf-8")
+    for rel in ("nanobot/__init__.py", "host/eeepc/etc/presets/test.env"):
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    _git("add", ".", cwd=repo, check=True)
+    _git("commit", "-m", "candidate gate fixture", cwd=repo, check=True)
+    monkeypatch.setenv("REPO_ROOT", str(repo))
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", "HEAD"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    logged = calls.read_text(encoding="utf-8").splitlines()
+    gate_call = next(i for i, row in enumerate(logged) if "VERIFY_ONLY=1 bash -s" in row)
+    cleanup_call = next(i for i, row in enumerate(logged) if "rm -rf '/tmp/gate-candidate'" in row)
+    assert cleanup_call > gate_call, logged
+    assert "verify_release_health.py" in logged[gate_call + 1]
+
+
 def test_verify_only_has_no_mutation_or_health_wait_path() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     assert 'VERIFY-ONLY mode: candidate $COMMIT; stream candidate gate only' in script
