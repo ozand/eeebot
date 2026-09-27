@@ -73,9 +73,17 @@ def record_rejected_duplicate(
     })
 
 
-def consume_pending_evidence(state_dir: "Path") -> "dict[str, Any] | None":
-    """Read and clear the pending rejection, if any -- delivered to exactly
-    one following planning session."""
+def peek_pending_evidence(state_dir: "Path") -> "dict[str, Any] | None":
+    """Read-only half of :func:`consume_pending_evidence`: read the
+    pending rejection, if any, WITHOUT clearing it.
+
+    #2011: the planner's prompt needs this before the planner has actually
+    started, but clearing the record must wait until startup is confirmed
+    -- a session that never received the prompt (``SubagentManager``
+    construction or ``spawn()`` failing) must not lose its one delivery of
+    this evidence; pair with :func:`clear_pending_evidence` once startup is
+    confirmed.
+    """
     path = _state_path(state_dir)
     try:
         raw = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
@@ -83,16 +91,37 @@ def consume_pending_evidence(state_dir: "Path") -> "dict[str, Any] | None":
         raw = None
     if not isinstance(raw, dict):
         return None
-    try:
-        path.unlink(missing_ok=True)
-    except Exception:
-        pass
     return {
         "title": raw.get("title", ""),
         "evidence_sha": raw.get("evidence_sha", ""),
         "reason": raw.get("reason", ""),
         "cycle_id": raw.get("cycle_id", ""),
     }
+
+
+def clear_pending_evidence(state_dir: "Path") -> None:
+    """Delete the pending rejection record. Call only once planner startup
+    is confirmed (#2011)."""
+    path = _state_path(state_dir)
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def consume_pending_evidence(state_dir: "Path") -> "dict[str, Any] | None":
+    """Read and clear the pending rejection, if any -- delivered to exactly
+    one following planning session.
+
+    Peeks and clears in one call, for callers that don't need to gate
+    clearing on a later confirmation. A caller that must defer clearing
+    until planner startup is confirmed (#2011) should use
+    :func:`peek_pending_evidence` + :func:`clear_pending_evidence` instead.
+    """
+    evidence = peek_pending_evidence(state_dir)
+    if evidence is not None:
+        clear_pending_evidence(state_dir)
+    return evidence
 
 
 def render_dedup_evidence_block(evidence: "dict[str, Any] | None") -> str:
