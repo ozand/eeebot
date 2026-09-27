@@ -242,6 +242,71 @@ If activation occurred:
 - [ ] live authority status still coherent
 - [ ] rollback target identified and ready
 
+## Release Window: Forecast, Check, External Review
+
+Every behaviour release gets a 24 h window, measured from the flip time of `current`. The release issue records the window's four steps in order. (Architect decision, 2026-09-27; first applied to R1, #1993.)
+
+### Before the flip — forecast
+
+Publish the forecast in the release issue before activation. Each line states:
+
+1. the change it tests;
+2. its **instrument**: the exact rendered string or ledger/telemetry field, with the `file:line` of the writer at the release sha. Name the text the reader actually sees, not an internal enum name;
+3. its **denominator**, for example per success cycle, per unit start or per outcome row, never "per day";
+4. whether the writer is **live on the host now**;
+5. the **baseline** read on the host before the flip;
+6. the expected result.
+
+Rules for the reader:
+- **Rotating streams:** every count reads the live file plus the rotated archives that cover the window. That means `state/ledger/cycles.jsonl` + `cycles-<day>.jsonl.gz`, and `state/bridge/runs.jsonl` + `runs-<day>.jsonl.gz`. This applies to the baseline and to the check. Reading the live file alone undercounted by 4× on 2026-09-27.
+- **The flip cycle:** exclude the cycle running at the flip, and name it by `cycle_id` or run id in the flip comment. Count only cycles first started after the flip.
+- **A guard line:** at least one line must catch harm, not only the intended effect. Examples: unit failures per start from the unit journal; the wall-clock-abort share with a stop threshold.
+- **Changes with no forecast line:** list any change whose trigger is unlikely within 24 h under "no forecast line", with the reason.
+
+Before the flip, the gate precheck runs the release sha against live state: `verify_release_health.py`, with statuses printed per dimension.
+
+**The gate does not enforce health.** `verify_release_health.py` checks imports, rendering and the structure and bounds of fields. It exits 0 whatever `overall` or any dimension status is, so a passing gate is not a health verdict.
+
+The health stop is an **operator step**. Whoever runs the release compares the per-dimension statuses printed by the precheck and records the comparison in the release issue before activating:
+- **Retired sources** (`reward`, `gate`): WARN by construction.
+- **`cpu` and `queue`:** read against the load at that moment.
+- **Any other dimension:** a new WARN or CRIT, compared with the live baseline, means the operator does not activate.
+- **The dimension set differs:** if the candidate prints fewer `dim` lines than the baseline, or a baseline dimension has no line in the candidate's output (for example `memory`, `disk` or `cycle_progress`), the operator does not activate. The gate's own validation checks only `reward` and `gate` among the dimensions, so a lost dimension passes the gate silently, and the operator's count is the only check. Also compare the reverse direction: a new dimension in the candidate is recorded, and if it is WARN or CRIT the operator does not activate.
+
+Automating this comparison inside `--verify-only` is follow-up #2016. Until it lands, use the command below to take the dimension report, and show the comparison in the release issue.
+
+Run the command twice from the dev machine. The first run uses `REF` = the candidate sha. The second uses `REF` = the live release's `SOURCE_COMMIT`, which is the baseline. Each run streams that ref's `scripts/` and `nanobot/` to a temp dir on the host. It runs the gate as `eeepc-agent` and prints the gate result, then one `dim <name> <status>` line per dimension. It then deletes the temp dir. It never touches `current`, units or the release dirs.
+
+```bash
+REF=<sha>; HOST=eeepc-lan
+git archive --format=tar "$REF" scripts nanobot | ssh "ozand@$HOST" '
+  set -u; d=$(mktemp -d /tmp/gate-dims.XXXXXX); trap "sudo -n rm -rf -- \"$d\"" EXIT
+  tar -x -C "$d"; chmod -R a+rX "$d"
+  PY=/opt/eeepc-agent/venv/bin/python; [ -x "$PY" ] || PY=python3
+  sudo -n -u eeepc-agent env PYTHONPATH="$d" PYTHONDONTWRITEBYTECODE=1 "$PY" "$d/scripts/verify_release_health.py"; echo "gate rc=$?"
+  sudo -n -u eeepc-agent env PYTHONPATH="$d" PYTHONDONTWRITEBYTECODE=1 "$PY" -c "import sys; sys.path.insert(0, sys.argv[1]); from scripts.verify_release_health import verify_release_health as v; [print(\"dim\", k, d.get(\"status\")) for k, d in v()[\"health\"][\"dimensions\"].items()]" "$d"'
+```
+
+Both runs read the same live state within minutes of each other, so `cpu` and `queue` can differ from load alone. Always take the baseline at the same time as the candidate, never from an earlier reading. Some dimensions change with the time of day. For example, `host_probe` turns WARN later in the day because the probe runs once a day. A baseline from the morning would make that look like a new WARN. (Verified on 2026-09-27 against live 582bd126: gate rc=0, 10 dimension lines, no temp dir left behind.)
+
+### At the flip — flip comment
+
+Record the flip time and `SOURCE_COMMIT`, the activation self-check result, the publisher drop-ins, and the flip cycle.
+
+### At +24 h — forecast check
+
+Check every line with its own instrument. Before accepting a "broken" verdict, reproduce the count from the writer's literal output and confirm the reader covered the archives. A miss is one of three kinds, and the check names which:
+- a code defect;
+- a wrong forecast: volume, premise or instrument;
+- no qualifying event in the window.
+
+### After the check — external diary review
+
+The architect commissions a ChatGPT review (skill `chatgpt-github-review`, one job at a time). ChatGPT reads the instance repo's public `diary/` for the window, pinned to the instance sha at the window's end. Then the architect reconciles each claim with private host data ChatGPT cannot see: the ledger with archives, `llm_calls`, `bridge/runs`. Each claim is tagged confirmed, refuted or unverifiable. The result goes to the release issue, and findings go to their owners.
+- The prompt carries only public material: diary paths, instance sha, public repo code. Never goal text, host prompts or responses, or env values.
+- The diary records intentions, not a result log. The reconciliation weighs host data over diary numbers.
+- On 2026-09-27 the pairing worked in both directions. ChatGPT's "duplicates are caught too late" became, on host data, "duplicates cost 2 calls each; service-only cycles cost 23% of all calls". ChatGPT's validator finding reproduced (#2004). The architect's own unrotated-ledger error surfaced (#1976 correction).
+
 ## Operational Rule
 
 Prefer this order:
