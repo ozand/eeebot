@@ -115,7 +115,7 @@ def repair_wait_budget_secs(
     # The finalization reserve was already subtracted above; only the p99
     # call budget remains to prove that the repair can begin an LLM call.
     # Comparing against p99 + final here would reserve finalization twice.
-    if remaining_for_repair < get_call_p99_secs():
+    if min(max(0.0, max_wait_secs), remaining_for_repair) < get_call_p99_secs():
         return None
     return min(max(0.0, max_wait_secs), remaining_for_repair)
 

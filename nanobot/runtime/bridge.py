@@ -5906,12 +5906,34 @@ async def _main_impl_body():
                         clock=time.monotonic,
                     )
                     if _repair_wait is None:
+                        _cancelled_ids = list(_repair_mgr._running_tasks)
                         for _repair_task in list(_repair_mgr._running_tasks.values()):
                             _repair_task.cancel()
                         await asyncio.gather(
                             *list(_repair_mgr._running_tasks.values()),
                             return_exceptions=True,
                         )
+                        # A task cancelled before its first event-loop step never
+                        # enters _run_subagent's CancelledError handler; replace
+                        # spawn's synchronous running telemetry explicitly.
+                        for _task_id in _cancelled_ids:
+                            _repair_mgr._write_subagent_telemetry(
+                                _task_id,
+                                _repair_mgr._build_subagent_telemetry_payload(
+                                    task_id=_task_id,
+                                    task='',
+                                    label='repair',
+                                    started_at=_repair_mgr._read_subagent_started_at(_task_id) or _repair_mgr._utc_now(),
+                                    finished_at=_repair_mgr._utc_now(),
+                                    status='cancelled',
+                                    summary='Repair skipped before execution: insufficient wall-clock budget.',
+                                    result='Repair skipped before execution: insufficient wall-clock budget.',
+                                    origin={},
+                                    session_key=None,
+                                    correlation_context={},
+                                    stop_reason='repair_skipped_no_budget',
+                                ),
+                            )
                         append_event(STATE_DIR, {
                             'phase': 'repair_skipped_no_budget',
                             'cycle_id': _cycle_id,
@@ -6792,10 +6814,13 @@ async def _main_impl_body():
                 pass
         try:
             from nanobot.runtime.session_clock import compute_cycle_max_call_gap
-            _candidate_max_call_gap_s = getattr(
-                _last_call_gap_manager,
-                "last_max_call_gap_s",
+            _manager_gaps = [
                 _candidate_max_call_gap_s,
+                getattr(_last_call_gap_manager, "last_max_call_gap_s", None),
+            ]
+            _candidate_max_call_gap_s = max(
+                (gap for gap in _manager_gaps if gap is not None),
+                default=None,
             )
             _candidate_max_call_gap_s = compute_cycle_max_call_gap(
                 STATE_DIR,
