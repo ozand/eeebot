@@ -65,6 +65,14 @@ class TestWallClockSafetyMargin:
         assert repair_wait_budget_secs(543.0, now=0.0) == 243.0
         assert repair_wait_budget_secs(543.0, now=200.0) is None
 
+    def test_repair_is_skipped_when_wait_cap_is_below_p99(self, monkeypatch):
+        monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "1500")
+        monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "300")
+        # 1600 seconds remain after reserve, but the bridge caps an individual
+        # repair wait at 1200 seconds, too short to cover the configured p99.
+        assert repair_wait_budget_secs(1900.0, now=0.0, max_wait_secs=1200.0) is None
+        assert repair_wait_budget_secs(1900.0, now=0.0, max_wait_secs=1500.0) == 1500.0
+
     def test_repair_wait_is_capped_by_shared_wall_and_final_reserve(self):
         deadline = 1000.0
         assert repair_wait_budget_secs(deadline, now=100.0, final_reserve_secs=300.0) == 600.0
