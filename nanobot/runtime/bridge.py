@@ -65,9 +65,15 @@ from nanobot.runtime.existence_index import (  # noqa: E402
     intents_match,
 )
 from nanobot.runtime.goal_review import read_charter_text  # noqa: E402
-from nanobot.runtime.goal_text_utils import filter_completed_priorities_from_goal_text  # noqa: E402
 from nanobot.runtime.lesson_v2 import (  # noqa: E402
     bounded_load_yaml as _bounded_lesson_load,
+)
+from nanobot.runtime.operator_documents import (  # noqa: E402
+    PRIORITY_UNAVAILABLE,
+    PriorityResolution,
+    render_priorities_block,
+    resolve_derived_priorities_split,
+    resolve_operator_priorities,
 )
 from nanobot.runtime.lessons_context import selection_provenance as _lesson_selection_provenance
 from nanobot.runtime.lesson_v2 import (
@@ -227,11 +233,7 @@ def _is_real_result(result: dict) -> bool:
 
 
 def _real_result_ledger_inputs(
-    result_status: str,
-    *,
-    terminal_reason: str | None = None,
-    materialized_from: str = 'bridge_llm_execution',
-    blocker: dict | None = None,
+    result: dict[str, Any],
 ) -> dict:
     """#1748: the same five inputs :func:`_is_real_result` reads from a result
     artifact (``result_status``, ``status``, ``terminal_reason``,
@@ -254,21 +256,14 @@ def _real_result_ledger_inputs(
     the criterion changes -- the boolean is written ALONGSIDE the inputs it
     was computed from, never in place of them.
     """
-    candidate = {
-        'result_status': result_status,
-        'status': result_status,
-        'terminal_reason': terminal_reason,
-        'materialized_from': materialized_from,
-        'blocker': blocker or {},
-    }
-    blocker_reason = (blocker or {}).get('reason') if isinstance(blocker, dict) else None
+    blocker = result.get('blocker') if isinstance(result.get('blocker'), dict) else {}
     return {
-        'result_status': result_status,
-        'status': result_status,
-        'terminal_reason': terminal_reason,
-        'materialized_from': materialized_from,
-        'blocker_reason': blocker_reason,
-        'is_real_result': _is_real_result(candidate),
+        'result_status': result.get('result_status'),
+        'status': result.get('status'),
+        'terminal_reason': result.get('terminal_reason'),
+        'materialized_from': result.get('materialized_from'),
+        'blocker_reason': blocker.get('reason'),
+        'is_real_result': _is_real_result(result),
     }
 
 
@@ -1310,6 +1305,20 @@ def _cleanup_cycle_branch(repo_root: 'Path', cycle_branch: str) -> bool:
 _LATE_PUSH_RESOLUTIONS = frozenset({'pushed_late', 'superseded', 'abandoned'})
 
 
+def _delivery_from_changed_files(files_changed: object) -> tuple[bool, str]:
+    """Resolve delivery conservatively; an empty/unknown path list is unknown."""
+    if not isinstance(files_changed, list) or not files_changed:
+        return False, "unknown"
+    from nanobot.runtime.service_paths import is_service_only
+    return not is_service_only(files_changed), "known"
+
+
+def _mark_integrated_delivery(result: dict) -> None:
+    """Recompute provisional candidate delivery after integration succeeds."""
+    from nanobot.runtime.service_paths import is_delivered
+    result['delivered'] = is_delivered(True, result.get('files_changed'))
+
+
 def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
     """#1709 increment 2: at the same safe cycle-start boundary as
     :func:`_pickup_staged_promotions` (bridge lock held, HEAD on clean
@@ -1359,7 +1368,11 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
             outcome = str(row.get('outcome') or '')
             if outcome == 'push_pending':
                 pending_by_cycle[cid] = row
-            elif outcome in _LATE_PUSH_RESOLUTIONS:
+            elif outcome in _LATE_PUSH_RESOLUTIONS or (
+                outcome == 'partial' and row.get('reason') == 'service_only'
+            ):
+                # A service-only late push is recorded as the ordinary
+                # Rule-C partial outcome; it still resolves its pending push.
                 resolved_cycles.add(cid)
         todo = {cid: row for cid, row in pending_by_cycle.items() if cid not in resolved_cycles}
         if not todo:
@@ -1370,6 +1383,26 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
         for cycle_id, row in todo.items():
             branch = str(row.get('branch') or '')
             main_sha_before = str(row.get('main_sha_before') or '')
+            files_changed = row.get('files_changed')
+            if not isinstance(files_changed, list) or not files_changed:
+                # Older push_pending rows normalized missing path evidence to
+                # []. Recover the candidate diff while its branch still exists;
+                # otherwise successful recovery would delete the only source of
+                # delivery truth and leave the demand permanently unknown.
+                if branch:
+                    recovered = _sp_late.run(
+                        git + ['diff', '--name-only', f'{main_sha_before}...{branch}'],
+                        capture_output=True, text=True,
+                    )
+                    if recovered.returncode == 0:
+                        files_changed = [
+                            path for path in recovered.stdout.splitlines() if path.strip()
+                        ]
+                    else:
+                        files_changed = []
+                else:
+                    files_changed = []
+            delivered, delivery_state = _delivery_from_changed_files(files_changed)
             if not branch:
                 # A push_pending row with no branch name is not something this
                 # boundary can act on either way — skip rather than guess.
@@ -1382,8 +1415,9 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
             if branch_ref.returncode != 0:
                 _v, _vr = _derive_cycle_verdict('abandoned', 'push_pending_branch_missing')
                 record_cycle_outcome(
-                    state_dir, cycle_id, 'abandoned', 'push_pending_branch_missing', [], branch,
-                    verdict=_v, verdict_reason=_vr,
+                    state_dir, cycle_id, 'abandoned', 'push_pending_branch_missing', files_changed, branch,
+                    verdict=_v, verdict_reason=_vr, delivered=False,
+                    delivery_state=delivery_state,
                 )
                 print(f'bridge: late push: {branch} (cycle {cycle_id}) no longer exists — recorded abandoned')
                 resolved_count += 1
@@ -1401,8 +1435,9 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
             if main_sha_before and current_origin_main != main_sha_before:
                 _v, _vr = _derive_cycle_verdict('superseded', 'push_pending_main_moved')
                 record_cycle_outcome(
-                    state_dir, cycle_id, 'superseded', 'push_pending_main_moved', [], branch,
-                    verdict=_v, verdict_reason=_vr,
+                    state_dir, cycle_id, 'superseded', 'push_pending_main_moved', files_changed, branch,
+                    verdict=_v, verdict_reason=_vr, delivered=False,
+                    delivery_state=delivery_state,
                 )
                 print(
                     f"bridge: late push: origin/main moved past {branch}'s recorded base "
@@ -1441,10 +1476,24 @@ def _finish_pending_pushes(repo_root: 'Path', state_dir: 'Path') -> int:
             main_sha_after = _sp_late.run(
                 git + ['rev-parse', 'HEAD'], capture_output=True, text=True,
             ).stdout.strip()
-            _v, _vr = _derive_cycle_verdict('pushed_late', None)
+            # A late-pushed service-only change integrated into Git but did
+            # not deliver work. Preserve the ordinary Rule-C non-delivery
+            # outcome/verdict so futility and recent-failure readers agree.
+            if delivered:
+                late_outcome, late_reason = 'pushed_late', None
+            elif delivery_state == 'known':
+                late_outcome, late_reason = 'partial', 'service_only'
+            else:
+                # Historical rows with no paths are not enough evidence to
+                # classify the branch as service-only or delivered.
+                late_outcome, late_reason = 'pushed_late', 'delivery_unknown'
+            _v, _vr = _derive_cycle_verdict(late_outcome, late_reason)
+            if delivery_state == 'unknown':
+                _v, _vr = 'inconclusive', 'delivery_unknown'
             record_cycle_outcome(
-                state_dir, cycle_id, 'pushed_late', None, [], branch,
-                verdict=_v, verdict_reason=_vr,
+                state_dir, cycle_id, late_outcome, late_reason, files_changed, branch,
+                verdict=_v, verdict_reason=_vr, delivered=delivered,
+                delivery_state=delivery_state,
             )
             _cleanup_cycle_branch(repo_root, branch)
             print(f'bridge: late push: {branch} (cycle {cycle_id}) pushed to main at {main_sha_after}')
@@ -2846,11 +2895,11 @@ def _write_diary_open_entry(repo_root: 'Path', state_dir: 'Path', cycle_id: str,
     from nanobot.runtime import day_diary
     from nanobot.runtime.cycle_ledger import record_diary_open_entry
 
-    # ADR-029 (#1831): "what day is it" for the diary is decided in exactly
-    # ONE place -- day_diary._today() (nanobot/runtime/day_diary.py) --
-    # currently UTC. This call site does not decide a clock itself and must
-    # not gain its own date.today()/datetime.now() call; #1831's migration
-    # changes day_diary._today() alone.
+    # ADR-029 (#1831, #1958): "what day is it" for the diary is decided in
+    # exactly ONE place -- day_diary._today() (nanobot/runtime/day_diary.py) --
+    # resolved on host-local time via day_key.day_key(). This call site does
+    # not decide a clock itself and must not gain its own
+    # date.today()/datetime.now() call.
     relpath = day_diary.diary_relpath()
     if _is_blocked_filename(relpath):
         record_diary_open_entry(state_dir, cycle_id, 'refused', None, f'blocked filename pattern: {relpath}')
@@ -3084,6 +3133,57 @@ def _regenerate_skills_index_if_needed(repo_root: 'Path', files_changed: 'list[s
         return {'outcome': 'commit_failed', 'commit_sha': None, 'reason': f'unexpected error: {exc}'}
 
 
+def _parse_planner_final_response(raw_result: str) -> tuple[dict[str, Any] | None, str, str | None, str | None]:
+    """Parse only a whole JSON object or a single terminal JSON fence.
+
+    Returns parsed object, parse mode, optional format violation, and malformed
+    reason. Per architect decision #1903/#1925, prose may prefix one terminal
+    fence as a recorded format violation, but prose/object extraction is not
+    allowed and fenced examples inside reasoning are not treated as plans.
+    """
+    import json as _json
+
+    try:
+        parsed = _json.loads(raw_result)
+    except _json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed, "strict", None, None
+    if parsed is not None:
+        return None, "malformed", None, "invalid_json"
+
+    fence = re.compile(r"```(?:json)?[ \t]*\r?\n(.*?)```", re.IGNORECASE | re.DOTALL)
+    blocks = list(fence.finditer(raw_result))
+    if not blocks:
+        if "```" in raw_result:
+            return None, "malformed", None, "truncated"
+        # Distinguish embedded JSON examples from plain prose without ever
+        # accepting them as plans.
+        try:
+            decoder = _json.JSONDecoder()
+            for match in re.finditer(r"\{", raw_result):
+                decoder.raw_decode(raw_result[match.start():])
+                return None, "malformed", None, "unfenced_embedded"
+        except _json.JSONDecodeError:
+            pass
+        return None, "malformed", None, "invalid_json"
+    if len(blocks) > 1:
+        return None, "malformed", None, "multiple_blocks"
+    block = blocks[0]
+    if raw_result[block.end():].strip():
+        return None, "malformed", None, "text_after_block"
+    prefix = raw_result[:block.start()]
+    body = block.group(1)
+    try:
+        parsed = _json.loads(body)
+    except _json.JSONDecodeError:
+        return None, "malformed", None, "truncated"
+    if not isinstance(parsed, dict):
+        return None, "malformed", None, "invalid_json"
+    # A complete JSON value with the wrong shape is not truncation.
+    return parsed, "fenced", "prose_prefix" if prefix.strip() else None, None
+
+
 async def _run_planning_session(
     *, provider, bus, config, model: str, state_dir: 'Path', selfevo_repo: 'Path',
     denied_paths: set, cycle_id: str,
@@ -3143,11 +3243,26 @@ async def _run_planning_session(
             'tampered_files': tampered_files or [],
         }
 
+    # ADR-034 rule 3: a missing/unreadable release charter stops the
+    # planning session from running at all — never a silently degraded
+    # "[missing: goals.md]" prompt (role_prompt's own fail-open marker,
+    # meant for logging/diagnostics, not for a role to run on). The
+    # reason is recorded via the same _fail()/record_planning_session()
+    # path every other early-out in this function uses.
+    try:
+        charter_text = read_charter_text(RELEASE_ROOT)
+    except Exception as exc:
+        return _fail('refused', f'charter_unavailable: {exc}')
+    if not charter_text:
+        return _fail('refused', 'no_charter')
+
     git = _git_cmd(selfevo_repo)
     pre_sha = _sp_run.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
 
     try:
-        role_text, _role_meta = role_prompt.build_role_system_prompt('planner', release_root=RELEASE_ROOT)
+        role_text, _role_meta = role_prompt.build_role_system_prompt_or_refuse('planner', release_root=RELEASE_ROOT)
+    except (role_prompt.CharterTooLargeError, role_prompt.RolePromptBuildError) as exc:
+        return _fail('refused', f'role prompt assembly failed: {exc}')
     except Exception as exc:
         return _fail('spawn_failed', f'role prompt assembly failed: {exc}')
 
@@ -3171,12 +3286,29 @@ async def _run_planning_session(
     except Exception as exc:
         return _fail('refused', f'task-writing pre-read failed: {exc}')
 
+    # ADR-034 rule 5 (issue #1940, A4): the planning session sees the
+    # operator's priorities (with Completed) and the derived list (compact:
+    # number/label/vector/source, never the derived instructions body) --
+    # read-only context, never a selection made on the planner's behalf.
+    # One combined section, one shared cap (architect decision, 2026-09-25),
+    # same renderer as the executor's own section.
+    try:
+        _planner_operator_res = resolve_operator_priorities(state_dir, selfevo_repo_root=selfevo_repo)
+    except Exception:
+        _planner_operator_res = PriorityResolution(state=PRIORITY_UNAVAILABLE, reason='resolve_failed')
+    try:
+        _planner_derived_entries, _ = resolve_derived_priorities_split(state_dir, selfevo_repo_root=selfevo_repo)
+    except Exception:
+        _planner_derived_entries = ()
+    _priorities_block = render_priorities_block(_planner_operator_res, _planner_derived_entries)
+
     _planner_task = (
         'The harness pre-read the mandatory release-owned task-writing contract '
         'before this model turn. Apply it to the next increment.\n\n'
         '--- task-writing contract ---\n'
         f'{_task_writing_contract}\n'
         '--- end task-writing contract ---\n\n'
+        f'{_priorities_block}\n\n'
         'Plan the next cycle.'
     )
 
@@ -3294,22 +3426,29 @@ async def _run_planning_session(
         )
         print(f'planning-session: no_plan ({reason})')
         return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': []}
+    # #1903/#1925: keep the role's no-wrapping instruction, but accept one
+    # terminal fenced object as a recorded format violation (never extract a
+    # JSON example from reasoning prose).
+    parsed, parse_mode, format_violation, parse_error = _parse_planner_final_response(raw_result)
+    if parse_error is None and (
+        not isinstance(parsed, dict)
+        or not isinstance(parsed.get('plan'), str)
+        or not parsed['plan'].strip()
+    ):
+        parse_error = 'missing non-empty "plan" field'
     try:
-        # roles/planner.md: "no markdown wrapping" -- same strict contract
-        # strategist.py's own final-response parse enforces; a fenced
-        # response is malformed, not silently unwrapped.
-        if raw_result.startswith('```'):
-            raise ValueError('final response must not be fenced')
-        parsed = json.loads(raw_result)
-        if not isinstance(parsed, dict) or not isinstance(parsed.get('plan'), str) or not parsed['plan'].strip():
-            raise ValueError('missing non-empty "plan" field')
+        if parse_error is not None:
+            raise ValueError(parse_error)
+        assert parsed is not None
         iterations_planned = parsed.get('iterations_planned')
         iterations_planned = int(iterations_planned) if isinstance(iterations_planned, (int, float)) else None
     except Exception as exc:
         record_planning_session(
             state_dir, cycle_id, 'malformed',
             iterations_used=iterations_used, iterations_planned=None,
-            reason=f'unparseable final response: {exc}',
+            reason=f'{exc}',
+            parse_mode=parse_mode,
+            format_violation=format_violation,
             task_writing_read=_task_writing_read,
             task_writing_source=_task_writing_source or None,
             task_writing_path=str(_task_writing_file) if _task_writing_read else None,
@@ -3338,6 +3477,8 @@ async def _run_planning_session(
     record_planning_session(
         state_dir, cycle_id, write_result['outcome'],
         iterations_used=iterations_used, iterations_planned=iterations_planned,
+        parse_mode=parse_mode,
+        format_violation=format_violation,
         reason=write_result.get('reason', ''),
         task_writing_read=True,
         task_writing_source=_task_writing_source,
@@ -3399,11 +3540,35 @@ async def _main_impl_body():
     except Exception:
         pass
 
+    # ADR-034 rule 3 (pA review, #1947): the release charter is a more
+    # fundamental precondition than the active goal id — checked here,
+    # before no_active_goal and before any request is even looked up, so
+    # an absent charter is never masked by the downstream no_active_goal/
+    # already_handled early-outs, and no per-request side effect (diary
+    # open, curator pickup, pending-push repair, further down the loop)
+    # ever runs on a cycle that cannot proceed anyway. Diagnostics, health,
+    # deploy rollback and the publisher (publish_derived_view, just above)
+    # all keep running regardless — only task execution stops here. Same
+    # "print the reason, return 0, no bookkeeping" shape as the
+    # no_active_goal/already_handled/bridge_disabled siblings: no request
+    # has been dequeued yet, so there is nothing to mark handled — the
+    # next run's find_pending_request() sees the same queue unchanged.
+    if read_charter_text(RELEASE_ROOT) == '':
+        print(
+            f'bridge: charter unavailable at {RELEASE_ROOT}; '
+            'aborting run (no_charter), no subagent spawned'
+        )
+        print('no_charter')
+        return 0
+
     if not goal_id:
         print('no_active_goal')
         return 0
 
     BRIDGE_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _bridge_start_mono = time.monotonic()
+    from nanobot.runtime.session_clock import get_bridge_wall_secs
+    _bridge_wall_deadline = _bridge_start_mono + get_bridge_wall_secs()
 
     # #733: bulk-skip pre-spawn duplicates in one run. Each iteration pulls
     # the next pending request; a pre-spawn duplicate (tag-first match or
@@ -3571,7 +3736,7 @@ async def _main_impl_body():
                 record_cycle_outcome(
                     STATE_DIR, _cycle_id, 'failed', fail_reason, [], None,
                     verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
-                    real_result=_real_result_ledger_inputs('blocked'),
+                    real_result=_real_result_ledger_inputs({'result_status': 'blocked', 'status': 'blocked', 'materialized_from': 'bridge_llm_execution'}),
                 )
                 # #721: no cycle branch exists yet on this path — tag at current HEAD.
                 _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'failed')
@@ -3595,40 +3760,30 @@ async def _main_impl_body():
                 req.get('task_title') or req.get('semantic_task_id') or 'subagent review task',
             )
 
-        # #944: read executor mission from immutable goals.md at the release
-        # root when available; fall back to the legacy goal_text.json chain.
-        # Derived priorities (derived_priorities.json) are always folded in.
+        # #944/ADR-034 rule 2: read the executor mission's charter from
+        # immutable goals.md at the release root, via read_charter_text's
+        # resolver (no path constructed here), so build_task's
+        # charter_in_system flag reflects reality. A2 is a mechanical
+        # resolver migration, not a rule-5 rollout: folding the operator's
+        # own priority section and the derived list in under their own
+        # headings (rule 5) is ADR-034 A4's job, on top of A3's
+        # source-tagged split. ADR-034 rule 3: the top-of-run charter gate
+        # above already stopped this cycle if the charter were absent.
+        #
+        # ADR-034 rule 4 (A3): build_task's own `goal_text` PARAMETER has
+        # been dead since #1727 — it `del`s it immediately on arrival at
+        # BOTH of its call sites in this function (here and the repair-turn
+        # call further down), replacing it with the one-line "operator
+        # priority P<n> / not an operator priority" mission statement
+        # instead. There is therefore nothing here to merge derived
+        # priorities into or preserve `source` for — the goal_text/
+        # merged_goal_text/filter_completed_priorities_from_goal_text/
+        # marker-extraction chain this replaced computed a value build_task
+        # discarded on receipt. Removed rather than migrated.
         try:
-            from nanobot.runtime.goal_review import merged_goal_text
             _charter = read_charter_text(RELEASE_ROOT)
         except Exception:
             _charter = ''
-        if _charter:
-            _base_goal_text = _charter
-        else:
-            _base_goal_text = (
-                # Prefer goal_text.json in state dir
-                (load_json(STATE_DIR / 'goals' / 'goal_text.json') or {}).get('text')
-                # Fallback: read from release root (deployed with release)
-                or (load_json(RELEASE_ROOT / 'host' / 'eeepc' / 'etc' / 'goal_text.json') or {}).get('text')
-                or goal_id
-            )
-        try:
-            from nanobot.runtime.goal_review import merged_goal_text
-            goal_text = merged_goal_text(STATE_DIR, _base_goal_text)
-        except Exception:
-            goal_text = _base_goal_text
-        # #712: strip completed "Current priority target" entries (per the #575
-        # git-log done-detection heuristic) before this raw text is injected
-        # verbatim into the subagent prompt below — otherwise a priority the
-        # coordinator already treats as done keeps being shown/re-proposed every
-        # cycle (novelty collapse, per the #711 shadow run).
-        # #773: state_dir enables the completed-demand sidecar check — the
-        # ledger-chain done-truth that text evidence cannot provide for
-        # demand-mode integrations (refined titles carry no verbatim label).
-        goal_text = filter_completed_priorities_from_goal_text(
-            goal_text, _selfevo_repo_check, state_dir=STATE_DIR
-        )
         # #1222: the coordinator's per-goal subagent_policy (preferred_profile /
         # budget_class in goals/registry.json) went with the coordinator; the
         # live registry never carried the key, so this was always the default.
@@ -3638,12 +3793,8 @@ async def _main_impl_body():
         mode_at_start = 'auto' if gate_open else 'strict'
 
         resolved_iterations = resolve_max_tool_iterations(config.agents.defaults.max_tool_iterations)
-        task_goal_text = goal_text
-        if _charter:
-            marker = 'Current priority targets:'
-            task_goal_text = goal_text[goal_text.find(marker):] if marker in goal_text else ''
         task = build_task(
-            req, task_goal_text, report_source, state_dir=STATE_DIR,
+            req, '', report_source, state_dir=STATE_DIR,
             selfevo_repo_root=_selfevo_repo_check,
             max_iterations=resolved_iterations,
             charter_in_system=bool(_charter),
@@ -3691,7 +3842,7 @@ async def _main_impl_body():
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'skipped-duplicate', 'already_done_tag', [], None,
                 verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
-                real_result=_real_result_ledger_inputs('already_done'),
+                real_result=_real_result_ledger_inputs({'result_status': 'already_done', 'status': 'already_done', 'materialized_from': 'bridge_llm_execution'}),
             )
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-already-done')
             _record_diary_fitness_marker(STATE_DIR, _cycle_id)
@@ -3761,6 +3912,7 @@ async def _main_impl_body():
                 commits_pushed=0,
                 result_status='blocked',
                 backlog_title=backlog_title,
+                delivered=False,
                 key_learnings=[
                     f'Task "{_dup_check_title[:60]}" matches recently-failed/rejected proposal '
                     f'"{_recent_failure_title[:60]}" (within {FAILURE_SUPPRESS_HOURS}h); suppressed '
@@ -3783,7 +3935,8 @@ async def _main_impl_body():
                     'cycle_id': str((_failure_evidence or {}).get('cycle_id') or '') if isinstance(_failure_evidence, dict) else '',
                     'error_class': str((_failure_evidence or {}).get('error_class') or 'unknown') if isinstance(_failure_evidence, dict) else 'unknown',
                 },
-                real_result=_real_result_ledger_inputs('blocked'),
+                real_result=_real_result_ledger_inputs({'result_status': 'blocked', 'status': 'blocked', 'materialized_from': 'bridge_llm_execution'}),
+                delivered=False,
             )
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-recent-failure')
@@ -3836,6 +3989,7 @@ async def _main_impl_body():
                 commits_pushed=0,
                 result_status='blocked',
                 backlog_title=backlog_title,
+                delivered=False,
                 key_learnings=[
                     f'Task "{_dup_check_title[:60]}" matched an existing artifact '
                     f'({_existence_match}) via the #750 existence index (semantic '
@@ -3855,7 +4009,8 @@ async def _main_impl_body():
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'skipped-duplicate', 'existence_index_duplicate', [], None,
                 verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
-                real_result=_real_result_ledger_inputs('blocked'),
+                real_result=_real_result_ledger_inputs({'result_status': 'blocked', 'status': 'blocked', 'materialized_from': 'bridge_llm_execution'}),
+                delivered=False,
             )
             # #721: no cycle branch on this path — tag at current HEAD.
             _tag_cycle_post(_selfevo_repo_check, _cycle_id, 'skipped-duplicate', tag_suffix='skipped-existence-duplicate')
@@ -3955,6 +4110,7 @@ async def _main_impl_body():
                 commits_pushed=0,
                 result_status='blocked',
                 backlog_title=backlog_title,
+                delivered=False,
                 key_learnings=[
                     f"Cycle-branch setup failed ({_cycle_setup['reason']}); "
                     'the eeebot-self-evolving checkout was left untouched, no subagent was spawned.',
@@ -3971,7 +4127,8 @@ async def _main_impl_body():
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'failed', _cycle_setup['reason'], [], cycle_branch,
                 verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
-                real_result=_real_result_ledger_inputs('blocked'),
+                real_result=_real_result_ledger_inputs({'result_status': 'blocked', 'status': 'blocked', 'materialized_from': 'bridge_llm_execution'}),
+                delivered=False,
             )
             # #721: cycle branch setup itself failed — tag at main_sha_before
             # (may be '' if even the pre-checkout rev-parse failed; _tag_cycle_post
@@ -4042,6 +4199,7 @@ async def _main_impl_body():
             # #939 Part E: suppress loop-irrelevant builtin skills.
             excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
             telemetry_component="executor",
+            wall_deadline=_bridge_wall_deadline,
         )
 
         # Capture HEAD SHA before spawn so we can count subagent commits correctly,
@@ -4067,6 +4225,8 @@ async def _main_impl_body():
         _auto_committed = False
         _cycle_tier = 'script'  # #812: 'script' | 'runtime' (set by surface classify below)
         _integrated = False
+        _delivered = False
+        _service_only = False
         _rollback_reason: 'str | None' = None
         # #678 F1/F3: mutation-surface / blocked-pattern violations across ALL cycle
         # commits (not just the auto-commit fallback) — populated below once
@@ -4188,15 +4348,15 @@ async def _main_impl_body():
             _subagent_task_id = next(iter(mgr._running_tasks), None)
             if mgr._running_tasks:
                 try:
-                    # Limit subagent execution time to 3000s (50 minutes).
-                    # Coordinator stale threshold is 3600s (60 minutes).
-                    # This ensures the subagent terminates gracefully before coordinator marks it stale.
+                    # Limit subagent execution time to remaining bridge wall allocation.
+                    # #1899: anchored to bridge start time so planning does not displace the deadline.
+                    _remaining_wall = max(60.0, _bridge_wall_deadline - time.monotonic())
                     await asyncio.wait_for(
                         asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True),
-                        timeout=3000.0
+                        timeout=_remaining_wall,
                     )
                 except asyncio.TimeoutError:
-                    print("Subagent execution timed out (limit: 3000s). Cancelling running tasks...")
+                    print("Subagent execution timed out (wall-clock limit). Cancelling running tasks...")
                     for task_obj in list(mgr._running_tasks.values()):
                         task_obj.cancel()
                     # Allow tasks to process CancelledError and write telemetry
@@ -4213,6 +4373,9 @@ async def _main_impl_body():
                     _run_record.set_run_metadata(classification='wall_clock_abort', reason=_run_stop_reason)
                 elif _run_stop_reason == 'model_call_incomplete':
                     _run_record.set_run_metadata(classification='model_call_incomplete', reason=_run_stop_reason)
+                elif _run_stop_reason == 'progress_watchdog_timeout':
+                    _run_record.set_run_metadata(classification='progress_watchdog_abort', reason=_run_stop_reason)
+                    _rollback_reason = 'progress_watchdog_timeout'
             except Exception:
                 pass
             # #1280: the handled_ marker is no longer written here unconditionally
@@ -4355,7 +4518,7 @@ async def _main_impl_body():
                     print(f'smoke: FAIL — spawning repair turn {_repair_attempts}/{_max_repair_attempts}')
                     # Build repair prompt with traceback injected
                     _repair_prompt = build_task(
-                        req, goal_text, report_source,
+                        req, '', report_source,
                         state_dir=STATE_DIR,
                         repair_context=_smoke_output,
                         declared_tool_names=EXECUTOR_TOOL_NAMES,
@@ -4847,6 +5010,9 @@ async def _main_impl_body():
                                     except Exception: pass
                             if _integ['ok']:
                                 _integrated = True
+                                from nanobot.runtime.service_paths import is_delivered as _is_delivered
+                                _delivered = _is_delivered(True, files_changed)
+                                _service_only = not _delivered
                                 try:
                                     from nanobot.runtime import archive as _archive_mod
                                     _archive_mod.record_stepping_stone(
@@ -4898,7 +5064,7 @@ async def _main_impl_body():
             # audit, never counted in fitness scoring).  A non-integrated cycle's
             # reads are discarded — the subagent did not ship, so no fitness credit.
             try:
-                if _integrated:
+                if _delivered:
                     _sf_count = mgr.collect_skill_reads()
                     if _sf_count:
                         print(f'skill-fitness: recorded {_sf_count} SKILL.md read(s) for cycle {_cycle_id}')
@@ -4951,7 +5117,7 @@ async def _main_impl_body():
                 except Exception:
                     pass  # skills-index regeneration errors are non-blocking
 
-            if _integrated and backlog_title and not _is_proposer_request(req):
+            if _delivered and backlog_title and not _is_proposer_request(req):
                 marked = _try_mark_backlog_done(
                     repo_root=_selfevo_repo,
                     backlog_title=backlog_title,
@@ -5075,6 +5241,7 @@ async def _main_impl_body():
             'integrity_changed': locals().get('_integrity_changed', []),
             'rollback_reason': locals().get('_rollback_reason', ''),
             'integrated': locals().get('_integrated', False),
+            'delivered': locals().get('_delivered', False),
             'score': locals().get('cand_score', float('-inf')),
             'cycle_tier': locals().get('_cycle_tier', 'script'),
             'subagent_task_id': locals().get('_subagent_task_id', None),
@@ -5120,12 +5287,21 @@ async def _main_impl_body():
             _explore_n = 1
         else:
             try:
+                from datetime import datetime as _dt_explore
+                from nanobot.runtime import day_key
                 from nanobot.runtime.cycle_ledger import read_events, record_explore_started
-                _today = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).strftime('%Y-%m-%d')
-                _daily_explores = sum(
-                    1 for e in read_events(STATE_DIR)
-                    if e.get('phase') == 'explore_started' and str(e.get('ts', '')).startswith(_today)
-                )
+                _today = day_key.day_key()
+
+                def _is_today_explore(event: dict) -> bool:
+                    if event.get('phase') != 'explore_started' or not event.get('ts'):
+                        return False
+                    try:
+                        parsed_ts = _dt_explore.fromisoformat(str(event['ts']).replace('Z', '+00:00'))
+                        return day_key.day_key(parsed_ts) == _today
+                    except Exception:
+                        return False
+
+                _daily_explores = sum(1 for e in read_events(STATE_DIR) if _is_today_explore(e))
                 if _daily_explores >= 1:
                     _explore_n = 1
                 else:
@@ -5195,6 +5371,7 @@ async def _main_impl_body():
                     )
                     if _integ['ok']:
                         _winner['integrated'] = True
+                        _mark_integrated_delivery(_winner)
                         _winner['rollback_reason'] = ''
                         _winner['main_sha_after'] = _integ.get('main_sha_after', _winner['main_sha_before'])
                         try:
@@ -5229,6 +5406,7 @@ async def _main_impl_body():
     _integrity_changed = _res['integrity_changed']
     _rollback_reason = _res['rollback_reason']
     _integrated = _res['integrated']
+    _delivered = _res.get('delivered', _integrated)
     _cycle_tier = _res.get('cycle_tier', 'script')
     _subagent_task_id = _res.get('subagent_task_id')
     _citation_subagent_task_id = _res.get('citation_subagent_task_id', _subagent_task_id)
@@ -5281,6 +5459,13 @@ async def _main_impl_body():
         # a git commit despite having a dirty working tree.
         'auto_committed': _auto_committed,
     }
+    _result_artifact = {
+        'result_status': _bridge_status,
+        'status': _bridge_status,
+        'materialized_from': 'bridge_llm_execution',
+        'terminal_reason': None,
+        'blocker': {},
+    }
     _write_bridge_completed_result(
         state_dir=STATE_DIR,
         req=req,
@@ -5292,6 +5477,7 @@ async def _main_impl_body():
         result_status=_bridge_status,
         revisions=_revision_record,
         backlog_title=backlog_title,
+        delivered=_delivered,
         rollback=_rollback,
         # #789: a spawn-window fitness-sidecar write is surfaced in the
         # cycle's own learnings so the gate/history reflects the incident.
@@ -5329,7 +5515,13 @@ async def _main_impl_body():
     # rejection, integrate failure) -> failed. Timeouts (subagent-spawn,
     # repair-turn asyncio.wait_for) fold into the normal commit/gate
     # accounting above rather than a distinct outcome.
-    if _integrated:
+    from nanobot.runtime.service_paths import is_service_only as _is_service_only_branch
+    _service_only = bool(_integrated and _is_service_only_branch(files_changed))
+    _delivered = bool(_integrated and not _service_only)
+    if _service_only:
+        _cycle_outcome = 'partial'
+        _rollback_reason = 'service_only'
+    elif _integrated:
         _cycle_outcome = 'success'
     elif _rollback_reason == 'push_pending':
         # #1709: the cycle gate-passed and merged locally; only the final
@@ -5371,18 +5563,24 @@ async def _main_impl_body():
     if _cycle_outcome in ('partial', 'failed', 'model_call_incomplete') and not _rollback_reason:
         if _executor_reported_skipped(STATE_DIR, _subagent_task_id):
             _verdict_reason_hint = 'executor_reported_skipped'
+    if _service_only:
+        _verdict_reason_hint = 'service_only'
     _verdict, _verdict_reason = _derive_cycle_verdict(_cycle_outcome, _verdict_reason_hint)
     try:
         from nanobot import crash_record as _run_record
         if not _res.get('run_stop_reason'):
             _run_record.set_run_metadata(
-                classification=("completion" if _cycle_outcome == "success" else "failed"),
+                # A service-only cycle merged cleanly and the bridge run
+                # completed; only its delivery verdict is non-success.
+                classification=(
+                    "completion" if _cycle_outcome == "success" or _service_only else "failed"
+                ),
                 reason=_rollback_reason or _cycle_outcome,
             )
     except Exception:
         pass
     _lesson_candidate: dict[str, object] | None = None
-    if _integrated:
+    if _delivered:
         _lesson_candidate = {"condition_met": bool(
             _has_meaningful_lesson(_artifact_data)
             and _has_delta_evidence(_artifact_data, repo_root=_selfevo_repo, backlog_title=backlog_title)
@@ -5391,7 +5589,7 @@ async def _main_impl_body():
     # the terminal ledger row is appended. This makes the row self-contained:
     # an observer can distinguish no qualifying condition, a queued candidate,
     # and a refusal without joining a later sink.
-    if _integrated and _lesson_candidate and _lesson_candidate["condition_met"]:
+    if _delivered and _lesson_candidate and _lesson_candidate["condition_met"]:
         try:
             from nanobot.runtime.knowledge_curator import queue_bridge_lesson_candidate
 
@@ -5446,6 +5644,18 @@ async def _main_impl_body():
                     _iterations_used = len(_iters_list)
         except Exception:
             _iterations_used = None
+    _max_call_gap_s: float | None = None
+    try:
+        from nanobot.runtime.session_clock import compute_cycle_max_call_gap
+        _mgr = locals().get("mgr")
+        _fallback = getattr(_mgr, "last_max_call_gap_s", None) if _mgr else None
+        _max_call_gap_s = compute_cycle_max_call_gap(
+            STATE_DIR,
+            _cycle_id,
+            fallback_gap=_fallback,
+        )
+    except Exception:
+        pass
     record_cycle_outcome(
         STATE_DIR, _cycle_id, _cycle_outcome, _rollback_reason, files_changed, cycle_branch,
         lesson_candidate=_lesson_candidate,
@@ -5460,11 +5670,15 @@ async def _main_impl_body():
         iterations_limit=resolved_iterations,
         # iterations_predicted remains None until forecast is implemented
         iterations_predicted=None,
+        max_call_gap_s=_max_call_gap_s,
         # #1709 increment 2: only a push_pending row needs the base it
         # merged against — _finish_pending_pushes reads this back to tell
         # "origin/main unchanged" (safe to redo) from "moved" (superseded).
         main_sha_before=(main_sha_before if _cycle_outcome == 'push_pending' else None),
-        real_result=_real_result_ledger_inputs(_bridge_status),
+        real_result=_real_result_ledger_inputs(_result_artifact),
+        delivered=_delivered,
+        delivery_state="known" if files_changed else "unknown",
+        # #1959 F5: ledger real_result derives from the same artifact payload.
         # #1765: the classifier's decision AND the raw error text, together,
         # so a misclassification is auditable after the fact — never just
         # the derived outcome/reason with the evidence discarded.
@@ -5978,7 +6192,7 @@ _REJECT_REASONS = frozenset({
 _INCONCLUSIVE_REASONS = frozenset({
     'gate_failed', 'mutation_surface_violation', 'blocked_file_present',
     'out_of_band_main_detected', 'switch_base_gate_error',
-    'switch_base_gate_blocked', 'head_on_main_precondition_failed',
+    'switch_base_gate_blocked', 'head_on_main_precondition_failed', 'service_only',
     'no_commit', 'internal_error', 'executor_llm_error', 'model_call_incomplete',
     # #1765: a supplier outage is infra trouble by definition — never
     # upgraded to accept/reject.
@@ -7158,6 +7372,7 @@ def _write_bridge_completed_result(
     backlog_title: str = '',
     rollback: dict | None = None,
     extra_learnings: list[str] | None = None,
+    delivered: bool | None = None,
 ) -> None:
     """Write a real subagent-result-v1 artifact after bridge LLM execution.
 
@@ -7239,6 +7454,7 @@ def _write_bridge_completed_result(
         'created_at': _dt.datetime.now(_dt.timezone.utc).isoformat(),
         'files_changed': files_changed,
         'commits_pushed': commits_pushed,
+        'delivered': bool(delivered) if delivered is not None else None,
         'summary': summary,
         'key_learnings': key_learnings,
         'learning_classification': (

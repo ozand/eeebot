@@ -272,7 +272,7 @@ def test_call_site_actually_gates_on_provenance():
     source = (_Path(__file__).resolve().parents[1] / "nanobot" / "runtime" / "bridge.py").read_text(
         encoding="utf-8", errors="replace"
     )
-    assert "if _integrated and backlog_title and not _is_proposer_request(req):" in source, (
+    assert "if _delivered and backlog_title and not _is_proposer_request(req):" in source, (
         "the completion guard must be gated on provenance at the call site; "
         "testing the predicate alone would pass with the guard still firing"
     )

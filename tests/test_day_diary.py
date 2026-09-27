@@ -21,7 +21,6 @@ from nanobot.agent.tools.filesystem import EditFileTool, WriteFileTool
 from nanobot.runtime import day_diary
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
 
-
 # ---------------------------------------------------------------------------
 # path and format
 # ---------------------------------------------------------------------------
@@ -31,11 +30,14 @@ def test_diary_relpath_is_date_keyed_under_diary_dir():
     assert day_diary.diary_relpath(date(2026, 9, 20)) == "diary/2026-09-20.md"
 
 
-def test_diary_relpath_defaults_to_todays_utc_date():
+def test_diary_relpath_defaults_to_todays_local_date():
     path = day_diary.diary_relpath()
     assert path.startswith("diary/")
     assert path.endswith(".md")
     assert len(path) == len("diary/YYYY-MM-DD.md")
+
+
+test_diary_relpath_defaults_to_todays_utc_date = test_diary_relpath_defaults_to_todays_local_date
 
 
 def test_the_day_boundary_is_decided_in_exactly_one_place():

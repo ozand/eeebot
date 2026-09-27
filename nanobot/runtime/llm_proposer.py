@@ -44,6 +44,7 @@ from typing import Any
 
 from nanobot.runtime.role_prompt import (
     build_role_system_prompt,
+    build_role_system_prompt_or_refuse,
     load_role_text,
     system_chars,
 )
@@ -74,6 +75,16 @@ from nanobot.runtime.goal_text_utils import (
 )
 from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
+from nanobot.runtime.operator_documents import (
+    PRIORITY_UNAVAILABLE,
+    STATE_TEXT,
+    PriorityResolution,
+    format_derived_priority_line,
+    render_priorities_block,
+    resolve_charter,
+    resolve_derived_priorities_split,
+    resolve_operator_priorities,
+)
 from nanobot.runtime.reflection_context import build_reflection_hints
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
 
@@ -236,6 +247,40 @@ _DEFAULT_DEDUP_EXHAUSTION_DAYS = 3
 # response that arrived but was not valid JSON, without changing propose()'s
 # existing dict-or-None public contract.
 _last_propose_failure: str | None = None
+_role_prompt_refusal_state_dir: Path | None = None
+
+
+def _record_role_prompt_refusal(role_body: str, error: Exception, detail: str) -> None:
+    """Record oversized-charter refusal when an explicit state path exists."""
+    try:
+        if not isinstance(error, CharterTooLargeError):
+            return
+        state_dir = _role_prompt_refusal_state_dir
+        if state_dir is not None:
+            _record_proposer_reject(
+                state_dir, "charter_too_large", detail=detail[:500]
+            )
+    except Exception:
+        pass
+
+
+def _build_proposer_role_prompt(role_body: str) -> str | None:
+    """Build the system prompt or fail the proposal attempt with a reason.
+
+    Charter refusal must not become a gateway call with an empty/partial
+    system message; callers observe ``_last_propose_failure`` and record a
+    normal proposer rejection instead.
+    """
+    global _last_propose_failure
+    try:
+        system_content, _fit = build_role_system_prompt_or_refuse(
+            _role_name_for(role_body), role_text=role_body
+        )
+        return system_content
+    except Exception as exc:
+        _last_propose_failure = f"RolePromptBuildFailed: {exc}"
+        _record_role_prompt_refusal(role_body, exc, _last_propose_failure)
+        return None
 
 _PRIORITY_PATTERN = re.compile(
     r"\([A-Za-z]\)\s*Priority\s+(\d+)\s*[—-]\s*(.+?):\s*(.+?)(?=\n\([A-Za-z]\)|\Z)",
@@ -497,51 +542,58 @@ def _release_root_from_env() -> Path:
 
 
 def _load_goal_text(state_dir: Path, release_root: "Path | None" = None) -> str:
-    """Assembled goal text for the proposer context.
+    """The immutable operator charter, verbatim.
 
-    #944: reads the immutable operator charter from ``goals.md`` in the
-    release tree (``release_root`` arg or ``RELEASE_ROOT`` env var).
-    Derived priorities from ``state/goals/derived_priorities.json`` are
-    folded in by :func:`goal_review.merged_goal_text` (#860). Falls back
-    to the pre-#944 behavior (``goal_text.json`` in state dir holds the
-    full text) when ``goals.md`` is absent.
+    #944/ADR-034 rule 2: reads it from ``goals.md`` in the release tree
+    (``release_root`` arg or ``RELEASE_ROOT`` env var) via
+    :func:`operator_documents.resolve_charter` — the charter's one
+    resolver, no path constructed here.
+
+    ADR-034 rule 4 (A3): no longer folds derived priorities into this text
+    (that was ``goal_review.merged_goal_text``, #860/#1665) — a caller that
+    needs the derived list calls :func:`_load_derived_priorities` for it,
+    tagged ``source="derived"``, kept separate rather than merged into one
+    numbered blob. The operator's own priority text is still NOT folded in
+    here either way — that structured, four-state, "intent not instruction"
+    presentation is ADR-034 A4's job, on top of this rule's source-tagged
+    split. ``should_propose`` gates this role on the charter's presence
+    (rule 3); by the time this is called the charter is expected to be
+    there, but a defensive absent/unreadable charter still degrades to
+    ``""`` rather than raising.
     """
-    from nanobot.runtime.goal_review import read_charter_text
-
-    # Resolve release root: explicit arg wins, then RELEASE_ROOT/default.
     if release_root is None:
         release_root = _release_root_from_env()
+    charter_res = resolve_charter(release_root)
+    return charter_res.text if charter_res.state == STATE_TEXT else ""
 
-    charter = read_charter_text(release_root)
-    if charter:
-        raw_text = charter
-    else:
-        # Legacy fallback: goal_text.json holds the full text (charter + priorities).
-        state_path = Path(state_dir) / "goals" / "goal_text.json"
-        if not state_path.is_file():
-            return ""
-        try:
-            data = json.loads(state_path.read_text(encoding="utf-8"))
-        except Exception:
-            return ""
-        if not isinstance(data, dict):
-            return ""
-        raw_text = str(data.get("text") or "")
 
-    if not raw_text:
-        return ""
-
-    # #860/#944: fold in goal_review's harness-owned derived priorities —
-    # the sidecar deploy_release.sh never touches — so a deploy's reseed
-    # can't erase an already-accepted priority out from under the proposer's
-    # context or should_propose's filter_completed path.
+def _load_derived_priorities(
+    state_dir: Path, selfevo_repo: "Path | None" = None
+) -> "tuple[Any, ...]":
+    """The harness's own derived priorities still open (not yet completed),
+    ``source="derived"`` — ADR-034 rule 4: resolved and completed-filtered
+    independently of the charter, never folded into its text. Each entry is
+    an ``operator_documents.PriorityEntry``. Fail-open to ``()``."""
     try:
-        from nanobot.runtime import goal_review
-
-        raw_text = goal_review.merged_goal_text(state_dir, raw_text)
+        open_entries, _completed = resolve_derived_priorities_split(
+            state_dir, selfevo_repo_root=selfevo_repo
+        )
+        return open_entries
     except Exception:
-        pass
-    return raw_text
+        return ()
+
+
+def _render_derived_priorities(entries: "tuple[Any, ...]") -> str:
+    """Render open derived-priority entries as their own labeled block —
+    never mixed into the charter's own numbering (ADR-034 rule 4). Compact
+    form only -- number, label, vector, source -- never the instructions
+    body (ADR-034 Consequences, #1951; #1952 review: this block used to
+    render the body, the same shared :func:`operator_documents.
+    format_derived_priority_line` the executor/planner section uses now
+    keeps this reader from drifting onto a different shape)."""
+    if not entries:
+        return ""
+    return "\n".join(format_derived_priority_line(e) for e in entries)
 
 
 def _priorities_remain(filtered_goal_text: str) -> bool:
@@ -598,15 +650,12 @@ def _recent_proposed_titles(rows: list[dict[str, Any]], n: int = _RECENT_PROPOSE
     return titles
 
 
-# #716: outcomes that mean "attempted, but not integrated" — the opposite of
-# 'success'/'promotion_candidate', which DID land. Deliberately excludes
-# 'skipped-duplicate' (never an attempt at new work; already covered by
-# _recent_proposed_titles/git-log dedup).
-_NON_INTEGRATED_OUTCOMES = frozenset({"failed", "partial", "timeout", "model_call_incomplete", "paused-supplier"})
+# Non-delivery outcomes include supplier outages and incomplete model calls.
+_NOT_DELIVERED_OUTCOMES = frozenset({"failed", "partial", "timeout", "model_call_incomplete", "paused-supplier"})
+
 # #716: gate rollback reasons that mean the cycle produced real work but it
-# was blocked from integrating — same "attempted, not integrated" bucket as
-# _NON_INTEGRATED_OUTCOMES above, just recorded on a 'gate' row instead of an
-# 'outcome' row.
+# was blocked from delivery — same "not delivered" bucket as the outcome set,
+# just recorded on a 'gate' row instead of an 'outcome' row.
 _NON_INTEGRATED_GATE_REASONS = frozenset(
     {"mutation_surface_violation", "blocked_file_present", "gate_failed"}
 )
@@ -617,7 +666,7 @@ def _recent_failed_titles(
     n: int = _RECENT_FAILED_TITLES_N,
     window_cycles: int = _RECENT_FAILED_WINDOW_CYCLES,
 ) -> list[str]:
-    """Titles of recent attempts that were NEVER integrated (#716).
+    """Titles of recent attempts that were never delivered (#716).
 
     Before this, the proposer's context only showed already-INTEGRATED work
     (git log) and its OWN recently-proposed titles
@@ -625,15 +674,17 @@ def _recent_failed_titles(
     already tried that failed, timed out, or was rolled back by the gate, so
     it kept re-proposing the same dead-end idea (observed live: 26
     ``proposer_reject reason=self_dedup`` in one loop run, each a re-hit of
-    an already-attempted-but-failed theme).
+    an already-attempted-but-undelivered theme). A service-only ``partial``
+    is included even though Git merged it: Rule C says it delivered no work.
 
     Joins two ledger phases back to their originating ``'proposed'`` row via
     ``cycle_id`` (the only field that links a title to its terminal result):
 
     - an ``'outcome'`` row whose ``outcome`` is in
-      :data:`_NON_INTEGRATED_OUTCOMES` (``failed``/``partial``/``timeout`` —
-      attempted, but never integrated; ``success`` and
-      ``promotion_candidate`` are excluded on purpose, they DID integrate);
+      :data:`_NOT_DELIVERED_OUTCOMES` (``failed``/``partial``/``timeout`` —
+      attempted but not delivered; ``partial`` also covers an integrated
+      Rule-C service-only branch, while ``success`` and
+      ``promotion_candidate`` mean delivered/integrated work);
     - a ``'gate'`` row that blocked integration (``allowed`` falsy) with a
       rollback ``reason`` in :data:`_NON_INTEGRATED_GATE_REASONS`.
 
@@ -654,7 +705,7 @@ def _recent_failed_titles(
 
         failed_cycle_ids: list[str] = []
         for row in _terminal_rows(rows)[-window_cycles:]:
-            if str(row.get("outcome") or "") in _NON_INTEGRATED_OUTCOMES:
+            if str(row.get("outcome") or "") in _NOT_DELIVERED_OUTCOMES:
                 cycle_id = str(row.get("cycle_id") or "").strip()
                 if cycle_id:
                     failed_cycle_ids.append(cycle_id)
@@ -716,24 +767,25 @@ def _last_k_all_duplicate(state_dir: Path, k: int = _DUP_STREAK_K) -> bool:
 _idle_recorded_this_process = False
 
 
-def _record_idle(state_dir: Path) -> None:
+def _record_idle(state_dir: Path, reason: str = "no_demand") -> None:
     """#760 idle heartbeat: a distinct ``'idle'`` ledger phase recording that
-    the cycle deliberately made ZERO LLM calls because there was no demand —
-    structurally different from ``proposer_skip`` (an LLM call was made and
-    the model declined) and from silence (which is indistinguishable from a
-    crash). Fail-open (``append_event`` is best-effort); no ``cycle_id`` —
-    an idle attempt makes zero LLM calls, so there is no paid call to join it
-    to (#1374 deliberately leaves it without one). Recorded from inside
+    the cycle deliberately made ZERO LLM calls because there was no demand
+    (or, ADR-034 rule 3, no release charter) — structurally different from
+    ``proposer_skip`` (an LLM call was made and the model declined) and from
+    silence (which is indistinguishable from a crash). Fail-open
+    (``append_event`` is best-effort); no ``cycle_id`` — an idle attempt
+    makes zero LLM calls, so there is no paid call to join it to (#1374
+    deliberately leaves it without one). Recorded from inside
     ``should_propose`` (not ``maybe_propose``) because ``should_propose`` is
-    the single point that knows the failure reason is "no demand" rather
-    than e.g. the anti-stacking guard — recording from ``maybe_propose``
-    would force ``should_propose`` to grow a richer return type or the
-    demand to be collected twice."""
+    the single point that knows the failure reason is "no demand"/"no
+    charter" rather than e.g. the anti-stacking guard — recording from
+    ``maybe_propose`` would force ``should_propose`` to grow a richer return
+    type or the demand to be collected twice."""
     global _idle_recorded_this_process
     if _idle_recorded_this_process:
         return
     _idle_recorded_this_process = True
-    append_event(state_dir, {"phase": "idle", "reason": "no_demand"})
+    append_event(state_dir, {"phase": "idle", "reason": reason})
 
 
 def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
@@ -791,6 +843,13 @@ def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
             return False
         if _has_queued_proposer_request(state_dir):
             return False
+        # ADR-034 rule 3: a missing/unreadable release charter stops this
+        # role entirely, with the reason recorded — both the demand-driven
+        # branch and the pre-#760 supply path below assume a charter is
+        # available; neither checked for one before.
+        if resolve_charter(_release_root_from_env()).state != STATE_TEXT:
+            _record_idle(state_dir, reason="no_charter")
+            return False
         if demand.demand_driven_enabled():
             # #760: demand gate. Both prior gates passed, so an empty
             # collection means "no demand" is the ONLY reason not to
@@ -800,20 +859,12 @@ def should_propose(state_dir: Path, selfevo_repo: Path | None) -> bool:
                 return True
             _record_idle(state_dir)
             return False
-        goal_text_path = state_dir / "goals" / "goal_text.json"
-        # #944: the pre-#760 supply path also works when goals.md exists
-        # at the release root (RELEASE_ROOT env), even without goal_text.json.
-        _release_root = _release_root_from_env()
-        _has_goals_md = (_release_root / "goals.md").is_file()
-        if not goal_text_path.is_file() and not _has_goals_md:
-            return False
         if _queue_effectively_empty(state_dir):
             return True
-        raw_goal_text = _load_goal_text(state_dir)
-        filtered = filter_completed_priorities_from_goal_text(
-            raw_goal_text, selfevo_repo, state_dir=state_dir
-        )
-        if not _priorities_remain(filtered):
+        # ADR-034 rule 4: "priorities remain" was always about the derived
+        # list (the charter text itself never carries a priority section);
+        # resolved directly rather than via the retired merged-text check.
+        if not _load_derived_priorities(state_dir, selfevo_repo):
             return True
         return _last_k_all_duplicate(state_dir)
     except Exception:
@@ -975,9 +1026,18 @@ def _system_map_inventory_section(
         return ""
     try:
         repo = Path(selfevo_repo)
-        map_path = repo / "docs" / "SYSTEM_MAP.md"
+        map_path: Path | None = None
+        if state_dir:
+            sp = system_map.system_map_path(state_dir)
+            if sp.is_file():
+                map_path = sp
+        if map_path is None:
+            rp = repo / "docs" / "SYSTEM_MAP.md"
+            if rp.is_file():
+                map_path = rp
+
         lines: list[str] = []
-        if map_path.is_file():
+        if map_path is not None and map_path.is_file():
             lines = system_map.parse_inventory_section(map_path.read_text(encoding="utf-8"))
         if not lines:
             # Absent file, empty file, or a foreign-format map our parser
@@ -1095,9 +1155,10 @@ def _inventory_query(
 
 def _demand_section(demand_items: list[dict[str, str]]) -> str:
     """Bounded ``## Demand`` body (#760): one block per item with kind,
-    stable id, summary, and quoted evidence, capped at
-    :data:`_MAX_DEMAND_CHARS` (same separately-bounded-section precedent as
-    :data:`_MAX_INVENTORY_CHARS`). Fail-open: returns ``""`` on any error."""
+    stable id, summary, quoted evidence, and (ADR-034 rule 4) source when
+    the item carries one, capped at :data:`_MAX_DEMAND_CHARS` (same
+    separately-bounded-section precedent as :data:`_MAX_INVENTORY_CHARS`).
+    Fail-open: returns ``""`` on any error."""
     try:
         lines: list[str] = []
         for item in demand_items:
@@ -1107,6 +1168,16 @@ def _demand_section(demand_items: list[dict[str, str]]) -> str:
             if not summary:
                 continue
             line = f"- [{item.get('id') or '?'}] ({item.get('kind') or '?'}) {summary}"
+            # ADR-034 rule 4: a "priority" item's real source (operator vs
+            # self-derived, demand._priority_items' own PriorityEntry.source)
+            # — never rendered for kinds that carry no provenance (empty
+            # string default) and never a guess. This is NOT the operator's
+            # own priority text/block reaching this prompt — that remains
+            # ADR-034 A4's (#1940) job; only the label on a demand item this
+            # section already lists.
+            provenance = str(item.get("provenance") or "").strip()
+            if provenance:
+                line += f" [source: {provenance}]"
             evidence = str(item.get("evidence") or "").strip()
             if evidence:
                 line += f' — evidence: "{evidence}"'
@@ -1627,6 +1698,23 @@ def build_context(
         filtered_goal = filter_completed_priorities_from_goal_text(
             raw_goal_text, selfevo_repo, state_dir=state_dir
         )
+        # ADR-034 rule 4: derived priorities are resolved and completed-
+        # filtered independently, rendered under their own heading — never
+        # folded into the charter's own "## Goal" text (that was
+        # goal_review.merged_goal_text, #860/#1665).
+        derived_text = _render_derived_priorities(_load_derived_priorities(state_dir, selfevo_repo))
+        # ADR-034 rule 5 (#1940, A4): the operator's OWN priority list (with
+        # its Completed headers), which nothing in this context previously
+        # showed -- "## Goal" above is the release charter, not this
+        # document. This context already renders derived priorities in its
+        # own section right below (derived_text above); the operator
+        # section here is independent of it -- own heading, own budget,
+        # never sharing a cap (#1952 review).
+        try:
+            _operator_priorities_res = resolve_operator_priorities(state_dir, selfevo_repo_root=selfevo_repo)
+        except Exception:
+            _operator_priorities_res = PriorityResolution(state=PRIORITY_UNAVAILABLE, reason="resolve_failed")
+        operator_priorities_block = render_priorities_block(_operator_priorities_res, ())
         ledger_rows = _load_ledger_rows(state_dir)
         digest_lines = _digest_ledger(ledger_rows)
         recent_proposed_titles = _recent_proposed_titles(ledger_rows)
@@ -1658,8 +1746,13 @@ def build_context(
         # dedup caught them, but the wasted LLM call already happened). Now only
         # the blob is trimmed; guardrails + surface_rule are appended after.
         blob_parts = [
-            "## Goal (filtered — already-completed priorities removed)",
+            "## Goal (charter, filtered — already-completed priorities removed)",
             filtered_goal.strip() or "(no goal text available)",
+            "",
+            operator_priorities_block,
+            "",
+            "## Derived priorities (source: derived; filtered — already-completed removed)",
+            derived_text or "(none)",
             "",
             "## Recent cycle outcomes (most recent last — do not repeat done/failed work)",
             "\n".join(f"- {line}" for line in digest_lines) or "(no ledger history yet)",
@@ -1914,8 +2007,9 @@ def propose(
     Fails open (returns ``None``) on any missing config, network error, or
     unparseable reply — never raises.
     """
-    global _last_propose_failure
+    global _last_propose_failure, _role_prompt_refusal_state_dir
     _last_propose_failure = None
+    _role_prompt_refusal_state_dir = None
     try:
         from openai import OpenAI
     except Exception as exc:
@@ -1935,10 +2029,12 @@ def propose(
         )
     # #1729: identity (short form) + soul + charter are prepended once, from
     # the release files; ``system_prompt`` carries only the role body.
+    state_dir = os.environ.get("STATE_DIR", "").strip()
+    _role_prompt_refusal_state_dir = Path(state_dir) if state_dir else None
     role_body = system_prompt or _PROPOSER_SYSTEM_PROMPT
-    system_content, _role_fit = build_role_system_prompt(
-        _role_name_for(role_body), role_text=role_body
-    )
+    system_content = _build_proposer_role_prompt(role_body)
+    if system_content is None:
+        return None
     try:
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         create_kwargs: dict[str, Any] = dict(
@@ -2010,8 +2106,9 @@ def propose_multi(
     "the call failed"; :data:`_last_propose_failure` still distinguishes
     them for the caller exactly as it does for :func:`propose`.
     """
-    global _last_propose_failure
+    global _last_propose_failure, _role_prompt_refusal_state_dir
     _last_propose_failure = None
+    _role_prompt_refusal_state_dir = None
     try:
         from openai import OpenAI
     except Exception as exc:
@@ -2028,10 +2125,12 @@ def propose_multi(
         "Reply with a JSON array of exactly that many objects, each shaped "
         "like the single-object schema described above."
     )
+    state_dir = os.environ.get("STATE_DIR", "").strip()
+    _role_prompt_refusal_state_dir = Path(state_dir) if state_dir else None
     role_body = system_prompt or _PROPOSER_SYSTEM_PROMPT
-    system_content, _role_fit = build_role_system_prompt(
-        _role_name_for(role_body), role_text=role_body
-    )
+    system_content = _build_proposer_role_prompt(role_body)
+    if system_content is None:
+        return None
     try:
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         create_kwargs: dict[str, Any] = dict(
@@ -2346,49 +2445,6 @@ for _prompt in (_PROPOSER_SYSTEM_PROMPT, _DEMAND_PROPOSER_SYSTEM_PROMPT):
         MUTATION_POLICY.validate_rendered_surfaces(_MUTATION_SURFACE_MARKER)
 
 
-_PERMANENT_DEDUP_MAX_COMMITS = 3000
-
-
-def _all_built_subjects(selfevo_repo: Path | None) -> str:
-    """Full-history commit subjects of the instance repo (#834 permanent novelty).
-
-    Unlike :func:`goal_text_utils._recent_git_log`'s 14-day window, this is the
-    complete catalogue of everything ever integrated into ``main``, so a
-    throwaway script cannot be silently rebuilt once its creation commit ages
-    out of the recency window. Bounded to the most recent
-    :data:`_PERMANENT_DEDUP_MAX_COMMITS` subjects. Fail-open: ``""`` on any
-    error.
-    """
-    if not selfevo_repo:
-        return ""
-    import subprocess as _sp_hist
-
-    repo = Path(selfevo_repo)
-    try:
-        raw = _sp_hist.check_output(
-            [
-                "git", "-c", f"safe.directory={repo}", "-C", str(repo),
-                "log",
-                "--invert-grep", "-i",
-                "--grep=^Selfevo-Residual: true",
-                "--grep=^selfevo: auto-commit uncommitted subagent work",
-                "--grep=^selfevo: auto-commit residual state",
-                "--format=%s", f"-n{_PERMANENT_DEDUP_MAX_COMMITS}",
-            ],
-            stderr=_sp_hist.DEVNULL,
-            timeout=15,
-        ).decode(errors="replace")
-        return "\n".join(
-            line for line in raw.splitlines()
-            if not line.strip().lower().startswith((
-                "selfevo: auto-commit residual state",
-                "selfevo: auto-commit uncommitted subagent work",
-            ))
-        )
-    except Exception:
-        return ""
-
-
 def _proposal_creates_new_file(selfevo_repo: Path | None, proposal: dict[str, Any]) -> bool:
     """True when the proposal would create a target_path that does NOT yet exist
     in the instance repo (#834).
@@ -2414,6 +2470,64 @@ def _proposal_creates_new_file(selfevo_repo: Path | None, proposal: dict[str, An
     except Exception:
         return False
     return not candidate.exists()
+
+
+def _latest_non_residual_commit_for_path(
+    selfevo_repo: Path | None, target_path: str,
+) -> tuple[str, str] | None:
+    """Return the latest non-residual commit touching ``target_path``."""
+    if not selfevo_repo or not target_path:
+        return None
+    import subprocess as _sp
+
+    repo = Path(selfevo_repo)
+    try:
+        raw = _sp.check_output(
+            [
+                "git", "-c", f"safe.directory={repo}", "-C", str(repo),
+                "log", "-n1", "--format=%H%x1f%s", "--invert-grep", "-i",
+                "--grep=^Selfevo-Residual: true",
+                "--grep=^selfevo: auto-commit uncommitted subagent work",
+                "--grep=^selfevo: auto-commit residual state",
+                "--", target_path,
+            ],
+            stderr=_sp.DEVNULL,
+            timeout=10,
+        ).decode(errors="replace").strip()
+        if not raw:
+            return None
+        sha, subject = raw.split("\x1f", 1)
+        if subject.lower().startswith((
+            "selfevo: auto-commit uncommitted subagent work",
+            "selfevo: auto-commit residual state",
+        )):
+            return None
+        return sha[:12], subject
+    except Exception:
+        return None
+
+
+def _dedup_evidence_context(
+    selfevo_repo: Path | None,
+    proposal: dict[str, Any],
+    feedback: str,
+    matched_against: str,
+) -> tuple[str, str | None]:
+    """Add non-verdict evidence for existing-path dedup rejections."""
+    reason = _dedup_reject_reason(matched_against)
+    if reason != "self_dedup" or _proposal_creates_new_file(selfevo_repo, proposal):
+        return feedback, None
+    target = str(proposal.get("target_path") or "").strip()
+    commit = _latest_non_residual_commit_for_path(selfevo_repo, target)
+    if commit is None:
+        return feedback, None
+    sha, subject = commit
+    return (
+        f"{feedback} Evidence only: commit {sha} '{subject}' already touched {target}; "
+        "this may relate to your proposal. If you propose it, state how the new "
+        "requirement differs from what was done.",
+        f"{sha}:{target}",
+    )
 
 
 def _subject_dedup_enabled() -> bool:
@@ -2875,30 +2989,11 @@ def _is_duplicate_proposal(
                     "preferring the numbered Current priority targets"
                 ), f"refuted-hypothesis:{matched_refuted}"
 
-        # #834 permanent novelty guard: for proposals that CREATE A NEW file,
-        # also reject against the full commit history (not just the 14-day
-        # window above), so a throwaway artifact is not silently rebuilt once
-        # its creation commit ages out. Edits/improvements to an existing file
-        # are iteration, not churn, and are never blocked here.
+        # For an absent target, repository-wide subject history is evidence,
+        # not proof that the target is already done. Keep #903's distinct
+        # subject-duplicate rule below: it points to an existing script to extend.
         creates_new_file = _proposal_creates_new_file(selfevo_repo, proposal)
         if creates_new_file:
-            built_subjects = _all_built_subjects(selfevo_repo)
-            if built_subjects and _title_already_done_in_git_log(title, built_subjects):
-                matched_built = next(
-                    (
-                        line.strip()
-                        for line in built_subjects.splitlines()
-                        if line.strip() and _title_already_done_in_git_log(title, line)
-                    ),
-                    "",
-                )
-                return True, (
-                    f"your proposal '{title}' re-creates an artifact that "
-                    "ALREADY EXISTS in the repo history (built previously); "
-                    "improve/reuse the existing one, or propose genuinely NEW "
-                    "work from the numbered Current priority targets"
-                ), matched_built
-
             # #903: verb-invariant subject dedup. Complements the exact-title
             # #834 guard above — a paraphrase (check/audit/analyze) clears
             # the lexical word-overlap threshold, so this compares SUBJECT
@@ -3018,6 +3113,7 @@ def _record_proposer_reject(
     task_title: str = "",
     target_path: str = "",
     matched_against: str = "",
+    evidence_commit: str | None = None,
     detail: str = "",
     demand_id: str = "",
 ) -> None:
@@ -3049,6 +3145,8 @@ def _record_proposer_reject(
             event["target_path"] = target_path.strip()[:200]
         if matched_against:
             event["matched_against"] = matched_against.strip()[:200]
+        if evidence_commit:
+            event["evidence_commit"] = evidence_commit.strip()[:200]
         if detail:
             event["detail"] = detail.strip()[:200]
         if demand_id:
@@ -3657,8 +3755,11 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
             return None
 
         dup, dup_reason, dup_matched = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
+        retry_feedback, _ = _dedup_evidence_context(
+            selfevo_repo, proposal, dup_reason, dup_matched
+        ) if dup else (dup_reason, None)
         if dup and calls_made < _MAX_LLM_CALLS:
-            proposal = _call_propose(rejection_reason=dup_reason)
+            proposal = _call_propose(rejection_reason=retry_feedback)
             calls_made += 1
             _stamp_assigned_hypothesis_ref(proposal)
             # #760 follow-up (live 2026-07-15 20:42-21:02Z): a model told
@@ -3684,23 +3785,18 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                 return None
             dup, dup_reason, dup_matched = _is_duplicate_proposal(state_dir, selfevo_repo, proposal)
         if dup:
-            # #762: double self-dedup rejection — the live-saturation case
-            # (every cycle burning 2-3 LLM calls with zero ledger trace).
-            # matched_against records what it actually matched (#757 spirit).
-            # #760: demand_id lets demand.py's exhaustion tracking stop
-            # presenting an item whose proposals keep self-dedup-rejecting.
-            # #1184/#1335: a futile-surface or enhancement-without-caller
-            # refusal is its own ledger reason so a suppressed surface is
-            # distinguishable from title dedup.
             reject_reason = _dedup_reject_reason(dup_matched)
+            target_path = str(proposal.get("target_path") or "")
+            rejection_feedback, evidence_commit = _dedup_evidence_context(
+                selfevo_repo, proposal, dup_reason, dup_matched
+            )
             _record_proposer_reject(
                 state_dir,
                 reject_reason,
                 task_title=str(proposal.get("task_title") or ""),
-                target_path=str(proposal.get("target_path") or ""),
+                target_path=target_path,
                 matched_against=dup_matched,
-                # #1335: the deferral's steer names the caller index it read
-                # (files scanned, roots), so a row proves what was looked at.
+                evidence_commit=evidence_commit,
                 detail=dup_reason if reject_reason == enhancement_gate.REASON else "",
                 demand_id=_candidate_identity(proposal),
             )

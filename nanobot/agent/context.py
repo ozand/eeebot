@@ -16,6 +16,16 @@ from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 from nanobot.runtime import day_clock
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
+from nanobot.runtime.operator_documents import (
+    PRIORITIES_BLOCK_CAP,
+    PRIORITY_UNAVAILABLE,
+    STATE_TEXT,
+    PriorityResolution,
+    render_priorities_block,
+    resolve_charter,
+    resolve_derived_priorities_split,
+    resolve_operator_priorities,
+)
 from nanobot.runtime.scorecard import SCORECARD_SCHEMA
 from nanobot.utils.helpers import (
     build_assistant_message,
@@ -373,6 +383,15 @@ Skills with available="false" need dependencies installed first - you can try in
                 effective_cap = cap
             if root is None:
                 text, meta = f"[missing: {filename}]", {"missing": True, "truncated": False}
+            elif root_kind == "release" and filename == "goals.md":
+                # ADR-034 rule 2: the charter's one root is
+                # ``<release root>/goals.md``, obtained via
+                # ``operator_documents.resolve_charter`` — never a second,
+                # hand-built path to it. Same (text, meta) contract as
+                # ``load_block`` (heading, pooled cap, line-boundary
+                # truncation with a notice), so the pool accounting below
+                # is unaffected.
+                text, meta = self._load_charter_block(root, effective_cap)
             else:
                 text, meta = self.load_block(filename, Path(root) / filename, effective_cap, required)
             if root_kind == "release":
@@ -386,6 +405,30 @@ Skills with available="false" need dependencies installed first - you can try in
         self._release_pool_usage = pool_usage
         self._release_pool_left = pool_left
         return sections, missing, truncated
+
+    @staticmethod
+    def _load_charter_block(root: "Path | None", cap: int) -> tuple[str, dict[str, Any]]:
+        """ADR-034 rule 2: same ``(text, meta)`` contract as
+        :func:`nanobot.agent.block_loader.load_block` for ``goals.md``, but
+        obtained via :func:`operator_documents.resolve_charter` instead of
+        a second, hand-built path to the release charter."""
+        name = "goals.md"
+        if root is None:
+            marker = f"[missing: {name}]"
+            return marker, {"missing": True, "truncated": False}
+        res = resolve_charter(root)
+        if res.state != STATE_TEXT:
+            marker = f"[missing: {name}]"
+            return marker, {"missing": True, "truncated": False}
+        heading = f"## {name}\n\n"
+        text = heading + res.text
+        if len(text) <= cap:
+            return text, {"missing": False, "truncated": False}
+        notice = f"\n\n[{name} truncated at {cap} chars; read the file for the rest]"
+        budget = max(0, cap - len(heading) - len(notice))
+        trimmed_body = trim_lines(res.text, budget)
+        text = heading + trimmed_body + notice
+        return text, {"missing": False, "truncated": True}
 
     @staticmethod
     def _scorecard_number(section: Any, key: str) -> "int | float | None":
@@ -588,6 +631,48 @@ Skills with available="false" need dependencies installed first - you can try in
         )
         return self._trim_lines(text, self._POSITION_BLOCK_CAP)
 
+    def _load_priorities_block(self) -> str:
+        """ADR-034 rule 5 (issue #1940, A4; architect decision 2026-09-24
+        and 2026-09-25): the executor's own operator-priorities + compact
+        derived-priorities section.
+
+        Entirely OUTSIDE :data:`_RELEASE_POOL_CHARS` and its floors -- the
+        release pool's own measured headroom (129 chars, #1940 pG baseline
+        comment) cannot fit even the one-line ``all_completed`` state
+        reliably once anything upstream of it grows, so this section draws
+        from nothing that block already competes for. It is still counted
+        in :data:`MAX_SYSTEM_PROMPT_CHARS` like every other section (the
+        architect's decision, not a second, uncounted budget), bounded at
+        :data:`operator_documents.PRIORITIES_BLOCK_CAP` chars for BOTH the
+        operator and the (compact) derived content together -- past that
+        the renderer replaces the whole thing with an ``unavailable``/
+        ``oversize`` marker rather than truncating (ADR-034 rule 3,
+        extended to this rendered block). #1952 review history: derived is
+        rendered compactly (number/label/vector/source, never the
+        instructions body) specifically so a real-sized derived list still
+        fits this one shared cap alongside the operator section -- see
+        :func:`operator_documents.render_priorities_block`.
+
+        ``None`` state_dir (every caller but the self-evolving bridge, same
+        convention as :meth:`_load_scorecard_block`) renders the section
+        ``unavailable`` rather than resolving anything.
+        """
+        if self.state_dir is None:
+            operator_res = PriorityResolution(state=PRIORITY_UNAVAILABLE, reason="no_state_dir")
+            derived_entries: "tuple[Any, ...]" = ()
+        else:
+            try:
+                operator_res = resolve_operator_priorities(self.state_dir, selfevo_repo_root=self.workspace)
+            except Exception:
+                operator_res = PriorityResolution(state=PRIORITY_UNAVAILABLE, reason="resolve_failed")
+            try:
+                derived_entries, _completed = resolve_derived_priorities_split(
+                    self.state_dir, selfevo_repo_root=self.workspace,
+                )
+            except Exception:
+                derived_entries = ()
+        return render_priorities_block(operator_res, derived_entries, cap=PRIORITIES_BLOCK_CAP)
+
     def _build_loop_system_prompt(
         self,
         *,
@@ -609,6 +694,13 @@ Skills with available="false" need dependencies installed first - you can try in
         excluded from it, so the section was always empty under this
         profile."""
         sections, missing, truncated = self._load_ontology_blocks()
+
+        # ADR-034 rule 5 (#1940, A4): operator priorities (with compact
+        # derived after it) -- right after the charter ("operator first"),
+        # entirely outside the release pool those ontology blocks just drew
+        # from. ONE section, one shared cap (architect decision, 2026-09-25):
+        # see :meth:`_load_priorities_block`.
+        sections.append(("priorities", self._load_priorities_block()))
 
         # #1857: the resident catalogue is retired -- 1 cycle of 24 ever
         # read it (#1805), at ~4,048 chars every cycle paid whether or not

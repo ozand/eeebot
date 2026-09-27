@@ -47,7 +47,7 @@ from typing import Any, Callable, Iterable
 
 from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
 from nanobot.providers.model_window import resolve_context_window
-from nanobot.runtime.role_prompt import build_role_system_prompt, system_chars
+from nanobot.runtime.role_prompt import build_role_system_prompt_or_refuse, system_chars
 from nanobot.runtime.lesson_v2 import (
     append_curator_decision,
     atomic_write_yaml,
@@ -822,7 +822,7 @@ def _messages(lessons: list[dict[str, Any]], index: str, facts: str) -> list[dic
     if len(body) > MAX_INPUT_CHARS:
         raise ValueError("curator lesson batch was not fitted to complete items")
     # #1729 (ADR-022 rule 2): identity (short form) + soul + roles/curator.md.
-    system, _role_fit = build_role_system_prompt("curator")
+    system, _role_fit = build_role_system_prompt_or_refuse("curator")
     user = f"NEW LESSONS:\n{body}\n\nKB INDEXES:\n{index[:24000]}\n\nCITED ARTIFACT BODIES:\n{facts[:12000]}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -2723,7 +2723,14 @@ def run_curation(
         return result
     try:
         model = resolve_model("curator", strip_openai=True)
-        messages = _messages(entries, _read_index(workspace), "")
+        try:
+            messages = _messages(entries, _read_index(workspace), "")
+        except Exception as exc:
+            _append_jsonl(state_dir / "curator" / "errors.jsonl", {
+                "timestamp": _now(), "error": f"role_prompt_refused: {exc}",
+            })
+            return {"ok": False, "processed": 0, "writes": 0, "staged": [],
+                    "error": f"role_prompt_refused: {exc}"}
         result = llm(messages, model) if llm else _default_llm(messages, model)
         if inspect.isawaitable(result):
             result = asyncio.run(result)
@@ -2741,7 +2748,15 @@ def run_curation(
         facts = _cited_bodies(workspace, decisions)
         if facts:
             caller = llm or _default_llm
-            result = caller(_messages(entries, _read_index(workspace), facts), model)
+            try:
+                retry_messages = _messages(entries, _read_index(workspace), facts)
+            except Exception as exc:
+                _append_jsonl(state_dir / "curator" / "errors.jsonl", {
+                    "timestamp": _now(), "error": f"role_prompt_refused: {exc}",
+                })
+                return {"ok": False, "processed": 0, "writes": 0, "staged": [],
+                        "error": f"role_prompt_refused: {exc}"}
+            result = caller(retry_messages, model)
             if inspect.isawaitable(result):
                 result = asyncio.run(result)
             decisions, diag = _parse_output_with_diag(result)

@@ -18,6 +18,28 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture
+def synthetic_release_charter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """ADR-034 rule 3: a real release charter (``RELEASE_ROOT/goals.md``) is
+    now required for ``llm_proposer.should_propose``/``build_context`` to
+    do anything (real production always has one deployed — #1938 census).
+    Tests about the proposer's own behavior, not about charter absence,
+    request this fixture directly, or via a module-level ``autouse=True``
+    fixture in that specific test module that depends on it.
+
+    Deliberately NOT ``autouse`` here: making every test in the suite see a
+    charter by default would silently hide a future rule-3 regression
+    (a missing charter that should stop a role, but doesn't) behind a
+    conftest-wide default. A module that needs this everywhere opts in
+    once, at module scope — a test that specifically covers the
+    charter-absent path continues to see the real absence."""
+    release_root = tmp_path / "_release_root"
+    release_root.mkdir(exist_ok=True)
+    (release_root / "goals.md").write_text("test charter", encoding="utf-8")
+    monkeypatch.setenv("RELEASE_ROOT", str(release_root))
+    return release_root
+
+
 def pytest_sessionstart(session: pytest.Session) -> None:
     """Make every test subprocess fail fast instead of prompting for Git input.
 

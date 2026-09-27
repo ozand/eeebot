@@ -31,6 +31,14 @@ ROTATION_ENV = llm_proposer._DEMAND_ROTATION_ENABLED_ENV
 SATURATED_K_ENV = llm_proposer._SATURATED_THEME_K_ENV
 
 
+@pytest.fixture(autouse=True)
+def _release_charter(synthetic_release_charter):
+    """ADR-034 rule 3: should_propose/build_context now hard-gate on the
+    release charter's presence. This module's tests are about demand
+    rotation, not charter absence, so opt into the shared conftest fixture
+    at module scope (never suite-wide — see its docstring)."""
+
+
 def _item(kind: str, item_id: str, summary: str = "x", *, provenance: str = "") -> dict:
     return {
         "kind": kind,

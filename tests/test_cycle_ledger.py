@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from nanobot.runtime import bridge, cycle_ledger, llm_proposer, state_access
+from nanobot.runtime.service_paths import is_delivered
 
 
 def _read_ledger(state_dir: Path) -> list[dict]:
@@ -27,6 +28,29 @@ def _read_ledger(state_dir: Path) -> list[dict]:
         return []
     lines = path.read_text(encoding="utf-8").splitlines()
     return [json.loads(line) for line in lines if line.strip()]
+
+
+class TestRuleCDelivery:
+    def test_git_integration_and_delivery_are_separate(self):
+        service = ["diary/2026-09-21.md", "memory/MEMORY.md"]
+        mixed = [*service, "scripts/feature.py"]
+        assert is_delivered(True, service) is False
+        assert is_delivered(True, mixed) is True
+        assert is_delivered(False, mixed) is False
+
+    def test_service_only_ledger_contract_is_partial_inconclusive_and_not_real(self, tmp_path):
+        inputs = bridge._real_result_ledger_inputs({"result_status": "blocked", "status": "blocked"})
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "cycle-service", "partial", "service_only", [
+                "diary/2026-09-21.md", "memory/MEMORY.md",
+            ], "selfevo/cycle-service", verdict="inconclusive",
+            verdict_reason="service_only", real_result=inputs, delivered=False,
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert (row["outcome"], row["verdict"], row["reason"], row["verdict_reason"]) == (
+            "partial", "inconclusive", "service_only", "service_only",
+        )
+        assert row["real_result"]["is_real_result"] is False
 
 
 # ─── append_event / round-trip ────────────────────────────────────────────────
@@ -174,6 +198,15 @@ class TestTypedHelpers:
         assert rows[0]["reason"] == "push_pending"
         assert rows[0]["branch"] == "selfevo/cycle-1"
 
+    def test_record_cycle_outcome_push_pending_preserves_changed_paths(self, tmp_path):
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c-service", "push_pending", "push_pending",
+            ["diary/2026-09-25.md", "memory/MEMORY.md"], "selfevo/cycle-service",
+            main_sha_before="abc123",
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert row["files_changed"] == ["diary/2026-09-25.md", "memory/MEMORY.md"]
+
     def test_record_cycle_outcome_push_pending_carries_main_sha_before(self, tmp_path):
         """#1709 increment 2: bridge._finish_pending_pushes reads this back
         to tell whether origin/main moved since the original attempt."""
@@ -216,6 +249,15 @@ class TestTypedHelpers:
         cycle_ledger.record_cycle_outcome(tmp_path, "c1", "success", None, ["a.py"], "selfevo/cycle-1")
         rows = _read_ledger(tmp_path)
         assert "real_result" not in rows[0]
+
+    def test_record_cycle_outcome_delivered_is_additive(self, tmp_path):
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "c1", "partial", "service_only", ["diary/a.md"], "branch",
+            delivered=False,
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert row["delivered"] is False
+        assert row["outcome"] == "partial"
 
     def test_record_cycle_outcome_real_result_carries_inputs_plus_boolean(self, tmp_path):
         """The boolean is written ALONGSIDE the inputs, never in place of
@@ -417,6 +459,16 @@ class TestRecordPlanningSession:
         assert row["iterations_used"] == 7
         assert row["iterations_planned"] == 25
 
+    def test_records_parse_format_metadata(self, tmp_path):
+        cycle_ledger.record_planning_session(
+            tmp_path, "c1", "integrated", iterations_used=3, iterations_planned=None,
+            parse_mode="fenced", format_violation="prose_prefix",
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert row["parse_mode"] == "fenced"
+        assert row["format_violation"] == "prose_prefix"
+        assert row["iterations_planned"] is None
+
     def test_missing_forecast_stays_none_not_zero(self, tmp_path):
         """#1850-class distinction: a session that never produced a forecast
         must not be recorded as having forecast zero."""
@@ -606,11 +658,17 @@ class _FakeSubagentManager:
 
 
 @pytest.fixture(autouse=True)
-def _core_smoke_set_matches_fixture_repo(monkeypatch):
+def _core_smoke_set_matches_fixture_repo(monkeypatch, tmp_path):
     """Mirrors tests/test_bridge_cycle_branch.py: point the bounded gate's
     core-smoke set at the one test file these fixtures create.
     """
     monkeypatch.setattr(bridge, "_CORE_SMOKE_TESTS", ("tests/test_smoke.py",))
+    # ADR-034 rule 3: should_propose/build_context/bridge.py's executor
+    # gate all now hard-require a real release charter to proceed.
+    _adr034_release_root = tmp_path / "_adr034_release_root"
+    _adr034_release_root.mkdir(exist_ok=True)
+    (_adr034_release_root / "goals.md").write_text("test charter", encoding="utf-8")
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", _adr034_release_root)
 
 
 class TestBridgeIntegrationLedgerRows:

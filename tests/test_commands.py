@@ -522,7 +522,10 @@ def test_load_runtime_state_reads_host_control_plane_layout(tmp_path):
     )
 
     assert runtime["active_goal"] == "goal-44"
-    assert runtime["goal_text"] == "Improve prompt clarity"
+    # ADR-034 rule 3: availability only, never the document's text — a
+    # document with real content but no "Current priority targets:"
+    # section is a valid, priority-free document ("empty").
+    assert runtime["goal_text"] == "empty"
     assert runtime["goal_path"].endswith("goal_text.json")
     for retired in ("report_path", "report_stale", "outbox_path", "runtime_status", "approval_gate",
                     "next_hint", "credits_balance", "cycle_id", "current_task_id", "task_plan"):
@@ -572,7 +575,8 @@ def test_status_can_report_host_control_plane_authority(tmp_path, monkeypatch):
     assert "Runtime state source: host_control_plane" in result.stdout
     assert f"Runtime state root: {state_root}" in result.stdout
     assert "Active goal: goal-44" in result.stdout
-    assert "Goal text: Improve prompt clarity" in result.stdout
+    # ADR-034 rule 3: availability only, never the document's text.
+    assert "Goal text status: empty" in result.stdout
     assert "Goal source:" in result.stdout and "goal_text.json" in result.stdout
     for retired_line in ("Runtime status:", "Improvement score:", "Gate state:", "Outbox source:", "Report source:"):
         assert retired_line not in result.stdout, retired_line
@@ -709,7 +713,8 @@ def test_status_reports_runtime_surface(tmp_path, monkeypatch):
     assert "Runtime state source: workspace_state" in result.stdout
     assert f"Runtime state root: {state_dir}" in result.stdout
     assert "Active goal: goal-44e50921129bf475" in result.stdout
-    assert "Goal text: Ship the thing" in result.stdout
+    # ADR-034 rule 3: availability only, never the document's text.
+    assert "Goal text status: empty" in result.stdout
     assert "Promotion candidate: promotion-42" in result.stdout
     assert "Promotion review: pending" in result.stdout
     assert "Promotion decision: pending" in result.stdout

@@ -33,8 +33,14 @@ from tests.test_cycle_ledger import (
 
 
 @pytest.fixture(autouse=True)
-def _core_smoke_set_matches_fixture_repo(monkeypatch):
+def _core_smoke_set_matches_fixture_repo(monkeypatch, tmp_path):
     monkeypatch.setattr(bridge, "_CORE_SMOKE_TESTS", ("tests/test_smoke.py",))
+    # ADR-034 rule 3: should_propose/build_context/bridge.py's executor
+    # gate all now hard-require a real release charter to proceed.
+    _adr034_release_root = tmp_path / "_adr034_release_root"
+    _adr034_release_root.mkdir(exist_ok=True)
+    (_adr034_release_root / "goals.md").write_text("test charter", encoding="utf-8")
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", _adr034_release_root)
 
 
 def _wire(tmp_path, monkeypatch, manager_cls=_FakeSubagentManager):

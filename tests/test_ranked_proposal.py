@@ -32,6 +32,15 @@ def _enable(monkeypatch):
     monkeypatch.setenv("SELFEVO_DEMAND_DRIVEN_ENABLED", "0")
 
 
+@pytest.fixture(autouse=True)
+def _release_charter(synthetic_release_charter):
+    """ADR-034 rule 3: should_propose/build_context now hard-gate on the
+    release charter's presence. This module's tests are about ranked
+    proposal selection, not charter absence, so opt into the shared
+    conftest fixture at module scope (never suite-wide — see its
+    docstring)."""
+
+
 # ─── _extract_json_array ────────────────────────────────────────────────────
 
 

@@ -39,6 +39,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from nanobot.runtime import day_key, state_access
+
 SCHEMA_VERSION = "journal-story-v1"
 JOB_SCHEMA_VERSION = "journal-story-job-v1"
 PRODUCER = "scripts.journal_story"
@@ -146,21 +148,35 @@ def _source(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _day_files(ledger_dir: Path, day: date) -> list[Path]:
+def _day_files(
+    ledger_dir: Path, day: date, *, local_tz: Any = None
+) -> tuple[list[Path], list[str]]:
     """Files that can hold rows stamped ``day``: neighbouring archives + live file.
 
-    Rotation names an archive after the day the live file was last modified,
-    so a UTC day's rows can sit in the archive named for it, for the day after
-    (late writers), or still in the live file. Reading the bounded neighbour
-    set — never the live file alone — is what keeps a rotation boundary from
-    shrinking the day into a short, confident script.
+    ADR-029 (#1831) step 3: resolves bounds across both UTC- and local-keyed
+    archives through :func:`nanobot.runtime.state_access._ledger_sources`.
     """
-    names = [f"cycles-{(day + timedelta(days=offset)).isoformat()}.jsonl.gz" for offset in (-1, 0, 1)]
-    return [*(ledger_dir / name for name in names), ledger_dir / _LIVE_LEDGER]
+    day_str = day.isoformat()
+    cutover = day_key.load_cutover(day_key.cutover_marker_path(ledger_dir))
+    start_utc, end_utc = day_key.archive_day_bounds(day_str, cutover, local_tz=local_tz)
+    since = start_utc - timedelta(days=1)
+    sources, notes = state_access._ledger_sources(ledger_dir, since, local_tz=local_tz)
+    active = [p for p in sources if p.name == _LIVE_LEDGER]
+    archives = []
+    for p in sources:
+        if p.name == _LIVE_LEDGER:
+            continue
+        m = state_access._DAY_RE.match(p.name)
+        if m:
+            a_start, a_end = day_key.archive_day_bounds(m.group(1), cutover, local_tz=local_tz)
+            if a_start < end_utc and a_end >= since:
+                archives.append(p)
+    archives.sort(key=lambda p: p.name)
+    return archives + active, notes
 
 
-def load_day_journal(state_dir: str | Path, day: str) -> dict[str, Any]:
-    """Read one UTC day of ledger rows through the rotation-aware path.
+def load_day_journal(state_dir: str | Path, day: str, *, local_tz: Any = None) -> dict[str, Any]:
+    """Read one day of ledger rows through the rotation-aware path.
 
     Every returned row carries ``_source_file`` and ``_source_line`` so a beat
     can cite it. Unreadable lines and unreadable files are reported, not
@@ -181,7 +197,20 @@ def load_day_journal(state_dir: str | Path, day: str) -> dict[str, Any]:
     notes: list[str] = []
     if not ledger_dir.is_dir():
         notes.append("ledger_dir_missing")
-    for path in _day_files(ledger_dir, requested) if not notes else []:
+        return {
+            "source": LEDGER_SOURCE,
+            "day": requested.isoformat(),
+            "status": "incomplete",
+            "files_read": [],
+            "rows": [],
+            "unreadable": [],
+            "notes": notes,
+        }
+    cutover = day_key.load_cutover(day_key.cutover_marker_path(ledger_dir))
+    start_utc, end_utc = day_key.archive_day_bounds(day, cutover, local_tz=local_tz)
+    day_paths, source_notes = _day_files(ledger_dir, requested, local_tz=local_tz)
+    notes.extend(source_notes)
+    for path in day_paths:
         if not path.is_file():
             continue
         opener = gzip.open if path.name.endswith(".gz") else open
@@ -212,9 +241,12 @@ def load_day_journal(state_dir: str | Path, day: str) -> dict[str, Any]:
                     # (every other phase) keep the strict day match: a
                     # neighbouring day's events must never enter this day's
                     # beats.
-                    if row.get("phase") != "proposed" and (
-                        stamp is None or stamp.astimezone(timezone.utc).date() != requested
-                    ):
+                    if stamp is None:
+                        continue
+                    if row.get("phase") == "proposed":
+                        if stamp >= end_utc:
+                            continue
+                    elif not (start_utc <= stamp < end_utc):
                         continue
                     rows.append({**row, "_source_file": path.name, "_source_line": line_no})
         except PermissionError:
@@ -242,6 +274,8 @@ def select_beats(
     *,
     day: str | None = None,
     max_beats: int = DEFAULT_MAX_BEATS,
+    cutover_utc: Any = day_key._UNSET,
+    local_tz: Any = None,
 ) -> list[dict[str, Any]]:
     """Select an ordered, deterministic, ledger-backed beat set.
 
@@ -255,6 +289,15 @@ def select_beats(
     """
     if max_beats <= 0:
         raise ValueError("max_beats must be positive")
+    bounds = (
+        day_key.archive_day_bounds(
+            day,
+            day_key.CUTOVER_UTC if cutover_utc is day_key._UNSET else cutover_utc,
+            local_tz=local_tz,
+        )
+        if day is not None
+        else None
+    )
     candidates: list[tuple[datetime, str, int, dict[str, Any]]] = []
     titles: dict[str, str] = {}
     for row in rows:
@@ -270,7 +313,7 @@ def select_beats(
         timestamp = _parse_ts(row.get("ts"))
         if timestamp is None:
             continue
-        if day is not None and timestamp.astimezone(timezone.utc).date().isoformat() != day:
+        if bounds is not None and not (bounds[0] <= timestamp < bounds[1]):
             continue
         try:
             source = _source(row)
@@ -517,6 +560,7 @@ def run_narrator_job(
     llm: "Callable[[list[dict[str, str]], str], Any] | None" = None,
     glossary: dict[str, str] | None = None,
     max_beats: int = DEFAULT_MAX_BEATS,
+    local_tz: Any = None,
 ) -> dict[str, Any]:
     """One runnable job, increment 2: load the day, select beats, prompt one
     model through the strategist's own gateway pattern, validate, and write
@@ -542,8 +586,9 @@ def run_narrator_job(
     the artifact is written is itself recorded as a rejected/error artifact.
     """
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    journal = load_day_journal(state_dir, day)
-    beats = select_beats(journal["rows"], day=day, max_beats=max_beats)
+    journal = load_day_journal(state_dir, day, local_tz=local_tz)
+    ledger_cutover = day_key.load_cutover(day_key.cutover_marker_path(Path(state_dir) / "ledger"))
+    beats = select_beats(journal["rows"], day=day, max_beats=max_beats, cutover_utc=ledger_cutover, local_tz=local_tz)
     base: dict[str, Any] = {
         "schema_version": JOB_SCHEMA_VERSION,
         "producer": PRODUCER,
@@ -686,12 +731,14 @@ def _finish(state_dir: str | Path, day: str, result: dict[str, Any]) -> dict[str
     return result
 
 
-def default_day(now: datetime | None = None) -> str:
-    """Yesterday, UTC. Closed at any local hour the timer could fire: "the day
-    before today UTC" is over by definition the moment today UTC begins, so
-    the unit never narrates an open day even if the host's timezone moves."""
-    moment = now or datetime.now(timezone.utc)
-    return (moment.astimezone(timezone.utc).date() - timedelta(days=1)).isoformat()
+def default_day(now: datetime | None = None, *, local_tz: Any = None) -> str:
+    """Yesterday, in host-local calendar (ADR-029). Closed at any local hour
+    the timer could fire: the day before today is over by definition the moment
+    today begins.
+    """
+    today_key = day_key.day_key(now, local_tz=local_tz)
+    today_date = date.fromisoformat(today_key)
+    return (today_date - timedelta(days=1)).isoformat()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -704,7 +751,7 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="state directory, e.g. /var/lib/eeepc-agent/self-evolving-agent/state",
     )
-    parser.add_argument("--day", default=None, help="YYYY-MM-DD; defaults to yesterday UTC")
+    parser.add_argument("--day", default=None, help="YYYY-MM-DD; defaults to yesterday in host-local calendar")
     parser.add_argument("--max-beats", type=int, default=DEFAULT_MAX_BEATS)
     args = parser.parse_args(argv)
     day = args.day or default_day()

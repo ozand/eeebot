@@ -1,0 +1,306 @@
+[
+  {
+    "cycle_id": "cycle-45d79761fb17",
+    "outcome": "partial",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-aa9e21e4fcb1",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "scripts/run_all_tests.py",
+      "tests/test_run_all_tests.py"
+    ]
+  },
+  {
+    "cycle_id": "cycle-024b7583631e",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "scripts/find_zero_consumers.py",
+      "tests/test_find_zero_consumers.py"
+    ]
+  },
+  {
+    "cycle_id": "cycle-857e58d3f910",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "AGENTS.md",
+      "tests/test_agents_structure.py"
+    ]
+  },
+  {
+    "cycle_id": "cycle-970fb2e371ad",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "AGENTS.md",
+      "tests/test_agents_structure.py"
+    ]
+  },
+  {
+    "cycle_id": "cycle-c983c916f817",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "scripts/validate_open_encoding.py",
+      "tests/test_validate_open_encoding.py"
+    ]
+  },
+  {
+    "cycle_id": "cycle-6cf928bb2201",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "scripts/validate_test_existence.py",
+      "tests/test_validate_test_existence.py"
+    ]
+  },
+  {
+    "cycle_id": "cycle-064c271fbffe",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "tests/test_lesson_integrity.py"
+    ]
+  },
+  {
+    "cycle_id": "cycle-673e56eec90e",
+    "outcome": "partial",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-132a089470f5",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "scripts/validate_test_existence.py",
+      "tests/test_validate_test_existence.py"
+    ]
+  },
+  {
+    "cycle_id": "cycle-006724a42c7c",
+    "outcome": "partial",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-27bfc54d52ce",
+    "outcome": "partial",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-7ddb872d3b35",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "scripts/validate_exception_handling.py",
+      "tests/test_validate_exception_handling.py"
+    ]
+  },
+  {
+    "cycle_id": "cycle-6dfc21666c14",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "tests/test_lessons_integrity.py"
+    ]
+  },
+  {
+    "cycle_id": "cycle-01857a3d77a9",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "AGENTS.md",
+      "tests/test_agents_structure.py"
+    ]
+  },
+  {
+    "cycle_id": "cycle-450a21e13bb5",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "AGENTS.md",
+      "tests/test_agents_structure.py"
+    ]
+  },
+  {
+    "cycle_id": "cycle-53988b60d5cd",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "tests/test_lesson_metadata.py"
+    ]
+  },
+  {
+    "cycle_id": "cycle-127ddba04245",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "AGENTS.md",
+      "tests/test_agents_structure.py"
+    ]
+  },
+  {
+    "cycle_id": "cycle-fc7e9d004664",
+    "outcome": "partial",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-bb13cf33356d",
+    "outcome": "partial",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-78f20646a26c",
+    "outcome": "partial",
+    "verdict": "inconclusive",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-5619acea4c27",
+    "outcome": "partial",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-421b2684954a",
+    "outcome": "partial",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-f51cde25180b",
+    "outcome": "partial",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-22e972eb07e4",
+    "outcome": "partial",
+    "verdict": "inconclusive",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-28f5692158b2",
+    "outcome": "partial",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-29ef85dab854",
+    "outcome": "partial",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-380847e93b7b",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "diary/2026-09-21.md"
+    ]
+  },
+  {
+    "cycle_id": "cycle-3e0b8dda998e",
+    "outcome": "partial",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-452e2c4cc8db",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "diary/2026-09-21.md"
+    ]
+  },
+  {
+    "cycle_id": "cycle-59d33f4d3353",
+    "outcome": "skipped-duplicate",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-5e640c50580d",
+    "outcome": "skipped-duplicate",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-625438650afe",
+    "outcome": "partial",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-79357569a2d5",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "scripts/lesson_lookup.py",
+      "scripts/validate_deprecation_status.py"
+    ]
+  },
+  {
+    "cycle_id": "cycle-86d6b5307cd0",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "diary/2026-09-21.md"
+    ]
+  },
+  {
+    "cycle_id": "cycle-8b6b5b8bf583",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "diary/2026-09-21.md"
+    ]
+  },
+  {
+    "cycle_id": "cycle-91117c25f6d3",
+    "outcome": "skipped-duplicate",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-b1e752282809",
+    "outcome": "partial",
+    "verdict": "reject",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-db009d62275b",
+    "outcome": "partial",
+    "verdict": "inconclusive",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-de5e5393520a",
+    "outcome": "success",
+    "verdict": "accept",
+    "branch_files": [
+      "diary/2026-09-21.md"
+    ]
+  },
+  {
+    "cycle_id": "cycle-e13d8d815628",
+    "outcome": "failed",
+    "verdict": "inconclusive",
+    "branch_files": []
+  },
+  {
+    "cycle_id": "cycle-e74d785ab8e7",
+    "outcome": "partial",
+    "verdict": "inconclusive",
+    "branch_files": []
+  }
+]

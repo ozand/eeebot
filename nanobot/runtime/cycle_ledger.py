@@ -406,6 +406,8 @@ def record_planning_session(
     task_writing_path: str | None = None,
     task_writing_bytes: int | None = None,
     task_writing_sha256: str | None = None,
+    parse_mode: str | None = None,
+    format_violation: str | None = None,
 ) -> None:
     """Log one planning-session run (#1852): whether its plan reached the
     diary, how many of its 20 ticks it used, and its own forecast for the
@@ -432,6 +434,8 @@ def record_planning_session(
             **({"task_writing_path": task_writing_path} if task_writing_path else {}),
             **({"task_writing_bytes": task_writing_bytes} if isinstance(task_writing_bytes, int) else {}),
             **({"task_writing_sha256": task_writing_sha256} if task_writing_sha256 else {}),
+            **({"parse_mode": parse_mode} if parse_mode else {}),
+            **({"format_violation": format_violation} if format_violation else {}),
         },
     )
 
@@ -459,6 +463,9 @@ def record_cycle_outcome(
     iterations_used: int | None = None,
     iterations_limit: int | None = None,
     iterations_predicted: int | None = None,
+    max_call_gap_s: float | None = None,
+    delivered: bool | None = None,
+    delivery_state: str | None = None,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
 
@@ -544,6 +551,10 @@ def record_cycle_outcome(
         row["verdict"] = verdict
         if verdict_reason:
             row["verdict_reason"] = str(verdict_reason)[:200]
+    if delivered is not None:
+        row["delivered"] = bool(delivered)
+    if delivery_state in {"known", "unknown"}:
+        row["delivery_state"] = delivery_state
     if executor_llm_error:
         row["executor_llm_error"] = True
     if lane:
@@ -596,6 +607,11 @@ def record_cycle_outcome(
             row["iteration_fraction"] = round(iterations_used / iterations_limit, 4)
         if iterations_predicted is not None and isinstance(iterations_predicted, int):
             row["iterations_predicted"] = iterations_predicted
+    if max_call_gap_s is not None:
+        try:
+            row["max_call_gap_s"] = round(float(max_call_gap_s), 1)
+        except (ValueError, TypeError):
+            pass
     if files_changed is not None:
         try:
             from nanobot.runtime.demand import classify_change_tier

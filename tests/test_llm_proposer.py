@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import bridge, cycle_ledger, demand, llm_proposer
+from nanobot.runtime import bridge, cycle_ledger, demand, llm_proposer, system_map
 from tests.test_goal_backlog_routing import GOAL_TEXT_JSON, _make_git_repo_with_commit
 
 ENV_VAR = llm_proposer.ENABLED_ENV
@@ -26,14 +26,24 @@ DEMAND_ENV = demand.ENABLED_ENV
 
 
 @pytest.fixture(autouse=True)
-def _pre_760_mode(monkeypatch):
+def _pre_760_mode(synthetic_release_charter, monkeypatch):
     """#760: the tests in this module (written for #707-#762) pin the exact
     pre-#760 supply-driven behavior, which now lives behind
     ``SELFEVO_DEMAND_DRIVEN_ENABLED=0`` — the kill-switch-OFF contract this
     fixture is the regression suite for. Demand-driven-mode tests (see
     ``TestDemandDrivenMode`` below and ``tests/test_demand.py``) re-enable
     the switch inside their own bodies. Also resets the once-per-process
-    idle-heartbeat marker so tests are order-independent."""
+    idle-heartbeat marker so tests are order-independent.
+
+    ADR-034 rule 3: ``should_propose`` now hard-gates on the release
+    charter's presence (both demand-driven and supply-driven), matching
+    real production (a deployed release always has ``goals.md`` — #1938
+    census). Most of this file's tests predate that and call
+    ``should_propose``/``build_context`` with no real release root, so this
+    module opts into the shared ``synthetic_release_charter`` conftest
+    fixture at module scope (deliberately not a suite-wide autouse — see
+    that fixture's docstring); a test that specifically exercises the
+    charter-absent path points ``RELEASE_ROOT`` elsewhere itself."""
     monkeypatch.setenv(DEMAND_ENV, "0")
     monkeypatch.setattr(llm_proposer, "_idle_recorded_this_process", False)
 
@@ -47,6 +57,38 @@ def _state_dir(tmp_path: Path) -> Path:
 def _write_goal_text(state_dir: Path, text: str) -> None:
     (state_dir / "goals" / "goal_text.json").write_text(
         json.dumps({"text": text}), encoding="utf-8"
+    )
+
+
+def _write_charter(tmp_path: Path, text: str) -> None:
+    """ADR-034 rule 2: ``_load_goal_text`` is charter-only (A2 is a
+    mechanical resolver migration, not the rule-5 rollout that would fold
+    the operator's own priorities in — that is A4's job). A test that needs
+    ``build_context``/``should_propose`` to see "Current priority targets"
+    text writes it into the synthetic charter the ``_pre_760_mode``
+    fixture already points ``RELEASE_ROOT`` at, not into ``goal_text.json``."""
+    (tmp_path / "_release_root" / "goals.md").write_text(text, encoding="utf-8")
+
+
+def _write_derived_priority(state_dir: Path, *, number: int = 1, vector: str = "V1") -> None:
+    """ADR-034 rule 4: a derived priority lives in
+    ``state/goals/derived_priorities.json`` — never embedded in the
+    synthetic charter :func:`_write_charter` writes. Tests that need
+    ``should_propose``'s pre-#760 fallback to see an open priority write
+    it here directly."""
+    goals_dir = state_dir / "goals"
+    goals_dir.mkdir(parents=True, exist_ok=True)
+    (goals_dir / "derived_priorities.json").write_text(
+        json.dumps({
+            "schema_version": "derived-priorities-v1",
+            "priorities": [{
+                "label": "Write scripts/cycle_logger.py",
+                "body": "helper function append_cycle_summary(...).",
+                "number": number,
+                "vector": vector,
+            }],
+        }),
+        encoding="utf-8",
     )
 
 
@@ -187,7 +229,7 @@ class TestShouldPropose:
         request is still queued, so the queue is NOT empty — falls through
         to the unchanged priorities/dup-streak fallback clauses, both False."""
         state_dir = _state_dir(tmp_path)
-        _write_goal_text(state_dir, GOAL_TEXT_JSON and json.loads(GOAL_TEXT_JSON)["text"])
+        _write_derived_priority(state_dir)
         req_dir = state_dir / "subagents" / "requests"
         req_dir.mkdir(parents=True)
         (req_dir / "request-planner.json").write_text(
@@ -224,7 +266,7 @@ class TestShouldPropose:
         make this True regardless of the dup-streak state, defeating the
         point of this test (isolating the dup-streak fallback clause)."""
         state_dir = _state_dir(tmp_path)
-        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        _write_derived_priority(state_dir)
         req_dir = state_dir / "subagents" / "requests"
         req_dir.mkdir(parents=True)
         (req_dir / "request-planner.json").write_text(
@@ -411,9 +453,13 @@ def test_digest_ledger_bounds_joined_title_line():
 
 class TestBuildContext:
     def test_bounded_and_includes_goal_and_digest(self, tmp_path):
+        """ADR-034 rule 2: build_context's goal text is charter-only (A2 is
+        a mechanical resolver migration, not A4's rule-5 rollout that would
+        fold the operator's own priorities in) — the "Priority 5" content
+        lives in the synthetic charter, not goal_text.json."""
         state_dir = _state_dir(tmp_path)
         goal_text = json.loads(GOAL_TEXT_JSON)["text"]
-        _write_goal_text(state_dir, goal_text)
+        _write_charter(tmp_path, goal_text)
         _append_outcome(state_dir, "c1", "success")
         _append_outcome(state_dir, "c2", "skipped-duplicate")
 
@@ -423,6 +469,33 @@ class TestBuildContext:
         assert "success" in context
         assert "skipped-duplicate" in context
         assert "Mutable surface rule" in context
+
+    def test_derived_priorities_are_compact_never_the_instructions_body(self, tmp_path):
+        """ADR-034 (Consequences, #1951): "Derived priorities are shown in
+        compact form — number, label, vector and source; their bodies are
+        not rendered" — for every rule-5 reader, including the proposer's
+        own context (#1952 review: this reader's ``_render_derived_priorities``
+        was the one place still rendering the full instructions body)."""
+        state_dir = _state_dir(tmp_path)
+        long_unique_body = "UNIQUE-BODY-TEXT " + ("filler word " * 60)
+        (state_dir / "goals" / "derived_priorities.json").write_text(
+            json.dumps({
+                "schema_version": "derived-priorities-v1",
+                "priorities": [{
+                    "label": "Trim the retry loop",
+                    "body": long_unique_body,
+                    "number": 42,
+                    "vector": "V1",
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+        context = llm_proposer.build_context(state_dir, None)
+
+        assert long_unique_body not in context
+        assert "filler word" not in context
+        assert "42. Trim the retry loop (vector: V1, source: derived)" in context
 
     def test_hard_cap_enforced_with_huge_ledger(self, tmp_path):
         state_dir = _state_dir(tmp_path)
@@ -546,6 +619,25 @@ class TestBuildContext:
         _write_goal_text(state_dir, "some real goal text")
         context = llm_proposer.build_context(state_dir, None)
         assert "Existing scripts" not in context
+
+    def test_includes_inventory_section_from_state_system_map_file(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        repo = tmp_path / "selfevo_repo"
+        repo.mkdir(parents=True)
+        sm_path = system_map.system_map_path(state_dir)
+        sm_path.parent.mkdir(parents=True, exist_ok=True)
+        sm_path.write_text(
+            "# SYSTEM MAP\n\n## Inventory\n\n"
+            "- scripts/track_memory.py — Track memory usage over time.\n\n"
+            "## Near-duplicate candidates\n\n(none detected)\n",
+            encoding="utf-8",
+        )
+
+        context = llm_proposer.build_context(state_dir, repo)
+
+        assert "Existing scripts (do not duplicate" in context
+        assert "scripts/track_memory.py — Track memory usage over time." in context
 
     def test_includes_inventory_section_from_system_map_file(self, tmp_path):
         state_dir = _state_dir(tmp_path)
@@ -1740,6 +1832,21 @@ class TestProposeMockedClient:
         result = llm_proposer.propose("some context")
         assert result == payload
 
+    def test_oversized_charter_refuses_before_gateway_call_and_records_reason(self, monkeypatch, tmp_path):
+        self._patch_client(monkeypatch, "unused")
+        root = tmp_path / "release"
+        (root / "roles").mkdir(parents=True)
+        (root / "goals.md").write_text("X" * 8001, encoding="utf-8")
+        (root / "IDENTITY.md").write_text("# Identity\n\nTest.\n", encoding="utf-8")
+        (root / "SOUL.md").write_text("# Soul\n\nTest.\n", encoding="utf-8")
+        (root / "roles" / "proposer.md").write_text("---\nrole: proposer\n---\n# Role: proposer\n\nPropose.\n", encoding="utf-8")
+        monkeypatch.setenv("RELEASE_ROOT", str(root))
+        monkeypatch.setenv("STATE_DIR", str(tmp_path / "state"))
+        from nanobot.runtime.operator_documents import DOCUMENT_SIZE_CAP_BYTES
+        assert (root / "goals.md").stat().st_size <= DOCUMENT_SIZE_CAP_BYTES
+        assert llm_proposer.propose("context") is None
+        assert llm_proposer._last_propose_failure.startswith("RolePromptBuildFailed:")
+
     def test_garbage_reply_returns_none(self, monkeypatch):
         self._patch_client(monkeypatch, "not json at all, sorry")
         assert llm_proposer.propose("some context") is None
@@ -2255,7 +2362,8 @@ class TestSystemMapWiring:
         result = llm_proposer.maybe_propose(state_dir, repo)
 
         assert result is None  # kill switch off, no proposal
-        assert (repo / "docs" / "SYSTEM_MAP.md").is_file()
+        assert system_map.system_map_path(state_dir).is_file()
+        assert not (repo / "docs" / "SYSTEM_MAP.md").exists()
 
     def test_maybe_propose_survives_system_map_failure(self, tmp_path, monkeypatch):
         monkeypatch.delenv(ENV_VAR, raising=False)
@@ -2782,7 +2890,10 @@ class TestProposerRejectLedger:
             demand_id=candidate_id,
         )
 
+        received_feedback = []
+
         def _always_clone(context, *, rejection_reason=None, timeout=120.0):
+            received_feedback.append(rejection_reason)
             return {
                 "task_title": "Implement lightweight memory usage tracker",
                 "rationale": "Tracks memory usage.",
@@ -2802,6 +2913,7 @@ class TestProposerRejectLedger:
         # matched_against records what it actually matched (the earlier
         # reject's own identity), not an echo of the proposal's own title.
         assert rows[-1]["matched_against"].startswith(f"repeat:{candidate_id} first-rejected")
+        assert received_feedback[-1]
 
     def test_self_dedup_via_forced_tuple_records_matched_against(self, tmp_path, monkeypatch):
         """Drive the dedup exit deterministically by monkeypatching
@@ -3271,13 +3383,11 @@ class TestProposeReasoningPassthrough:
         assert "reasoning_effort" not in captured
 
 
-# ─── #834: permanent (history-wide) novelty guard ──────────────────────────
+# ─── #903 subject dedup and #1785 target-path state ────────────────────────
 
 
 def _init_instance_repo(tmp_path, *, subject, script_rel, old=True):
-    """Minimal git repo with ONE commit (dated >14 days ago when old=True) that
-    creates `script_rel`, so the 14-day recency git_log misses it but the
-    full-history _all_built_subjects catches it."""
+    """Minimal git repo with ONE commit creating ``script_rel``."""
     import subprocess as _sp
     repo = tmp_path / "inst"
     repo.mkdir()
@@ -3299,8 +3409,81 @@ def _init_instance_repo(tmp_path, *, subject, script_rel, old=True):
     return repo
 
 
-class TestPermanentNoveltyGuard:
-    def test_new_file_duplicating_old_built_artifact_rejected(self, tmp_path):
+class TestTargetPathState:
+    def test_latest_non_residual_commit_for_path(self, tmp_path):
+        repo = _init_instance_repo(
+            tmp_path,
+            subject="feat: latest real target change",
+            script_rel="scripts/existing_target.py",
+        )
+        result = llm_proposer._latest_non_residual_commit_for_path(
+            repo, "scripts/existing_target.py"
+        )
+        assert result is not None
+        sha, subject = result
+        assert len(sha) == 12
+        assert subject == "feat: latest real target change"
+
+    def test_existing_path_dedup_passes_commit_as_evidence(self, tmp_path, monkeypatch):
+        repo = _init_instance_repo(
+            tmp_path, subject="feat: latest real target change",
+            script_rel="scripts/existing_target.py",
+        )
+        state = _state_dir(tmp_path)
+        _write_goal_text(state, "no priority section, so should_propose is True")
+        proposal = {
+            "task_title": "Improve existing target safely",
+            "rationale": "Correct the behavior",
+            "target_path": "scripts/existing_target.py",
+            "serves": "priority 4",
+        }
+        feedback = []
+        def _fake_propose(context, *, rejection_reason=None, timeout=120.0):
+            feedback.append(rejection_reason)
+            return proposal
+        monkeypatch.setattr(llm_proposer, "propose", _fake_propose)
+        monkeypatch.setattr(llm_proposer, "should_propose", lambda *a, **k: True)
+        monkeypatch.setattr(llm_proposer, "build_context", lambda *a, **k: "context")
+        monkeypatch.setattr(llm_proposer, "_is_duplicate_proposal", lambda *a, **k: (True, "old suppressor", "legacy-subject-match"))
+        monkeypatch.setattr(llm_proposer, "_proposal_creates_new_file", lambda *a: False)
+        result = llm_proposer.maybe_propose(state, repo)
+        assert result is None
+        assert feedback
+        row = _reject_rows(state)[-1]
+        sha, subject = llm_proposer._latest_non_residual_commit_for_path(
+            repo, "scripts/existing_target.py"
+        )
+        assert row["matched_against"] == "legacy-subject-match"
+        assert row["evidence_commit"] == f"{sha}:scripts/existing_target.py"
+        assert "Evidence only" in feedback[-1]
+        assert f"commit {sha} '{subject}' already touched scripts/existing_target.py" in feedback[-1]
+        assert "state how the new requirement differs" in feedback[-1]
+        assert llm_proposer._latest_non_residual_commit_for_path(
+            repo, "scripts/missing_target.py"
+        ) is None
+
+    def test_fixture_new_file_subject_matches_are_allowed(self, tmp_path):
+        """#1785(a): commit-subject hits cannot make an absent target 'done'."""
+        import json
+
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "self_dedup_1785.json").read_text(encoding="utf-8")
+        )
+        state = tmp_path / "state"; state.mkdir()
+        for index, case in enumerate(fixture["false_new_file_rejections"]):
+            case_dir = tmp_path / f"case-{index}"
+            case_dir.mkdir()
+            repo = _init_instance_repo(
+                case_dir,
+                subject=case["matched_against"],
+                script_rel="scripts/history_subject.py",
+            )
+            proposal = {"task_title": case["task_title"], "target_path": case["target_path"]}
+            assert not (repo / case["target_path"]).exists()
+            duplicate, _, _ = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+            assert duplicate is False
+
+    def test_subject_duplicate_points_to_existing_script(self, tmp_path):
         repo = _init_instance_repo(
             tmp_path,
             subject="create firewall log analyzer summary script",
@@ -3313,8 +3496,8 @@ class TestPermanentNoveltyGuard:
         }
         dup, feedback, matched = llm_proposer._is_duplicate_proposal(state, repo, proposal)
         assert dup is True
-        assert "ALREADY EXISTS" in feedback
-        assert "firewall" in matched.lower()
+        assert "existing script" in feedback
+        assert matched == "subject-duplicate:scripts/firewall_log_analyzer.py"
 
     def test_edit_of_existing_file_not_blocked(self, tmp_path):
         repo = _init_instance_repo(
@@ -3351,11 +3534,9 @@ class TestPermanentNoveltyGuard:
         dup, _, _ = llm_proposer._is_duplicate_proposal(state, None, proposal)
         assert dup is False
 
-    def test_helpers_direct(self, tmp_path):
+    def test_target_path_helpers_direct(self, tmp_path):
         repo = _init_instance_repo(
             tmp_path, subject="build token usage reporter", script_rel="scripts/token_usage_reporter.py")
-        assert "token usage reporter" in llm_proposer._all_built_subjects(repo).lower()
-        assert llm_proposer._all_built_subjects(None) == ""
         assert llm_proposer._proposal_creates_new_file(repo, {"target_path": "scripts/new.py"}) is True
         assert llm_proposer._proposal_creates_new_file(repo, {"target_path": "scripts/token_usage_reporter.py"}) is False
         assert llm_proposer._proposal_creates_new_file(repo, {"target_path": ""}) is False

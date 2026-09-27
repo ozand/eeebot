@@ -131,11 +131,14 @@ def test_load_goal_data_prefers_release_charter(tmp_path: Path):
     assert data == {"text": "IMMUTABLE CHARTER"}
 
 
-def test_load_goal_data_falls_back_to_legacy_state(tmp_path: Path):
+def test_load_goal_data_returns_none_when_charter_absent(tmp_path: Path):
+    """ADR-034 rule 2: the operator's priority text (goal_text.json) is
+    NEVER substituted for a missing/unreadable charter — the #944-era
+    fallback this test used to cover is deleted, not kept."""
     state_dir = tmp_path / "state"
-    _write_goal_text(state_dir, "legacy charter")
+    _write_goal_text(state_dir, "operator priorities, never a charter")
 
-    assert goal_review._load_goal_data(state_dir, tmp_path / "missing")["text"] == "legacy charter"
+    assert goal_review._load_goal_data(state_dir, tmp_path / "missing") is None
 
 
 def _write_snapshot(state_dir: Path, gaps: list[dict]) -> None:
@@ -172,6 +175,29 @@ def _no_llm(monkeypatch) -> None:
 @pytest.fixture()
 def enabled(monkeypatch):
     monkeypatch.setenv(goal_review.ENABLED_ENV, "1")
+
+
+@pytest.fixture(autouse=True)
+def _default_release_root(tmp_path, monkeypatch):
+    """ADR-034 rule 2 deleted the goal_text.json-as-charter fallback:
+    ``maybe_goal_review`` now requires a real ``<release_root>/goals.md`` to
+    do anything (production always resolves and passes one — see
+    ``scorecard.compute_scorecard``). Most of this file's tests predate that
+    and call ``maybe_goal_review``/``_load_goal_data`` without a
+    ``release_root``, so give them one via the SAME ``RELEASE_ROOT`` env var
+    ``maybe_goal_review`` already falls back to, pointing at a placeholder
+    charter — this keeps their focus on priority-review logic (evidence,
+    vectors, dedup, watermark), not charter plumbing. A test that passes
+    ``release_root=`` explicitly is unaffected: the explicit argument always
+    wins over the env var."""
+    release_root = tmp_path / "_default_release_root"
+    release_root.mkdir(exist_ok=True)
+    (release_root / "goals.md").write_text(
+        "eeebot purpose. Vector 1 (PRIMARY) — Self-Improvement. "
+        "Vector 2 (SECONDARY) — Operator Interface. FUTURE (deferred): creative works.",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RELEASE_ROOT", str(release_root))
 
 
 # ─── kill switch (default OFF) ──────────────────────────────────────────────
@@ -278,7 +304,10 @@ class TestNoGaps:
         state_dir = tmp_path / "state"
         _write_snapshot(state_dir, [GAP])
 
-        assert goal_review.maybe_goal_review(state_dir, None, now=NOW) == []
+        no_charter_release_root = tmp_path / "no_such_release"
+        assert goal_review.maybe_goal_review(
+            state_dir, None, now=NOW, release_root=no_charter_release_root
+        ) == []
         row = _goal_review_rows(state_dir)[0]
         assert row["outcome"] == "no_goal_text"
         assert row["retention_status"] == "unavailable"
@@ -306,10 +335,14 @@ class TestAppend:
         )
 
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        # Numbering continues past the highest N anywhere in the text (16).
+        # ADR-034 rule 3: goal review's numbering baseline is charter +
+        # derived only (A2 does not fold the operator's own priority
+        # section in — that is A4's job) — this test's synthetic charter
+        # (the module's autouse RELEASE_ROOT fixture) has no "Priority N"
+        # of its own, so numbering starts fresh, not "past 16".
         assert titles == [
-            "Priority 17 — Trim proposer retry burn",
-            "Priority 18 — Dashboard usage ping",
+            "Priority 1 — Trim proposer retry burn",
+            "Priority 2 — Dashboard usage ping",
         ]
 
         # #860: goal_text.json is the operator's canon — goal_review never
@@ -323,21 +356,27 @@ class TestAppend:
         assert [d["vector"] for d in derived] == ["V1", "V2"]
         assert all(d["added_utc"] for d in derived)
 
-        # merged_goal_text (what demand/llm_proposer see) folds them in.
-        text = goal_review.merged_goal_text(state_dir, GOAL_TEXT)
-        # Operator entries untouched, verbatim.
-        assert "(A) Priority 11 — Loop health in dashboard: extend" in text
-        assert "(B) Priority 16 — Cycle strip line in dashboard: add ONE" in text
-        assert "Completed (do not repeat): Priority 14" in text
-        # New entries in the exact shape demand's parser reads, before the
-        # Completed paragraph — each carrying its inline (V1)/(V2) tag (#815).
-        assert "(C) Priority 17 — Trim proposer retry burn (V1): Add one guard" in text
-        assert "(D) Priority 18 — Dashboard usage ping (V2): Add one function" in text
-        assert text.index("(D) Priority 18") < text.index("\n\nCompleted")
+        # ADR-034 rule 4: demand._priority_items (the real production
+        # reader, superseding merged_goal_text/#1665's merge) resolves
+        # operator (GOAL_TEXT's own Priority 11/16, Completed: 14/10) and
+        # derived (the two just-minted entries, stable numbers 1/2 above)
+        # SEPARATELY, never as one blob — each item's provenance/vector
+        # comes straight from its resolved entry, and operator ranks
+        # before self-derived regardless of number.
+        from nanobot.runtime import demand
 
-        section = text[text.index("Current priority targets:"):]
-        parsed = goal_review._PRIORITY_PATTERN.findall(section)
-        assert [int(num) for num, _, _ in parsed] == [11, 16, 17, 18]
+        items = demand._priority_items(state_dir, None)
+        assert [i["summary"] for i in items] == [
+            "Priority 11 — Loop health in dashboard",
+            "Priority 16 — Cycle strip line in dashboard",
+            "Priority 1 — Trim proposer retry burn",
+            "Priority 2 — Dashboard usage ping",
+        ]
+        assert [i["provenance"] for i in items] == [
+            demand.PROVENANCE_OPERATOR, demand.PROVENANCE_OPERATOR,
+            demand.PROVENANCE_SELF_DERIVED, demand.PROVENANCE_SELF_DERIVED,
+        ]
+        assert [i["vector"] for i in items] == ["", "", "V1", "V2"]
 
         rows = _goal_review_rows(state_dir)
         assert len(rows) == 1
@@ -348,24 +387,39 @@ class TestAppend:
         assert rows[0]["evidence_sources"] == ["supported_hypotheses"]
         assert rows[0]["direction_at_review"] is None
 
-    def test_dedup_keeps_operator_entries_untouched(self, tmp_path, monkeypatch, enabled):
-        """A candidate duplicating an existing operator priority is rejected
-        (recorded); nothing existing is overwritten or removed."""
+    def test_dedup_keeps_existing_derived_entries_untouched(self, tmp_path, monkeypatch, enabled):
+        """ADR-034 rule 3: goal review's dedup/numbering baseline is
+        charter + derived — NOT the operator's own priority list (a
+        separate document; A2 does not fold it in here, that is A4's
+        structured, four-state rollout on top of A3). A candidate
+        duplicating an EXISTING DERIVED priority is rejected (recorded);
+        nothing existing is overwritten or removed."""
         state_dir = tmp_path / "state"
         _write_goal_text(state_dir)
         _write_snapshot(state_dir, [GAP])
         _seed_valid_evidence(state_dir)
+        goal_review._write_derived_priorities(
+            state_dir,
+            [{
+                "label": "Loop health in dashboard",
+                "vector": "V2",
+                "body": "extend scripts/eeebot_dashboard.py with a loop-health section.",
+                "number": 5,
+                "added_utc": "2026-08-01T00:00:00Z",
+            }],
+        )
         duplicate = dict(VALID_PRIORITY, label="Loop health in dashboard")
         monkeypatch.setattr(
             goal_review, "_call_llm", lambda ctx: {"priorities": [duplicate, VALID_PRIORITY]}
         )
 
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        assert titles == ["Priority 17 — Trim proposer retry burn"]
+        assert titles == ["Priority 6 — Trim proposer retry burn"]
 
-        assert _read_goal_text(state_dir) == GOAL_TEXT  # operator canon untouched
-        text = goal_review.merged_goal_text(state_dir, GOAL_TEXT)
-        assert text.count("Loop health in dashboard") == 1  # operator entry only
+        derived = goal_review.read_derived_priorities(state_dir)
+        assert [d["label"] for d in derived] == [
+            "Loop health in dashboard", "Trim proposer retry burn",
+        ]
         rows = _goal_review_rows(state_dir)
         assert rows[0]["rejected"] == [
             {"label": "Loop health in dashboard", "reason": "duplicate"}
@@ -407,7 +461,7 @@ class TestValidation:
         )
 
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        assert titles == ["Priority 17 — Trim proposer retry burn"]
+        assert titles == ["Priority 1 — Trim proposer retry burn"]
         rejected = _goal_review_rows(state_dir)[0]["rejected"]
         assert {(r["label"], r["reason"]) for r in rejected} == {
             ("Uncited invention", "evidence_not_in_inputs"),
@@ -476,9 +530,12 @@ class TestVectorBias:
         )
 
         goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        text = goal_review.merged_goal_text(state_dir, _read_goal_text(state_dir))
-        assert "Trim proposer retry burn (V1):" in text
-        assert "Dashboard usage ping (V2):" in text
+        # ADR-034 rule 4: vector is a structured field on the stored
+        # derived entry — never an inline tag needing a merged-text
+        # round-trip to read back.
+        derived = {d["label"]: d["vector"] for d in goal_review.read_derived_priorities(state_dir)}
+        assert derived["Trim proposer retry burn"] == "V1"
+        assert derived["Dashboard usage ping"] == "V2"
 
 
 # ─── daily watermark ────────────────────────────────────────────────────────
@@ -791,7 +848,7 @@ class TestDerivedPriorities:
         monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [VALID_PRIORITY]})
 
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        assert titles == ["Priority 17 — Trim proposer retry burn"]
+        assert titles == ["Priority 1 — Trim proposer retry burn"]
 
         assert _read_goal_text(state_dir) == GOAL_TEXT
         derived = goal_review.read_derived_priorities(state_dir)
@@ -800,18 +857,22 @@ class TestDerivedPriorities:
         assert derived[0]["vector"] == "V1"
         assert derived[0]["body"] == VALID_PRIORITY["body"]
         assert derived[0]["added_utc"]
-        # #860 review: the number IS stored at accept time (17 = next past
+        # #860 review: the number IS stored at accept time (1 = next past
         # merged base) so the rendered title/demand id stays stable across
         # deploy reseeds; the label itself stays number-free.
-        assert derived[0]["number"] == 17
-        assert "17" not in derived[0]["label"]
+        assert derived[0]["number"] == 1
+        assert "1" not in derived[0]["label"]
 
-    def test_merged_goal_text_empty_derived_is_byte_identical(self, tmp_path):
-        state_dir = tmp_path / "state"
-        assert goal_review.merged_goal_text(state_dir, GOAL_TEXT) == GOAL_TEXT
+    def test_derived_item_inserts_with_correct_number_and_ranks_after_operator(self, tmp_path):
+        """ADR-034 rule 4: ports the retired merged_goal_text_inserts_with_
+        correct_next_number onto the real production reader
+        (demand._priority_items) — a derived entry's stored number/vector
+        survive verbatim and it ranks AFTER the operator's own entries,
+        never merged into their numbering."""
+        from nanobot.runtime import demand
 
-    def test_merged_goal_text_inserts_with_correct_next_number(self, tmp_path):
         state_dir = tmp_path / "state"
+        _write_goal_text(state_dir, GOAL_TEXT)
         goal_review._write_derived_priorities(
             state_dir,
             [
@@ -824,22 +885,28 @@ class TestDerivedPriorities:
                 }
             ],
         )
-        merged = goal_review.merged_goal_text(state_dir, GOAL_TEXT)
-        assert merged != GOAL_TEXT
-        section = merged[merged.index("Current priority targets:"):]
-        assert (
-            "Priority 17 — Trim proposer retry burn (V1): Do the bounded thing." in section
-        )
-        parsed = goal_review._PRIORITY_PATTERN.findall(section)
-        assert [int(num) for num, _, _ in parsed] == [11, 16, 17]
+        items = demand._priority_items(state_dir, None)
+        assert [i["summary"] for i in items] == [
+            "Priority 11 — Loop health in dashboard",
+            "Priority 16 — Cycle strip line in dashboard",
+            "Priority 17 — Trim proposer retry burn",
+        ]
+        assert items[-1]["provenance"] == demand.PROVENANCE_SELF_DERIVED
+        assert items[-1]["vector"] == "V1"
+        assert items[-1]["evidence"] == "Do the bounded thing."
 
-    def test_merged_goal_text_skips_derived_entry_already_active(self, tmp_path):
+    def test_derived_entry_duplicating_an_operator_label_is_excluded(self, tmp_path):
         """#1640: a stray derived entry duplicating a label the operator
-        already lists as a live current target must never be appended
+        already lists as a live current target must never be presented
         twice — this is what the retired per-deploy migration script used
         to produce (it re-parsed goal_text.json's own live priorities back
-        into derived_priorities.json on every release)."""
+        into derived_priorities.json on every release). Ports the retired
+        merged_goal_text_skips_derived_entry_already_active onto the real
+        production reader (demand._priority_items)."""
+        from nanobot.runtime import demand
+
         state_dir = tmp_path / "state"
+        _write_goal_text(state_dir, GOAL_TEXT)
         goal_review._write_derived_priorities(
             state_dir,
             [
@@ -852,40 +919,51 @@ class TestDerivedPriorities:
                 }
             ],
         )
-        merged = goal_review.merged_goal_text(state_dir, GOAL_TEXT)
-        assert merged == GOAL_TEXT
-        assert merged.count("Priority 11") == 1
+        items = demand._priority_items(state_dir, None)
+        summaries = [i["summary"] for i in items]
+        assert summaries.count("Priority 11 — Loop health in dashboard") == 1
+        assert [i["provenance"] for i in items if i["summary"] == "Priority 11 — Loop health in dashboard"] == [
+            demand.PROVENANCE_OPERATOR
+        ]
 
-    def test_merged_goal_text_never_resurrects_a_completed_number(self, tmp_path):
+    def test_derived_entry_matching_a_completed_number_is_excluded(self, tmp_path):
         """#1640: a stray derived entry whose NUMBER already appears in the
-        "Completed (do not repeat):" sentence must never be re-appended as a
-        new current target, even when its label text does not match that
+        "Completed (do not repeat):" sentence must never be presented as a
+        new/open item, even when its label text does not match that
         sentence's free-form prose ("Priority 14 (demand dashboard, commit
         1029364)" vs. the derived entry's own stored label) — the Completed
         sentence has no fixed shape for a label-only check to rely on, so
-        the guard has to key on the number both share.
+        the guard has to key on the number both share. Ports the retired
+        merged_goal_text_never_resurrects_a_completed_number onto the real
+        production reader (demand._priority_items) via
+        operator_documents.resolve_operator_priority_numbers.
 
         Simulates exactly the mechanism found live on host: two writers
         used to exist (goal_review's own capped mint, and a per-deploy
         migration script since retired) and could disagree about whether a
         number was still open."""
+        from nanobot.runtime import demand
+
         state_dir = tmp_path / "state"
+        _write_goal_text(state_dir, GOAL_TEXT)
         goal_review._write_derived_priorities(
             state_dir,
             [
                 {
-                    "label": "Loop health in dashboard",
+                    "label": "Resurrected number",
                     "vector": "V2",
-                    "body": "extend scripts/eeebot_dashboard.py with a loop-health section. Commit.",
+                    "body": "unrelated to the completed operator entry",
                     "number": 14,
                     "added_utc": "2026-09-14T22:47:10Z",
                 }
             ],
         )
-        merged = goal_review.merged_goal_text(state_dir, GOAL_TEXT)
-        current_section = merged.split("Completed (do not repeat):", 1)[0]
-        assert "Priority 14" not in current_section
-        assert merged == GOAL_TEXT
+        items = demand._priority_items(state_dir, None)
+        summaries = [i["summary"] for i in items]
+        assert "Priority 14 — Resurrected number" not in summaries
+        # The operator's own entries are unaffected by the exclusion.
+        assert "Priority 11 — Loop health in dashboard" in summaries
+        assert "Priority 16 — Cycle strip line in dashboard" in summaries
 
     def test_deploy_reseed_does_not_erase_derived_priority(
         self, tmp_path, monkeypatch, enabled
@@ -1009,9 +1087,14 @@ class TestDerivedPriorities:
 
     def test_operator_readding_derived_label_is_not_doubled(self, tmp_path):
         """#860 review: if the operator later bakes a derived label into
-        goal_text itself, merged_goal_text must NOT render it twice (two
-        numbers → two demand items for the same work). Operator canon wins;
-        the derived copy is skipped."""
+        goal_text itself, the reader must NOT present it twice (two
+        numbers -> two demand items for the same work). Operator canon
+        wins; the derived copy is excluded. Ports the retired
+        test_operator_readding_derived_label_is_not_doubled (which called
+        merged_goal_text directly) onto the real production reader
+        (demand._priority_items)."""
+        from nanobot.runtime import demand
+
         state_dir = tmp_path / "state"
         goal_review._write_derived_priorities(
             state_dir,
@@ -1028,9 +1111,14 @@ class TestDerivedPriorities:
         operator_text = GOAL_TEXT + (
             "\n(C) Priority 17 — Trim proposer retry burn (V1): Operator copy."
         )
-        merged = goal_review.merged_goal_text(state_dir, operator_text)
-        assert merged == operator_text  # skipped entirely — no second copy
-        assert merged.count("Trim proposer retry burn") == 1
+        _write_goal_text(state_dir, operator_text)
+
+        items = demand._priority_items(state_dir, None)
+        summaries = [i["summary"] for i in items]
+        assert summaries.count("Priority 17 — Trim proposer retry burn (V1)") == 1
+        matching = [i for i in items if i["summary"] == "Priority 17 — Trim proposer retry burn (V1)"]
+        assert matching[0]["provenance"] == demand.PROVENANCE_OPERATOR
+        assert matching[0]["evidence"] == "Operator copy."
 
     def test_derived_number_stable_across_reseed_with_changed_count(
         self, tmp_path, monkeypatch, enabled
@@ -1142,7 +1230,7 @@ class TestSupportedHypothesisEvidence:
 
         monkeypatch.setattr(goal_review, "_call_llm", _fake_llm)
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        assert titles == ["Priority 17 — Land the widget cache"]
+        assert titles == ["Priority 1 — Land the widget cache"]
         assert "supported hypothesis: Cache the widget lookup" in captured_context["text"]
 
 
@@ -1280,7 +1368,7 @@ class TestNightContourCandidates:
 
         monkeypatch.setattr(goal_review, "_call_llm", _fake_llm)
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        assert titles == ["Priority 17 — Stream archive dirs"]
+        assert titles == ["Priority 1 — Stream archive dirs"]
 
 
 class TestADR020Rule1Contract:
@@ -1409,11 +1497,14 @@ class TestMaybeGoalReviewReleaseRoot:
         assert "RELEASE_CHARTER_CAPABILITY_LADDER" in captured_contexts[0]
         assert "LEGACY_GOAL_TEXT_CONTENT" not in captured_contexts[0]
 
-    def test_maybe_goal_review_falls_back_to_legacy_state_when_goals_md_absent(self, tmp_path, monkeypatch, enabled):
-        """#1920 AC: when release_root lacks goals.md, goal review context
-        falls back to legacy state/goals/goal_text.json."""
+    def test_maybe_goal_review_skips_when_goals_md_absent_not_falls_back(self, tmp_path, monkeypatch, enabled):
+        """ADR-034 rule 2/3: when release_root lacks goals.md, the review is
+        skipped with a reason recorded ("no_goal_text") — the operator's
+        priority text (goal_text.json) is NEVER substituted as the charter.
+        Supersedes the pre-ADR-034 "falls back to legacy state" contract
+        this test used to assert."""
         state_dir = tmp_path / "state"
-        _write_goal_text(state_dir, "LEGACY_GOAL_TEXT_FALLBACK")
+        _write_goal_text(state_dir, "OPERATOR_PRIORITY_TEXT_NEVER_A_CHARTER")
         _seed_valid_evidence(state_dir, monkeypatch)
         _write_snapshot(state_dir, [])
 
@@ -1428,9 +1519,13 @@ class TestMaybeGoalReviewReleaseRoot:
 
         monkeypatch.setattr(goal_review, "_call_llm", _mock_call_llm)
 
-        goal_review.maybe_goal_review(state_dir, None, now=NOW, release_root=empty_release_root)
-        assert len(captured_contexts) == 1
-        assert "LEGACY_GOAL_TEXT_FALLBACK" in captured_contexts[0]
+        titles = goal_review.maybe_goal_review(state_dir, None, now=NOW, release_root=empty_release_root)
+
+        assert titles == []
+        assert captured_contexts == []
+        rows = _goal_review_rows(state_dir)
+        assert len(rows) == 1
+        assert rows[0]["outcome"] == "no_goal_text"
 
 
 

@@ -10,7 +10,7 @@ WorkingDirectory=/var/lib/eeepc-agent/self-evolving-agent/eeebot-self-evolving
 Environment=PYTHONPATH=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=EEEBOT_CAPABILITY_PROBE_TRIGGER=systemd_timer
-ExecStart=/opt/eeepc-agent/venv/bin/python /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/eeebot_dashboard.py --refresh-host-caps
+ExecStart=/opt/eeepc-agent/venv/bin/python /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/probe_host_capabilities.py
 TimeoutStartSec=60
 NoNewPrivileges=true
 PrivateTmp=true

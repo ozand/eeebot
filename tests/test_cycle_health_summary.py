@@ -42,7 +42,7 @@ def _write_ledger(state: Path, cycle_id: str) -> None:
     )
 
 
-def test_build_cycle_health_summary_reads_state_and_systemd(tmp_path: Path):
+def test_build_cycle_health_summary_reads_state_and_systemd(tmp_path: Path, monkeypatch):
     state = tmp_path / "state"
     _write_ledger(state, "cycle-001")
     _write_json(
@@ -56,6 +56,15 @@ def test_build_cycle_health_summary_reads_state_and_systemd(tmp_path: Path):
     # A frozen coordinator report is not a source (#1222).
     _write_json(state / "reports" / "evolution-001.json", {"cycle_id": "cycle-frozen", "result_status": "PASS"})
 
+    monkeypatch.setattr("nanobot.runtime.state._host_resource_snapshot", lambda _: {
+        "loadavg": {"1m": 0.0, "5m": 0.0, "15m": 0.0},
+        "memory_available_bytes": 2 * 1024**3,
+        "disk_free_bytes": 10 * 1024**3,
+        "disk_total_bytes": 20 * 1024**3,
+        "weak_host_signals": [],
+    })
+    monkeypatch.setattr("nanobot.runtime.health._ledger_age_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr("nanobot.runtime.health.read_cycle_progress", lambda *_args, **_kwargs: {"state": "healthy", "alert": False})
     summary = build_cycle_health_summary(state, runner=_fake_runner)
 
     assert summary["schema_version"] == "cycle-health-summary-v2"
@@ -83,6 +92,15 @@ def test_cycle_health_cli_json(tmp_path: Path, monkeypatch):
         {"promotion_candidate_id": "promo-cli", "review_status": "ready_for_policy_review", "decision": "ready_for_policy_review"},
     )
     monkeypatch.setattr("nanobot.runtime.health._default_runner", _fake_runner)
+    monkeypatch.setattr("nanobot.runtime.state._host_resource_snapshot", lambda _: {
+        "loadavg": {"1m": 0.0, "5m": 0.0, "15m": 0.0},
+        "memory_available_bytes": 2 * 1024**3,
+        "disk_free_bytes": 10 * 1024**3,
+        "disk_total_bytes": 20 * 1024**3,
+        "weak_host_signals": [],
+    })
+    monkeypatch.setattr("nanobot.runtime.health._ledger_age_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr("nanobot.runtime.health.read_cycle_progress", lambda *_args, **_kwargs: {"state": "healthy", "alert": False})
 
     result = CliRunner().invoke(
         app,
@@ -261,6 +279,25 @@ def test_cycle_progress_no_success_is_distinct_and_interleaved_success_is_health
     assert progress["alert"] is False
     assert progress["consecutive_non_integrating_cycles"] == 1
     assert progress["dominant_reason"] == "new"
+
+
+def test_cycle_health_degrades_when_host_signal_crosses_threshold(tmp_path: Path, monkeypatch):
+    state = tmp_path / "state"
+    _write_ledger(state, "cycle-host-degraded")
+    monkeypatch.setattr("nanobot.runtime.state._host_resource_snapshot", lambda _: {
+        "loadavg": {"1m": 3.0, "5m": 0.0, "15m": 0.0},
+        "memory_available_bytes": 2 * 1024**3,
+        "disk_free_bytes": 10 * 1024**3,
+        "disk_total_bytes": 20 * 1024**3,
+        "weak_host_signals": ["high_load"],
+    })
+    monkeypatch.setattr("nanobot.runtime.health._ledger_age_seconds", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr("nanobot.runtime.health.read_cycle_progress", lambda *_args, **_kwargs: {"state": "healthy", "alert": False})
+
+    summary = build_cycle_health_summary(state, runner=_fake_runner)
+
+    assert summary["severity"] == "degraded"
+    assert summary["exit_code"] == 1
 
 
 def test_build_cycle_health_summary_includes_success_signals(tmp_path: Path):

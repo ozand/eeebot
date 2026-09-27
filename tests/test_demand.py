@@ -1430,12 +1430,21 @@ def _append_outcome(
     outcome: str,
     ts: str | None = None,
     files_changed: list[str] | None = None,
+    demand_id: str | None = None,
+    delivered: bool | None = None,
+    delivery_state: str | None = None,
 ) -> None:
     event: dict = {"phase": "outcome", "cycle_id": cycle_id, "outcome": outcome}
     if ts:
         event["ts"] = ts
     if files_changed is not None:
         event["files_changed"] = files_changed
+    if demand_id:
+        event["demand_id"] = demand_id
+    if delivered is not None:
+        event["delivered"] = delivered
+    if delivery_state is not None:
+        event["delivery_state"] = delivery_state
     cycle_ledger.append_event(state_dir, event)
 
 
@@ -1494,6 +1503,24 @@ class TestCompletedSidecar:
         _append_outcome(state_dir, "fallback-copy", "success", ts=_now_iso(1), files_changed=["scripts/fallback.py"])
         assert isolated_demand(state_dir) == set()
 
+    def test_service_only_success_does_not_complete_demand(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "service-cycle", "priority-service123", ts=_now_iso(2))
+        _append_outcome(
+            state_dir, "service-cycle", "success", ts=_now_iso(1),
+            files_changed=["diary/2026-09-21.md"],
+            demand_id="priority-service123", delivered=False, delivery_state="known",
+        )
+        _append_proposed(state_dir, "late-old-empty", "priority-late-empty", ts=_now_iso(2))
+        _append_outcome(
+            state_dir, "late-old-empty", "pushed_late", ts=_now_iso(1),
+            files_changed=[], delivered=False, delivery_state="unknown",
+        )
+        assert demand._fold_completed(state_dir) == set()
+        completed_path = state_dir / "demand" / "completed.json"
+        if completed_path.exists():
+            assert "priority-service123" not in _completed_sidecar(state_dir)["entries"]
+
     def test_normal_success_still_folds_by_demand_id(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         _append_proposed(state_dir, "normal-cycle", "priority-normal123", ts=_now_iso(2))
@@ -1506,6 +1533,18 @@ class TestCompletedSidecar:
         entries = _completed_sidecar(state_dir)["entries"]
         assert "priority-normal123" in entries
         assert "fallback:normal-cycle" not in entries
+
+    def test_legacy_success_with_normalized_empty_paths_still_folds(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        _append_proposed(state_dir, "legacy-empty-success", "priority-legacy-empty", ts=_now_iso(2))
+        # Historical writers commonly normalized unknown paths to [] rather
+        # than omitting the field altogether.
+        _append_outcome(
+            state_dir, "legacy-empty-success", "success", ts=_now_iso(1), files_changed=[],
+        )
+
+        assert demand._fold_completed(state_dir) == {"priority-legacy-empty"}
+        assert "priority-legacy-empty" in _completed_sidecar(state_dir)["entries"]
 
     def test_pushed_late_folds_the_same_as_success(self, tmp_path):
         """#1709 increment 2: 'pushed_late' is a genuine success delayed by
@@ -3305,11 +3344,17 @@ class TestIssue1038DemandLanesReproduction:
         # Bounded by _MAX_REFLECTION_ITEMS (5)
         assert len(items) <= demand._MAX_REFLECTION_ITEMS
 
-    def test_repro_priority_items_charter_fallback(self, tmp_path):
-        """(5) Priority items falls back to charter like llm_proposer / goal_review."""
+    def test_repro_priority_items_ignores_instance_repo_charter(self, tmp_path):
+        """ADR-034 rule 2: an instance-repo ``goals.md`` is NEVER parsed for
+        priorities \u2014 that #944-era "charter-first from the instance repo"
+        step (this test used to reproduce as the intended behavior) is
+        deleted, not kept: it was always dead in production (an instance
+        ``goals.md`` never existed) and would have dropped every operator
+        priority the moment one did. With no ``state/goals/goal_text.json``,
+        ``_priority_items`` returns nothing, regardless of what the
+        instance repo's ``goals.md`` contains."""
         state_dir = _state_dir(tmp_path)
         repo_dir = _git_repo(tmp_path)
-        # Create derived_priorities fixture to ensure test environment realism
         demand_dir = state_dir / "demand"
         demand_dir.mkdir(parents=True, exist_ok=True)
         (state_dir / "goals").mkdir(parents=True, exist_ok=True)
@@ -3317,7 +3362,8 @@ class TestIssue1038DemandLanesReproduction:
             json.dumps({"schema_version": "derived-priorities-v1", "priorities": []}),
             encoding="utf-8",
         )
-        # No state goal_text file, but repo has goals.md / charter
+        # No state goal_text file; the instance repo has a goals.md with a
+        # priority section \u2014 must never be read as the operator's priorities.
         goals_file = repo_dir / "goals.md"
         goals_file.write_text(
             "eeebot\n\nCurrent priority targets:\n(A) Priority 1 \u2014 Charter goal 1: instructions.\n(B) Priority 2 \u2014 Charter goal 2: instructions.\n",
@@ -3326,8 +3372,7 @@ class TestIssue1038DemandLanesReproduction:
         _commit_all(repo_dir, "add goals.md")
 
         items = demand._priority_items(state_dir, repo_dir)
-        assert len(items) == 2
-        assert any("Charter goal 1" in i["summary"] for i in items)
+        assert items == []
 
     def test_repro_completed_front_candidate_advances_to_later_decay(self, tmp_path):
         """(2c) Completed front candidate in decay lane does not starve later active candidates."""
@@ -3809,7 +3854,11 @@ class TestPublishDerivedView:
         assert view["schema_version"] == "derived-view-v1"
         assert view["generated_at_utc"].endswith("Z")
         assert view["derived_status"] == "present"
-        assert view["charter"] == {"source": "goal_text_json", "merged": False, "text": self.CHARTER}
+        # ADR-034 rule 2: no real RELEASE_ROOT/goals.md in this test, so the
+        # charter resolves absent — it is NEVER the operator's private
+        # goal_text.json content relabelled as the charter (the exact
+        # privacy bug this class's docstring says must never happen).
+        assert view["charter"] == {"source": "none", "merged": False, "text": ""}
         assert view["input_mtimes_utc"]["goal_text_json"] is not None
         assert view["input_mtimes_utc"]["derived_priorities_json"] is not None
         # Two origins stay apart: the self-derived list is its own array.
@@ -3819,20 +3868,57 @@ class TestPublishDerivedView:
         }]
         # The ranked list IS the production sort: operator (V2) before self-derived (V1).
         items = view["priority_items"]
-        assert [(i["rank"], i["number"], i["provenance"], i["vector"]) for i in items] == [
-            (1, 11, "operator", "V2"),
-            (2, 19, "self-derived", "V1"),
+        assert [(i["rank"], i["number"], i["provenance"]) for i in items] == [
+            (1, 11, "operator"),
+            (2, 19, "self-derived"),
         ]
-        assert items[0]["label"] == "Loop health in dashboard"
-        assert items[0]["direction"] == ""
+        # ADR-034 F1: an operator item carries no title, V-tag, id or text.
+        assert items[0] == {
+            "rank": 1, "kind": "priority", "number": 11,
+            "provenance": "operator", "state": "open",
+        }
         assert items[1]["label"] == "Night reflections batch"
+        assert items[1]["vector"] == "V1"
         assert items[1]["direction"] == "reflection"
         assert items[1]["kind"] == "priority"
         # Same rows, same order as the production ranking — not re-derived.
         prod = demand._priority_items(state_dir, None)
-        assert [i["id"] for i in items] == [p["id"] for p in prod]
+        assert len(items) == len(prod)
+        assert items[1]["id"] == prod[1]["id"]
         if os.name != "nt":
             assert (out.stat().st_mode & 0o777) == 0o644
+
+    def test_operator_priority_text_never_reaches_the_public_view(self, tmp_path):
+        """ADR-034 F1 (external review of 3d67221f): derived_view.json is 0644
+        and the public dashboard reads it. An operator priority is private
+        goal_text.json wording — its title, (V-tag) and instructions must not
+        be written there. Only number, provenance, state and rank are public
+        for provenance=operator; self-derived labels stay public."""
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(
+            state_dir,
+            "Current priority targets:\n"
+            "(A) Priority 11 — CANARYTITLE7f3a (V2): CANARYBODY91c2 do the thing\n",
+        )
+        self._write_derived(state_dir, [{
+            "label": "Night reflections batch (V1)", "vector": "V1",
+            "body": "run overnight", "number": 19,
+            "direction": "reflection", "added_utc": "2026-09-15T21:36:00Z",
+        }])
+
+        result = demand.publish_derived_view(state_dir, None)
+
+        raw = Path(result["path"]).read_text(encoding="utf-8")
+        assert "CANARYTITLE7f3a" not in raw
+        assert "CANARYBODY91c2" not in raw
+        view = json.loads(raw)
+        operator = [i for i in view["priority_items"] if i["provenance"] == "operator"]
+        assert operator == [{
+            "rank": 1, "kind": "priority", "number": 11,
+            "provenance": "operator", "state": "open",
+        }]
+        derived = [i for i in view["priority_items"] if i["provenance"] == "self-derived"]
+        assert derived and derived[0]["label"] == "Night reflections batch"
 
     def test_missing_derived_file_is_absent_not_an_empty_list(self, tmp_path):
         state_dir = _state_dir(tmp_path)
@@ -3866,6 +3952,25 @@ class TestPublishDerivedView:
         assert result["ok"] is True
         assert view["charter"] == {"source": "none", "merged": False, "text": ""}
         assert view["priority_items"] == []
+        # ADR-034 rule 3: no real RELEASE_ROOT/goals.md here (same as the
+        # charter itself, above) — the artifact-gap reader's own status is
+        # "unavailable", never confused with its healthy "no gap named" empty.
+        assert view["artifact_gap_status"] == demand.ARTIFACT_GAP_STATUS_UNAVAILABLE
+
+    def test_artifact_gap_status_ok_when_charter_present(self, tmp_path, monkeypatch):
+        """A present, readable charter is a healthy artifact-gap reader,
+        regardless of whether it happens to name an owner-facing surface —
+        distinct from the charter-unavailable case above."""
+        state_dir = _state_dir(tmp_path)
+        release_root = tmp_path / "_release_root"
+        release_root.mkdir()
+        (release_root / "goals.md").write_text(self.CHARTER, encoding="utf-8")
+        monkeypatch.setenv("RELEASE_ROOT", str(release_root))
+
+        view = demand.build_derived_view(state_dir, None)
+
+        assert view["artifact_gap_status"] == demand.ARTIFACT_GAP_STATUS_OK
+        assert demand._artifact_gap_items(state_dir, None) == []
 
     def test_write_failure_never_raises_keeps_previous_file_and_records_ledger_event(self, tmp_path, monkeypatch):
         state_dir = _state_dir(tmp_path)

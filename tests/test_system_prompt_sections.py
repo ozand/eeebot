@@ -275,6 +275,11 @@ def test_all_empty_sections_are_zero_except_identity(tmp_path):
     # (never truly empty in the real implementation) -- stubbed to true
     # empty for the same reason as scorecard above.
     builder._load_position_block = lambda **kwargs: ""
+    # ADR-034 rule 5 (#1940, A4): the priorities block always renders SOME
+    # state (even "unavailable") -- never truly empty in the real
+    # implementation -- stubbed to true empty for the same reason as
+    # scorecard/position above.
+    builder._load_priorities_block = lambda: ""
 
     prompt = builder.build_system_prompt(loop_profile=True)
     fit = builder.last_fit
@@ -306,8 +311,8 @@ HEALTHY_SECTIONS["agents"] = (
 )
 OVERFLOW_SECTIONS = {
     "identity": 1_446, "soul": 1_200, "goals": 2_800, "user": 3_500, "operating": 4_800,
-    "agents": 0, "skills_catalogue": 6_951, "memory": 4_030, "runtime": 320, "scorecard": 21,
-    "position": 478,
+    "agents": 0, "priorities": 137, "skills_catalogue": 6_951, "memory": 4_030, "runtime": 320,
+    "scorecard": 21, "position": 478,
 }
 OVERFLOW_SECTIONS["agents"] = (
     _OVERFLOW_TOTAL - sum(OVERFLOW_SECTIONS.values()) - len(ContextBuilder.SECTION_SEPARATOR) * (len(OVERFLOW_SECTIONS) - 1)
@@ -349,8 +354,14 @@ class _OverflowSectionsManager(_FakeSubagentManager):
 
 
 @pytest.fixture(autouse=True)
-def _core_smoke_set_matches_fixture_repo(monkeypatch):
+def _core_smoke_set_matches_fixture_repo(monkeypatch, tmp_path):
     monkeypatch.setattr(bridge, "_CORE_SMOKE_TESTS", ("tests/test_smoke.py",))
+    # ADR-034 rule 3: should_propose/build_context/bridge.py's executor
+    # gate all now hard-require a real release charter to proceed.
+    _adr034_release_root = tmp_path / "_adr034_release_root"
+    _adr034_release_root.mkdir(exist_ok=True)
+    (_adr034_release_root / "goals.md").write_text("test charter", encoding="utf-8")
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", _adr034_release_root)
 
 
 def _wire(tmp_path, monkeypatch, manager_cls):

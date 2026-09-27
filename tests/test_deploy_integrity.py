@@ -13,6 +13,19 @@ _SECTION_HEADER = re.compile(r"\[[A-Za-z]+\]")
 _DIRECTIVE = re.compile(r"[A-Za-z][A-Za-z0-9]*=.*")
 
 
+def test_activation_check_unit_is_installed_before_its_first_start() -> None:
+    """A fresh host must receive the new self-check unit in the same deploy."""
+    content = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    source = '"$RELEASE_DIR/host/eeepc/systemd/$ACTIVATION_UNIT"'
+    destination = '"/etc/systemd/system/$ACTIVATION_UNIT"'
+    start = 'sudo systemctl start eeepc-self-evolving-activation-check.service'
+
+    assert source in content and destination in content
+    assert content.index("sudo install -o root -g root -m 0644 \\") < content.index(source)
+    assert content.index(source) < content.index("sudo systemctl daemon-reload")
+    assert content.index("sudo systemctl daemon-reload") < content.index(start)
+
+
 def test_deploy_installs_systemd_drop_ins_with_unit_discipline() -> None:
     """#1701 part 2: the unit copy skipped ``*.d/*.conf``.
 
@@ -109,7 +122,7 @@ def test_host_capabilities_probe_runs_daily_as_eeepc_agent() -> None:
 
     assert "User=eeepc-agent" in service
     assert "Group=eeepc-agent" in service
-    assert "eeebot_dashboard.py --refresh-host-caps" in service
+    assert "probe_host_capabilities.py" in service
     assert "Environment=EEEBOT_CAPABILITY_PROBE_TRIGGER=systemd_timer" in service
     assert "ReadWritePaths=/var/lib/eeepc-agent/self-evolving-agent/state" in service
     assert "OnCalendar=*-*-* 01:00:00" in timer

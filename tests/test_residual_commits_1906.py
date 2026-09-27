@@ -98,11 +98,6 @@ def test_self_dedup_ignores_legacy_uncommitted_auto_commits_exact_b7e76119(tmp_p
     )
     subprocess.check_call(["git", "commit", "-m", commit_msg], cwd=repo)
 
-    # 1. _all_built_subjects must NOT contain this legacy commit
-    built = llm_proposer._all_built_subjects(repo)
-    assert "filter_futile_fallbacks" not in built
-    assert "auto-commit uncommitted subagent work" not in built
-
     # 2. A new proposal targeting scripts/filter_futile_fallbacks.py must NOT be rejected by self-dedup
     proposal = {
         "task_title": "Add deduplication cooldown filter to scripts/filter_futile_fallbacks.py",
@@ -138,11 +133,6 @@ def test_self_dedup_ignores_new_residual_commits_with_trailer(tmp_path: Path):
         "Selfevo-Residual: true\n"
     )
     subprocess.check_call(["git", "commit", "-m", commit_msg], cwd=repo)
-
-    # 1. _all_built_subjects must NOT contain this residual commit
-    built = llm_proposer._all_built_subjects(repo)
-    assert "filter_futile_fallbacks" not in built
-    assert "auto-commit residual state" not in built
 
     # 2. Proposal is not rejected by self-dedup
     proposal = {

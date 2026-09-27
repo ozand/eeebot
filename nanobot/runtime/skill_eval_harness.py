@@ -319,9 +319,12 @@ def _llm_runner(prompt: str, with_skill: bool, skill_path: Path, timeout: float)
     from nanobot.runtime.model_registry import resolve_harness_max_tokens, resolve_model
 
     # #1729 (ADR-022 rule 2): identity (short form) + roles/skill-eval.md.
-    from nanobot.runtime.role_prompt import build_role_system_prompt
+    from nanobot.runtime.role_prompt import build_role_system_prompt_or_refuse
 
-    system, _role_fit = build_role_system_prompt("skill-eval")
+    try:
+        system, _role_fit = build_role_system_prompt_or_refuse("skill-eval")
+    except Exception as exc:
+        return {"ok": False, "status": "refused", "reason": f"role_prompt_refused: {exc}"}
     if with_skill:
         try:
             skill_text = Path(skill_path).read_text(encoding="utf-8")[:MAX_SKILL_TEXT_CHARS]

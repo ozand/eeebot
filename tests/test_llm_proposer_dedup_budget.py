@@ -45,6 +45,15 @@ from tests.test_llm_proposer import _state_dir, _write_goal_text, _write_usage_s
 SUBJECT_DEDUP_ENV = llm_proposer._SUBJECT_DEDUP_ENABLED_ENV
 EDIT_BUDGET_M_ENV = llm_proposer._EDIT_BUDGET_M_ENV
 
+
+@pytest.fixture(autouse=True)
+def _release_charter(synthetic_release_charter):
+    """ADR-034 rule 3: should_propose/build_context now hard-gate on the
+    release charter's presence. This module's tests are about subject
+    dedup/edit budget, not charter absence, so opt into the shared
+    conftest fixture at module scope (never suite-wide — see its
+    docstring)."""
+
 # A commit date safely before every ``last_used`` timestamp used in this
 # module's edit-budget fixtures, so the repo-creation "seed" commit (which
 # necessarily touches every fixture script) never itself counts toward a

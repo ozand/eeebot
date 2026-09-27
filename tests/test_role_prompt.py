@@ -22,6 +22,7 @@ import pytest
 from nanobot.runtime import role_prompt
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
 from nanobot.runtime.role_prompt import (
+    CHARTER_MAX_CHARS,
     IDENTITY_SHORT_CAP,
     ROLE_FLAGS,
     ROLE_NAMES,
@@ -106,6 +107,56 @@ class TestLiteralParity:
 
 # ─── missing and truncated files degrade, never raise ──────────────────────
 
+class TestCharterIntegrity:
+    def test_current_size_charter_reaches_proposer_and_planner_whole(self, tmp_path):
+        charter = "A" * 3865
+        root = _release_root(
+            tmp_path,
+            **{
+                "IDENTITY.md": "# Identity\n\nTest identity.\n",
+                "SOUL.md": "# Soul\n\nTest soul.\n",
+                "goals.md": charter,
+                "roles__proposer.md": "---\nrole: proposer\n---\n# Role: proposer\n\nPropose.\n",
+                "roles__planner.md": "---\nrole: planner\n---\n# Role: planner\n\nPlan.\n",
+            },
+        )
+        from nanobot.runtime.operator_documents import resolve_charter
+        resolved = resolve_charter(root)
+        assert resolved.state == "text"
+        assert resolved.text == charter
+        expected = "## goals.md\n\n" + resolved.text
+        for role in ("proposer", "planner"):
+            prompt, fit = build_role_system_prompt(role, release_root=root)
+            assert expected in prompt
+            assert fit["blocks"]["goals"] == len(expected)
+            assert fit["truncated"] == []
+
+    def test_oversized_charter_refuses_prompt_build_with_reason(self, tmp_path):
+        root = _release_root(
+            tmp_path,
+            **{
+                "IDENTITY.md": "# Identity\
+\
+Test identity.\
+",
+                "SOUL.md": "# Soul\
+\
+Test soul.\
+",
+                "goals.md": "X" * (CHARTER_MAX_CHARS + 1),
+                "roles__proposer.md": "---\
+role: proposer\
+---\
+# Role: proposer\
+\
+Propose.\
+",
+            },
+        )
+        with pytest.raises(role_prompt.CharterTooLargeError, match="role prompt refused.*goals.md.*maximum is 8000"):
+            build_role_system_prompt("proposer", release_root=root)
+
+
 class TestMissingAndTruncated:
     def test_missing_role_file_leaves_the_caller_running_on_identity(self, tmp_path):
         root = _release_root(
@@ -126,11 +177,10 @@ class TestMissingAndTruncated:
         assert "[missing: IDENTITY.md]" in text and "[missing: SOUL.md]" in text
         assert "Curate." in text
 
-    def test_unresolvable_release_root_marks_every_block(self, tmp_path, monkeypatch):
+    def test_unresolvable_release_root_refuses_charter_roles(self, tmp_path, monkeypatch):
         monkeypatch.setattr(role_prompt, "resolve_release_root", lambda explicit=None: None)
-        text, fit = build_role_system_prompt("proposer")
-        assert fit["missing"] == ["IDENTITY.md", "SOUL.md", "goals.md", "roles/proposer.md"]
-        assert "[missing: roles/proposer.md]" in text
+        with pytest.raises(role_prompt.RolePromptBuildError, match="goals.md is unavailable"):
+            build_role_system_prompt("proposer")
 
     def test_over_budget_role_body_is_cut_with_the_loader_notice(self, tmp_path):
         body = "\n".join(f"line {n} of a very long role description" for n in range(200))

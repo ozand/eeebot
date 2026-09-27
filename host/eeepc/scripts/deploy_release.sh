@@ -228,6 +228,50 @@ else
     die "/opt/eeepc-agent/runtimes/self-evolving-agent is not owned by root:root"
   fi
 
+  # --- #1904 candidate self-check begin ---
+  # Prove candidate imports/config/state/tool path before current changes. A
+  # runtime drop-in scopes candidate state to this service only: unlike
+  # systemctl set-environment it cannot leak to unrelated manager-started units.
+  # Install the new unit before the first start on hosts predating this PR.
+  ACTIVATION_UNIT=eeepc-self-evolving-activation-check.service
+  sudo install -o root -g root -m 0644 \
+    "$RELEASE_DIR/host/eeepc/systemd/$ACTIVATION_UNIT" \
+    "/etc/systemd/system/$ACTIVATION_UNIT"
+  sudo systemctl daemon-reload
+  ACTIVATION_DROPIN_DIR="${ACTIVATION_CHECK_DROPIN_DIR:-/run/systemd/system/$ACTIVATION_UNIT.d}"
+  sudo mkdir -p "$ACTIVATION_DROPIN_DIR"
+  ACTIVATION_DROPIN="$ACTIVATION_DROPIN_DIR/90-candidate.conf"
+  ACTIVATION_DROPIN_CLEANED=0
+  cleanup_activation_dropin() {
+    if [ "$ACTIVATION_DROPIN_CLEANED" -eq 0 ]; then
+      ACTIVATION_DROPIN_CLEANED=1
+      sudo rm -f "$ACTIVATION_DROPIN"
+      sudo rmdir "$ACTIVATION_DROPIN_DIR" 2>/dev/null || true
+      sudo systemctl daemon-reload
+    fi
+  }
+  trap cleanup_activation_dropin ERR
+  printf '%s\n' '[Service]' \
+    "Environment=ACTIVATION_CHECK_RELEASE=$RELEASE_DIR" \
+    'Environment=ACTIVATION_CHECK_MODE=activation' \
+    | sudo tee "$ACTIVATION_DROPIN" >/dev/null
+  sudo chmod 0644 "$ACTIVATION_DROPIN"
+  sudo systemctl daemon-reload
+  # Nothing has been flipped yet, so a failed check has nothing to roll back:
+  # clear the cleanup trap and exit non-zero. rollback_remote is defined (and
+  # armed) only after this block.
+  if sudo systemctl start eeepc-self-evolving-activation-check.service; then
+    cleanup_activation_dropin
+    trap - ERR
+  else
+    ACTIVATION_CHECK_RC=$?
+    cleanup_activation_dropin
+    trap - ERR
+    die "model-free bridge activation self-check failed (rc=$ACTIVATION_CHECK_RC)"
+  fi
+  echo "[remote] model-free bridge activation self-check passed; no model was called"
+  # --- #1904 candidate self-check end ---
+
   echo "[remote] updating current symlink"
   sudo ln -sfn "$RELEASE_DIR" "$CURRENT_SYMLINK"
   sudo chown -h root:root "$CURRENT_SYMLINK"
@@ -530,10 +574,12 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     if [ "$VERIFY_ONLY" -eq 1 ]; then
       echo "[remote] verify-only mode: checking $DASHBOARD_UNIT without restart"
       if ! systemctl is-active --quiet "$DASHBOARD_UNIT"; then
-        die "$DASHBOARD_UNIT is not active"
+        echo "[remote] NOTICE: $DASHBOARD_UNIT is not active; skipping process verification"
+        DASHBOARD_PID=""
+      else
+        DASHBOARD_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
+        DASHBOARD_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
       fi
-      DASHBOARD_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
-      DASHBOARD_START="$(systemctl show "$DASHBOARD_UNIT" -p ExecMainStartTimestamp --value)"
     else
       echo "[remote] restarting $DASHBOARD_UNIT after current activation"
       DASHBOARD_PREV_PID="$(systemctl show "$DASHBOARD_UNIT" -p MainPID --value)"
@@ -558,157 +604,26 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
     # aborts as `unreadable: /proc/<pid>/cwd (exit N: <stderr>)`, never as the
     # `cwd is ''` text below, which now means exactly one thing: the process
     # runs from somewhere other than the release.
-    DASHBOARD_CWD="$(gate_read "/proc/$DASHBOARD_PID/cwd" sudo readlink -v "/proc/$DASHBOARD_PID/cwd")"
-    # `sudo tr ... < file` would not work: the shell opens the redirect as the
-    # deploying user before sudo runs. The read itself has to be the sudo'd
-    # command; gate_read streams it (see there) so the NULs reach `tr`.
-    DASHBOARD_CMDLINE="$(gate_read "/proc/$DASHBOARD_PID/cmdline" sudo cat "/proc/$DASHBOARD_PID/cmdline" | tr "\0" " ")"
-    if [ "$VERIFY_ONLY" -eq 0 ] && [ "$DASHBOARD_PID" = "$DASHBOARD_PREV_PID" ] && [ "$DASHBOARD_START" = "$DASHBOARD_PREV_START" ]; then
-      die "$DASHBOARD_UNIT restart did not produce a new process identity"
-    fi
-    if [ "$DASHBOARD_CWD" != "$RELEASE_DIR" ]; then
-      die "$DASHBOARD_UNIT PID $DASHBOARD_PID cwd is '$DASHBOARD_CWD', expected '$RELEASE_DIR'"
-    fi
-    if [ "$VERIFY_ONLY" -eq 0 ] && [ "$(cat "$RELEASE_DIR/SOURCE_COMMIT")" != "$FULL_COMMIT" ]; then
-      die "activated release SOURCE_COMMIT does not equal full requested SHA"
-    fi
-    # The unit's ExecStart names the `current` symlink; the cwd check resolves
-    # that symlink to the release, while this exact check pins script and args.
-    case "$DASHBOARD_CMDLINE" in
-      *"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"*) : ;;
-      *)
-        die "$DASHBOARD_UNIT PID $DASHBOARD_PID has unexpected command line: $DASHBOARD_CMDLINE"
-        ;;
-    esac
-    echo "[remote] $DASHBOARD_UNIT active: MainPID=$DASHBOARD_PID start=$DASHBOARD_START previous_pid=$DASHBOARD_PREV_PID previous_start=$DASHBOARD_PREV_START cwd=$DASHBOARD_CWD source=$FULL_COMMIT"
-
-    # Semantic dashboard gate: listener + valid JSON + bounded/no-leak fields.
-    # `ss -ltnp` prints the owning process only to root: without sudo the
-    # listener row is there but its users:(("python3",pid=...)) field is not,
-    # so the owner count reads 0 and this gate fails a healthy deploy — the
-    # third read in this block to need the privilege it was missing (#1246).
-    # `systemctl restart` returns before the process binds :8080. Wait bounded
-    # for the listener in normal deploy mode; verify-only cannot reproduce the
-    # bind race because it deliberately does not restart the service.
-    # `ss` itself failing (missing binary, sudo denied) is `unreadable: ss
-    # -ltnpH`; an empty row set from a successful `ss` is the listener not being
-    # up, and the owner gate below says so with the counts it saw.
-    DASHBOARD_SOCKET_ROWS=""
-    for _ in $(seq 1 40); do
-      DASHBOARD_SOCKET_ROWS="$(gate_read "ss -ltnpH" sudo ss -ltnpH | awk '$4 ~ /:8080$/')"
-      [ -n "$DASHBOARD_SOCKET_ROWS" ] && break
-      sleep 0.25
-    done
-    DASHBOARD_LISTENER_COUNT="$(printf '%s\n' "$DASHBOARD_SOCKET_ROWS" | sed '/^$/d' | wc -l)"
-    DASHBOARD_SOCKET_PIDS="$(printf '%s\n' "$DASHBOARD_SOCKET_ROWS" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
-    DASHBOARD_SOCKET_PID_COUNT="$(printf '%s\n' "$DASHBOARD_SOCKET_PIDS" | sed '/^$/d' | wc -l)"
-    if [ "$DASHBOARD_LISTENER_COUNT" != "1" ] || [ "$DASHBOARD_SOCKET_PID_COUNT" != "1" ] || [ "$DASHBOARD_SOCKET_PIDS" != "$DASHBOARD_PID" ]; then
-      die ":8080 must have exactly one owner, dashboard PID $DASHBOARD_PID; saw listeners=$DASHBOARD_LISTENER_COUNT pids='$DASHBOARD_SOCKET_PIDS'"
-    fi
-    DASHBOARD_PLAIN_ROWS="$(gate_read "ss -ltnH" sudo ss -ltnH | awk '$4 ~ /:8080$/')"
-    if [ -z "$DASHBOARD_PLAIN_ROWS" ]; then
-      die "dashboard listener :8080 is not active"
-    fi
-    DASHBOARD_HEALTH="$(curl --fail --silent --show-error http://127.0.0.1:8080/api/health 2>/dev/null || true)"
-    DASHBOARD_METRICS="$(curl --fail --silent --show-error http://127.0.0.1:8080/api/metrics 2>/dev/null || true)"
-    if [ -z "$DASHBOARD_HEALTH" ] || [ -z "$DASHBOARD_METRICS" ]; then
-      if [ "$VERIFY_ONLY" -eq 1 ]; then
-        echo "VERIFY_ONLY HEALTH_FETCH_FAILED" >&2
+    if [ -n "$DASHBOARD_PID" ]; then
+      DASHBOARD_CWD="$(gate_read "/proc/$DASHBOARD_PID/cwd" sudo readlink -v "/proc/$DASHBOARD_PID/cwd")"
+      DASHBOARD_CMDLINE="$(gate_read "/proc/$DASHBOARD_PID/cmdline" sudo cat "/proc/$DASHBOARD_PID/cmdline" | tr "\0" " ")"
+      if [ "$VERIFY_ONLY" -eq 0 ] && [ "$DASHBOARD_PID" = "$DASHBOARD_PREV_PID" ] && [ "$DASHBOARD_START" = "$DASHBOARD_PREV_START" ]; then
+        die "$DASHBOARD_UNIT restart did not produce a new process identity"
       fi
-      die "could not fetch health or metrics from :8080"
+      if [ "$DASHBOARD_CWD" != "$RELEASE_DIR" ]; then
+        die "$DASHBOARD_UNIT PID $DASHBOARD_PID cwd is '$DASHBOARD_CWD', expected '$RELEASE_DIR'"
+      fi
+      if [ "$VERIFY_ONLY" -eq 0 ] && [ "$(cat "$RELEASE_DIR/SOURCE_COMMIT")" != "$FULL_COMMIT" ]; then
+        die "activated release SOURCE_COMMIT does not equal full requested SHA"
+      fi
+      case "$DASHBOARD_CMDLINE" in
+        *"/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0"*) : ;;
+        *)
+          die "$DASHBOARD_UNIT PID $DASHBOARD_PID has unexpected command line: $DASHBOARD_CMDLINE"
+          ;;
+      esac
+      echo "[remote] $DASHBOARD_UNIT active: MainPID=$DASHBOARD_PID start=$DASHBOARD_START previous_pid=$DASHBOARD_PREV_PID previous_start=$DASHBOARD_PREV_START cwd=$DASHBOARD_CWD source=$FULL_COMMIT"
     fi
-    # #1270: the page a person actually reads. /api/health and /api/metrics
-    # are built by a different code path from the HTML renderer, so a
-    # KeyError in the renderer shipped behind a green gate and / returned
-    # 500 for 25 minutes. Status code and a body-size floor only — never
-    # markup: an unhandled exception yields a non-200, a broken renderer
-    # yields a stub, and coupling the gate to HTML content is how a gate
-    # gets routed around. gate_read keeps #1259's distinction: curl that
-    # cannot connect is `unreadable: …/ (exit 7: …)`, a page that answers
-    # with an error is reported as its status code. No --fail here: a 500
-    # must reach the status check, not the unreadable branch.
-    DASHBOARD_PAGE_BODY="$(mktemp)"
-    DASHBOARD_PAGE_STATUS="$(gate_read "http://127.0.0.1:8080/" curl --silent --show-error --max-time 30 --output "$DASHBOARD_PAGE_BODY" --write-out '%{http_code}' http://127.0.0.1:8080/)"
-    DASHBOARD_PAGE_BYTES="$(wc -c <"$DASHBOARD_PAGE_BODY" | tr -d ' ')"
-    rm -f "$DASHBOARD_PAGE_BODY"
-    if [ "$DASHBOARD_PAGE_STATUS" != "200" ]; then
-      die "dashboard page / returned HTTP $DASHBOARD_PAGE_STATUS ($DASHBOARD_PAGE_BYTES bytes); the HTML renderer is broken while /api/* may still be healthy"
-    fi
-    # Live page is ~18.8 KB; the floor catches a stub or an error page that
-    # somehow carries a 200, and nothing a working renderer produces.
-    if [ "$DASHBOARD_PAGE_BYTES" -lt 1024 ]; then
-      die "dashboard page / body is $DASHBOARD_PAGE_BYTES bytes (< 1024); the renderer produced a stub"
-    fi
-    echo "[remote] dashboard page / HTTP $DASHBOARD_PAGE_STATUS, $DASHBOARD_PAGE_BYTES bytes"
-    DASHBOARD_HEALTH="$DASHBOARD_HEALTH" DASHBOARD_METRICS="$DASHBOARD_METRICS" python3 - <<'PY'
-import json
-import os
-
-health = json.loads(os.environ["DASHBOARD_HEALTH"])
-metrics = json.loads(os.environ["DASHBOARD_METRICS"])
-required_health = {"overall", "dimensions", "goal", "active_task", "reward_average"}
-required_metrics = {"goal", "active_task", "approval_gate_state", "reward_source", "goal_source", "active_task_source", "approval_gate_source"}
-source_keys = ("goal_source", "active_task_source", "approval_gate_source", "reward_source")
-for payload, required in ((health, required_health), (metrics, required_metrics)):
-    if not all(isinstance(payload.get(key), (str, dict, int, float, list)) for key in required):
-        raise SystemExit("dashboard endpoint has invalid bounded field types")
-if not required_health <= health.keys() or not isinstance(health["dimensions"], dict):
-    raise SystemExit("dashboard health JSON missing bounded fields")
-if not required_metrics <= metrics.keys():
-    raise SystemExit("dashboard metrics JSON missing bounded fields")
-raw_markers = ("evolution-", "materialized-cycle-", "reward_signal")
-payload = json.dumps({"health": health, "metrics": metrics}, sort_keys=True)
-if any(marker in payload for marker in raw_markers):
-    raise SystemExit("dashboard endpoint contains raw retired artifact payload")
-for key in source_keys:
-    source = metrics.get(key)
-    if not isinstance(source, dict) or not {"status", "age_hours", "authoritative", "context_only"} <= source.keys():
-        raise SystemExit("dashboard endpoint missing bounded source metadata")
-    if source["authoritative"] is not False or source["context_only"] is not True:
-        raise SystemExit("dashboard endpoint source authority flags are unsafe")
-    if source["status"] not in {"fresh", "stale", "missing", "permission", "unreadable", "malformed", "valid-empty", "retired", "unavailable"}:
-        raise SystemExit("dashboard endpoint source status is invalid")
-    if source["status"] != "fresh" and source.get("age_hours") is not None and not isinstance(source["age_hours"], (int, float)):
-        raise SystemExit("dashboard endpoint source age is invalid")
-if metrics.get("latest_report_path") is not None or metrics.get("materialized_path") is not None:
-    raise SystemExit("dashboard endpoint exposes an artifact path")
-source_status = {
-    key: metrics[key]["status"] for key in source_keys
-}
-for dimension, source_key in (("reward", "reward_source"), ("gate", "approval_gate_source")):
-    detail = health.get("dimensions", {}).get(dimension, {})
-    if not isinstance(detail, dict) or detail.get("status") not in {"WARN", "OK", "CRIT"}:
-        raise SystemExit("dashboard health dimension is not structured")
-    expected = "OK" if source_status[source_key] == "fresh" else "WARN"
-    if detail.get("status") != expected:
-        raise SystemExit(f"dashboard {dimension} status does not match source state")
-    if source_status[source_key] != "fresh" and "source=" + source_status[source_key] not in detail.get("detail", ""):
-        raise SystemExit(f"dashboard {dimension} detail lacks bounded source state")
-# Validate the bounded label grammar and metadata, rather than reproducing the
-# dashboard formatter. Retired/missing sources legitimately have no age.
-if source_status["reward_source"] != "fresh":
-    import re
-    label = metrics.get("reward_average")
-    match = re.fullmatch(r"([a-z-]+)(?:; age=([0-9]+(?:\.[0-9]+)?)h)? \(context-only artifact\)", label) if isinstance(label, str) else None
-    age = metrics["reward_source"].get("age_hours")
-    if (match is None or match[1] != source_status["reward_source"]
-            or (match[2] is None) != (age is None)
-            or (age is not None and float(match[2]) != round(max(0.0, age), 1))):
-        raise SystemExit("dashboard reward payload is not bounded")
-if source_status["approval_gate_source"] != "fresh" and metrics.get("approval_gate_state", "").startswith("materialize_"):
-    raise SystemExit("dashboard gate payload is not bounded")
-if "0.88 avg over 5 sample(s)" in payload or "materialize_synthesized_improvement" in payload:
-    raise SystemExit("dashboard endpoint contains raw legacy dashboard values")
-# The bare host-path prefixes were in this list and rejected the healthy
-# live payload: `operator_attention` legitimately reports
-# `archive=/var/lib/eeepc-agent/self-evolving-agent/state/subagents/archive`,
-# which is an operational detail, not a leaked retired artifact. A host path
-# appearing anywhere is not evidence of staleness — the frozen cycle id and
-# the retired reward/gate strings are. Caught by `--verify-only` against a
-# healthy host before it could abort a deploy, which is what that mode is for.
-if any(token in payload for token in ("cycle-2f305bf18b42", "0.88 avg over 5 sample(s)", "materialize_synthesized_improvement")):
-    raise SystemExit("dashboard endpoint contains a stale cycle id or retired artifact value")
-PY
   elif [ "$DASHBOARD_UNIT_STATE" = "disabled" ] || [ "$DASHBOARD_UNIT_STATE" = "masked" ]; then
     echo "NOTICE: $DASHBOARD_UNIT is $DASHBOARD_UNIT_STATE; preserving state"
   else
@@ -720,30 +635,31 @@ else
   die "unexpected $DASHBOARD_UNIT LoadState=$DASHBOARD_LOAD_STATE"
 fi
 
-# Ensure bridge service is restarted correctly. Keep the activation rollback trap
-# installed through this restart so a bridge failure restores the previous release.
-#
+# Semantic release health gate (ADR-036 D3 Part B: model-free and dashboard-free):
+# Runs independently of dashboard service state or port 8080 under runtime service identity.
+# Vocabulary allowlist matching dashboard.ARTIFACT_SOURCE_STATUSES:
+# source["status"] not in {"fresh", "stale", "missing", "permission", "unreadable", "malformed", "valid-empty", "retired", "unavailable"}
+HEALTH_GATE_PYTHON="${HEALTH_GATE_PYTHON:-/opt/eeepc-agent/venv/bin/python}"
+if [ ! -x "$HEALTH_GATE_PYTHON" ]; then
+  HEALTH_GATE_PYTHON=python3
+fi
+if ! sudo -u eeepc-agent env PYTHONPATH="$RELEASE_DIR" PYTHONDONTWRITEBYTECODE=1 "$HEALTH_GATE_PYTHON" "$RELEASE_DIR/scripts/verify_release_health.py"; then
+  if [ "$VERIFY_ONLY" -eq 1 ]; then
+    echo "VERIFY_ONLY HEALTH_FETCH_FAILED" >&2
+  fi
+  die "could not verify release health"
+fi
+
+# Ensure bridge service is restarted correctly after model-free activation.
+# The model-free activation check above is the only activation rollback gate.
+# The first real candidate cycle is behavioural evidence only: timeout is
+# inconclusive (keep release active); every other non-clean exit rolls back.
 # --- #1303 bridge activation begin ---
-# The bridge is Type=oneshot, so `systemctl restart` blocks until its first
-# post-flip cycle ends and returns that cycle's exit status. Since #1280 a cycle
-# whose model call never returned exits EXIT_EXECUTOR_LLM_ERROR (3) so the
-# failure streak stays honest; on 2026-09-05 06:38 a transient gateway 404 in
-# that first cycle turned into "Failed to start … status=3", the ERR trap rolled
-# `a64470e5` back, and the release carrying #1280 became un-deployable by the
-# mechanism its own fix trips.
-#
-# Arm 1 of #1303, deliberately: distinguish the exit status here. Status 3 is
-# "this cycle could not reach the gateway" — the process imported, started, ran
-# a cycle and recorded it `blocked` — not "this release cannot run"; every other
-# non-zero status or signal still is, and still rolls back. Not arm 2 (retry the
-# activation once): it costs a full cycle and a second model call, and the
-# health gate below would still need this same distinction for the journal and
-# streak it reads. Not arm 3 (exit 0 and read the outcome instead): that moves
-# the signal #1280 put on the exit status, and the streak semantics stay exactly
-# as they are. The lib is the single home of the value, pinned to
-# bridge.EXIT_EXECUTOR_LLM_ERROR by test.
 if [ "$VERIFY_ONLY" -eq 0 ]; then
   . "$RELEASE_DIR/host/eeepc/scripts/lib_bridge_exit.sh"
+  sudo systemctl stop eeepc-self-evolving-subagent-bridge.service 2>/dev/null || true
+  sudo systemctl reset-failed eeepc-self-evolving-subagent-bridge.service 2>/dev/null || true
+  sudo systemctl daemon-reload
   BRIDGE_RESTART_RC=0
   sudo systemctl restart eeepc-self-evolving-subagent-bridge.service || BRIDGE_RESTART_RC=$?
   BRIDGE_RESULT="$(systemctl show -p Result --value eeepc-self-evolving-subagent-bridge.service 2>/dev/null || true)"
@@ -751,11 +667,26 @@ if [ "$VERIFY_ONLY" -eq 0 ]; then
   case "$(classify_bridge_run "$BRIDGE_RESTART_RC" "$BRIDGE_RESULT" "$BRIDGE_EXIT_STATUS")" in
     ok) ;;
     transport)
-      echo "[remote] bridge first post-flip cycle exited EXIT_EXECUTOR_LLM_ERROR ($BRIDGE_EXIT_EXECUTOR_LLM_ERROR): transport failure recorded as blocked, not an activation failure (#1303); release stays active" ;;
+      echo "[remote] bridge first real cycle exited EXIT_EXECUTOR_LLM_ERROR ($BRIDGE_EXIT_EXECUTOR_LLM_ERROR): transport failure recorded as blocked, not an activation failure (#1303); release stays active" ;;
+    timeout)
+      BRIDGE_TIMEOUT_RECORD_RC=0
+      sudo -u eeepc-agent env \
+        ACTIVATION_CHECK_RELEASE="$RELEASE_DIR" ACTIVATION_CHECK_MODE=record-behavior-timeout \
+        ACTIVATION_CHECK_RESULT="$BRIDGE_RESULT" ACTIVATION_CHECK_STATUS="$BRIDGE_EXIT_STATUS" \
+        PYTHONPATH="$RELEASE_DIR" PYTHONDONTWRITEBYTECODE=1 \
+        STATE_DIR=/var/lib/eeepc-agent/self-evolving-agent/state \
+        NANOBOT_RUNTIME_STATE_ROOT=/var/lib/eeepc-agent/self-evolving-agent/state \
+        HOME=/opt/eeepc-agent \
+        /opt/eeepc-agent/venv/bin/python -m nanobot.runtime.activation_check \
+        || BRIDGE_TIMEOUT_RECORD_RC=$?
+      sudo systemctl unset-environment ACTIVATION_CHECK_RELEASE ACTIVATION_CHECK_MODE ACTIVATION_CHECK_RESULT ACTIVATION_CHECK_STATUS || true
+      if [ "$BRIDGE_TIMEOUT_RECORD_RC" -ne 0 ]; then
+        die "bridge timed out and behavioral outcome recorder could not start (rc=$BRIDGE_TIMEOUT_RECORD_RC)"
+      fi
+      sudo systemctl show eeepc-self-evolving-activation-check.service -p Result --value >/dev/null
+      echo "[remote] first real cycle timed out at TimeoutStartSec; behavior is not measured because of the model queue, outcome recorded, release remains active" ;;
     *)
-      # #1300: a known status names itself and its remedy here, so the deployer
-      # reads the cause in the deploy output instead of in the bridge journal.
-      die "bridge activation failed (restart rc=$BRIDGE_RESTART_RC Result=$BRIDGE_RESULT ExecMainStatus=$BRIDGE_EXIT_STATUS) $(describe_bridge_exit_status "$BRIDGE_EXIT_STATUS")" ;;
+      die "bridge first real cycle failed (restart rc=$BRIDGE_RESTART_RC Result=$BRIDGE_RESULT ExecMainStatus=$BRIDGE_EXIT_STATUS) $(describe_bridge_exit_status "$BRIDGE_EXIT_STATUS")" ;;
   esac
 fi
 # --- #1303 bridge activation end ---

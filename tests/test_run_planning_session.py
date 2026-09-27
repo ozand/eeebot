@@ -129,6 +129,10 @@ def _stub_role_prompt(monkeypatch):
         role_prompt_mod, "build_role_system_prompt",
         lambda role, **kwargs: ("fixed planner prompt", {"role": role}),
     )
+    monkeypatch.setattr(
+        role_prompt_mod, "build_role_system_prompt_or_refuse",
+        lambda role, **kwargs: ("fixed planner prompt", {"role": role}),
+    )
     release = Path(__file__).resolve().parents[1]
     monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
 
@@ -170,6 +174,7 @@ def test_happy_path_writes_the_diary_and_journals_success(tmp_path: Path, monkey
     rows = _ledger_rows(state, "planning_session")
     assert len(rows) == 1
     assert rows[0]["outcome"] == "integrated"
+    assert rows[0]["parse_mode"] == "strict"
     assert rows[0]["iterations_used"] == 3
     assert rows[0]["iterations_planned"] == 35
     assert rows[0]["task_writing_read"] is True
@@ -217,6 +222,7 @@ def test_harness_prereads_task_contract_before_planner_spawn(tmp_path: Path, mon
     skill = release / "nanobot" / "skills" / "task-writing" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("# mandatory contract\nexternal criterion\n", encoding="utf-8")
+    (release / "goals.md").write_text("test charter", encoding="utf-8")
     manager_factory = _make_fake_mgr_factory(
         state, {"insight": "x", "plan": "y", "iterations_planned": 10},
         task_writing_read=False,
@@ -243,6 +249,7 @@ def test_timeout_is_distinct_from_missing_read(tmp_path: Path, monkeypatch):
     skill = release / "nanobot" / "skills" / "task-writing" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("# contract\n", encoding="utf-8")
+    (release / "goals.md").write_text("test charter", encoding="utf-8")
     monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
     manager_factory = _make_fake_mgr_factory(state, {"plan": "x"})
     monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
@@ -273,6 +280,7 @@ def test_oversized_task_writing_preread_refuses_before_spawn(tmp_path: Path, mon
     skill = release / "nanobot" / "skills" / "task-writing" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_bytes(b"x" * 16_385)
+    (release / "goals.md").write_text("test charter", encoding="utf-8")
     monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
     manager_factory = _make_fake_mgr_factory(state, {"plan": "must not run"})
     monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
@@ -291,6 +299,7 @@ def test_missing_task_writing_preread_refuses_before_spawn(tmp_path: Path, monke
     state = tmp_path / "state"
     release = tmp_path / "release"
     release.mkdir()
+    (release / "goals.md").write_text("test charter", encoding="utf-8")
     monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
     manager_factory = _make_fake_mgr_factory(state, {"plan": "must not run"})
     monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
@@ -330,6 +339,40 @@ def test_real_shaped_no_final_is_not_malformed(tmp_path: Path, monkeypatch, resu
     assert row['reason'] == expected_reason
     assert row['task_writing_read'] is True
     assert not _ledger_rows(state, 'integrity')
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_outcome", "expected_mode", "expected_violation", "expected_reason"),
+    [
+        ('{"insight":"i","plan":"p"}', "integrated", "strict", None, None),
+        ('Preface\n```json\n{"insight":"i","plan":"p"}\n```', "integrated", "fenced", "prose_prefix", None),
+        ('```json\n{"plan":"one"}\n```\n```json\n{"plan":"two"}\n```', "malformed", "malformed", None, "multiple_blocks"),
+        ('```json\n{"plan":"p"}\n``` trailing', "malformed", "malformed", None, "text_after_block"),
+        ('Reasoning example {"plan":"example"} then conclusion', "malformed", "malformed", None, "unfenced_embedded"),
+        ('```json\n{"plan":"unfinished"}', "malformed", "malformed", None, "truncated"),
+        ('{"insight":"i"}', "malformed", "strict", None, 'missing non-empty "plan" field'),
+        ('```json\n{"insight":"i"}\n```', "malformed", "fenced", None, 'missing non-empty "plan" field'),
+        ('ordinary garbage without object', "malformed", "malformed", None, "invalid_json"),
+    ],
+)
+def test_planner_final_response_parse_modes(
+    tmp_path: Path, monkeypatch, raw, expected_outcome, expected_mode,
+    expected_violation, expected_reason,
+):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    monkeypatch.setattr(bridge, "SubagentManager", _make_fake_mgr_factory(state, raw))
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["ran"] is True
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["outcome"] == expected_outcome
+    assert row["parse_mode"] == expected_mode
+    assert row.get("format_violation") == expected_violation
+    assert row.get("reason") == expected_reason
+    if expected_outcome == "integrated":
+        assert row["iterations_planned"] is None
 
 
 def test_malformed_final_response_degrades_without_touching_the_diary(tmp_path: Path, monkeypatch):
@@ -409,3 +452,77 @@ def test_planning_session_includes_dor_and_dod_in_plan_block(tmp_path: Path, mon
     ).stdout
     assert "DoR: baseline tokens_per_integration established" in pushed
     assert "DoD: tokens_per_integration improves by 1%" in pushed
+
+
+def test_refuses_without_spawning_when_charter_absent(tmp_path: Path, monkeypatch):
+    """ADR-034 rule 3: a missing release charter stops the planning session
+    before any spawn -- reason recorded via record_planning_session, same
+    as every other early-out in this function."""
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    release = tmp_path / "release"
+    release.mkdir()  # no goals.md
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
+    manager_factory = _make_fake_mgr_factory(state, {"plan": "must not run"})
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["ran"] is False
+    assert manager_factory.last_task is None
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["outcome"] == "refused"
+    assert row["reason"] == "no_charter"
+
+
+def test_refuses_without_spawning_when_charter_exceeds_role_prompt_limit(tmp_path: Path, monkeypatch):
+    import nanobot.runtime.role_prompt as role_prompt_mod
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "goals.md").write_text("X" * 8001, encoding="utf-8")
+    skill = release / "nanobot" / "skills" / "task-writing" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# task contract\\n", encoding="utf-8")
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
+    manager_factory = _make_fake_mgr_factory(state, {"plan": "must not run"})
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+    monkeypatch.setattr(bridge, "read_charter_text", lambda _root: "X" * 8001)
+    monkeypatch.setattr(
+        role_prompt_mod, "build_role_system_prompt_or_refuse",
+        lambda role, **kwargs: (_ for _ in ()).throw(
+            role_prompt_mod.CharterTooLargeError(role, 8001, 8000)
+        ),
+    )
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["ran"] is False
+    assert manager_factory.last_task is None
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["outcome"] == "refused"
+    assert "maximum is 8000" in row["reason"]
+
+
+def test_refuses_without_spawning_when_charter_unreadable(tmp_path: Path, monkeypatch):
+    """ADR-034 rule 3: an unreadable (here, oversize) release charter
+    follows the same "refused, no spawn" path as an absent one."""
+    from nanobot.runtime.operator_documents import DOCUMENT_SIZE_CAP_BYTES
+
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "goals.md").write_text("x" * (DOCUMENT_SIZE_CAP_BYTES + 1), encoding="utf-8")
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
+    manager_factory = _make_fake_mgr_factory(state, {"plan": "must not run"})
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["ran"] is False
+    assert manager_factory.last_task is None
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["outcome"] == "refused"
+    assert row["reason"] == "no_charter"

@@ -94,12 +94,18 @@ def _local_main_sha(work: Path) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _core_smoke_set_matches_fixture_repo(monkeypatch):
+def _core_smoke_set_matches_fixture_repo(monkeypatch, tmp_path):
     """Same rationale as test_bridge_cycle_branch.py: the real core-smoke set
     names paths in THIS repo that don't exist in the synthetic origin/work
     repos built here — point it at the one file the fixture actually creates.
     """
     monkeypatch.setattr(bridge, "_CORE_SMOKE_TESTS", ("tests/test_smoke.py",))
+    # ADR-034 rule 3: should_propose/build_context/bridge.py's executor
+    # gate all now hard-require a real release charter to proceed.
+    _adr034_release_root = tmp_path / "_adr034_release_root"
+    _adr034_release_root.mkdir(exist_ok=True)
+    (_adr034_release_root / "goals.md").write_text("test charter", encoding="utf-8")
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", _adr034_release_root)
 
 
 # ─── 1/2/4: repair-loop revision-cap exhaustion (mirrors main()'s repair

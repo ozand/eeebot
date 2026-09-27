@@ -26,8 +26,14 @@ from tests.test_cycle_ledger import _init_selfevo_repo, _seed_bridge_request
 
 
 @pytest.fixture(autouse=True)
-def _core_smoke_set_matches_fixture_repo(monkeypatch):
+def _core_smoke_set_matches_fixture_repo(monkeypatch, tmp_path):
     monkeypatch.setattr(bridge, "_CORE_SMOKE_TESTS", ("tests/test_smoke.py",))
+    # ADR-034 rule 3: should_propose/build_context/bridge.py's executor
+    # gate all now hard-require a real release charter to proceed.
+    _adr034_release_root = tmp_path / "_adr034_release_root"
+    _adr034_release_root.mkdir(exist_ok=True)
+    (_adr034_release_root / "goals.md").write_text("test charter", encoding="utf-8")
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", _adr034_release_root)
 
 
 def _wire(tmp_path, monkeypatch, manager_cls):
@@ -449,6 +455,25 @@ class TestScorecardPausedSupplierCounters:
         assert loop["model_call_incomplete_tasks"] == 0
         assert loop["model_call_incomplete_share"] == 0.0
         assert loop["unknown_failure_cause_events"] == "unavailable"
+
+    def test_model_call_incomplete_fields_are_populated_from_ledger(self):
+        rows = [
+            {"phase": "proposed", "cycle_id": "c-incomplete", "demand_id": "task-a"},
+            {"phase": "outcome", "cycle_id": "c-incomplete", "outcome": "model_call_incomplete"},
+        ]
+        loop = scorecard._loop_section(rows, ledger_status="complete")
+        assert loop["model_call_incomplete_events"] == 1
+        assert loop["model_call_incomplete_tasks"] == 1
+        assert loop["model_call_incomplete_share"] == 1.0
+        assert loop["execution_failure_and_incomplete_events"] == 1
+        assert loop["execution_failure_events"] == 0
+        assert loop["wasted_attempts"] == 0
+
+    def test_model_call_incomplete_fields_stay_unavailable_if_ledger_unavailable(self):
+        loop = scorecard._loop_section([], ledger_status="unavailable")
+        assert loop["model_call_incomplete_events"] == "unavailable"
+        assert loop["model_call_incomplete_tasks"] == "unavailable"
+        assert loop["model_call_incomplete_share"] == "unavailable"
 
     def test_paused_supplier_counted_and_timed_separately_from_failed(self):
         loop = scorecard._loop_section(self._rows(paused=2, failed=1, success=1), ledger_status="complete")

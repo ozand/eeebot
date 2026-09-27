@@ -902,6 +902,18 @@ ALIGNED_PRIORITY = {
 
 
 class TestGoalReviewWiring:
+    @pytest.fixture(autouse=True)
+    def _release_root_env(self, tmp_path, monkeypatch):
+        """ADR-034 rule 2 deleted goal_text.json's charter-substitute
+        fallback: maybe_goal_review now requires a real release charter to
+        run at all (production always resolves and passes one). These
+        tests are about goal-review's tech-tree direction wiring, not
+        charter plumbing, so give them one via RELEASE_ROOT."""
+        release_root = tmp_path / "_release_root"
+        release_root.mkdir(exist_ok=True)
+        (release_root / "goals.md").write_text("test charter", encoding="utf-8")
+        monkeypatch.setenv("RELEASE_ROOT", str(release_root))
+
     def test_direction_aligned_candidate_wins_capped_slot(self, tmp_path, monkeypatch):
         from nanobot.runtime import goal_review
 
@@ -983,6 +995,10 @@ class TestGoalReviewWiring:
         monkeypatch.setattr(goal_review, "_call_llm", lambda ctx: {"priorities": [ALIGNED_PRIORITY]})
 
         titles = goal_review.maybe_goal_review(state_dir, None, now=NOW)
-        assert titles == ["Priority 6 — Cut proposer repeat failure rate"]
+        # ADR-034 rule 3: goal review's numbering baseline is charter +
+        # derived only (the operator's own priority list is a separate
+        # document, not folded in by A2) — this test's synthetic charter
+        # has no "Priority N" of its own, so numbering starts fresh.
+        assert titles == ["Priority 1 — Cut proposer repeat failure rate"]
         derived = goal_review.read_derived_priorities(state_dir)
         assert "direction" not in derived[0]

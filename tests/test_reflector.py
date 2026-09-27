@@ -27,6 +27,30 @@ def _answer(cycle: str = "c1") -> str:
     return json.dumps({"cycle_id": cycle, "summary": "good", "findings": [{"kind": "good_practice", "detail": "bounded"}], "recommendations": [{"kind": "approach_hint", "detail": "reuse helper", "evidence": cycle}], "followed_previous": []})
 
 
+def test_reflector_refuses_role_prompt_without_llm_call(tmp_path: Path, monkeypatch):
+    from nanobot.runtime import role_prompt
+
+    monkeypatch.setattr(
+        role_prompt, "build_role_system_prompt",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            role_prompt.CharterTooLargeError("reflector", 8001, 8000)
+        ),
+    )
+    called = False
+
+    def llm(*_args):
+        nonlocal called
+        called = True
+        return _answer()
+
+    result = reflector.run_reflector(tmp_path, llm=llm)
+    assert result["status"] == "refused"
+    assert called is False
+    [row] = [json.loads(line) for line in (tmp_path / "reflector" / "reflections.jsonl").read_text().splitlines()]
+    assert row["status"] == "refused"
+    assert "maximum is 8000" in row["summary"]
+
+
 def test_ledger_rows_reads_gzip_archive(tmp_path: Path):
     archive = tmp_path / "ledger" / "cycles-2026-08-26.jsonl.gz"
     archive.parent.mkdir(parents=True)
