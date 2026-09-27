@@ -456,11 +456,6 @@ def test_prior_summary_survives_when_new_carrier_is_unavailable(tmp_path):
     # Put a 420-character new candidate at the end. Its summary cannot fit
     # within its head/tail excerpt, while the old carrier is excluded from
     # re-compaction as already marked.
-    carrier_index = next(
-        i for i, message in enumerate(messages)
-        if isinstance(message.get("content"), str)
-        and message["content"].startswith("[Compaction summary")
-    )
     candidate = {"role": "assistant", "content": "n" * 420}
     grown = [*messages, candidate]
     result = cc.compact_messages(
