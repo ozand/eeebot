@@ -784,6 +784,20 @@ def test_verify_only_remote_cleanup_happens_after_gate_invocation(repo, mock_bin
     assert not calls.exists()
 
 
+def test_verify_only_other_candidate_ref_is_allowed_from_clean_checkout(repo, mock_bin, monkeypatch) -> None:
+    _git("branch", "other-candidate", cwd=repo, check=True)
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", "other-candidate"])
+    assert "Refuse to verify" not in (result.stdout + result.stderr)
+
+
+def test_verify_only_dry_run_does_not_contact_ssh(repo, mock_bin):
+    calls = repo / "ssh-calls.txt"
+    _write_mock(mock_bin / "ssh", f'echo called >> {shlex.quote(str(calls))}; exit 0')
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--dry-run", "--ref", "HEAD"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not calls.exists()
+
+
 def test_verify_only_has_no_mutation_or_health_wait_path() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     assert 'VERIFY-ONLY mode: candidate $COMMIT; stream candidate gate only' in script
