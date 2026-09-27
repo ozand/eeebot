@@ -45,14 +45,28 @@ async def test_watchdog_cancellation_kills_and_reaps_real_exec_subprocess(tmp_pa
     tool = ExecTool(timeout=60)
     execution = asyncio.create_task(tool.execute(child_command))
     deadline = time.monotonic() + 10
-    while (
-        (not child_pid_file.exists() or (os.name != "nt" and not shell_pid_file.exists()))
-        and time.monotonic() < deadline
-    ):
+    child_pid = None
+    shell_pid = None
+    while time.monotonic() < deadline:
+        # File existence is not a completion signal: open(..., 'w') creates
+        # the file before the child has written its PID. Retry empty/partial
+        # contents within the same startup deadline before parsing.
+        try:
+            content = child_pid_file.read_text(encoding="utf-8").strip()
+            child_pid = int(content) if content else None
+        except (FileNotFoundError, ValueError):
+            child_pid = None
+        if os.name != "nt":
+            try:
+                content = shell_pid_file.read_text(encoding="utf-8").strip()
+                shell_pid = int(content) if content else None
+            except (FileNotFoundError, ValueError):
+                shell_pid = None
+        if child_pid is not None and (os.name == "nt" or shell_pid is not None):
+            break
         await asyncio.sleep(0.01)
-    assert child_pid_file.exists(), "exec child did not start"
-    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
-    shell_pid = int(shell_pid_file.read_text(encoding="utf-8")) if shell_pid_file.exists() else None
+    assert child_pid is not None, "exec child did not write a valid PID before startup deadline"
+    assert os.name == "nt" or shell_pid is not None, "exec shell did not write a valid PID before startup deadline"
     if os.name != "nt":
         import os as posix_os
 
