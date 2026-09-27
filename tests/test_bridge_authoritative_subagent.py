@@ -221,6 +221,26 @@ class TestAuthoritativeSpawnEndToEnd:
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
         assert rows[-1]["max_call_gap_s"] == 42.0
 
+    def test_executor_exception_path_records_observed_call_gap(self, tmp_path, monkeypatch):
+        class _ExceptionPrimary(_PrimaryManager):
+            last_max_call_gap_s = 37.0
+
+            async def spawn(self, **kwargs):
+                result = await super().spawn(**kwargs)
+                return result
+
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("cancelled", REPAIR_TEXT_CANCELLED))
+        _seed_bridge_request(state_dir, "req-gap-unexpected", "cycle-gap-unexpected")
+        monkeypatch.setattr(bridge, "SubagentManager", _ExceptionPrimary)
+        monkeypatch.setattr(
+            bridge, "_changed_files_and_violations",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("injected post-executor failure")),
+        )
+
+        assert asyncio.run(bridge._main_impl()) == 0
+        rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
+        assert rows[-1].get("max_call_gap_s") == 37.0
+
     def test_executor_error_records_observed_call_gap(self, tmp_path, monkeypatch):
         class _ErrorPrimary(_PrimaryManager):
             last_max_call_gap_s = 31.0
@@ -239,6 +259,48 @@ class TestAuthoritativeSpawnEndToEnd:
         assert asyncio.run(bridge._main_impl()) == bridge.EXIT_EXECUTOR_LLM_ERROR
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
         assert rows[-1]["max_call_gap_s"] == 31.0
+
+    def test_repair_wait_is_recomputed_immediately_before_wait(self, tmp_path, monkeypatch):
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
+        _seed_bridge_request(state_dir, "req-repair-recompute", "cycle-repair-recompute")
+        now = [0.0]
+        monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "4000")
+        monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "100")
+        monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "100")
+        monkeypatch.setattr(bridge, "_BRIDGE_PROCESS_START_MONO", 0.0)
+        monkeypatch.setattr(bridge.time, "monotonic", lambda: now[0])
+        import nanobot.runtime.session_clock as session_clock
+        real_budget = session_clock.repair_wait_budget_secs
+        budget_calls = []
+
+        def _advance_after_first_budget(*args, **kwargs):
+            budget = real_budget(*args, **kwargs)
+            budget_calls.append(budget)
+            return budget
+
+        _repair_spawn_state = {"spawned": False}
+        import nanobot.agent.subagent as subagent_module
+        base_repair_cls = _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)
+
+        # The bridge performs immediate cancellation on the pre-await skip;
+        # use an unresolved task so this verifies cleanup rather than a no-op.
+        class _PendingRepair(base_repair_cls):
+            async def spawn(self, **kwargs):
+                _repair_spawn_state["spawned"] = True
+                async def _finished():
+                    return None
+                self._running_tasks[self.task_id] = asyncio.create_task(_finished())
+                now[0] = 3800.0
+                return "pending repair"
+
+        monkeypatch.setattr(subagent_module, "SubagentManager", _PendingRepair)
+        monkeypatch.setattr(bridge, "SubagentManager", _PrimaryManager)
+        monkeypatch.setattr(session_clock, "repair_wait_budget_secs", _advance_after_first_budget)
+        assert asyncio.run(bridge._main_impl()) == 0
+        assert budget_calls[0] == 1200.0
+        assert len(budget_calls) >= 2, "repair wait must be recomputed immediately before await"
+        assert budget_calls[-1] == 100.0, "stale 1200s wait must shrink after pre-await work"
+        assert _repair_spawn_state["spawned"] is True
 
     def test_repair_manager_receives_shared_deadline(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
