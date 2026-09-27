@@ -121,6 +121,7 @@ class TestClassifyLlmError:
         assert bridge._classify_llm_error(text) == "failed"
         assert bridge._classify_llm_error(text, model_call_failure={"stage": "model_call"}) == "model_call_incomplete"
         assert bridge._classify_llm_error(text, model_call_failure={"stage": "tool_execution"}) == "failed"
+        assert bridge._classify_llm_error(text, model_call_failure={"stage": "response_handling"}) == "failed"
 
     @pytest.mark.parametrize("error_type, message", [
         ("BadRequestError", "invalid temperature"),
@@ -140,6 +141,11 @@ class TestClassifyLlmError:
             f"litellm.{error_type}: {message}",
             model_call_failure=failure,
         ) == "failed"
+
+    @pytest.mark.parametrize("error_type", ["RateLimitError", "InternalServerError", "ServiceUnavailableError"])
+    def test_affirmative_provider_error_types_are_supplier_pauses(self, error_type):
+        failure = {"stage": "model_call", "error_type": error_type, "message": "gateway response"}
+        assert bridge._classify_llm_error("gateway response", model_call_failure=failure) == "paused-supplier"
 
     def test_default_is_conservative_not_a_catch_all(self):
         """An error text mentioning neither class's vocabulary at all stays

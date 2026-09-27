@@ -821,7 +821,13 @@ while :; do
     rollback_release
     exit 1
   fi
-  INCOMPLETE_EXIT=$(ssh "ozand@${HOST}" "sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --utc --since \"$FLIP_JOURNAL_TS\" --no-pager | grep -iE 'main process exited, code=exited, status=${BRIDGE_EXIT_MODEL_CALL_INCOMPLETE}/' || true")
+  INCOMPLETE_EXIT=$(ssh "ozand@${HOST}" "sudo journalctl -u eeepc-self-evolving-subagent-bridge.service --utc --since \"$FLIP_JOURNAL_TS\" --no-pager -o short-iso | grep -iE 'main process exited, code=exited, status=${BRIDGE_EXIT_MODEL_CALL_INCOMPLETE}/' | tail -n 1 || true")
+  LATEST_STARTING=$(ssh "ozand@${HOST}" "sudo journalctl -u $BRIDGE_UNIT --utc --since \"$FLIP_JOURNAL_TS\" --no-pager -o short-iso | grep -E 'systemd\\[1\\]: Starting $BRIDGE_UNIT' | tail -n 1 || true")
+  if [ -n "$INCOMPLETE_EXIT" ] && [ -n "$LATEST_STARTING" ]; then
+    INCOMPLETE_TS=${INCOMPLETE_EXIT%% *}
+    STARTING_TS=${LATEST_STARTING%% *}
+    if [[ "$STARTING_TS" > "$INCOMPLETE_TS" ]]; then INCOMPLETE_EXIT=""; fi
+  fi
   if [ -n "$INCOMPLETE_EXIT" ] && [ -z "${INCOMPLETE_EXIT_LOGGED:-}" ]; then
     log "Health gate: model call did not complete (${BRIDGE_EXIT_MODEL_CALL_INCOMPLETE}) after flip; this cycle is inconclusive, release stays active while waiting for a clean run."
     INCOMPLETE_EXIT_LOGGED=1
@@ -912,14 +918,22 @@ while :; do
 
   if [ -n "${INCOMPLETE_EXIT:-}" ]; then
     # A status-6 completion is neither a still-running invocation nor a clean
-    # exit. Clear the hold window so this completed incomplete call cannot
-    # satisfy the weaker NO-CRASH verdict; wait for the next Starting event.
+    # exit. Wait for a later Starting event before beginning a fresh hold;
+    # journal query uses the newest start so an older invocation cannot keep
+    # satisfying NO-CRASH after this completion.
     INVOKED_AT=""
+    STARTING_LINE=$(ssh "ozand@${HOST}" "sudo journalctl -u $BRIDGE_UNIT --utc --since \"$FLIP_JOURNAL_TS\" --no-pager | grep -E 'systemd\\[1\\]: Starting $BRIDGE_UNIT' | tail -n 1 || true")
+    if [ -n "$STARTING_LINE" ] && [ "$STARTING_LINE" != "${LAST_STARTING_LINE:-}" ]; then
+      LAST_STARTING_LINE="$STARTING_LINE"
+      INVOKED_AT=$SECONDS
+      log "New bridge invocation after incomplete call; holding ${NO_CRASH_HOLD}s before weaker verdict: $STARTING_LINE"
+    fi
   fi
-  if [ -z "$INVOKED_AT" ]; then
+  if [ -z "$INVOKED_AT" ] && [ -z "${INCOMPLETE_EXIT:-}" ]; then
     STARTING_LINE=$(ssh "ozand@${HOST}" "sudo journalctl -u $BRIDGE_UNIT --utc --since \"$FLIP_JOURNAL_TS\" --no-pager | grep -E 'systemd\[1\]: Starting $BRIDGE_UNIT' | head -n 1 || true")
     if [ -n "$STARTING_LINE" ]; then
       INVOKED_AT=$SECONDS
+      LAST_STARTING_LINE="$STARTING_LINE"
       log "Bridge invoked after the flip; holding ${NO_CRASH_HOLD}s for a crash before the weaker verdict: $STARTING_LINE"
     fi
   elif [ $(( SECONDS - INVOKED_AT )) -ge "$NO_CRASH_HOLD" ]; then

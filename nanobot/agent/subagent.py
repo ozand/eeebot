@@ -582,13 +582,13 @@ class SubagentManager:
                 if response.finish_reason == "error":
                     model_call_failure = {
                         "error_type": str(getattr(response, "error_type", None) or "provider_error"),
+                        "stage": model_call_stage,
                         "model": str(self.model or ""),
                         "prompt_size_chars": sum(
                             len(str(message.get("content") or ""))
                             for message in messages if isinstance(message, dict)
                         ),
                         "limit": generation_limit,
-                        "stage": "model_call",
                         "message": str(response.content or "")[:300],
                     }
                     raise RuntimeError(f"LLM execution failed: {response.content}")

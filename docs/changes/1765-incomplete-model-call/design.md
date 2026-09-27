@@ -2,8 +2,8 @@
 
 ## Classification
 
-- `paused-supplier` is an affirmative infrastructure signal, matched via positive evidence. HTTP status numbers must have error/status context, so numeric payloads such as an output-token ceiling cannot imply provider outage.
-- `model_call_incomplete` requires persisted telemetry identifying the model-call stage. Tool execution, response handling, and local code failures do not receive the classification.
+- `paused-supplier` is an affirmative infrastructure signal, matched via positive evidence. HTTP status numbers must have error/status context, so numeric payloads such as an output-token ceiling cannot imply provider outage. Persisted positive transport/provider error types (rate limit, server unavailable, connection/timeout) also qualify as supplier evidence.
+- `model_call_incomplete` requires persisted telemetry identifying the model-call stage. Tool execution, response handling, and local code failures do not receive the classification; telemetry retains the tracked stage rather than hardcoding it.
 - Affirmative client/request rejection evidence (known request-validation error types or invalid-parameter/context/tool-payload markers) retains the ordinary `failed` path even when the model-call stage is known; supplier evidence takes precedence.
 - Other errors retain the existing ordinary failure path.
 - The bridge returns a distinct non-zero exit status for `model_call_incomplete`; process and systemd exit recorders finalize an explicit incomplete run/exit record without updating the success/failure streak. Deployment activation and post-flip gates treat it as inconclusive and keep the candidate active while awaiting a clean cycle.

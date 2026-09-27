@@ -6356,6 +6356,13 @@ def _classify_llm_error(error_text: str, *, model_call_failure: dict | None = No
         # Provider client errors are affirmative evidence that the request was
         # rejected, not that the call was incomplete. Unknown errors remain in
         # the existing incomplete bucket, with raw evidence retained by caller.
+        supplier_error_types = {
+            'ratelimiterror', 'internalservererror', 'serviceunavailableerror',
+            'apiconnectionerror', 'timeout', 'timeouterror', 'connecttimeout',
+            'readtimeout', 'remoteprotocolerror',
+        }
+        if error_type in supplier_error_types:
+            return 'paused-supplier'
         definitive_request_errors = {
             'badrequesterror', 'contextwindowexceedederror',
             'invalidrequesterror', 'unprocessableentityerror',

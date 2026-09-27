@@ -200,6 +200,10 @@ def _journal_replay_mock(*journal_lines):
         printf '%s\\n' {shlex.quote(payload)} | eval "${{cmd#*| }}"
         exit 0
     fi
+    if [[ "$cmd" == *journalctl* && "$cmd" == *"--no-pager"* ]]; then
+        printf '%s\\n' {shlex.quote(payload)}
+        exit 0
+    fi
     exit 0
     """
 
@@ -539,15 +543,15 @@ def test_m_invocation_without_finish_is_no_crash_after_the_hold(repo, tmp_path, 
     assert "health gate: pass" not in combined and "health gate: clean-exit" not in combined
 
 
-def test_incomplete_invocation_does_not_satisfy_no_crash(repo, tmp_path, mock_bin):
+def test_incomplete_then_new_invocation_can_satisfy_no_crash(repo, tmp_path, mock_bin):
     incomplete_exit = f"eeepc systemd[1]: {BRIDGE_UNIT}: Main process exited, code=exited, status=6/NOTIMPLEMENTED"
-    set_ssh_mock(mock_bin, _journal_replay_mock(STARTING_TEXT, incomplete_exit))
+    later_start = STARTING_TEXT.replace("Starting", "Starting again")
+    set_ssh_mock(mock_bin, _journal_replay_mock(STARTING_TEXT, incomplete_exit, later_start))
     res = run_deploy(repo, mock_bin, ["--health-timeout", "1", "--no-crash-hold", "0", "--ref", "HEAD"])
     combined = (res.stdout + res.stderr).lower()
     assert res.returncode == 0, combined
-    assert "health gate: no-crash" not in combined
-    assert "health gate: clean-exit" not in combined
-    assert "health gate: unknown" in combined
+    assert "health gate: no-crash" in combined
+    assert "new bridge invocation after incomplete call" in combined
 
 
 def test_n_invocation_then_crash_within_the_hold_rolls_back(repo, tmp_path, mock_bin):
