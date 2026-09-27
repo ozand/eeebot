@@ -80,6 +80,14 @@ class TestClassifyLlmError:
     def test_supplier_side_signals_classify_as_paused_supplier(self, text):
         assert bridge._classify_llm_error(text) == "paused-supplier"
 
+    @pytest.mark.parametrize("text", [
+        "maximum output is 500 tokens",
+        "requested 500 tokens but the model allows 400",
+        "limit is 429 tokens",
+    ])
+    def test_bare_numeric_data_does_not_claim_supplier_outage(self, text):
+        assert bridge._classify_llm_error(text) == "failed"
+
     def test_bare_400_status_code_alone_is_not_a_supplier_signal(self):
         """The classifier keys on the MESSAGE, not the HTTP status -- a 400
         with no supplier-shaped phrasing must still default to 'failed'."""
