@@ -220,8 +220,13 @@ def test_explore_quota_skips_malformed_ts_row_and_continues_counting(tmp_path, m
     from nanobot.runtime import day_key
 
     today = day_key.day_key()
-    valid_ts1 = datetime.now().astimezone().isoformat()
-    valid_ts2 = (datetime.now().astimezone() - timedelta(minutes=5)).isoformat()
+    # Anchor within today's local calendar day, not five minutes from now:
+    # near UTC/local midnight that interval can cross a day boundary.
+    valid_ts1 = datetime.now().astimezone().replace(
+        hour=12, minute=0, second=0, microsecond=0,
+    )
+    valid_ts2 = (valid_ts1 - timedelta(minutes=5)).isoformat()
+    valid_ts1 = valid_ts1.isoformat()
 
     test_events = [
         {"phase": "explore_started", "ts": valid_ts1},
