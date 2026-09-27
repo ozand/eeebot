@@ -106,6 +106,20 @@ def test_cycle_attribution_is_persisted_to_marker_before_systemd_kill(tmp_path, 
     assert _run_rows(state)[0]["classification"] == "unit_timeout"
 
 
+def test_model_call_incomplete_run_classification_survives_failure_process_exit(tmp_path):
+    from nanobot import crash_record
+    from nanobot.runtime import bridge
+
+    state = tmp_path / "state"
+    crash_record._start_run_marker(state)
+    crash_record.set_run_metadata(classification="model_call_incomplete", reason="model_call_incomplete")
+    crash_record.record_exit(state, outcome="failure", exit_status=bridge.EXIT_MODEL_CALL_INCOMPLETE)
+
+    row = _run_rows(state)[0]
+    assert row["classification"] == "model_call_incomplete"
+    assert row["outcome"] == "failure"
+
+
 def test_loop_breaker_run_classification_is_preserved(tmp_path):
     from nanobot import crash_record
 

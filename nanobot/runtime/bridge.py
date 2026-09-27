@@ -152,6 +152,9 @@ EXIT_SYSTEM_PROMPT_OVERFLOW = 4
 # during an outage), so nothing here hides the outage — it is simply not
 # counted as evidence the LOOP is stuck.
 EXIT_SUPPLIER_PAUSED = 5
+# A model-call interruption is not a healthy completion, but it is distinct
+# from a defect failure so crash streak health does not cool the work itself.
+EXIT_MODEL_CALL_INCOMPLETE = 6
 # How many times a request whose subagent died on the LLM call is re-offered
 # before it is retired with the handled_ marker like any other request. Bounded
 # so a permanently-bad request (bad model name, oversize prompt) cannot spin
@@ -5956,6 +5959,10 @@ async def _main_impl_body():
         # move consecutive_failures the way OUR OWN executor defect still
         # does below. The process still exits non-zero.
         return EXIT_SUPPLIER_PAUSED
+    if _rollback_reason == 'model_call_incomplete':
+        # The call did not yield a usable response. Preserve a non-zero process
+        # result, but keep it distinct from a request/code defect for streaks.
+        return EXIT_MODEL_CALL_INCOMPLETE
     if _rollback_reason == 'executor_llm_error':
         # #1280: say it with the exit status. The __main__ guard records any
         # other non-zero code as a `failure` in bridge/exit_streak.json, so
@@ -6358,6 +6365,7 @@ def _classify_llm_error(error_text: str, *, model_call_failure: dict | None = No
         definitive_request_errors = {
             'badrequesterror', 'contextwindowexceedederror',
             'invalidrequesterror', 'unprocessableentityerror',
+            'authenticationerror', 'permissiondeniederror',
         }
         request_rejection_markers = (
             'invalid parameter', 'invalid temperature', 'unsupported parameter',
@@ -7618,13 +7626,12 @@ if __name__ == '__main__':
     # (uncaught exceptions are recorded by the sys.excepthook armed in
     # nanobot/__init__). A disabled bridge still never touches STATE_DIR.
     if BRIDGE_ENABLED:
-        # #1765: a supplier outage exits non-zero (systemd still sees a
-        # non-clean run) but is deliberately NEVER handed to record_exit —
-        # its outcome is a strict success|failure binary with no third
-        # state, and forcing either box would move exit_streak's
-        # consecutive_failures for a supplier's uptime, not the loop's own
-        # defect (see EXIT_SUPPLIER_PAUSED's own comment).
-        _skip_exit_record = _exit_code == EXIT_SUPPLIER_PAUSED
+        # #1765: supplier outages and incomplete model calls exit non-zero
+        # (systemd still sees a non-clean run) but are deliberately NEVER
+        # handed to record_exit — its outcome is a strict success|failure
+        # binary with no third state, and forcing either box would move the
+        # defect streak for provider/model interruptions, not an actual defect.
+        _skip_exit_record = _exit_code in (EXIT_SUPPLIER_PAUSED, EXIT_MODEL_CALL_INCOMPLETE)
         if not _skip_exit_record:
             try:
                 from nanobot import crash_record as _crash_record

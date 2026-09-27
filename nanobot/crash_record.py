@@ -66,6 +66,7 @@ RUN_RETENTION_DAYS = 90
 # that counter exists to detect the LOOP crash-looping (#1197's own 9h20m
 # incident), not the supplier's uptime.
 SUPPLIER_PAUSED_EXIT_CODE = 5
+MODEL_CALL_INCOMPLETE_EXIT_CODE = 6
 # Issue #1835: Signals that represent external shutdown / interruption rather
 # than an autonomous loop failure. When systemd stops or restarts the bridge unit
 # (e.g. during deploy_release.sh flip), it issues SIGTERM optionally followed
@@ -436,6 +437,9 @@ def main(argv: list[str] | None = None) -> int:
         status = int(status)
     if status == SUPPLIER_PAUSED_EXIT_CODE:
         print(json.dumps({"outcome": "skipped_supplier_paused", "consecutive_failures": None}))
+        return 0
+    if status == MODEL_CALL_INCOMPLETE_EXIT_CODE:
+        print(json.dumps({"outcome": "skipped_model_call_incomplete", "consecutive_failures": None}))
         return 0
     # Issue #1835: SIGTERM / SIGINT from deploy restart or operator shutdown
     # is an external interruption, not an autonomous loop failure.

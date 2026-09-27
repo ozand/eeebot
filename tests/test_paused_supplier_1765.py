@@ -122,14 +122,19 @@ class TestClassifyLlmError:
         assert bridge._classify_llm_error(text, model_call_failure={"stage": "model_call"}) == "model_call_incomplete"
         assert bridge._classify_llm_error(text, model_call_failure={"stage": "tool_execution"}) == "failed"
 
-    def test_definitive_client_rejection_with_model_call_telemetry_stays_failed(self):
+    @pytest.mark.parametrize("error_type, message", [
+        ("BadRequestError", "invalid temperature"),
+        ("AuthenticationError", "Incorrect API key provided"),
+        ("PermissionDeniedError", "model access denied"),
+    ])
+    def test_definitive_client_rejection_with_model_call_telemetry_stays_failed(self, error_type, message):
         failure = {
             "stage": "model_call",
-            "error_type": "BadRequestError",
-            "message": "invalid temperature: must be between 0 and 2",
+            "error_type": error_type,
+            "message": message,
         }
         assert bridge._classify_llm_error(
-            "litellm.BadRequestError: invalid temperature: must be between 0 and 2",
+            f"litellm.{error_type}: {message}",
             model_call_failure=failure,
         ) == "failed"
 
@@ -316,6 +321,16 @@ class TestExitStreakAndHealthDoNotCountAnOutage:
     def test_supplier_paused_exit_code_is_distinct_from_executor_llm_error(self):
         assert bridge.EXIT_SUPPLIER_PAUSED not in (0, bridge.EXIT_EXECUTOR_LLM_ERROR, bridge.EXIT_SYSTEM_PROMPT_OVERFLOW)
 
+    def test_incomplete_model_call_has_distinct_nonzero_exit_code(self):
+        assert bridge.EXIT_MODEL_CALL_INCOMPLETE not in (
+            0, bridge.EXIT_EXECUTOR_LLM_ERROR, bridge.EXIT_SYSTEM_PROMPT_OVERFLOW,
+            bridge.EXIT_SUPPLIER_PAUSED,
+        )
+
+    def test_crash_record_mirrors_model_call_incomplete_exit_code(self):
+        from nanobot import crash_record
+        assert crash_record.MODEL_CALL_INCOMPLETE_EXIT_CODE == bridge.EXIT_MODEL_CALL_INCOMPLETE
+
     def test_crash_record_mirrors_the_same_exit_code_value(self):
         """crash_record.py must not import bridge.py (module docstring) --
         the value is mirrored as a literal there; this pins the two from
@@ -338,10 +353,30 @@ class TestExitStreakAndHealthDoNotCountAnOutage:
         guard = tree.body[-1]
         assert isinstance(guard, ast.If) and "__main__" in ast.dump(guard.test)
         body_src = ast.get_source_segment(src, guard)
-        assert "_exit_code == EXIT_SUPPLIER_PAUSED" in body_src
+        assert "_exit_code in (EXIT_SUPPLIER_PAUSED, EXIT_MODEL_CALL_INCOMPLETE)" in body_src
         assert "if not _skip_exit_record:" in body_src
         assert "_crash_record.record_exit(" in body_src
         assert "if BRIDGE_ENABLED:" in body_src
+
+    def test_systemd_cli_skips_record_exit_for_model_call_incomplete_and_streak_is_unchanged(self, tmp_path):
+        from nanobot import crash_record
+
+        state = tmp_path / "state"
+        crash_record.record_exit(state, outcome="failure", exit_status=1, error="NameError: x")
+        before = crash_record._load_streak(state / "bridge" / "exit_streak.json")
+        assert before["consecutive_failures"] == 1
+
+        rc = crash_record.main([
+            "--source", "systemd",
+            "--exit-status", str(bridge.EXIT_MODEL_CALL_INCOMPLETE),
+            "--exit-code", "exited",
+            "--service-result", "exit-code",
+            "--state-dir", str(state),
+        ])
+        assert rc == 0
+        after = crash_record._load_streak(state / "bridge" / "exit_streak.json")
+        assert after["consecutive_failures"] == before["consecutive_failures"]
+        assert after["last_failure_ts"] == before["last_failure_ts"]
 
     def test_systemd_cli_skips_record_exit_for_supplier_paused_and_streak_is_unchanged(self, tmp_path):
         from nanobot import crash_record
