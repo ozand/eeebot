@@ -48,9 +48,14 @@ def test_gate_is_model_free_and_dashboard_free(monkeypatch, tmp_path: Path) -> N
     # A fake sudo consumes the identity flags and execs the remaining argv,
     # preserving shell quoting/spacing while making this host-independent.
     invocation = re.search(
-        r"(?m)^if ! (sudo -u eeepc-agent env .*?\"\$RELEASE_DIR/scripts/verify_release_health\.py\"); then$",
+        r"(?m)^  if ! (sudo -u eeepc-agent env .*?\"\$RELEASE_DIR/scripts/verify_release_health\.py\"); then$",
         script_text,
     )
+    if invocation is None:
+        invocation = re.search(
+            r"(?m)^  if ! (sudo -u eeepc-agent env .*?\"\$GATE_TMP/scripts/verify_release_health\.py\"); then$",
+            script_text,
+        )
     assert invocation is not None, "expected the exact runtime-identity gate command in deploy_release.sh"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
