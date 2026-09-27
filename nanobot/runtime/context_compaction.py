@@ -293,7 +293,13 @@ def _structural_summary(
         role = msg.get("role")
         if role == "assistant":
             if "decision:" in text.lower() or "we will " in text.lower():
-                decisions.append(text[:500])
+                # Capture the matched decision phrase rather than an
+                # unrelated prefix that can hide the actual choice.
+                decision_match = re.search(r"decision:|we will ", text, re.IGNORECASE)
+                decision_start = decision_match.start() if decision_match else 0
+                decisions.append(
+                    _representative_excerpt(text[decision_start:], 500)
+                )
             else:
                 # Assistant messages often carry both progress narration and
                 # tool_calls. The calls are metadata; do not discard the
