@@ -19,8 +19,7 @@ def test_remote_verify_runs_candidate_and_never_mutates_units_or_current(tmp_pat
     }
     for old, new in roots.items():
         remote = remote.replace(old, new)
-    root = Path(roots["/opt/eeepc-agent"]) / "runtimes/self-evolving-agent"
-    live = root / "current"
+    live = Path(roots["/opt/eeepc-agent"]) / "runtimes/self-evolving-agent/current"
     live.mkdir(parents=True)
     gate = tmp_path / "candidate"
     (gate / "scripts").mkdir(parents=True)
@@ -30,13 +29,15 @@ def test_remote_verify_runs_candidate_and_never_mutates_units_or_current(tmp_pat
     bindir = tmp_path / "bin"
     bindir.mkdir()
     log = str(calls).replace("\\", "/")
-    _write_mock(bindir / "sudo", f'''if [[ "$1" == "-u" ]]; then shift 2; fi
+    _write_mock(bindir / "sudo", f'''echo "sudo $*" >> {log}
+if [[ "$1" == "-u" ]]; then shift 2; fi
 case "$1" in
   env) shift; while [[ "$1" == *=* ]]; do export "$1"; shift; done; exec "$@" ;;
-  chown|chmod|mkdir|cp|install|tee|rmdir|ln|tar) echo "sudo $*" >> {log}; exit 0 ;;
-  rm) echo "sudo $*" >> {log}; shift; if [[ "$1" == "-n" ]]; then shift; fi; command rm "$@" ;;
+  chown|chmod|mkdir|cp|install|tee|rmdir|ln|tar) exit 0 ;;
+  systemctl) echo "sudo-systemctl $*" >> {log}; exit 0 ;;
+  rm) shift; if [[ "$1" == "-n" ]]; then shift; fi; command rm "$@" ;;
   stat) echo 0:0 ;;
-  *) exit 0 ;;
+  *) echo "unexpected sudo command: $*" >&2; exit 97 ;;
 esac
 ''')
     _write_mock(bindir / "systemctl", f'''echo "systemctl $*" >> {log}
@@ -55,7 +56,7 @@ esac
 ''')
     python = shutil.which("python3")
     assert python, "python3 is required for the remote gate replay"
-    marker_path = str(marker).replace(chr(92), "/")
+    marker_path = str(marker).replace("\\", "/")
     _write_mock(bindir / "python3", f'''if [[ "$*" == *verify_release_health.py* ]]; then
   test -f "$GATE_TMP/scripts/verify_release_health.py" || exit 9
   echo ran > {marker_path}
@@ -67,19 +68,22 @@ exec {python} "$@"
     _write_mock(bindir / "stat", "echo 0:0")
     remote_script = tmp_path / "remote.sh"
     remote_script.write_text(remote, encoding="utf-8")
-    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"],
-               VERIFY_ONLY="1", FULL_COMMIT="candidate-sha", PREV_RELEASE_PATH=str(live),
+    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1",
+               FULL_COMMIT="candidate-sha", PREV_RELEASE_PATH=str(live),
                GATE_TMP=str(gate).replace("\\", "/"), RELEASE_DIR=str(live),
                HEALTH_GATE_PYTHON=str(bindir / "python3"))
     result = subprocess.run(["bash", str(remote_script)], cwd=tmp_path, env=env,
                             capture_output=True, text=True, timeout=90)
     assert result.returncode == 0, result.stdout + result.stderr
     assert marker.exists(), result.stdout + result.stderr
-    assert not gate.exists(), "the real remote EXIT trap must remove the candidate gate tree"
+    assert not gate.exists(), "the remote EXIT trap must remove the candidate gate tree"
     logged = calls.read_text(encoding="utf-8")
     assert "gate " in logged
     assert not any(token in logged for token in (
-        "systemctl restart", "systemctl stop", "systemctl start", "ln -sfn",
+        "systemctl restart", "systemctl stop", "systemctl start",
+        "sudo-systemctl restart", "sudo-systemctl stop", "sudo-systemctl start",
+        "ln -sfn", "sudo ln -sfn",
     )), logged
     assert not (live / "SOURCE_COMMIT").exists()
-    assert not (tmp_path / "etc/systemd/system").exists() or not any((tmp_path / "etc/systemd/system").iterdir())
+    units = Path(roots["/etc/systemd"]) / "system"
+    assert not units.exists() or not any(units.iterdir())
