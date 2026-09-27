@@ -357,7 +357,9 @@ class TestExitStreakAndHealthDoNotCountAnOutage:
         assert isinstance(guard, ast.If) and "__main__" in ast.dump(guard.test)
         body_src = ast.get_source_segment(src, guard)
         assert "_exit_code == EXIT_MODEL_CALL_INCOMPLETE" in body_src
+        assert "outcome=\"model_call_incomplete\"" in body_src
         assert "outcome_classification=\"model_call_incomplete\"" in body_src
+        assert "update_streak=False" in body_src
         assert "if not _skip_exit_record:" in body_src
         assert "_crash_record.record_exit(" in body_src
         assert "if BRIDGE_ENABLED:" in body_src
