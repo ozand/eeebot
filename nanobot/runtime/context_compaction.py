@@ -231,11 +231,16 @@ def _compactable_indices(messages: list[dict[str, Any]], keep_tokens: int) -> se
 
 
 def _thinking_blocks_text(blocks: list[dict[str, Any]] | None) -> str:
-    """Flatten Anthropic-style ``thinking_blocks`` into plain text."""
+    """Flatten Anthropic-style ``thinking_blocks`` into plain text, #1930
+    (Codex 4115692517): a ``redacted_thinking`` block's payload lives under
+    ``data``, not ``thinking``/``text``/``content`` -- omitting it means
+    that block contributes zero to the token estimate even though its
+    payload is real and gets resent on every later call."""
     if not blocks:
         return ""
     return "\n".join(
-        str(block.get("thinking") or block.get("text") or block.get("content") or "")
+        str(block.get("thinking") or block.get("text") or block.get("content")
+            or block.get("data") or "")
         if isinstance(block, dict) else str(block)
         for block in blocks
     )
@@ -370,7 +375,8 @@ def _structural_summary(
     fresh_sections.extend(f"- {x}" for x in progress[-6:])
     fresh_text = _bounded_summary("\n".join(fresh_sections), MAX_SUMMARY_CHARS)
 
-    prefix = ["[Compaction summary — deterministic, evidence-only]", f"Goal: {goal[:1000] or 'not available'}"]
+    header_line = "[Compaction summary — deterministic, evidence-only]"
+    prefix = [header_line, f"Goal: {goal[:1000] or 'not available'}"]
     if previous:
         prefix.extend(["Earlier summary (preserved):", previous])
     prefix.append("Files read (paths observed in tool calls/results):")
@@ -381,14 +387,26 @@ def _structural_summary(
     if len(prefix_text) + len(fresh_text) <= MAX_SUMMARY_CHARS:
         return prefix_text + "\n" + fresh_text if prefix_text else fresh_text
 
-    # Prior summary and path inventory are less important than the new
-    # decisions/progress in this compaction. Give fresh sections the remaining
-    # capacity first, then retain a bounded tail of earlier context.
+    # #1930 (Codex 4115719536): the header marker must survive truncation --
+    # both "is this message the installed carrier" and "is this an earlier
+    # carrier" key off the returned text starting with `header_line`. When
+    # this round's fresh decisions/progress alone are close to
+    # MAX_SUMMARY_CHARS, budgeting the rest of the prefix (goal/previous/
+    # files) as "whatever's left" could previously drive that share to zero
+    # and, with it, the header itself -- silently turning the installed
+    # carrier into a message compaction can no longer recognise as one.
+    # Reserve the header's own length first; only what remains is split
+    # between the rest of the prefix and this round's fresh evidence
+    # (which still gets first claim on that remaining budget).
     separator = "\n"
-    prefix_budget = max(0, MAX_SUMMARY_CHARS - len(fresh_text) - len(separator))
-    bounded_prefix = _bounded_summary(prefix_text, prefix_budget)
-    combined = bounded_prefix + separator + fresh_text
-    return _bounded_summary(combined, MAX_SUMMARY_CHARS)
+    rest_of_prefix = "\n".join(prefix[1:])
+    fixed_overhead = len(header_line) + 2 * len(separator)
+    usable = max(0, MAX_SUMMARY_CHARS - fixed_overhead)
+    fresh_budget = min(len(fresh_text), usable)
+    prefix_budget = max(0, usable - fresh_budget)
+    bounded_fresh = _bounded_summary(fresh_text, fresh_budget)
+    bounded_rest = _bounded_summary(rest_of_prefix, prefix_budget)
+    return header_line + separator + bounded_rest + separator + bounded_fresh
 
 
 def _compact_content(content: str) -> str:
@@ -426,20 +444,51 @@ def _min_compact_len() -> int:
     return EXCERPT_HEAD + len(_OMIT_MARKER) + EXCERPT_TAIL
 
 
-def _already_marked(text: str) -> bool:
-    """True once a message has already been through compaction — either it
-    carries the structural summary or a prior legacy excerpt. Used to make
-    repeat compaction idempotent (#1776: a second call with no new content
-    must not re-touch, or re-grow, what an earlier call already produced)."""
-    return text.startswith("[Compaction summary") or _OMIT_MARKER in text
+# #1930 (Codex 4115719563): compaction state lives on flags the code itself
+# sets on the message dict -- never inferred from the message's own text.
+# Both `_ALLOWED_MSG_KEYS`/`_ANTHROPIC_EXTRA_KEYS` in litellm_provider.py
+# strip any key not on their allowlist before a request is sent, so these
+# never reach a provider.
+_COMPACTED_FLAG = "_compaction_touched"
+_CARRIER_FLAG = "_compaction_carrier"
+
+
+def _already_marked(msg: dict[str, Any]) -> bool:
+    """True once THIS code has already compacted ``msg`` -- carrier install,
+    plain excerpt, or retirement placeholder. Keyed on :data:`_COMPACTED_FLAG`,
+    not on text: a tool result can legitimately contain the literal string
+    "[Compaction summary" or the excerpt marker (this very module's own
+    source is one example an agent could `cat`), and matching on that text
+    would wrongly treat such a result as already compacted -- silently
+    disabling space recovery for it and anything counted alongside it.
+    Used to make repeat compaction idempotent (#1776: a second call with no
+    new content must not re-touch, or re-grow, what an earlier call already
+    produced)."""
+    return bool(msg.get(_COMPACTED_FLAG))
 
 
 def _worth_compacting(msg: dict[str, Any]) -> bool:
     """A candidate is only physically replaced if doing so actually shrinks
     it and it hasn't already been compacted — otherwise compacting a
-    trivially small or already-compacted message would only grow it."""
+    trivially small or already-compacted message would only grow it.
+
+    #1930: a message carrying ``thinking_blocks`` is never a candidate here,
+    regardless of size. Only ``reasoning_content`` is supported for
+    shrinking/clearing in this runtime (the host's provider, qwen via
+    LiteLLM, is the only one observed to populate it — 590/637 prompts).
+    Anthropic's extended-thinking forms (``thinking_blocks``, including
+    ``redacted_thinking``) are not: a signed thinking block that
+    accompanies a `tool_calls` turn must be replayed unmodified on the next
+    request or the provider can reject the call, and this module has no
+    logic that preserves that constraint while shrinking. Fail-safe: such a
+    message is left completely untouched by compaction (still counted
+    toward the token estimate via ``_message_tokens`` -- see
+    :func:`_thinking_blocks_text` -- as incompressible, never itself
+    shrunk)."""
+    if msg.get("thinking_blocks"):
+        return False
     text = _message_text(msg)
-    return bool(text) and not _already_marked(text) and len(text) > _min_compact_len()
+    return bool(text) and not _already_marked(msg) and len(text) > _min_compact_len()
 
 
 def _excerpt_content(content: Any) -> tuple[Any, bool]:
@@ -634,44 +683,57 @@ def compact_messages(
 
         # #1776: cumulative summary. `previous` is whichever earlier-round
         # carrier text still exists anywhere in history (there is at most
-        # one). `evidence_span` covers the WHOLE unprotected span (not only
+        # one, flagged with `_CARRIER_FLAG` -- #1930, never inferred from
+        # text). `evidence_span` covers the WHOLE unprotected span (not only
         # worth_indices) so a short-but-fresh message — e.g. a one-line
         # "decision: ..." too small to be worth excerpting on its own —
         # still contributes evidence, while messages already compacted by
         # an earlier round (recognisable by `_already_marked`) are excluded
         # so their content isn't re-scanned as if it were new.
         previous = "\n".join(
-            _message_text(m) for m in messages
-            if _message_text(m).startswith("[Compaction summary")
+            _message_text(m) for m in messages if m.get(_CARRIER_FLAG)
         )
         evidence_span = [
             messages[i] for i in sorted_candidates
-            if not _already_marked(_message_text(messages[i]))
+            if not _already_marked(messages[i])
         ]
         goal = _message_text(messages[1]) if len(messages) > 1 else ""
         summary = _structural_summary(evidence_span, goal=goal, previous=previous)
 
+        # #1930 (Codex 4113995954): try every worth-compacting candidate for
+        # the refreshed summary, not just the first. A small first candidate
+        # can be too small to hold it (the guard below then falls back to a
+        # bare excerpt) even when a later, larger candidate easily could --
+        # discarding this round's fresh evidence for no reason. The first
+        # candidate whose combined (summary + its own excerpt) is smaller
+        # than its own original text becomes the carrier; if none qualify,
+        # no carrier is installed this round (every candidate gets a plain
+        # excerpt, same as before).
+        carrier: int | None = None
+        carrier_content: str | None = None
+        for i in worth_indices:
+            msg = messages[i]
+            old_text = _message_text(msg)
+            excerpt, _ = _excerpt_content(msg.get("content"))
+            excerpt_text = excerpt if isinstance(excerpt, str) else _message_text(dict(msg, content=excerpt))
+            candidate_content = f"{summary}\n{excerpt_text}"
+            # A summary is useful only if adding it does not defeat
+            # compaction. If it would grow this carrier, another candidate
+            # (or none) must carry it instead.
+            if len(candidate_content) < len(old_text):
+                carrier = i
+                carrier_content = candidate_content
+                break
+
         new_messages = list(messages)
         results_compacted = 0
         compacted_details: list[dict[str, Any]] = []
-        carrier = worth_indices[0]
         for i in worth_indices:
             msg = messages[i]
             old_text = _message_text(msg)
             tool_name = str(msg.get("name") or "tool")
             if i == carrier:
-                excerpt, _ = _excerpt_content(msg.get("content"))
-                excerpt_text = excerpt if isinstance(excerpt, str) else _message_text(dict(msg, content=excerpt))
-                candidate_content = f"{summary}\n{excerpt_text}"
-                # A summary is useful only if adding it does not defeat
-                # compaction. If it would grow this carrier, keep the
-                # bounded excerpt instead and let other candidates reclaim
-                # space without a summary payload.
-                new_content = (
-                    candidate_content
-                    if len(candidate_content) < len(old_text)
-                    else excerpt_text
-                )
+                new_content = carrier_content
             else:
                 new_content, _ = _excerpt_content(msg.get("content"))
             new_msg = dict(msg, content=new_content)
@@ -679,9 +741,11 @@ def compact_messages(
             # as its content — leaving it in place would keep resending the
             # fastest-growing part of a thinking model's context untouched
             # (litellm_provider.py sends reasoning_content back on every
-            # later call).
+            # later call). Messages carrying thinking_blocks never reach
+            # this loop at all (_worth_compacting excludes them).
             new_msg.pop("reasoning_content", None)
-            new_msg.pop("thinking_blocks", None)
+            new_msg[_COMPACTED_FLAG] = True
+            new_msg[_CARRIER_FLAG] = (i == carrier)
             new_messages[i] = new_msg
             compacted_details.append(_drop_detail(tool_name, old_text))
             results_compacted += 1
@@ -689,18 +753,16 @@ def compact_messages(
         # Retire the prior carrier only after a new summary was installed.
         # If no candidate could fit the refreshed summary, preserve old
         # cumulative evidence instead of replacing it with a marker.
-        installed_carrier = (
-            isinstance(new_messages[carrier].get("content"), str)
-            and str(new_messages[carrier].get("content") or "").startswith(
-                "[Compaction summary"
-            )
-        )
+        installed_carrier = carrier is not None
         if installed_carrier:
             for i, msg in enumerate(messages):
-                if i != carrier and _message_text(msg).startswith("[Compaction summary"):
-                    new_messages[i] = dict(
+                if i != carrier and msg.get(_CARRIER_FLAG):
+                    retired = dict(
                         msg, content="[Earlier compaction summary incorporated below.]"
                     )
+                    retired[_COMPACTED_FLAG] = True
+                    retired[_CARRIER_FLAG] = False
+                    new_messages[i] = retired
 
         after_tokens = _total_tokens(new_messages)
         _write_journal(
