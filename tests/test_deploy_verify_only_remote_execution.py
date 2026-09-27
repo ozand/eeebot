@@ -48,7 +48,11 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
     _git("add", "scripts/verify_release_health.py", cwd=source, check=True)
     _git("commit", "-qm", "candidate gate", cwd=source, check=True, env=identity)
     candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-    assert candidate != head
+    (source / "later-head.txt").write_text("checkout HEAD advances past candidate\n", encoding="utf-8")
+    _git("add", "later-head.txt", cwd=source, check=True)
+    _git("commit", "-qm", "advance checkout after candidate", cwd=source, check=True, env=identity)
+    actual_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    assert candidate != head and candidate != actual_head
     assert "CANDIDATE_GATE_EXECUTED" in gate_source or "SystemExit(23)" in gate_source
     gate = tmp_path / "candidate"
     gate.mkdir()
@@ -154,25 +158,26 @@ def test_staging_failure_after_mktemp_cleans_remote_directory(tmp_path: Path, re
     tar_log = tmp_path / "tar.log"
     _write_mock(mock_bin / "tar", f'echo "$*" >> {str(tar_log).replace(chr(92), "/")}; exit 23')
     _write_mock(mock_bin / "sudo", '[[ "$1" == -n ]] && shift; exec rm "$@"')
+    staging_script = tmp_path / "staging-command.sh"
+    staging_script.write_text(staging_source, encoding="utf-8")
+    staging_dir_arg = shlex.quote(str(staging_dir).replace("\\", "/"))
+    staging_script_arg = shlex.quote(str(staging_script).replace("\\", "/"))
     tar_input = tmp_path / "empty.tar"
     tar_input.write_bytes(b"")
     remote_commands = tmp_path / "remote-commands.log"
     remote_mock_log = str(remote_commands).replace("\\", "/")
-    production_trap = 'sudo -n rm -rf -- "$d"'
-    mock_body = f'''echo "$*" >> {remote_mock_log}
+    _write_mock(mock_bin / "ssh", f'''echo "$*" >> {remote_mock_log}
 if [[ "$*" == *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"* ]]; then
   echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/previous
   exit 0
 fi
-if [[ "$*" == *mktemp* ]]; then
-  d="{staging_dir}"
-  mkdir -p "$d"
-  trap {shlex.quote(production_trap)} EXIT
-  tar -x -C "$d" < "{tar_input}" || exit $?
-  exit 23
+if [[ "$*" == *"mktemp -d /tmp/eeebot-verify-gate."* ]]; then
+  export STAGING_DIR={staging_dir_arg}
+  bash {staging_script_arg}
+  exit $?
 fi
-'''
-    _write_mock(mock_bin / "ssh", mock_body)
+exit 0
+''')
     # Run the production script so its COMMIT selection and staging pipeline
     # execute unchanged; requested candidate is a commit distinct from checkout HEAD.
     monkeypatch.setenv("REPO_ROOT", str(repo))
