@@ -4567,6 +4567,12 @@ async def _main_impl_body():
                         wall_deadline=_bridge_wall_deadline,
                     )
                     _last_call_gap_manager = _repair_mgr
+                    _repair_gap = getattr(_repair_mgr, "last_max_call_gap_s", None)
+                    if _repair_gap is not None:
+                        _candidate_max_call_gap_s = max(
+                            gap for gap in (_candidate_max_call_gap_s, _repair_gap)
+                            if gap is not None
+                        )
                     await _repair_mgr.spawn(
                         task=_repair_prompt,
                         task_id=f'selfevo-repair-{_repair_attempts}',
