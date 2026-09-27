@@ -3,7 +3,10 @@
 # eeepc deploy: push a new code release to the running host and activate it
 #
 # Usage (from dev machine, not on eeepc):
-#   bash host/eeepc/scripts/deploy_release.sh [--host eeepc] [--dry-run] [--ref <sha>] [--health-timeout <min>] [--no-crash-hold <sec>] [--no-health-gate] [--allow-dirty]
+#   bash host/eeepc/scripts/deploy_release.sh [--host eeepc] [--dry-run] [--verify-only] [--ref <sha>] [--health-timeout <min>] [--no-crash-hold <sec>] [--no-health-gate] [--allow-dirty]
+#   --verify-only streams the selected candidate gate and checks release imports/rendering
+#   without dashboard or model calls plus bounded field shapes; it is not state-health
+#   validation and passes on an empty state directory.
 #
 # What it does:
 #   1. Bundles current repo HEAD into a timestamped release archive
@@ -105,11 +108,20 @@ if [ "$VERIFY_ONLY" -eq 0 ]; then
   log "uploading to $HOST:$REMOTE_ARCHIVE..."
   run scp "$ARCHIVE" "ozand@${HOST}:${REMOTE_ARCHIVE}"
 else
+  if [ -n "$REF" ]; then
+    COMMIT=$(git -C "$REPO_ROOT" rev-parse --short "$REF")
+  else
+    COMMIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
+  fi
+  FULL_COMMIT="$(git -C "$REPO_ROOT" rev-parse "$COMMIT^{commit}")"
+  if [ "$ALLOW_DIRTY" -eq 0 ] && ! git -C "$REPO_ROOT" diff-index --quiet "$COMMIT" --; then
+    echo "CRITICAL: Working tree is dirty. Refuse to verify unless --allow-dirty is passed." >&2
+    exit 1
+  fi
   log "host:    $HOST"
-  log "VERIFY-ONLY mode active. Skipping archive and upload."
+  log "VERIFY-ONLY mode: candidate $COMMIT; stream candidate gate only"
   REMOTE_ARCHIVE=""
   RELEASE_NAME=""
-  FULL_COMMIT=""
 fi
 
 # Resolve PREV_RELEASE so we can roll back if needed
@@ -127,7 +139,19 @@ rollback_release() {
 
 # 3. Extract, build venv, update symlink, restart
 log "installing on $HOST..."
-run ssh "ozand@${HOST}" "REMOTE_ARCHIVE='${REMOTE_ARCHIVE:-}' RELEASE_NAME='${RELEASE_NAME:-}' FULL_COMMIT='${FULL_COMMIT:-}' PREV_RELEASE_PATH='${PREV_RELEASE_PATH:-}' VERIFY_ONLY='$VERIFY_ONLY' bash -s" <<'REMOTE'
+REMOTE_ENV="REMOTE_ARCHIVE='${REMOTE_ARCHIVE:-}' RELEASE_NAME='${RELEASE_NAME:-}' FULL_COMMIT='${FULL_COMMIT:-}' PREV_RELEASE_PATH='${PREV_RELEASE_PATH:-}' VERIFY_ONLY='$VERIFY_ONLY'"
+if [ "$VERIFY_ONLY" -eq 1 ]; then
+  GATE_TMP="$(git -C "$REPO_ROOT" archive --format=tar "$COMMIT" scripts nanobot host/eeepc/etc | \
+    ssh "ozand@${HOST}" 'set -e; d=$(mktemp -d /tmp/eeebot-verify-gate.XXXXXX); tar -x -C "$d"; chmod -R a+rX "$d"; printf "%s" "$d"')"
+  VERIFY_GATE_REMOTE_TEMP="$(ssh "ozand@${HOST}" "rm -rf '$GATE_TMP'")"
+  if [ -z "$GATE_TMP" ]; then
+    echo "CRITICAL: could not stage candidate gate on $HOST" >&2
+    exit 1
+  fi
+  log "candidate gate staged at $GATE_TMP"
+  REMOTE_ENV="GATE_TMP='$GATE_TMP' REMOTE_ARCHIVE='' RELEASE_NAME='' FULL_COMMIT='${FULL_COMMIT}' PREV_RELEASE_PATH='${PREV_RELEASE_PATH:-}' VERIFY_ONLY=1"
+fi
+run ssh "ozand@${HOST}" "$REMOTE_ENV bash -s" <<'REMOTE'
 # Make ERR trap inherit to shell functions (the rollback trap)
 set -eEuo pipefail
 
@@ -181,15 +205,12 @@ CURRENT_SYMLINK=/opt/eeepc-agent/runtimes/self-evolving-agent/current
 VENV_BASE=/opt/eeepc-agent/runtimes/self-evolving-agent/venv
 
 if [ "$VERIFY_ONLY" -eq 1 ]; then
-  echo "[remote] VERIFY-ONLY mode: using current live release for checks"
-  RELEASE_DIR="$(gate_read "$CURRENT_SYMLINK" sudo readlink -v "$CURRENT_SYMLINK")"
-  if [ -z "$RELEASE_DIR" ]; then
-    die "current release symlink $CURRENT_SYMLINK resolved to an empty target in verify-only mode"
-  fi
-  if [ ! -f "$RELEASE_DIR/SOURCE_COMMIT" ]; then
-    die "no SOURCE_COMMIT found in current release $RELEASE_DIR"
-  fi
-  FULL_COMMIT="$(sudo cat "$RELEASE_DIR/SOURCE_COMMIT")"
+  echo "[remote] VERIFY-ONLY mode: running selected candidate gate"
+  GATE_TMP="${GATE_TMP:?candidate gate temp directory was not supplied}"
+  RELEASE_DIR="$GATE_TMP"
+  trap 'sudo rm -rf "$GATE_TMP"' EXIT
+  sudo chown -R eeepc-agent:eeepc-agent "$GATE_TMP"
+  echo "[remote] candidate $FULL_COMMIT gate temp=$GATE_TMP"
 else
   RELEASE_DIR="$RELEASES_DIR/$RELEASE_NAME"
 
@@ -610,7 +631,7 @@ if [ "$DASHBOARD_LOAD_STATE" = "loaded" ]; then
       if [ "$VERIFY_ONLY" -eq 0 ] && [ "$DASHBOARD_PID" = "$DASHBOARD_PREV_PID" ] && [ "$DASHBOARD_START" = "$DASHBOARD_PREV_START" ]; then
         die "$DASHBOARD_UNIT restart did not produce a new process identity"
       fi
-      if [ "$DASHBOARD_CWD" != "$RELEASE_DIR" ]; then
+      if [ "$VERIFY_ONLY" -eq 0 ] && [ "$DASHBOARD_CWD" != "$RELEASE_DIR" ]; then
         die "$DASHBOARD_UNIT PID $DASHBOARD_PID cwd is '$DASHBOARD_CWD', expected '$RELEASE_DIR'"
       fi
       if [ "$VERIFY_ONLY" -eq 0 ] && [ "$(cat "$RELEASE_DIR/SOURCE_COMMIT")" != "$FULL_COMMIT" ]; then
@@ -636,18 +657,23 @@ else
 fi
 
 # Semantic release health gate (ADR-036 D3 Part B: model-free and dashboard-free):
-# Runs independently of dashboard service state or port 8080 under runtime service identity.
+# --verify-only uses the candidate's streamed gate; normal deploy uses the extracted release.
+# This verifies imports/rendering and bounded fields, not state health; an empty state can pass.
 # Vocabulary allowlist matching dashboard.ARTIFACT_SOURCE_STATUSES:
 # source["status"] not in {"fresh", "stale", "missing", "permission", "unreadable", "malformed", "valid-empty", "retired", "unavailable"}
 HEALTH_GATE_PYTHON="${HEALTH_GATE_PYTHON:-/opt/eeepc-agent/venv/bin/python}"
 if [ ! -x "$HEALTH_GATE_PYTHON" ]; then
   HEALTH_GATE_PYTHON=python3
 fi
-if ! sudo -u eeepc-agent env PYTHONPATH="$RELEASE_DIR" PYTHONDONTWRITEBYTECODE=1 "$HEALTH_GATE_PYTHON" "$RELEASE_DIR/scripts/verify_release_health.py"; then
-  if [ "$VERIFY_ONLY" -eq 1 ]; then
+if [ "$VERIFY_ONLY" -eq 1 ]; then
+  if ! sudo -u eeepc-agent env PYTHONPATH="$GATE_TMP" PYTHONDONTWRITEBYTECODE=1 "$HEALTH_GATE_PYTHON" "$GATE_TMP/scripts/verify_release_health.py"; then
     echo "VERIFY_ONLY HEALTH_FETCH_FAILED" >&2
+    die "could not verify candidate release health"
   fi
-  die "could not verify release health"
+else
+  if ! sudo -u eeepc-agent env PYTHONPATH="$RELEASE_DIR" PYTHONDONTWRITEBYTECODE=1 "$HEALTH_GATE_PYTHON" "$RELEASE_DIR/scripts/verify_release_health.py"; then
+    die "could not verify release health"
+  fi
 fi
 
 # Ensure bridge service is restarted correctly after model-free activation.
@@ -700,7 +726,12 @@ if [ "$VERIFY_ONLY" -eq 0 ]; then
 fi
 
 # 4. Post-deploy health gate
-if [ "$NO_HEALTH_GATE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ] || [ "$VERIFY_ONLY" -eq 1 ]; then
+if [ "$VERIFY_ONLY" -eq 1 ]; then
+  log "Health gate passed against candidate $COMMIT."
+  log "=== Verify-only complete ==="
+  exit 0
+fi
+if [ "$NO_HEALTH_GATE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
   log "Health gate skipped."
   log "=== Deploy complete ==="
   exit 0
