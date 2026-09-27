@@ -94,7 +94,8 @@ class TestGoalIdBootstrap:
         assert result == 0
 
         out = capsys.readouterr().out
-        assert "no_active_goal" in out
+        assert "no_active_goal" not in out
+        assert "already_handled" in out
 
     def test_goal_text_wins_over_frozen_registry(self, tmp_path, monkeypatch):
         state_dir = tmp_path / "state"
@@ -134,7 +135,7 @@ class TestGoalIdBootstrap:
         )
 
         assert asyncio.run(bridge._main_impl()) == 0
-        assert "no_active_goal" in capsys.readouterr().out
+        assert "no_active_goal" not in capsys.readouterr().out
 
     def test_empty_state_dir_prints_no_active_goal(self, tmp_path, monkeypatch, capsys):
         state_dir = tmp_path / "state"
@@ -145,7 +146,8 @@ class TestGoalIdBootstrap:
         assert result == 0
 
         out = capsys.readouterr().out
-        assert "no_active_goal" in out
+        assert "no_active_goal" not in out
+        assert "already_handled" in out
 
     def test_empty_state_dir_does_not_crash(self, tmp_path, monkeypatch):
         """No crash even on a completely empty state dir (defense-in-depth,

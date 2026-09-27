@@ -366,7 +366,7 @@ def run_strategist(state_root: Path, repo_root: Path, llm: Callable[[list[dict[s
             # other four inputs being exceeded — record which one it was
             # instead of the one generic REASON_INPUTS_UNAVAILABLE for both.
             charter_status = (status.get("goals") or {}).get("status")
-            reason = REASON_NO_CHARTER if charter_status != "complete" else REASON_INPUTS_UNAVAILABLE
+            reason = REASON_NO_CHARTER if charter_status not in {"complete", "truncated"} else REASON_INPUTS_UNAVAILABLE
             decision.update({"prompt_chars": 0, "reason": reason,
                              "empty_inputs": strategist_inputs.empty_inputs(status),
                              "unavailable_inputs": strategist_inputs.unavailable_inputs(status)})

@@ -380,18 +380,20 @@ def read_subagent_queue_depth(state_root: Path) -> int:
     return len(list(_json_files_sorted_by_mtime(False, requests_dir)))
 
 
-def read_derived_priorities_queue(state_root: Path) -> dict[str, int]:
+def read_derived_priorities_queue(state_root: Path) -> dict[str, int | str]:
     """Depth and limit for derived priorities — ADR-034 rule 2: read via
     :func:`operator_documents.resolve_derived_priorities`, the derived
     priorities' one resolver, never a second path to the file."""
     from nanobot.runtime import goal_review
-    from nanobot.runtime.operator_documents import STATE_TEXT, resolve_derived_priorities
+    from nanobot.runtime.operator_documents import STATE_ABSENT, STATE_TEXT, resolve_derived_priorities
 
     res = resolve_derived_priorities(state_root)
     depth = len(res.entries) if res.state == STATE_TEXT else 0
+    status = "present" if res.state == STATE_TEXT else "absent" if res.state == STATE_ABSENT else "unavailable"
     return {
         "depth": depth,
         "limit": goal_review._DERIVED_PRIORITIES_MAX,
+        "status": status,
     }
 
 

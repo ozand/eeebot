@@ -156,7 +156,7 @@ def test_read_derived_priorities_queue(tmp_path: Path):
     from nanobot.runtime.health import read_derived_priorities_queue
 
     state = tmp_path / "state"
-    assert read_derived_priorities_queue(state) == {"depth": 0, "limit": 10}
+    assert read_derived_priorities_queue(state) == {"depth": 0, "limit": 10, "status": "absent"}
     goals = state / "goals"
     goals.mkdir(parents=True)
     (goals / "derived_priorities.json").write_text(
@@ -173,7 +173,7 @@ def test_read_derived_priorities_queue(tmp_path: Path):
         }),
         encoding="utf-8",
     )
-    assert read_derived_priorities_queue(state) == {"depth": 4, "limit": 10}
+    assert read_derived_priorities_queue(state) == {"depth": 4, "limit": 10, "status": "present"}
 
 
 def test_read_subagent_queue_depth_counts_json_files(tmp_path: Path):

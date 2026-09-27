@@ -1289,7 +1289,8 @@ new nine-key breakdown.
   racing through `_setup_cycle_branch`/`_git_cmd` on the same shared
   checkout; the lock is defense-in-depth for an out-of-band invocation (e.g.
   a manual `python -m nanobot.runtime.bridge`) overlapping a timer-triggered
-  run, which can take up to ~3000s plus repair turns. If the lock is already
+  run, bounded by the shared ~3000s bridge wall including repair turns; each
+  repair wait also preserves the reserved finalization/smoke/gate budget. If the lock is already
   held, `main()` SHALL log one line and exit cleanly (`0`, not an error — a
   concurrent run is expected, not a fault) without touching `STATE_DIR` or
   the git checkout. On a platform without `fcntl` (non-POSIX; the eeepc host

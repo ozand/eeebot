@@ -26,6 +26,8 @@ import sys
 import time
 from pathlib import Path
 
+_BRIDGE_PROCESS_START_MONO = time.monotonic()  # before package imports and bridge housekeeping
+
 try:  # pragma: no cover - fcntl is POSIX-only; the host is always Linux
     import fcntl
 except ImportError:  # pragma: no cover - exercised only on non-POSIX platforms
@@ -72,6 +74,7 @@ from nanobot.runtime.operator_documents import (  # noqa: E402
     PRIORITY_UNAVAILABLE,
     PriorityResolution,
     render_priorities_block,
+    resolve_derived_priorities,
     resolve_derived_priorities_split,
     resolve_operator_priorities,
 )
@@ -3298,9 +3301,20 @@ async def _run_planning_session(
         _planner_operator_res = PriorityResolution(state=PRIORITY_UNAVAILABLE, reason='resolve_failed')
     try:
         _planner_derived_entries, _ = resolve_derived_priorities_split(state_dir, selfevo_repo_root=selfevo_repo)
+        _planner_derived_res = resolve_derived_priorities(state_dir)
+        _planner_derived_state = _planner_derived_res.state
+        if _planner_derived_state == "text":
+            _planner_derived_state = (
+                "present" if _planner_derived_entries else
+                "all_completed" if _planner_derived_res.entries else "empty"
+            )
     except Exception:
         _planner_derived_entries = ()
-    _priorities_block = render_priorities_block(_planner_operator_res, _planner_derived_entries)
+        _planner_derived_state = "unreadable"
+    _priorities_block = render_priorities_block(
+        _planner_operator_res, _planner_derived_entries,
+        derived_status=_planner_derived_state,
+    )
 
     _planner_task = (
         'The harness pre-read the mandatory release-owned task-writing contract '
@@ -3561,14 +3575,13 @@ async def _main_impl_body():
         print('no_charter')
         return 0
 
-    if not goal_id:
-        print('no_active_goal')
-        return 0
+    # ADR-034 F3: operator priorities are optional input, not the identity
+    # gate for a cycle. Preserve an empty metadata goal_id when that document
+    # is absent/unreadable; the request/cycle remains runnable.
 
     BRIDGE_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    _bridge_start_mono = time.monotonic()
-    from nanobot.runtime.session_clock import get_bridge_wall_secs
-    _bridge_wall_deadline = _bridge_start_mono + get_bridge_wall_secs()
+    from nanobot.runtime.session_clock import bridge_wall_deadline
+    _bridge_wall_deadline = bridge_wall_deadline(_BRIDGE_PROCESS_START_MONO)
 
     # #733: bulk-skip pre-spawn duplicates in one run. Each iteration pulls
     # the next pending request; a pre-spawn duplicate (tag-first match or
@@ -4084,6 +4097,7 @@ async def _main_impl_body():
     async def _evaluate_candidate(cand_cycle_id: str, do_integration: bool, meas_metric: str = "") -> dict:
         _cycle_id = cand_cycle_id
         _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
+        _candidate_max_call_gap_s: float | None = None
         # _cycle_id was already resolved up front (right after request_id, before
         # the write-ahead ledger marker) — reused here unchanged.
         _cycle_setup = _setup_cycle_branch(_selfevo_repo, _cycle_id, STATE_DIR)
@@ -4363,6 +4377,7 @@ async def _main_impl_body():
                     await asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True)
                     print("All timed-out subagent tasks cancelled.")
 
+            _candidate_max_call_gap_s = getattr(mgr, "last_max_call_gap_s", None)
             try:
                 from nanobot import crash_record as _run_record
                 _telem = json.loads((STATE_DIR / 'subagents' / f'{_subagent_task_id}.json').read_text(encoding='utf-8')) if _subagent_task_id else {}
@@ -4521,6 +4536,21 @@ async def _main_impl_body():
                 )
                 print(f'smoke: {"PASS" if _smoke_passed else "FAIL"}')
                 while not _smoke_passed and _repair_attempts < _max_repair_attempts:
+                    from nanobot.runtime.session_clock import repair_wait_budget_secs
+                    _repair_wait = repair_wait_budget_secs(
+                        _bridge_wall_deadline,
+                        max_wait_secs=1200.0,
+                        clock=time.monotonic,
+                    )
+                    if _repair_wait is None:
+                        append_event(STATE_DIR, {
+                            'phase': 'repair_skipped_no_budget',
+                            'cycle_id': _cycle_id,
+                            'reason': 'repair_skipped_no_budget',
+                            'repair_attempt': _repair_attempts + 1,
+                        })
+                        print('repair_skipped_no_budget: insufficient shared wall budget after final reserve')
+                        break
                     _repair_attempts += 1
                     print(f'smoke: FAIL — spawning repair turn {_repair_attempts}/{_max_repair_attempts}')
                     # Build repair prompt with traceback injected
@@ -4558,6 +4588,7 @@ async def _main_impl_body():
                         skill_fitness_cycle_base_sha=main_sha_before,
                         excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
                         telemetry_component="executor",
+                        wall_deadline=_bridge_wall_deadline,
                     )
                     await _repair_mgr.spawn(
                         task=_repair_prompt,
@@ -4572,7 +4603,7 @@ async def _main_impl_body():
                     try:
                         await asyncio.wait_for(
                             asyncio.gather(*list(_repair_mgr._running_tasks.values()), return_exceptions=True),
-                            timeout=1200.0,  # 20 min max for repair turn
+                            timeout=_repair_wait,
                         )
                     except asyncio.TimeoutError:
                         print(f'repair turn {_repair_attempts} timed out')
@@ -5232,8 +5263,18 @@ async def _main_impl_body():
                 _pre_spawn_sha_file.unlink(missing_ok=True)
             except Exception:
                 pass
+        try:
+            from nanobot.runtime.session_clock import compute_cycle_max_call_gap
+            _candidate_max_call_gap_s = compute_cycle_max_call_gap(
+                STATE_DIR,
+                _cycle_id,
+                fallback_gap=_candidate_max_call_gap_s,
+            )
+        except Exception:
+            pass
         return {
             'status': 1,
+            'max_call_gap_s': _candidate_max_call_gap_s,
             'cycle_branch': locals().get('cycle_branch', ''),
             'main_sha_before': locals().get('main_sha_before', ''),
             'main_sha_after': locals().get('main_sha_after', locals().get('main_sha_before', '')),
@@ -5342,9 +5383,11 @@ async def _main_impl_body():
             pass  # planning-overhead write errors are non-blocking
     else:
         candidates_results = []
+        _explore_candidate_gaps: list[float | None] = []
         for cand_idx in range(_explore_n):
             _cand_id = f"{_cycle_id}-{cand_idx+1}"
             _cres = await _evaluate_candidate(_cand_id, False, _explore_metric)
+            _explore_candidate_gaps.append(_cres.get('max_call_gap_s'))
             if _cres.get('status') == 0:
                 continue
             
@@ -5394,6 +5437,20 @@ async def _main_impl_body():
                 except Exception: pass
                 
                 _res = _winner
+
+        # Bridge planning and telemetry use the base cycle ID; candidate
+        # execution also returns a suffixed-ID local gap. Aggregate both after
+        # every explore candidate has completed.
+        try:
+            from nanobot.runtime.session_clock import compute_explore_cycle_max_call_gap
+            _res['max_call_gap_s'] = compute_explore_cycle_max_call_gap(
+                STATE_DIR, _cycle_id, _explore_candidate_gaps,
+            )
+        except Exception:
+            _res['max_call_gap_s'] = max(
+                (gap for gap in _explore_candidate_gaps if gap is not None),
+                default=None,
+            )
 
     if _res.get('status') == 0:
         return 0
@@ -5651,18 +5708,7 @@ async def _main_impl_body():
                     _iterations_used = len(_iters_list)
         except Exception:
             _iterations_used = None
-    _max_call_gap_s: float | None = None
-    try:
-        from nanobot.runtime.session_clock import compute_cycle_max_call_gap
-        _mgr = locals().get("mgr")
-        _fallback = getattr(_mgr, "last_max_call_gap_s", None) if _mgr else None
-        _max_call_gap_s = compute_cycle_max_call_gap(
-            STATE_DIR,
-            _cycle_id,
-            fallback_gap=_fallback,
-        )
-    except Exception:
-        pass
+    _max_call_gap_s = _res.get("max_call_gap_s")
     record_cycle_outcome(
         STATE_DIR, _cycle_id, _cycle_outcome, _rollback_reason, files_changed, cycle_branch,
         lesson_candidate=_lesson_candidate,
