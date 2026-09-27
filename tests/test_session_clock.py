@@ -386,7 +386,7 @@ class TestMaxCallGapRecording:
         assert telem["max_call_gap_s"] == round(mgr.last_max_call_gap_s, 1)
 
     async def test_error_before_watchdog_initialization_omits_call_gap(self, tmp_path):
-        """Early setup exceptions must not mask the original error with UnboundLocalError."""
+        """Early setup failures keep their original error and omit an unavailable gap."""
         class _DivergentManager(SubagentManager):
             def registered_tool_names(self):
                 return super().registered_tool_names()[:-1]
