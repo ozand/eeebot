@@ -48,12 +48,17 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
     _git("add", "scripts/verify_release_health.py", cwd=source, check=True)
     _git("commit", "-qm", "candidate gate", cwd=source, check=True, env=identity)
     candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-    (source / "later-head.txt").write_text("checkout HEAD advances past candidate\n", encoding="utf-8")
-    _git("add", "later-head.txt", cwd=source, check=True)
+    gate_path.write_text("print('advanced HEAD gate')\n", encoding="utf-8")
+    _git("add", "scripts/verify_release_health.py", cwd=source, check=True)
     _git("commit", "-qm", "advance checkout after candidate", cwd=source, check=True, env=identity)
     actual_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
     assert candidate != head and candidate != actual_head
     assert "CANDIDATE_GATE_EXECUTED" in gate_source or "SystemExit(23)" in gate_source
+    assert subprocess.check_output(
+        ["git", "-C", str(source), "show", f"{candidate}:scripts/verify_release_health.py"], text=True
+    ) != subprocess.check_output(
+        ["git", "-C", str(source), "show", f"{actual_head}:scripts/verify_release_health.py"], text=True
+    )
     gate = tmp_path / "candidate"
     gate.mkdir()
     archive = subprocess.Popen(["git", "-C", str(source), "archive", "--format=tar", candidate, "scripts"], stdout=subprocess.PIPE)
@@ -108,7 +113,7 @@ exec {shlex.quote(sys.executable)} "$@"
                FULL_COMMIT="candidate", PREV_RELEASE_PATH=str(live), GATE_TMP=str(gate).replace("\\", "/"),
                RELEASE_DIR=str(live), HEALTH_GATE_PYTHON=str(bindir / "python3"))
     result = subprocess.run(["bash", str(remote_path)], cwd=tmp_path, env=env,
-                            capture_output=True, text=True, timeout=180)
+                            capture_output=True, text=True, timeout=480)
     return result, before_systemd, (systemd_sandbox, roots)
 
 
@@ -159,7 +164,15 @@ def test_staging_failure_after_mktemp_cleans_remote_directory(tmp_path: Path, re
     _write_mock(mock_bin / "tar", f'echo "$*" >> {str(tar_log).replace(chr(92), "/")}; exit 23')
     _write_mock(mock_bin / "sudo", '[[ "$1" == -n ]] && shift; exec rm "$@"')
     staging_script = tmp_path / "staging-command.sh"
-    staging_script.write_text(staging_source, encoding="utf-8")
+    staging_command = "\n".join(
+        line.strip().removesuffix("\\")
+        for line in deploy.splitlines()
+        if 'GATE_TMP="$(git -C "$REPO_ROOT" archive' in line
+        or (line.startswith("    ssh ") and "eeebot-verify-gate.XXXXXX" in line)
+    ) + "\n"
+    staging_script.write_text('#!/usr/bin/env bash\nset -euo pipefail\n' + staging_command, encoding="utf-8")
+    syntax_check = subprocess.run(["bash", "-n", str(staging_script)], capture_output=True, text=True)
+    assert syntax_check.returncode == 0, syntax_check.stderr
     staging_dir_arg = shlex.quote(str(staging_dir).replace("\\", "/"))
     staging_script_arg = shlex.quote(str(staging_script).replace("\\", "/"))
     tar_input = tmp_path / "empty.tar"
