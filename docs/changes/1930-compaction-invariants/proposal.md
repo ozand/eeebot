@@ -1,7 +1,13 @@
 # Context compaction — invariants
 
-_Status: approved with conditions A–E (architect review, PR #2023), folded
-into I1's mechanics below. Written 2026-09-27 during
+_Status: approved with conditions A–E (architect review, PR #2023); Codex's
+remaining P1/P2 threads on that round are resolved below (namespace,
+path sanitization, strict monotonicity, full-payload tests, an explicit
+retention sweep, a byte-accurate volume measurement). This is a **change
+proposal** (AGENTS.md's change workflow), not a `docs/specs/` capability
+spec — it lives at `docs/changes/1930-compaction-invariants/proposal.md`
+until #1930 lands, then archives and folds into the affected spec.
+Written 2026-09-27 during
 #1930 (ADR #1776 follow-up), after three rounds in which Codex found a new
 way for the heuristic to lose progress: carrier accumulation, reasoning
 payloads, "no candidate fits the summary", and "progress plus decision in
@@ -33,14 +39,24 @@ file with N sections) — never fewer.
 - **Who writes it:** `compact_messages`, in the same pass that decides
   `new_content` for each `worth_indices` candidate — before the candidate's
   in-context content is replaced.
-- **Where:** `{state_root}/compaction/<cycle_id>/<iteration>.md` (next to
-  the existing `{state_root}/compaction/journal.jsonl`, so both are found
-  the same way). One file per compaction call, named by the same
-  `cycle_id`/`iteration` the journal entry for that call already carries —
-  the carrier's reference is exactly that path, not a new identifier
-  scheme. This directory must be inside the executor's existing allowed
-  read paths (no permission changes) and outside the instance repo
-  checkout — the restore step erases uncommitted files there (#1966). If
+- **Where:** `{state_root}/compaction/<cycle_id>/<execution_id>/<iteration>.md`
+  (next to the existing `{state_root}/compaction/journal.jsonl`, so both
+  are found the same way). One file per compaction call, named by the
+  same `cycle_id`/`iteration` the journal entry for that call already
+  carries, plus the executing task's own `execution_id` — `cycle_id` alone
+  is not unique (`SubagentManager` allows an empty cycle ID, and separate
+  subagent executions can share a state root and each restart `iteration`
+  from 0), so without an execution segment a second execution's write can
+  overwrite or race on another's `.tmp` file, leaving an earlier carrier
+  pointing at unrelated or missing evidence. A repeated cycle therefore
+  never overwrites an earlier execution's files. `cycle_id` reaches here
+  from the request (`bridge.py` accepts it verbatim, including `/`, `\`,
+  or `..`) — it is restricted to a safe single-path-component charset
+  before use, and the fully joined path is checked to resolve inside
+  `{state_root}/compaction` before any write, never interpolated raw. This
+  directory must be inside the executor's existing allowed read paths (no
+  permission changes) and outside the instance repo checkout — the
+  restore step erases uncommitted files there (#1966). If
   `{state_root}/compaction/<cycle_id>/` is outside the executor's read
   allowlist, the implementation picks a location that is, keeping the same
   per-call naming.
@@ -53,14 +69,20 @@ file with N sections) — never fewer.
   either fully replaced or untouched, never partially written.
 - **Retention/rotation:** one file per compaction call, never rotated
   independently while the cycle is active (a reader never finds a path the
-  carrier references already gone). Bounded, not tied to an assumed
-  cycle-retirement lifecycle: preservation dirs of *finished* cycles older
-  than 7 days are deleted, plus a total size cap enforced oldest-first;
-  an active cycle's directory is never touched. First implementation step:
-  measure the current volume from the existing journal — `ts` buckets
-  compaction calls per day, `before_tokens - after_tokens` on
-  `reason == "compacted"` rows estimates bytes preserved per call, and
-  `cycle_id` groups per-cycle totals.
+  carrier references already gone). Bounded by an explicit sweep — new
+  code, since no per-cycle teardown that could retire this directory
+  exists today (`state_root` is a persistent, shared directory, not a
+  per-cycle one that gets torn down): run once per cycle start, it scans
+  `{state_root}/compaction/*/` for cycle dirs whose cycle has finished and
+  whose newest file is older than 7 days, deletes them, then enforces a
+  total size cap oldest-first across what remains; an active cycle's
+  directory is never touched. First implementation step: measure the
+  current volume from the journal's existing `compacted_details[].dropped_chars`
+  (the exact character count of each dropped middle span — already
+  written today, and a much closer proxy for on-disk bytes than
+  `before_tokens - after_tokens`, which is a net *token* delta after
+  carrier/index overhead and undercounts raw bytes roughly fourfold),
+  summed per day (`ts`) and per cycle (`cycle_id`) to size the cap.
 - **Privacy class:** private executor state, same class as the rest of
   `{state_root}` — contains full tool outputs and assistant reasoning,
   never published, never included in any public dashboard or gh-pages
@@ -78,34 +100,48 @@ file with N sections) — never fewer.
   still a correctness guarantee — it argues the carrier's index (above)
   isn't doing its job, and becomes the next hypothesis to test.
 
-**How it's tested.** A property test embeds a unique marker token in the
-original text of every message a random history hands to `compact_messages`
-before compaction, then asserts every marker is found either still
-literally present in the returned in-context messages, or inside the
-per-cycle preservation file this round wrote. See Test plan. Separately: a
-test through the executor's real tool layer confirms `read_file` on the
-path named in the carrier succeeds — the file being written is not enough
-if the executor's tools can't open it.
+**How it's tested.** A property test embeds a unique marker token AND
+records the complete pre-compaction payload (`content`, `reasoning_content`)
+of every message a random history hands to `compact_messages`. After
+compaction it asserts, for every touched message, the *complete* recorded
+payload — not merely the marker token — round-trips byte-for-byte out of
+the preservation files: marker survival alone would still pass if a buggy
+writer kept only the marker, or kept a head/tail excerpt with the middle
+lost. Because a message compacted in an earlier round may no longer be in
+context to re-check this round, the assertion searches every preservation
+file still referenced by the current carrier's index (I1/B), not only the
+file the current round wrote. See Test plan. Separately: a test through
+the executor's real tool layer confirms `read_file` on the path named in
+the carrier succeeds — the file being written is not enough if the
+executor's tools can't open it.
 
 ## I2 — Monotonicity
 
-**Definition.** After a real compaction (`reason="compacted"`), total
-estimated tokens (`_total_tokens`) of the returned history is `<=` the
-total before. If satisfying this for the chosen carrier/excerpt selection
-is not possible, the entire compaction is cancelled instead: the returned
-history is byte-identical to the input, and no message is marked touched
-(`_compaction_touched` unset on every message that wasn't already marked
-before this call). A new `reason` value in the journal (e.g.
-`declined_no_reduction`) records this as distinct from `already_compact`.
+**Definition.** A round is only journaled `reason="compacted"` when total
+estimated tokens (`_total_tokens`) of the returned history is *strictly*
+less than the total before (`after < before`) — equality is not a
+compaction: it spent carrier/index overhead without buying back any
+headroom, while still marking its candidates touched and excluding their
+evidence from later rounds (I4), so it must not be allowed to pass as a
+success. Equality takes the same decline path as "can't reduce at all":
+the returned history is byte-identical to the input, and no message is
+marked touched (`_compaction_touched` unset on every message that wasn't
+already marked before this call). A new `reason` value in the journal
+(e.g. `declined_no_reduction`) covers both cases, distinct from
+`already_compact`. A declined round changes no message's content, so I1
+writes nothing for it — the preservation file exists only for rounds that
+actually compact.
 
 **What gets measured.** `_total_tokens(before)` vs. `_total_tokens(after)`
-for every call whose `reason` is `"compacted"`. The carrier's per-message
-index (I1/B) counts toward `after` here — it's real returned-history
-bytes, not a free addition outside the budget it's meant to respect.
+for every call whose `reason` is `"compacted"` — must satisfy `after <
+before`, never merely `<=`. The carrier's per-message index (I1/B) counts
+toward `after` here — it's real returned-history bytes, not a free
+addition outside the budget it's meant to respect.
 
 **How it's tested.** A property test asserts, for every random-history
-compaction call: if `reason == "compacted"`, `after <= before`; if any
-other reason, `after == before` exactly and the set of messages with
+compaction call: if `reason == "compacted"`, `after < before` (strict); if
+any other reason — including a candidate selection that would only reach
+exact equality — `after == before` exactly and the set of messages with
 `_compaction_touched` set is unchanged. See Test plan.
 
 ## I3 — One carrier, marked by code
@@ -114,8 +150,10 @@ other reason, `after == before` exactly and the set of messages with
 `_compaction_carrier: True`. That flag (and `_compaction_touched`) is set
 and read only by `nanobot/runtime/context_compaction.py` itself — never
 inferred from a message's own text (a raw tool result can legitimately
-contain the literal marker text). Already present: `_CARRIER_FLAG` /
-`_COMPACTED_FLAG` in the current code (#1930 convergence round).
+contain the literal marker text). `_CARRIER_FLAG`/`_COMPACTED_FLAG` exist
+today only on #1930's own branch, from its convergence rounds — not on
+`main` — and land as part of this same implementation pass, not as
+separately-shipped prior work.
 
 **What gets measured.** `sum(1 for m in messages if m.get("_compaction_carrier"))`
 — must be `0` or `1` after every call, for the lifetime of a cycle.
@@ -167,8 +205,10 @@ regardless of size. It is left completely untouched — content,
 `reasoning_content` (if any), `thinking_blocks`, all byte-identical — but
 still counted toward the token estimate (`_message_tokens`) as
 incompressible, so the trigger/protected-span accounting isn't blind to
-it. Already present: `_worth_compacting`'s `thinking_blocks` guard and
-`_thinking_blocks_text`'s `data`-key accounting (#1930 convergence round).
+it. `_worth_compacting`'s `thinking_blocks` guard and
+`_thinking_blocks_text`'s `data`-key accounting exist today only on
+#1930's own branch, from its convergence rounds — not on `main` — and
+land with the rest of this pass.
 
 **What gets measured.** For any message `m` with `m.get("thinking_blocks")`
 truthy: `m` is identical (by value, all keys) before and after every
@@ -233,15 +273,22 @@ randomized across:
   `previous`-sized summary text near `MAX_SUMMARY_CHARS`) prepended, to
   stress I2/I3/I4 under repeated-compaction conditions.
 
-Every marker token embedded is recorded in a `planted: dict[token, full_text]`
-map before the call, for the I1 assertion.
+Every marker token, along with the complete pre-compaction payload it's
+embedded in (`content` and, when present, `reasoning_content`), is
+recorded in a `planted: dict[token, full_payload]` map before the call,
+for the I1 assertion.
 
 **Assertions, after every `compact_messages` call:**
-- **I1:** every token in `planted` is found either in some message's
-  current text (`_message_text`) or in the per-cycle preservation file
-  this round wrote (read back and searched).
-- **I2:** per the definition above (`after <= before` when `reason ==
-  "compacted"`; exact no-op otherwise).
+- **I1:** for every message touched this round, its complete recorded
+  pre-compaction payload — not just the planted marker token — is found
+  either still literally present in some message's current text
+  (`_message_text`), or inside a preservation file still referenced by the
+  carrier's index. The search checks every file the index names, not only
+  the one this round wrote, since an earlier round's file remains the sole
+  copy for messages already dropped from context.
+- **I2:** per the definition above (`after < before`, strict, when
+  `reason == "compacted"`; exact no-op — including exact-equality
+  candidate selections — otherwise).
 - **I3:** `sum(1 for m in result if m.get("_compaction_carrier")) <= 1`.
 - **I4:** per the definition above (full commit or full decline, no
   partial state).
@@ -256,12 +303,17 @@ of a fixed sequence would hide an intermediate-round violation.
 
 ## Rules for implementation
 
-One pass. I1 requires a new write-then-reference step in
-`compact_messages`, including the read-allowlist check and index format
-from conditions A/B; I2 and I4 restructure the carrier-decision path to a
-single commit/decline branch instead of the current per-candidate loop;
-I3 and I5 are already implemented (this page documents them, doesn't
-change them). Conditions C (retention), D (ADR-036 + canary), and E (usage
-counter) ship alongside I1, not deferred. First implementation step per C:
-measure current volume from the compaction journal before picking the size
-cap.
+One pass, merged together with #1930's own branch (I3/I5's code already
+lives there, from its convergence rounds — this doesn't restart that
+work, it lands it on `main` alongside I1/I2/I4). I1 requires a new
+write-then-reference step in `compact_messages`, including the
+execution-id namespace, cycle-id sanitization/containment check, and
+index format from conditions A/B; I2 requires the strict `after < before`
+check plus the matching `declined_no_reduction` reason (equality folds
+into decline, no separate reason value); I2 and I4 restructure the
+carrier-decision path to a single commit/decline branch instead of the
+current per-candidate loop. Conditions C (retention), D (ADR-036 +
+canary), and E (usage counter) ship alongside I1, not deferred. First
+implementation step per C: measure current volume from the journal's
+existing `compacted_details[].dropped_chars` (character counts, not the
+`before_tokens`/`after_tokens` token delta) before picking the size cap.
