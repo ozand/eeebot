@@ -271,6 +271,7 @@ The health stop is an **operator step**. Whoever runs the release compares the p
 - **Retired sources** (`reward`, `gate`): WARN by construction.
 - **`cpu` and `queue`:** read against the load at that moment.
 - **Any other dimension:** a new WARN or CRIT, compared with the live baseline, means the operator does not activate.
+- **The dimension set differs:** if the candidate prints fewer `dim` lines than the baseline, or a baseline dimension has no line in the candidate's output (for example `memory`, `disk` or `cycle_progress`), the operator does not activate. The gate's own validation checks only `reward` and `gate` among the dimensions, so a lost dimension passes the gate silently, and the operator's count is the only check. Also compare the reverse direction: a new dimension in the candidate is recorded, and if it is WARN or CRIT the operator does not activate.
 
 Automating this comparison inside `--verify-only` is follow-up #2016. Until it lands, use the command below to take the dimension report, and show the comparison in the release issue.
 
