@@ -2720,6 +2720,81 @@ def test_killed_attempt_becomes_interrupted_kill(tmp_path: Path, monkeypatch):
     assert state.hold is None, "a kill is not supplier evidence -- it must not start a backoff hold"
 
 
+def test_kill_check_interruption_persist_failure_aborts_the_tick(tmp_path: Path, monkeypatch):
+    """Codex re-check on `787c0acf` (P1): the top-of-tick stale-attempt
+    recovery block (D2) calls the same interruption writers as the D1/
+    repair barriers but, unlike them, never checks the returned
+    `OpenIncrementState.persisted` flag. If the write fails, the kill-
+    check's in-memory conversion is silently discarded on the next
+    read-back, planning proceeds anyway, and a fresh
+    `record_attempt_started` for this tick's own new cycle can overwrite
+    the only registration that still points at the dead attempt's branch
+    -- losing it for good instead of retrying kill-recovery next tick.
+    """
+    import asyncio
+    import subprocess
+
+    from tests.test_cycle_ledger import _FakeSubagentManager, _init_selfevo_repo
+    from nanobot.runtime import bridge, open_increment
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+
+    old_cycle_id = "cycle-killed-persistfail"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    subprocess.run(["git", "-C", str(work), "checkout", "-b", old_branch], check=True, capture_output=True)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "wip.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/wip.py"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(work), "commit", "-m", "selfevo: checkpoint — scripts/wip.py", "-m", CHECKPOINT_TRAILER],
+        check=True, capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(work), "checkout", "main"], check=True, capture_output=True)
+
+    open_increment.record_attempt_started(state_dir, old_cycle_id, old_branch)
+
+    # Only the kill-check's own interruption write fails -- a blanket
+    # _save_state stub would also break a fresh record_attempt_started's
+    # later registration write, masking what this test targets. The
+    # interruption write is the only one that sets `pending`;
+    # record_attempt_started's own save only ever touches `running`.
+    _real_save_state = open_increment._save_state
+
+    def _fail_on_pending_write(sd, st):
+        if st.pending is not None:
+            return False
+        return _real_save_state(sd, st)
+
+    monkeypatch.setattr(open_increment, "_save_state", _fail_on_pending_write)
+
+    spawned: list = []
+
+    class _NeverSpawnedManager(_FakeSubagentManager):
+        async def spawn(self, **kwargs):
+            if self._telemetry_component != "planner":
+                spawned.append(1)
+            return await super().spawn(**kwargs)
+
+    _stub_planning_session(monkeypatch, "a brand new, unrelated task")
+    monkeypatch.setattr(bridge, "SubagentManager", _NeverSpawnedManager)
+
+    rc = asyncio.run(bridge._main_impl())
+    assert rc == 0
+    assert spawned == [], "the tick must abort before spawning anything when kill-recovery persistence is unverified"
+
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is None, "an unverified interruption write must not be trusted as a real pending increment"
+
+    state = open_increment.load_state(state_dir)
+    assert state.running is not None, "the dead attempt's own registration must survive for the next tick's kill-check to retry"
+    assert state.running.get("cycle_id") == old_cycle_id
+    assert state.running.get("branch") == old_branch
+
+
 def test_registration_persistence_failure_blocks_executor_startup(tmp_path: Path, monkeypatch):
     """N4 (round 2 external re-check, architect resolution 2026-09-26):
     ``record_attempt_started``'s write is a correctness prerequisite, not
