@@ -565,10 +565,36 @@ def proposer_candidate_items(state_dir: Path) -> list[dict[str, str]]:
             continue
         items.append(_make_item(
             "proposer", title, str(req.get("task") or ""),
-            affected_path=str(req.get("target_path") or ""),
+            affected_path=_extract_request_target_path(req),
             provenance="proposer",
         ))
     return items
+
+
+def _extract_request_target_path(req: dict) -> str:
+    """Recover the target path :func:`write_request` embedded in a proposer
+    request's task text (#2013).
+
+    ``write_request`` deliberately never adds a top-level ``target_path``
+    key to the request payload it writes to disk -- that would break the
+    C1 request-schema-equality invariant -- so it carries the target ONLY
+    as a literal ``Target path: <path>`` line in the ``task`` field (echoed
+    in ``recommended_next_action`` as ``(target: <path>)``). A plain
+    ``req.get("target_path")`` in :func:`proposer_candidate_items` therefore
+    always resolved to "", silently dropping every proposer candidate's
+    target path. Mirrors ``bridge._extract_target_path``'s marker regex.
+    """
+    for field in ("task", "recommended_next_action"):
+        text = req.get(field)
+        if not text or not isinstance(text, str):
+            continue
+        m = re.search(r"Target path:\s*(\S+)", text)
+        if m:
+            return m.group(1).strip().rstrip(").,;")
+        m = re.search(r"\(target:\s*(\S+?)\)", text)
+        if m:
+            return m.group(1).strip()
+    return ""
 
 
 def retire_proposer_request_for_candidate(state_dir: Path, candidate_id: str) -> bool:
