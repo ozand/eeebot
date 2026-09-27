@@ -455,6 +455,24 @@ def test_verbose_decision_phrase_is_preserved_in_summary(tmp_path):
     assert decision in summary
 
 
+def test_fresh_progress_and_decision_survive_summary_cap_with_path_flood():
+    """Current-round decisions survive beside progress and a huge inventory."""
+    progress = "FRESH_PROGRESS_SURVIVES"
+    decision = "decision: SWITCH_TO_PLAN_B"
+    paths = [f"src/generated/module_{i:04d}.py" for i in range(1_000)]
+    evidence = [
+        {"role": "assistant", "content": "P" * 2_000 + progress + "S" * 2_000 + " " + decision,
+         "tool_calls": [{"id": "paths", "type": "function",
+                         "function": {"name": "read_file", "arguments": " ".join(paths)}}]},
+    ]
+
+    summary = cc._structural_summary(evidence, goal="task", previous="P" * 4_000)
+
+    assert len(summary) <= cc.MAX_SUMMARY_CHARS
+    assert progress in summary
+    assert decision in summary
+
+
 def test_prior_summary_survives_when_new_carrier_is_unavailable(tmp_path):
     """Do not retire the old carrier if this pass cannot install a replacement."""
     messages = _make_messages([_long_content(30_000)] * 4)
