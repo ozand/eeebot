@@ -119,7 +119,7 @@ def test_charter_survives_atomic_priority_fallback(tmp_path, monkeypatch, synthe
     charter = "CHARTER_CANARY: preserve this mandatory charter text."
     monkeypatch.setattr(llm_proposer, "_MAX_CONTEXT_CHARS", 3000)
     # This context hits the fallback yet leaves enough budget for the charter.
-    monkeypatch.setattr(llm_proposer, "_captured_pattern_hint", lambda _rows: "guardrail filler " * 130)
+    monkeypatch.setattr(llm_proposer, "_captured_pattern_hint", lambda _rows: "guardrail filler " * 75)
     monkeypatch.setattr(llm_proposer, "_load_goal_text", lambda *_args, **_kwargs: charter)
     _write_charter(tmp_path, charter)
     monkeypatch.setenv("RELEASE_ROOT", str(tmp_path / "_release_root"))

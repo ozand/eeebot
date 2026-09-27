@@ -1836,6 +1836,13 @@ def build_context(
         blob = "\n".join(blob_parts)
         budget = max(0, _MAX_CONTEXT_CHARS - reserved)
         if len(blob) > budget:
+            # The immutable charter is a required proposer input, not part of
+            # the replaceable priority/outcomes blob. Keep its own bounded
+            # section ahead of lower-priority context in all fallback paths.
+            charter_section = (
+                "## Goal (charter, filtered — already-completed priorities removed)\n"
+                + (filtered_goal.strip() or "(no goal text available)")
+            )
             marker = "\n[context truncated; earlier sections have priority]\n"
             keep = max(0, budget - len(marker))
             blob = blob[:keep] + marker[:budget - keep]
@@ -1846,19 +1853,25 @@ def build_context(
                 # replace it with its fixed oversize/unavailable marker.
                 from nanobot.runtime.operator_documents import _PRIORITIES_BLOCK_OVERSIZE_TEXT
 
+                priority_fallback = (
+                    operator_priorities_block
+                    if len(operator_priorities_block) <= budget
+                    else _PRIORITIES_BLOCK_OVERSIZE_TEXT
+                )
                 truncated_prefix = "[context truncated; earlier sections have priority]"
-                if len(operator_priorities_block) + len(truncated_prefix) + 2 <= budget:
-                    blob = truncated_prefix + "\n\n" + operator_priorities_block
-                elif len(_PRIORITIES_BLOCK_OVERSIZE_TEXT) + len(truncated_prefix) + 2 <= budget:
-                    blob = truncated_prefix + "\n\n" + _PRIORITIES_BLOCK_OVERSIZE_TEXT
-                elif len(operator_priorities_block) <= budget:
-                    blob = operator_priorities_block
-                elif len(_PRIORITIES_BLOCK_OVERSIZE_TEXT) <= budget:
-                    blob = _PRIORITIES_BLOCK_OVERSIZE_TEXT
+                required = "\n\n".join((charter_section, truncated_prefix, priority_fallback))
+                if len(required) <= budget:
+                    blob = required
+                elif len(charter_section) + 2 + len(priority_fallback) <= budget:
+                    blob = charter_section + "\n\n" + priority_fallback
+                elif len(priority_fallback) <= budget:
+                    blob = priority_fallback
+                elif len(charter_section) <= budget:
+                    blob = charter_section
                 else:
-                    # Zero/small residual budget: reserve marker characters
-                    # ahead of guardrail trimming above, then never slice it.
-                    blob = _PRIORITIES_BLOCK_OVERSIZE_TEXT[:budget]
+                    # The remaining budget can be zero only when protected
+                    # constraints exceed the cap; preserve a whole section.
+                    blob = ""
         context = blob + "\n" + guardrail_tail + "\n" + surface_rule
 
         # #844: PROTECTED (never-truncated) stepping-stones section — optional
