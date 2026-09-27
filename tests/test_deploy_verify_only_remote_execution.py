@@ -141,24 +141,24 @@ def test_staging_failure_after_mktemp_cleans_remote_directory(tmp_path: Path, re
     (repo / "nanobot/__init__.py").write_text("# candidate package\\n", encoding="utf-8")
     (repo / "host/eeepc/etc/presets").mkdir(parents=True)
     (repo / "host/eeepc/etc/presets/test.env").write_text("FIXTURE=1\\n", encoding="utf-8")
-    git_identity = dict(os.environ, GIT_AUTHOR_NAME="test", GIT_AUTHOR_EMAIL="test@example.invalid",
-                       GIT_COMMITTER_NAME="test", GIT_COMMITTER_EMAIL="tests@example.invalid")
-    subprocess.run(["git", "add", "scripts", "nanobot", "host/eeepc/etc/presets"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-m", "candidate gate"], cwd=repo, check=True, env=git_identity)
+    _git("add", "scripts", "nanobot", "host/eeepc/etc/presets", cwd=repo, check=True)
+    _git("commit", "-m", "candidate gate", cwd=repo, check=True)
     candidate = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=repo, text=True).strip()
     (repo / "later-head.txt").write_text("checkout HEAD differs from requested candidate\\n", encoding="utf-8")
-    subprocess.run(["git", "add", "later-head.txt"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-m", "advance checkout after candidate"], cwd=repo, check=True, env=git_identity)
+    _git("add", "later-head.txt", cwd=repo, check=True)
+    _git("commit", "-m", "advance checkout after candidate", cwd=repo, check=True)
     head = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=repo, text=True).strip()
     assert candidate != head
 
     staging_dir = tmp_path / "eeebot-verify-gate.A1B2C3"
     tar_log = tmp_path / "tar.log"
     _write_mock(mock_bin / "tar", f'echo "$*" >> {str(tar_log).replace(chr(92), "/")}; exit 23')
+    _write_mock(mock_bin / "sudo", '[[ "$1" == -n ]] && shift; exec rm "$@"')
     tar_input = tmp_path / "empty.tar"
     tar_input.write_bytes(b"")
     remote_commands = tmp_path / "remote-commands.log"
     remote_mock_log = str(remote_commands).replace("\\", "/")
+    production_trap = 'sudo -n rm -rf -- "$d"'
     mock_body = f'''echo "$*" >> {remote_mock_log}
 if [[ "$*" == *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"* ]]; then
   echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/previous
@@ -167,7 +167,7 @@ fi
 if [[ "$*" == *mktemp* ]]; then
   d="{staging_dir}"
   mkdir -p "$d"
-  trap 'rm -rf -- "$d"' EXIT
+  trap {shlex.quote(production_trap)} EXIT
   tar -x -C "$d" < "{tar_input}" || exit $?
   exit 23
 fi
