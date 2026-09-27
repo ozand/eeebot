@@ -24,7 +24,6 @@ class _StopGatewayError(RuntimeError):
 
 import shutil
 
-import pytest
 
 
 @pytest.fixture

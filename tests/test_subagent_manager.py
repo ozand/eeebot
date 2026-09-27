@@ -62,7 +62,6 @@ def test_subagent_manager_accepts_deployed_bridge_compat_kwargs(tmp_path):
     class SubagentCfg:
         max_running = 3
 
-    from nanobot.agent.subagent import SubagentManager
     from unittest.mock import Mock
     manager = SubagentManager(
         provider=Provider(),
@@ -82,7 +81,6 @@ def test_subagent_system_prompt_includes_harness_context(tmp_path):
         def get_default_model(self):
             return 'test-model'
 
-    from nanobot.agent.subagent import SubagentManager
     from unittest.mock import Mock
     manager = SubagentManager(
         provider=Provider(),
@@ -104,7 +102,6 @@ def test_subagent_manager_default_max_iterations_is_15(tmp_path):
         def get_default_model(self):
             return 'test-model'
 
-    from nanobot.agent.subagent import SubagentManager
     from unittest.mock import Mock
     manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus())
     assert manager.max_iterations == 15
@@ -120,7 +117,6 @@ def test_subagent_manager_honors_configured_max_iterations(tmp_path):
         def get_default_model(self):
             return 'test-model'
 
-    from nanobot.agent.subagent import SubagentManager
     from unittest.mock import Mock
     manager = SubagentManager(
         provider=Provider(),
@@ -140,7 +136,6 @@ def test_subagent_telemetry_includes_compaction_and_prompt_fields(tmp_path):
         def get_default_model(self):
             return "test-model"
 
-    from nanobot.agent.subagent import SubagentManager
     from unittest.mock import Mock
     manager = SubagentManager(
         provider=Provider(),
@@ -174,7 +169,6 @@ def test_subagent_telemetry_omits_none_prompt_tokens(tmp_path):
         def get_default_model(self):
             return "test-model"
 
-    from nanobot.agent.subagent import SubagentManager
     from unittest.mock import Mock
     manager = SubagentManager(
         provider=Provider(),
