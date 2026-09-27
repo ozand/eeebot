@@ -441,6 +441,39 @@ def test_compaction_replaces_old_summary_carrier_instead_of_accumulating(tmp_pat
     assert sum(map(len, payloads)) <= cc.MAX_SUMMARY_CHARS + 3_000
 
 
+def test_prior_summary_survives_when_new_carrier_is_unavailable(tmp_path):
+    """Do not retire the old carrier if this pass cannot install a replacement."""
+    messages = _make_messages([_long_content(30_000)] * 4)
+    messages = cc.compact_messages(
+        messages, cycle_id="retain-old-summary", iteration=1, state_root=tmp_path,
+        threshold=0.01, keep_tokens=8_000, window_tokens=98_304,
+    )
+    previous = next(
+        message["content"] for message in messages
+        if isinstance(message.get("content"), str)
+        and message["content"].startswith("[Compaction summary")
+    )
+    # Put a 420-character new candidate at the end. Its summary cannot fit
+    # within its head/tail excerpt, while the old carrier is excluded from
+    # re-compaction as already marked.
+    carrier_index = next(
+        i for i, message in enumerate(messages)
+        if isinstance(message.get("content"), str)
+        and message["content"].startswith("[Compaction summary")
+    )
+    candidate = {"role": "assistant", "content": "n" * 420}
+    grown = [*messages, candidate]
+    result = cc.compact_messages(
+        grown, cycle_id="retain-old-summary", iteration=2, state_root=tmp_path,
+        threshold=0.01, keep_tokens=0, window_tokens=98_304,
+    )
+
+    assert any(
+        isinstance(message.get("content"), str) and previous in message["content"]
+        for message in result
+    ), "the previous cumulative summary must remain until a replacement is installed"
+
+
 def test_cumulative_summary_growth_is_bounded_across_many_compactions(tmp_path):
     """#1776 item 2: 'retained verbatim' must not mean 'grows without bound'
     -- a cycle that compacts repeatedly (the issue's own telemetry: one
