@@ -844,8 +844,10 @@ class SubagentManager:
                     session_key=session_key,
                     correlation_context=correlation_context,
                     context_usage=context_usage,
+                    max_call_gap_s=_watchdog.max_call_gap_s,
                 ),
             )
+            self.last_max_call_gap_s = _watchdog.max_call_gap_s
             logger.info("Subagent [{}] cancelled", task_id)
             raise
         except Exception as e:
@@ -866,8 +868,10 @@ class SubagentManager:
                     session_key=session_key,
                     correlation_context=correlation_context,
                     context_usage=context_usage,
+                    max_call_gap_s=_watchdog.max_call_gap_s,
                 ),
             )
+            self.last_max_call_gap_s = _watchdog.max_call_gap_s
             logger.error("Subagent [{}] failed: {}", task_id, e)
             await self._announce_result(task_id, label, task, error_msg, origin, "error")
 
