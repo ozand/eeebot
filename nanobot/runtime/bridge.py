@@ -6426,7 +6426,11 @@ def _executor_model_call_failure(state_dir: Path, task_id: str | None) -> dict |
     try:
         payload = json.loads((Path(state_dir) / 'subagents' / f'{task_id}.json').read_text(encoding='utf-8'))
         failure = payload.get('model_call_failure') if isinstance(payload, dict) else None
-        return failure if isinstance(failure, dict) and failure.get('stage') == 'model_call' else None
+        if not isinstance(failure, dict):
+            return None
+        if failure.get('stage') == 'model_call' or failure.get('call_stage') == 'model_call':
+            return failure
+        return None
     except Exception:
         return None
 

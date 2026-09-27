@@ -936,7 +936,8 @@ while :; do
       LAST_STARTING_LINE="$STARTING_LINE"
       log "Bridge invoked after the flip; holding ${NO_CRASH_HOLD}s for a crash before the weaker verdict: $STARTING_LINE"
     fi
-  elif [ -n "$INVOKED_AT" ] && [ -z "${INCOMPLETE_EXIT:-}" ] && [ $(( SECONDS - INVOKED_AT )) -ge "$NO_CRASH_HOLD" ]; then
+  fi
+  if [ -n "$INVOKED_AT" ] && [ -z "${INCOMPLETE_EXIT:-}" ] && [ $(( SECONDS - INVOKED_AT )) -ge "$NO_CRASH_HOLD" ]; then
     log "Health gate: NO-CRASH. Bridge invoked after the flip and no crash for ${NO_CRASH_HOLD}s; the run has not finished yet, so this is weaker than CLEAN-EXIT."
     log "=== Deploy complete ==="
     exit 0
