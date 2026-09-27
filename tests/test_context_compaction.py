@@ -321,6 +321,27 @@ def test_second_real_compaction_incorporates_newly_dropped_evidence(tmp_path):
     )
 
 
+def test_summary_carrier_is_not_inserted_when_it_would_increase_history(tmp_path):
+    """A small candidate and verbose goal must not turn compaction into growth."""
+    goal = "G" * 1_000
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": goal},
+        {"role": "assistant", "content": "x" * 420,
+         "tool_calls": [{"id": "tc-small", "type": "function",
+                         "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "tc-small", "name": "bash",
+         "content": "y" * 80_000},
+    ]
+
+    result = cc.compact_messages(
+        messages, cycle_id="carrier-growth", iteration=1, state_root=tmp_path,
+        threshold=0.01, keep_tokens=1, window_tokens=98_304,
+    )
+
+    assert cc._total_tokens(result) <= cc._total_tokens(messages)
+
+
 def test_second_compaction_summarizes_assistant_progress_with_tool_calls(tmp_path):
     """Assistant progress remains evidence even when that turn invokes tools."""
     messages = _make_messages([_long_content(30_000)] * 4)
