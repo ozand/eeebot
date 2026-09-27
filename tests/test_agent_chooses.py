@@ -236,6 +236,22 @@ def test_supply_and_planner_no_plan_are_counted_apart(tmp_path: Path):
     assert not any(e["state"] in ("planner_degraded", "stopped") for e in transitions)
 
 
+def test_switching_no_plan_family_resets_the_other_consecutive_streak(tmp_path: Path):
+    state = tmp_path / "state"
+    for index in range(5):
+        result = no_plan_recovery.record_outcome(state, f"supply-{index}", "timed_out")
+    assert result.consecutive_supply == 5
+    assert result.consecutive_planner == 0
+
+    switched = no_plan_recovery.record_outcome(state, "planner-1", "malformed")
+    assert switched.consecutive_supply == 0
+    assert switched.consecutive_planner == 1
+
+    switched_back = no_plan_recovery.record_outcome(state, "supply-after-planner", "timed_out")
+    assert switched_back.consecutive_supply == 1
+    assert switched_back.consecutive_planner == 0
+
+
 def test_infrastructure_outcomes_do_not_count_toward_either_family(tmp_path: Path):
     state = tmp_path / "state"
     for outcome in ("spawn_failed", "spawn_failed", "commit_failed", "spawn_failed"):
@@ -2900,6 +2916,25 @@ def test_killed_attempt_recovery_carries_original_plan(tmp_path: Path, monkeypat
     assert pending["plan_text"] == original_plan, (
         f"recovery must carry the ORIGINAL plan forward, not an explanatory placeholder: {pending['plan_text']!r}"
     )
+
+
+def test_terminal_ledger_row_prevents_stale_kill_classification(tmp_path: Path):
+    """A durable terminal outcome wins over a stale uncleared running registration."""
+    from nanobot.runtime import cycle_ledger, open_increment
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    cycle_id = "cycle-ledger-terminal-before-clear"
+    branch = f"selfevo/{cycle_id}"
+    open_increment.record_attempt_started(state_dir, cycle_id, branch, plan_text="finished work")
+    cycle_ledger.record_cycle_outcome(state_dir, cycle_id, "success", None, ["x.py"], branch)
+
+    # Restore the inconsistent persisted registration to simulate a crash or
+    # failed clear after the terminal ledger append became durable.
+    open_increment.record_attempt_started(state_dir, cycle_id, branch, plan_text="finished work")
+    stale = open_increment.check_running_for_kill(state_dir, "cycle-next-tick")
+    assert stale is None
+    assert open_increment.load_state(state_dir).running is None
 
 
 @pytest.mark.parametrize("executor_status", ["ok", "bounded_stop", "blocked", "cancelled", "error", None])
