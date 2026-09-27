@@ -162,7 +162,8 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _message_tokens(msg: dict[str, Any]) -> int:
-    """Estimate tokens for a single message dict."""
+    """Estimate tokens for a single message dict, #1930: including
+    ``reasoning_content``/``thinking_blocks`` — see :func:`_message_text`."""
     content = msg.get("content") or ""
     if isinstance(content, list):
         # Anthropic-style block list
@@ -172,8 +173,15 @@ def _message_tokens(msg: dict[str, Any]) -> int:
                 total += _estimate_tokens(str(block.get("text") or block.get("content") or ""))
             else:
                 total += _estimate_tokens(str(block))
-        return total
-    return _estimate_tokens(str(content))
+    else:
+        total = _estimate_tokens(str(content))
+    reasoning = msg.get("reasoning_content")
+    if reasoning:
+        total += _estimate_tokens(str(reasoning))
+    thinking_text = _thinking_blocks_text(msg.get("thinking_blocks"))
+    if thinking_text:
+        total += _estimate_tokens(thinking_text)
+    return total
 
 
 def _total_tokens(messages: list[dict[str, Any]]) -> int:
@@ -222,15 +230,42 @@ def _compactable_indices(messages: list[dict[str, Any]], keep_tokens: int) -> se
     return {i for i in range(keep_from) if not _is_system_or_user_task(messages[i])}
 
 
+def _thinking_blocks_text(blocks: list[dict[str, Any]] | None) -> str:
+    """Flatten Anthropic-style ``thinking_blocks`` into plain text."""
+    if not blocks:
+        return ""
+    return "\n".join(
+        str(block.get("thinking") or block.get("text") or block.get("content") or "")
+        if isinstance(block, dict) else str(block)
+        for block in blocks
+    )
+
+
 def _message_text(msg: dict[str, Any]) -> str:
+    """Every message's visible text plus, per #1930, its reasoning payload:
+    ``build_assistant_message`` (nanobot/utils/helpers.py) stores model
+    ``reasoning_content``/``thinking_blocks`` on assistant turns, and
+    ``litellm_provider.py`` sends ``reasoning_content`` back to the model on
+    every later call. Left out of this, compaction neither counts nor
+    shrinks the fastest-growing part of a thinking model's context.
+    """
     content = msg.get("content") or ""
     if isinstance(content, list):
-        return "\n".join(
+        text = "\n".join(
             str(block.get("text") or block.get("content") or "")
             if isinstance(block, dict) else str(block)
             for block in content
         )
-    return str(content)
+    else:
+        text = str(content)
+    parts = [text] if text else []
+    reasoning = msg.get("reasoning_content")
+    if reasoning:
+        parts.append(str(reasoning))
+    thinking_text = _thinking_blocks_text(msg.get("thinking_blocks"))
+    if thinking_text:
+        parts.append(thinking_text)
+    return "\n".join(parts)
 
 
 _PATH_RE = re.compile(
@@ -639,7 +674,15 @@ def compact_messages(
                 )
             else:
                 new_content, _ = _excerpt_content(msg.get("content"))
-            new_messages[i] = dict(msg, content=new_content)
+            new_msg = dict(msg, content=new_content)
+            # #1930: an old turn's reasoning payload is exactly as compacted
+            # as its content — leaving it in place would keep resending the
+            # fastest-growing part of a thinking model's context untouched
+            # (litellm_provider.py sends reasoning_content back on every
+            # later call).
+            new_msg.pop("reasoning_content", None)
+            new_msg.pop("thinking_blocks", None)
+            new_messages[i] = new_msg
             compacted_details.append(_drop_detail(tool_name, old_text))
             results_compacted += 1
 
