@@ -326,20 +326,34 @@ def _structural_summary(
         if len(previous) > budget:
             previous = "...[earlier summary truncated]...\n" + previous[-budget:]
 
-    lines = ["[Compaction summary — deterministic, evidence-only]", f"Goal: {goal[:1000] or 'not available'}"]
+    # Reserve space for current-round decisions and progress BEFORE laying
+    # out older cumulative context or unbounded path inventories. Those fresh
+    # signals must not be cut away by the final whole-summary cap.
+    fresh_sections = ["Key decisions (explicit statements only):"]
+    fresh_sections.extend(f"- {x}" for x in decisions[-6:])
+    fresh_sections.append("Progress:")
+    fresh_sections.extend(f"- {x}" for x in progress[-6:])
+    fresh_text = _bounded_summary("\n".join(fresh_sections), MAX_SUMMARY_CHARS)
+
+    prefix = ["[Compaction summary — deterministic, evidence-only]", f"Goal: {goal[:1000] or 'not available'}"]
     if previous:
-        lines.extend(["Earlier summary (preserved):", previous])
-    lines.append("Key decisions (explicit statements only):")
-    lines.extend(f"- {x}" for x in decisions[-6:])
-    lines.append("Files read (paths observed in tool calls/results):")
-    lines.extend(f"- {x}" for x in sorted(read_files))
-    lines.append("Files modified (paths observed in write/edit/patch tools):")
-    lines.extend(f"- {x}" for x in sorted(modified_files))
-    # Put recent progress last so the hard-cap tail retains it even when an
-    # unusually large previous summary and path inventory consume the budget.
-    lines.append("Progress:")
-    lines.extend(f"- {x}" for x in progress[-6:])
-    return _bounded_summary("\n".join(lines), MAX_SUMMARY_CHARS)
+        prefix.extend(["Earlier summary (preserved):", previous])
+    prefix.append("Files read (paths observed in tool calls/results):")
+    prefix.extend(f"- {x}" for x in sorted(read_files))
+    prefix.append("Files modified (paths observed in write/edit/patch tools):")
+    prefix.extend(f"- {x}" for x in sorted(modified_files))
+    prefix_text = "\n".join(prefix)
+    if len(prefix_text) + len(fresh_text) <= MAX_SUMMARY_CHARS:
+        return prefix_text + "\n" + fresh_text if prefix_text else fresh_text
+
+    # Prior summary and path inventory are less important than the new
+    # decisions/progress in this compaction. Give fresh sections the remaining
+    # capacity first, then retain a bounded tail of earlier context.
+    separator = "\n"
+    prefix_budget = max(0, MAX_SUMMARY_CHARS - len(fresh_text) - len(separator))
+    bounded_prefix = _bounded_summary(prefix_text, prefix_budget)
+    combined = bounded_prefix + separator + fresh_text
+    return _bounded_summary(combined, MAX_SUMMARY_CHARS)
 
 
 def _compact_content(content: str) -> str:

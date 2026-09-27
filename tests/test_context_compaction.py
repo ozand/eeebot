@@ -461,9 +461,12 @@ def test_fresh_progress_and_decision_survive_summary_cap_with_path_flood():
     decision = "decision: SWITCH_TO_PLAN_B"
     paths = [f"src/generated/module_{i:04d}.py" for i in range(1_000)]
     evidence = [
-        {"role": "assistant", "content": "P" * 2_000 + progress + "S" * 2_000 + " " + decision,
-         "tool_calls": [{"id": "paths", "type": "function",
-                         "function": {"name": "read_file", "arguments": " ".join(paths)}}]},
+        {"role": "assistant", "content": "P" * 2_000 + progress + "S" * 2_000},
+        {"role": "assistant", "content": "D" * 1_000 + decision},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "paths", "type": "function",
+             "function": {"name": "read_file", "arguments": " ".join(paths)}},
+        ]},
     ]
 
     summary = cc._structural_summary(evidence, goal="task", previous="P" * 4_000)
