@@ -4596,26 +4596,43 @@ async def _main_impl_body():
                             return_exceptions=True,
                         )
                         # A task cancelled before its first event-loop step never
-                        # enters _run_subagent's CancelledError handler; replace
-                        # spawn's synchronous running telemetry explicitly.
+                        # enters _run_subagent's CancelledError handler; update
+                        # spawn's existing record while preserving its task and
+                        # correlation metadata.
                         for _task_id in _cancelled_ids:
-                            _repair_mgr._write_subagent_telemetry(
-                                _task_id,
-                                _repair_mgr._build_subagent_telemetry_payload(
+                            telemetry_path = _repair_mgr._telemetry_dir / f'{_task_id}.json'
+                            try:
+                                with telemetry_path.open('r', encoding='utf-8') as fh:
+                                    payload = json.load(fh)
+                            except (OSError, ValueError):
+                                payload = None
+                            if not isinstance(payload, dict):
+                                # Defensive fallback for a missing/corrupt
+                                # record; normally spawn has already persisted it.
+                                payload = _repair_mgr._build_subagent_telemetry_payload(
                                     task_id=_task_id,
-                                    task='',
+                                    task=_repair_prompt,
                                     label='repair',
                                     started_at=_repair_mgr._read_subagent_started_at(_task_id) or _repair_mgr._utc_now(),
-                                    finished_at=_repair_mgr._utc_now(),
-                                    status='cancelled',
-                                    summary='Repair skipped before execution: insufficient wall-clock budget.',
-                                    result='Repair skipped before execution: insufficient wall-clock budget.',
-                                    origin={},
+                                    finished_at=None,
+                                    status='running',
+                                    summary=None,
+                                    result=None,
+                                    origin={
+                                        'channel': 'self-evolving',
+                                        'chat_id': _cycle_id,
+                                        'session_key': None,
+                                    },
                                     session_key=None,
-                                    correlation_context={},
-                                    stop_reason='repair_skipped_no_budget',
-                                ),
-                            )
+                                )
+                            payload.update({
+                                'finished_at': _repair_mgr._utc_now(),
+                                'status': 'cancelled',
+                                'summary': 'Repair skipped before execution: insufficient wall-clock budget.',
+                                'result': 'Repair skipped before execution: insufficient wall-clock budget.',
+                                'stop_reason': 'repair_skipped_no_budget',
+                            })
+                            _repair_mgr._write_subagent_telemetry(_task_id, payload)
                         append_event(STATE_DIR, {
                             'phase': 'repair_skipped_no_budget',
                             'cycle_id': _cycle_id,
