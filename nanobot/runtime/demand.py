@@ -1086,7 +1086,7 @@ def _ledger_defects(
             outcome = str(row.get("outcome") or "").strip().lower()
             if outcome.startswith("skipped"):
                 continue
-            if outcome not in ("failed", "timeout", "error", "harness_failed", "model_call_incomplete"):
+            if outcome not in ("failed", "timeout", "error", "harness_failed"):
                 continue
             ts = _parse_ts(row.get("ts"))
             if ts is None or ts < cutoff:

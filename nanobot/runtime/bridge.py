@@ -7620,13 +7620,23 @@ if __name__ == '__main__':
     # (uncaught exceptions are recorded by the sys.excepthook armed in
     # nanobot/__init__). A disabled bridge still never touches STATE_DIR.
     if BRIDGE_ENABLED:
-        # #1765: supplier outages and incomplete model calls exit non-zero
-        # (systemd still sees a non-clean run) but are deliberately NEVER
-        # handed to record_exit — its outcome is a strict success|failure
-        # binary with no third state, and forcing either box would move the
-        # defect streak for provider/model interruptions, not an actual defect.
-        _skip_exit_record = _exit_code in (EXIT_SUPPLIER_PAUSED, EXIT_MODEL_CALL_INCOMPLETE)
-        if not _skip_exit_record:
+        # #1765: supplier outages do not write a process exit row. Incomplete
+        # model calls write an explicit run/exit record but pass
+        # ``outcome_classification`` so the defect streak is not mutated.
+        _skip_exit_record = _exit_code == EXIT_SUPPLIER_PAUSED
+        if _exit_code == EXIT_MODEL_CALL_INCOMPLETE:
+            try:
+                from nanobot import crash_record as _crash_record
+
+                _crash_record.record_exit(
+                    STATE_DIR,
+                    outcome="failure",
+                    exit_status=_exit_code,
+                    outcome_classification="model_call_incomplete",
+                )
+            except Exception as _record_exc:
+                print(f"bridge: incomplete-call run record not written: {_record_exc!r}", file=sys.stderr)
+        elif not _skip_exit_record:
             try:
                 from nanobot import crash_record as _crash_record
 

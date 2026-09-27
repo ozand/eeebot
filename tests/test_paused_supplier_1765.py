@@ -353,16 +353,19 @@ class TestExitStreakAndHealthDoNotCountAnOutage:
         guard = tree.body[-1]
         assert isinstance(guard, ast.If) and "__main__" in ast.dump(guard.test)
         body_src = ast.get_source_segment(src, guard)
-        assert "_exit_code in (EXIT_SUPPLIER_PAUSED, EXIT_MODEL_CALL_INCOMPLETE)" in body_src
+        assert "_exit_code == EXIT_MODEL_CALL_INCOMPLETE" in body_src
+        assert "outcome_classification=\"model_call_incomplete\"" in body_src
         assert "if not _skip_exit_record:" in body_src
         assert "_crash_record.record_exit(" in body_src
         assert "if BRIDGE_ENABLED:" in body_src
 
-    def test_systemd_cli_skips_record_exit_for_model_call_incomplete_and_streak_is_unchanged(self, tmp_path):
+    def test_systemd_cli_records_model_call_incomplete_without_streak_mutation(self, tmp_path):
         from nanobot import crash_record
 
         state = tmp_path / "state"
+        crash_record._start_run_marker(state)
         crash_record.record_exit(state, outcome="failure", exit_status=1, error="NameError: x")
+        crash_record._start_run_marker(state)
         before = crash_record._load_streak(state / "bridge" / "exit_streak.json")
         assert before["consecutive_failures"] == 1
 
@@ -377,6 +380,13 @@ class TestExitStreakAndHealthDoNotCountAnOutage:
         after = crash_record._load_streak(state / "bridge" / "exit_streak.json")
         assert after["consecutive_failures"] == before["consecutive_failures"]
         assert after["last_failure_ts"] == before["last_failure_ts"]
+        rows = [json.loads(line) for line in (state / "bridge" / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert rows[-1]["classification"] == "model_call_incomplete"
+        assert rows[-1]["outcome"] == "model_call_incomplete"
+        exit_rows = [json.loads(line) for line in (state / "bridge" / "exits.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert exit_rows[-1]["outcome"] == "model_call_incomplete"
+        assert exit_rows[-1]["classification"] == "model_call_incomplete"
+        assert after["total_records"] == before["total_records"]
 
     def test_systemd_cli_skips_record_exit_for_supplier_paused_and_streak_is_unchanged(self, tmp_path):
         from nanobot import crash_record

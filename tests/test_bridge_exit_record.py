@@ -118,6 +118,8 @@ def test_model_call_incomplete_run_classification_survives_failure_process_exit(
     row = _run_rows(state)[0]
     assert row["classification"] == "model_call_incomplete"
     assert row["outcome"] == "failure"
+    assert row["classification"] == "model_call_incomplete"
+    assert row["outcome"] == "failure"
 
 
 def test_supplier_pause_run_classification_is_preserved(tmp_path):
