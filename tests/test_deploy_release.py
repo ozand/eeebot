@@ -677,6 +677,24 @@ def test_verify_only_semantic_gate_rejects_stale_raw_dashboard(monkeypatch) -> N
     assert 'materialize_synthesized_improvement' in gate_script
 
 
+def test_verify_only_streams_candidate_gate_without_requiring_live_gate_file() -> None:
+    """Regression: verify the candidate gate, not code installed in current."""
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    remote = _remote_block(script)
+    assert "git -C \"$REPO_ROOT\" archive" in script  # candidate source is sent from the selected local ref
+    assert "VERIFY_ONLY" in remote
+    assert "verify_release_health.py" in remote
+    assert "mktemp -d" in remote
+    assert "tar -x" in remote
+    assert 'PYTHONPATH="$' in remote
+    assert 'sudo -u eeepc-agent env PYTHONPATH=' in remote
+    assert '"$RELEASE_DIR/scripts/verify_release_health.py"' not in remote
+    assert 'test -f "$RELEASE_DIR/scripts/verify_release_health.py"' not in remote
+    usage = script.splitlines()[5]
+    assert "--ref <sha>" in usage and "--verify-only" in usage
+    assert "candidate" in script.lower() and "empty state" in script.lower()
+
+
 def test_verify_only_has_no_mutation_or_health_wait_path() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     assert 'VERIFY-ONLY mode active. Skipping archive and upload.' in script
