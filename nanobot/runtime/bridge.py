@@ -4180,6 +4180,10 @@ async def _main_impl_body():
         print('no_charter')
         return 0
 
+    if not goal_id:
+        print('no_active_goal')
+        return 0
+
     # ADR-034 F3: operator priorities are optional input, not the identity
     # gate for a cycle. Preserve an empty metadata goal_id when that document
     # is absent/unreadable; the request/cycle remains runnable.

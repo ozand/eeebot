@@ -153,6 +153,7 @@ class TestAuthoritativeSpawnEndToEnd:
         """A real bridge cycle must not spawn repair without wall+reserve budget (#1899 F1)."""
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-repair-budget", "cycle-repair-budget")
+        _stub_planning_session(monkeypatch, "add feature")
         monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "1000")
         monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "300")
         now = [0.0]
@@ -194,6 +195,7 @@ class TestAuthoritativeSpawnEndToEnd:
     def test_success_outcome_records_executor_call_gap(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-call-gap", "cycle-call-gap")
+        _stub_planning_session(monkeypatch, "add feature")
         monkeypatch.setattr(bridge, "SubagentManager", _PrimaryManager)
 
         assert asyncio.run(bridge._main_impl()) == 0
@@ -213,6 +215,7 @@ class TestAuthoritativeSpawnEndToEnd:
 
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("cancelled", REPAIR_TEXT_CANCELLED))
         _seed_bridge_request(state_dir, "req-gap-cancel", "cycle-gap-cancel")
+        _stub_planning_session(monkeypatch, "add feature")
         monkeypatch.setattr(bridge, "SubagentManager", _CancelledPrimary)
         assert asyncio.run(bridge._main_impl()) == 0
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
@@ -231,6 +234,7 @@ class TestAuthoritativeSpawnEndToEnd:
 
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("cancelled", REPAIR_TEXT_CANCELLED))
         _seed_bridge_request(state_dir, "req-gap-error", "cycle-gap-error")
+        _stub_planning_session(monkeypatch, "add feature")
         monkeypatch.setattr(bridge, "SubagentManager", _ErrorPrimary)
         assert asyncio.run(bridge._main_impl()) == bridge.EXIT_EXECUTOR_LLM_ERROR
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
@@ -239,6 +243,7 @@ class TestAuthoritativeSpawnEndToEnd:
     def test_repair_manager_receives_shared_deadline(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-repair-deadline", "cycle-repair-deadline")
+        _stub_planning_session(monkeypatch, "add feature")
         deadline_seen = []
 
         class _DeadlineRepair(_make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)):
