@@ -263,7 +263,16 @@ Rules for the reader:
 - **A guard line:** at least one line must catch harm, not only the intended effect. Examples: unit failures per start from the unit journal; the wall-clock-abort share with a stop threshold.
 - **Changes with no forecast line:** list any change whose trigger is unlikely within 24 h under "no forecast line", with the reason.
 
-The gate precheck of the release sha against live state (`verify_release_health.py`, per-dimension statuses) runs before the flip. Retired sources (`reward`, `gate`) are WARN by construction. `cpu` and `queue` are read against load at that moment. Any other dimension at WARN or CRIT stops the release.
+Before the flip, the gate precheck runs the release sha against live state: `verify_release_health.py`, with statuses printed per dimension.
+
+**The gate does not enforce health.** `verify_release_health.py` checks imports, rendering and the structure and bounds of fields. It exits 0 whatever `overall` or any dimension status is, so a passing gate is not a health verdict.
+
+The health stop is an **operator step**. Whoever runs the release compares the per-dimension statuses printed by the precheck and records the comparison in the release issue before activating:
+- **Retired sources** (`reward`, `gate`): WARN by construction.
+- **`cpu` and `queue`:** read against the load at that moment.
+- **Any other dimension:** a new WARN or CRIT, compared with the live baseline, means the operator does not activate.
+
+Automating this comparison inside `--verify-only` is a separate follow-up; until it lands, the release issue must show the comparison.
 
 ### At the flip — flip comment
 
