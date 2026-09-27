@@ -6814,11 +6814,9 @@ async def _main_impl_body():
             print(f'bridge: unexpected error during cycle {cycle_branch}: {exc}')
             _rollback_reason = _rollback_reason or 'internal_error'
             commits_pushed = cycle_commit_count if _integrated else 0
-            _candidate_max_call_gap_s = getattr(
-                _last_call_gap_manager,
-                "last_max_call_gap_s",
-                _candidate_max_call_gap_s,
-            )
+            _latest_manager_gap = getattr(_last_call_gap_manager, "last_max_call_gap_s", None)
+            if _latest_manager_gap is not None:
+                _candidate_max_call_gap_s = _latest_manager_gap
         finally:
             # Never leave the shared checkout stranded on a cycle branch.
             if not _integrated:
