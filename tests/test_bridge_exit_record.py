@@ -113,13 +113,14 @@ def test_model_call_incomplete_run_classification_survives_failure_process_exit(
     state = tmp_path / "state"
     crash_record._start_run_marker(state)
     crash_record.set_run_metadata(classification="model_call_incomplete", reason="model_call_incomplete")
-    crash_record.record_exit(state, outcome="failure", exit_status=bridge.EXIT_MODEL_CALL_INCOMPLETE)
+    crash_record.record_exit(
+        state, outcome="model_call_incomplete", exit_status=bridge.EXIT_MODEL_CALL_INCOMPLETE,
+        outcome_classification="model_call_incomplete", update_streak=False,
+    )
 
     row = _run_rows(state)[0]
     assert row["classification"] == "model_call_incomplete"
-    assert row["outcome"] == "failure"
-    assert row["classification"] == "model_call_incomplete"
-    assert row["outcome"] == "failure"
+    assert row["outcome"] == "model_call_incomplete"
 
 
 def test_supplier_pause_run_classification_is_preserved(tmp_path):

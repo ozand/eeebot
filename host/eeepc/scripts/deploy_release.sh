@@ -910,6 +910,12 @@ while :; do
     exit 0
   fi
 
+  if [ -n "${INCOMPLETE_EXIT:-}" ]; then
+    # A status-6 completion is neither a still-running invocation nor a clean
+    # exit. Clear the hold window so this completed incomplete call cannot
+    # satisfy the weaker NO-CRASH verdict; wait for the next Starting event.
+    INVOKED_AT=""
+  fi
   if [ -z "$INVOKED_AT" ]; then
     STARTING_LINE=$(ssh "ozand@${HOST}" "sudo journalctl -u $BRIDGE_UNIT --utc --since \"$FLIP_JOURNAL_TS\" --no-pager | grep -E 'systemd\[1\]: Starting $BRIDGE_UNIT' | head -n 1 || true")
     if [ -n "$STARTING_LINE" ]; then

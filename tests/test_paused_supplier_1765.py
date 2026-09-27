@@ -126,6 +126,9 @@ class TestClassifyLlmError:
         ("BadRequestError", "invalid temperature"),
         ("AuthenticationError", "Incorrect API key provided"),
         ("PermissionDeniedError", "model access denied"),
+        ("provider_error", "Azure OpenAI API Error 401: Incorrect API key"),
+        ("provider_error", "Azure OpenAI API Error 404: Deployment not found"),
+        ("provider_error", "Error calling Codex: Invalid API key"),
     ])
     def test_definitive_client_rejection_with_model_call_telemetry_stays_failed(self, error_type, message):
         failure = {
@@ -386,6 +389,7 @@ class TestExitStreakAndHealthDoNotCountAnOutage:
         exit_rows = [json.loads(line) for line in (state / "bridge" / "exits.jsonl").read_text(encoding="utf-8").splitlines()]
         assert exit_rows[-1]["outcome"] == "model_call_incomplete"
         assert exit_rows[-1]["classification"] == "model_call_incomplete"
+        assert exit_rows[-1]["streak_updated"] is False
         assert after["total_records"] == before["total_records"]
 
     def test_systemd_cli_skips_record_exit_for_supplier_paused_and_streak_is_unchanged(self, tmp_path):

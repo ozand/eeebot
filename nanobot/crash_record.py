@@ -345,6 +345,7 @@ def record_exit(
                         classification=outcome_classification)
         records_path.parent.mkdir(parents=True, exist_ok=True)
         if not update_streak:
+            row["streak_updated"] = False
             with records_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             return _load_streak(streak_path)

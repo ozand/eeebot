@@ -6365,10 +6365,14 @@ def _classify_llm_error(error_text: str, *, model_call_failure: dict | None = No
             'invalid parameter', 'invalid temperature', 'unsupported parameter',
             'maximum context length', 'context length exceeded',
             'invalid tool call arguments', 'malformed tool-call',
+            'invalid api key', 'incorrect api key', 'unauthorized',
+            'authentication failed', 'permission denied', 'deployment not found',
+            'model not found', 'invalid model',
         )
-        if error_type in definitive_request_errors or any(
+        has_client_http_status = bool(re.search(r"(?:api error|http(?: status)?|status code|error code)\s*[:=]?\s*(?:400|401|403|404|409|413|422)\b", message))
+        if (error_type in definitive_request_errors or has_client_http_status or any(
             marker in message for marker in request_rejection_markers
-        ):
+        )):
             return 'failed'
         return 'model_call_incomplete'
     return 'failed'
@@ -7630,9 +7634,10 @@ if __name__ == '__main__':
 
                 _crash_record.record_exit(
                     STATE_DIR,
-                    outcome="failure",
+                    outcome="model_call_incomplete",
                     exit_status=_exit_code,
                     outcome_classification="model_call_incomplete",
+                    update_streak=False,
                 )
             except Exception as _record_exc:
                 print(f"bridge: incomplete-call run record not written: {_record_exc!r}", file=sys.stderr)

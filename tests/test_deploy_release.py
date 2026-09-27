@@ -539,6 +539,17 @@ def test_m_invocation_without_finish_is_no_crash_after_the_hold(repo, tmp_path, 
     assert "health gate: pass" not in combined and "health gate: clean-exit" not in combined
 
 
+def test_incomplete_invocation_does_not_satisfy_no_crash(repo, tmp_path, mock_bin):
+    incomplete_exit = f"eeepc systemd[1]: {BRIDGE_UNIT}: Main process exited, code=exited, status=6/NOTIMPLEMENTED"
+    set_ssh_mock(mock_bin, _journal_replay_mock(STARTING_TEXT, incomplete_exit))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "1", "--no-crash-hold", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert res.returncode == 0, combined
+    assert "health gate: no-crash" not in combined
+    assert "health gate: clean-exit" not in combined
+    assert "health gate: unknown" in combined
+
+
 def test_n_invocation_then_crash_within_the_hold_rolls_back(repo, tmp_path, mock_bin):
     """The FAIL branches keep their authority over the hold: Starting + a non-zero exit -> rollback."""
     set_ssh_mock(mock_bin, _journal_replay_mock(

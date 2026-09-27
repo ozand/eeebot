@@ -14,6 +14,18 @@ from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 _AZURE_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name"})
 
 
+def _error_type_from_status(status_code: int) -> str:
+    if status_code in (401, 403):
+        return "AuthenticationError" if status_code == 401 else "PermissionDeniedError"
+    if status_code == 429:
+        return "RateLimitError"
+    if 400 <= status_code < 500:
+        return "BadRequestError"
+    if status_code >= 500:
+        return "InternalServerError"
+    return "ProviderHTTPError"
+
+
 class AzureOpenAIProvider(LLMProvider):
     """
     Azure OpenAI provider with API version 2024-10-21 compliance.
@@ -150,6 +162,7 @@ class AzureOpenAIProvider(LLMProvider):
                     return LLMResponse(
                         content=f"Azure OpenAI API Error {response.status_code}: {response.text}",
                         finish_reason="error",
+                        error_type=_error_type_from_status(response.status_code),
                     )
                 
                 response_data = response.json()
@@ -159,6 +172,7 @@ class AzureOpenAIProvider(LLMProvider):
             return LLMResponse(
                 content=f"Error calling Azure OpenAI: {repr(e)}",
                 finish_reason="error",
+                error_type=type(e).__name__,
             )
 
     def _parse_response(self, response: dict[str, Any]) -> LLMResponse:
@@ -206,6 +220,7 @@ class AzureOpenAIProvider(LLMProvider):
             return LLMResponse(
                 content=f"Error parsing Azure OpenAI response: {str(e)}",
                 finish_reason="error",
+                error_type="InvalidResponseError",
             )
 
     def get_default_model(self) -> str:
