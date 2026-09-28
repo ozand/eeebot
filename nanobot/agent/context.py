@@ -14,6 +14,7 @@ from loguru import logger
 from nanobot.agent.block_loader import load_block, trim_lines
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
+from nanobot.runtime import context_compaction as _ctx_compact
 from nanobot.runtime import day_clock
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
 from nanobot.runtime.operator_documents import (
@@ -812,6 +813,38 @@ Skills with available="false" need dependencies installed first - you can try in
             value = 0
         return value if value > 0 else self.MAX_SYSTEM_PROMPT_CHARS
 
+    def _budget_telemetry(self, cap: int, pool_usage: dict[str, int]) -> dict[str, Any]:
+        """ozand/eeebot-ops-dashboard#368: the budgets as the runtime resolves
+        them for THIS fit -- numbers only, published on the ``system_prompt``
+        ledger row so readers stop restating them as constants.
+
+        ``compaction`` is read from :mod:`nanobot.runtime.context_compaction`'s
+        own module attributes at call time -- the values ``compact_messages``
+        uses (the subagent loop passes no overrides), env overrides included.
+        """
+        agents_md_cap = next(
+            (
+                block_cap for root_kind, filename, block_cap, _required in self.BOOTSTRAP_FILES
+                if root_kind == "workspace" and Path(filename).name == "AGENTS.md"
+            ),
+            None,
+        )
+        return {
+            "system_prompt_budget_chars": cap,
+            "release_pool_chars": {
+                "limit": self._RELEASE_POOL_CHARS,
+                "used": sum(pool_usage.values()) if pool_usage else None,
+            },
+            "operating_reserve_chars": self._RELEASE_BLOCK_FLOORS.get("OPERATING.md"),
+            "agents_md_cap_chars": agents_md_cap,
+            "compaction": {
+                "window_tokens": _ctx_compact.WINDOW_TOKENS,
+                "reserve_tokens": _ctx_compact.RESERVE_TOKENS,
+                "threshold": _ctx_compact.THRESHOLD,
+                "keep_tokens": _ctx_compact.KEEP_TOKENS,
+            },
+        }
+
     def _trim_section_to_fit(
         self,
         sections: list[tuple[str, str]],
@@ -1038,6 +1071,8 @@ Skills with available="false" need dependencies installed first - you can try in
                 "left": getattr(self, "_release_pool_left", 0),
                 "per_file": pool_usage,
             }
+        # ozand/eeebot-ops-dashboard#368: the budgets this fit ran under.
+        fit["budget"] = self._budget_telemetry(cap, pool_usage)
         # #1802 AC 4: a truncated or dropped block is a condition someone is
         # told about, not a field nobody reads. The first block to truncate
         # will be the one carrying the cycle rules.
