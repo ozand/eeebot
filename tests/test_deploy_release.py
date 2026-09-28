@@ -891,8 +891,9 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
     gate_tmp = root / "candidate-gate"
     mock("systemctl", f'''echo "systemctl $*" >> {log}
     case "$*" in
-      *eeepc-network-fallback*"-p LoadState"*) echo not-found ;;
-      *"-p LoadState"*) echo loaded ;;
+      *eeepc-network-fallback.timer*"-p LoadState"*|*eeepc-network-fallback.service*"-p LoadState"*) echo not-found ;;
+      *eeepc-promotion-verifier.timer*"-p LoadState"*|*eeebot-host-metrics.timer*"-p LoadState"*|*eeebot-host-capabilities.timer*"-p LoadState"*|*eeebot-*.timer*"-p LoadState"*|*eeebot-dashboard.service*"-p LoadState"*) echo loaded ;;
+      *"-p LoadState"*) echo not-found ;;
       *"-p MainPID"*) echo 4242 ;;
       *"-p ExecMainStartTimestamp"*) echo now ;;
       *is-enabled*) echo enabled ;;
