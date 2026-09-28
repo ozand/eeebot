@@ -707,7 +707,11 @@ def test_pairing_survives_when_the_cut_falls_between_a_call_and_its_own_result(t
     the call becomes compactable (older side of the cut) while its own
     result stays fully protected (newer side). Even straddling the exact
     pair like this, the two must still resolve to each other afterward."""
-    tool_content = _long_content(5_000)
+    # #1930 review B3: carrier selection now counts the preservation
+    # index/file-list overhead too, so this fixture needs enough margin
+    # over that overhead (previously 5_000 was margin enough; the honest
+    # accounting needs more) for the straddle to still actually compact.
+    tool_content = _long_content(30_000)
     # Long enough to clear the worth-compacting size floor on its own, so
     # the assertion below actually exercises the straddle instead of the
     # (also-correct, separately tested) "too small to bother" no-op path.
@@ -1296,8 +1300,15 @@ def test_later_candidate_carries_summary_when_the_first_is_too_small(tmp_path):
         messages, cycle_id="later-candidate", iteration=1, state_root=tmp_path,
         threshold=0.001, keep_tokens=50, window_tokens=98_304,
     )
-    carriers = [m for m in result if isinstance(m.get("content"), str)
-                and m["content"].startswith("[Compaction summary")]
+    # I3's own contract: carrier-ness is the CODE-SET _CARRIER_FLAG, never
+    # inferred from a message's own text. A plain-text scan for the
+    # "[Compaction summary" prefix is exactly the anti-pattern I3 forbids --
+    # this fixture's own old_summary text happens to start with that same
+    # literal string, so its PLAIN excerpt (once it's no longer chosen as
+    # carrier -- #1930 review B3 correctly makes it too large to qualify
+    # once the preservation overhead is honestly counted) coincidentally
+    # matches too, without being a real second carrier.
+    carriers = [m for m in result if m.get(cc._CARRIER_FLAG)]
     assert len(carriers) == 1, f"expected exactly one carrier, found {len(carriers)}"
     assert marker in carriers[0]["content"], (
         "this round's fresh evidence must survive by moving to a candidate "
@@ -1433,13 +1444,15 @@ def _random_history_with_payloads(
     return messages, index_payload
 
 
-def _decode_preservation_file(path: Path) -> dict[int, tuple[str, str]]:
+def _decode_preservation_file(path: Path) -> "dict[int, tuple[str, dict]]":
     """Test-side reverse of :func:`cc._write_preservation_file`: ``{index:
-    (role, text)}``. Reconstruction is positional (fixed-width chunks), so
-    this only needs to strip the readability-only continuation marker from
-    every physical line but a record's last and re-``json.loads`` the
-    concatenated payload -- never a marker SEARCH."""
-    records: dict[int, tuple[str, str]] = {}
+    (role, parts)}`` -- ``parts`` is the RAW ``{"content": ..., optionally
+    "reasoning_content": ...}`` object #1930 review B1 stores. Reconstruction
+    is positional (fixed-width chunks), so this only needs to strip the
+    readability-only continuation marker from every physical line but a
+    record's last and re-``json.loads`` the concatenated payload -- never a
+    marker SEARCH."""
+    records: "dict[int, tuple[str, dict]]" = {}
     lines = path.read_text(encoding="utf-8").split("\n")
     i = 0
     header_re = re.compile(r"^## message (\d+) role=(.*) chars=(\d+)$")
@@ -1465,7 +1478,35 @@ def _decode_preservation_file(path: Path) -> dict[int, tuple[str, str]]:
     return records
 
 
-_PRESERVATION_PATH_RE = re.compile(r"-- full text preserved at (\S+\.md)")
+# Matches both the per-message index line's trailing path ("-- full text
+# preserved at <path>") and #1930 review A2(b)'s bare "- <path>" file-list
+# lines -- any whitespace-bounded token ending in ".md" is a preservation
+# file reference in either format.
+_PRESERVATION_PATH_RE = re.compile(r"(\S+\.md)\b")
+
+
+def _recovered_parts_to_joined_text(parts) -> str:
+    """Mirror the pre-B1 ``_message_text`` join convention (content, then
+    reasoning_content, joined by ``"\\n"``) over a RAW ``parts`` object
+    (#1930 review B1 stores ``content``/``reasoning_content`` as separate
+    keys, ``content`` unmodified -- a plain string, or the raw block list).
+    Used only to compare a recovered record against an ``index_payload``
+    entry that was itself captured as one combined string; a test that
+    needs the raw dict directly should read ``_decode_preservation_file``'s
+    result itself instead of going through this."""
+    if not isinstance(parts, dict):
+        return str(parts)
+    content = parts.get("content", "")
+    if isinstance(content, list):
+        content = "\n".join(
+            str(b.get("text") or b.get("content") or "") if isinstance(b, dict) else str(b)
+            for b in content
+        )
+    text_parts = [str(content)] if content else []
+    reasoning = parts.get("reasoning_content")
+    if reasoning:
+        text_parts.append(str(reasoning))
+    return "\n".join(text_parts)
 
 
 def _referenced_preservation_records(history: list[dict]) -> dict[int, tuple[str, str]]:
@@ -1473,7 +1514,10 @@ def _referenced_preservation_records(history: list[dict]) -> dict[int, tuple[str
     still named in ANY message's current text (the carrier's index, folded
     forward across rounds) -- not only the file the most recent round wrote,
     since a message compacted in an earlier round may no longer be in
-    context to re-check this round."""
+    context to re-check this round. ``text`` is the JOINED string (see
+    :func:`_recovered_parts_to_joined_text`) -- callers that need the RAW
+    parts dict (#1930 review B1's own tests) use
+    :func:`_decode_preservation_file` directly instead."""
     all_records: dict[int, tuple[str, str]] = {}
     seen_paths: set[str] = set()
     for msg in history:
@@ -1483,7 +1527,8 @@ def _referenced_preservation_records(history: list[dict]) -> dict[int, tuple[str
     for raw_path in seen_paths:
         p = Path(raw_path)
         if p.is_file():
-            all_records.update(_decode_preservation_file(p))
+            for index, (role, parts) in _decode_preservation_file(p).items():
+                all_records[index] = (role, _recovered_parts_to_joined_text(parts))
     return all_records
 
 
@@ -1612,7 +1657,9 @@ def test_invariant_i1_preservation_file_readable_through_real_read_file_tool(tmp
         if not ln.startswith("## ")
     ]
     encoded = "".join(stripped_lines)
-    assert json.loads(encoded) == huge_line, (
+    decoded = json.loads(encoded)
+    content_text = decoded["content"] if isinstance(decoded, dict) else decoded
+    assert content_text == huge_line, (
         "the huge line must reconstruct byte-for-byte through the real tool's pagination"
     )
 
@@ -1733,14 +1780,19 @@ def test_sweep_preservation_retention_deletes_aged_out_cycles_never_touching_act
     old_time = time.time() - 10 * 86400
     os.utime(old_file, (old_time, old_time))
 
-    active_cycle = compaction_root / "active-cycle" / "exec2"
+    # #1930 review B4: _sanitize_path_component now hash-suffixes every
+    # sanitized segment, so the directory sweep_preservation_retention will
+    # actually treat as "active" is NOT the bare cycle_id string -- it must
+    # be built the same way the function itself builds it.
+    active_cycle_id = "active-cycle"
+    active_cycle = compaction_root / cc._sanitize_path_component(active_cycle_id, "") / "exec2"
     active_cycle.mkdir(parents=True)
     active_file = active_cycle / "0.md"
     active_file.write_text("live", encoding="utf-8")
     os.utime(active_file, (old_time, old_time))  # also old, but is the active cycle
 
     counts = cc.sweep_preservation_retention(
-        tmp_path, active_cycle_id="active-cycle", max_age_days=7,
+        tmp_path, active_cycle_id=active_cycle_id, max_age_days=7,
         max_total_bytes=10_000_000,
     )
     assert counts["aged_out"] == 1
@@ -1804,3 +1856,466 @@ def test_count_preservation_reads_counts_matching_cycle_and_compaction_path(tmp_
     assert cc.count_preservation_reads(tmp_path, "c1", day="2026-09-27") == 2
     assert cc.count_preservation_reads(tmp_path, "c2", day="2026-09-27") == 1
     assert cc.count_preservation_reads(tmp_path, "nonexistent", day="2026-09-27") == 0
+
+
+# ---------------------------------------------------------------------------
+# #1930 architect review round 1 (A1-A6) @ 0da52baf
+# ---------------------------------------------------------------------------
+
+def _big_history_no_carrier_fits(n: int = 45) -> list[dict]:
+    """Deliberately sized so NO candidate can hold the refreshed summary --
+    the I4 'decline' repro (Codex 4115904095). NOT for tests that need an
+    ordinary successful compaction -- see :func:`_normal_compacting_history`."""
+    return _make_messages([_long_content(cc._min_compact_len() + 50)] * n)
+
+
+def _normal_compacting_history(tool_size: int = 20_000) -> list[dict]:
+    """A minimal history that reliably yields a real ``reason="compacted"``
+    round: one oversized, easily-excerpted tool result. Distinct from
+    :func:`_big_history_no_carrier_fits` above."""
+    return [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "tc0", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "tc0", "name": "bash", "content": _long_content(tool_size)},
+        {"role": "assistant", "content": "keep me recent " + "z" * 200},
+    ]
+
+
+class TestA3ReadCounterOverCounting:
+    """A3 (P2): a bare substring match on "compaction" also matched
+    "context_compaction.py" (this very module) or its tests -- a false hit
+    unrelated to the preservation directory."""
+
+    def test_a3_read_of_context_compaction_module_itself_is_not_counted(self, tmp_path):
+        index_dir = Path(tmp_path) / "action_index"
+        index_dir.mkdir(parents=True)
+        rows = [
+            {"cycle_id": "c1", "actions_detail": ["read:compaction/c1/exec1/0.md"]},
+            {"cycle_id": "c1", "actions_detail": ["read:nanobot/runtime/context_compaction.py"]},
+            {"cycle_id": "c1", "actions_detail": ["read:tests/test_context_compaction.py"]},
+        ]
+        with (index_dir / "2026-09-27.jsonl").open("w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+        assert cc.count_preservation_reads(tmp_path, "c1", day="2026-09-27") == 1
+
+
+class TestA4JournalPreservationFields:
+    """A4 (P2): the journal row for a compaction lacks written_bytes/file_path."""
+
+    def test_a4_compacted_journal_row_names_preservation_path_and_bytes(self, tmp_path):
+        messages = _normal_compacting_history()
+        cc.compact_messages(
+            messages, cycle_id="a4-journal", iteration=1, state_root=tmp_path,
+            threshold=0.001, keep_tokens=50, window_tokens=98_304, execution_id="exec-a4",
+        )
+        ev = _last_journal_event(tmp_path)
+        assert ev["reason"] == "compacted"
+        assert ev.get("preservation_path"), "journal row must name the preservation file"
+        assert Path(ev["preservation_path"]).is_file()
+        assert isinstance(ev.get("preservation_bytes"), int) and ev["preservation_bytes"] > 0
+        assert ev["preservation_bytes"] == Path(ev["preservation_path"]).stat().st_size
+
+
+class TestA5NonAsciiPreservation:
+    """A5 (P2): json.dumps defaults to ensure_ascii=True, so Cyrillic becomes
+    \\uXXXX -- up to 6x larger and unreadable for the executor via read_file."""
+
+    def test_a5_cyrillic_and_huge_line_restore_through_real_read_file_tool(self, tmp_path):
+        from nanobot.agent.tools.filesystem import ReadFileTool
+
+        cyrillic_huge_line = ("Привет мир, это тест кириллицы. " * 8000)[:250_000]
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": "",
+             "tool_calls": [{"id": "tc0", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "tc0", "name": "bash", "content": cyrillic_huge_line},
+            {"role": "assistant", "content": "keep me recent " + "z" * 200},
+        ]
+        result = cc.compact_messages(
+            messages, cycle_id="a5-cyrillic", iteration=1, state_root=tmp_path,
+            threshold=0.001, keep_tokens=50, window_tokens=98_304, execution_id="exec-a5",
+        )
+        ev = _last_journal_event(tmp_path)
+        assert ev["reason"] == "compacted"
+        preservation_path = Path(ev["preservation_path"])
+        raw = preservation_path.read_text(encoding="utf-8")
+        assert "Привет" in raw, (
+            "non-ASCII text must be written literally (ensure_ascii=False), not as \\uXXXX escapes"
+        )
+        assert "\\u041f" not in raw and "\\u0440" not in raw
+
+        tool = ReadFileTool(allowed_dir=Path(tmp_path))
+        collected = ""
+        offset = 1
+        for _ in range(50):
+            page = asyncio.run(tool.execute(path=str(preservation_path), offset=offset, limit=2000))
+            assert not page.startswith("Error"), page
+            body = page.rsplit("\n\n(", 1)[0]
+            for numbered_line in body.splitlines():
+                _, _, text_part = numbered_line.partition("| ")
+                collected += text_part + "\n"
+            if "End of file" in page:
+                break
+            offset = int(page.rsplit("offset=", 1)[1].split(" ", 1)[0])
+        else:
+            pytest.fail("tool pagination did not terminate")
+
+        stripped_lines = [
+            ln[:-len(cc._PRESERVATION_CONTINUATION_MARKER)] if ln.endswith(cc._PRESERVATION_CONTINUATION_MARKER) else ln
+            for ln in collected.split("\n")
+            if not ln.startswith("## ")
+        ]
+        encoded = "".join(stripped_lines)
+        decoded = json.loads(encoded)
+        content_text = decoded["content"] if isinstance(decoded, dict) else decoded
+        assert content_text == cyrillic_huge_line, (
+            "Cyrillic + a line past the tool's 128_000-char cap must restore byte-for-byte"
+        )
+
+
+class TestA2RetiredCarrierPreservation:
+    """A2 (P1, I1): a retired carrier's text is replaced by a stub and was
+    NOT written to a preservation file -- only folded into `previous`, which
+    truncates to its tail. After enough rounds the index lines pointing at
+    early files fall out of the carrier, and those files (sole copies) are
+    referenced by nothing."""
+
+    def test_a2_every_sole_copy_file_stays_reachable_over_20_rounds(self, tmp_path):
+        for round_record in _run_sequence(rng_seed=42, n_calls=20, tmp_path=tmp_path):
+            pass
+        # After the full sequence, every message no longer literally in
+        # context must have its full pre-compaction payload recoverable from
+        # SOME preservation file the FINAL carrier's index (including its
+        # "all preservation files" list) currently references.
+        final_result = round_record["result"]
+        index_payload = round_record["index_payload"]
+        referenced = _referenced_preservation_records(final_result)
+        missing = []
+        for i, payload in index_payload.items():
+            if i >= len(final_result):
+                continue
+            still_in_context = any(payload in cc._message_text(m) for m in final_result)
+            if still_in_context:
+                continue
+            if i not in referenced:
+                missing.append(i)
+        assert not missing, (
+            f"turns {missing} have no reachable preservation record after 20 rounds -- "
+            f"their sole copy fell out of the carrier's reachable file list"
+        )
+
+
+class TestA1SweepCalledByWriter:
+    """A1 (P1, revised): the sweep is called by compact_messages itself,
+    right before _write_preservation_file, once per (process, cycle_id),
+    fail-open. bridge.py is never touched."""
+
+    def test_a1a_compacting_round_sweeps_an_old_other_cycle_directory(self, tmp_path):
+        old_dir = Path(tmp_path) / "compaction" / "stale-other-cycle" / "exec1"
+        old_dir.mkdir(parents=True)
+        old_file = old_dir / "0.md"
+        old_file.write_text("stale", encoding="utf-8")
+        old_time = time.time() - 30 * 86400
+        os.utime(old_file, (old_time, old_time))
+
+        messages = _normal_compacting_history()
+        cc.compact_messages(
+            messages, cycle_id="a1a-fresh-cycle", iteration=1, state_root=tmp_path,
+            threshold=0.001, keep_tokens=50, window_tokens=98_304, execution_id="exec-a1a",
+        )
+        ev = _last_journal_event(tmp_path)
+        assert ev["reason"] == "compacted"
+        assert not old_dir.exists(), (
+            "a compacting round must sweep an aged-out OTHER cycle's directory"
+        )
+
+    def test_a1b_below_threshold_round_never_sweeps(self, tmp_path):
+        old_dir = Path(tmp_path) / "compaction" / "stale-other-cycle" / "exec1"
+        old_dir.mkdir(parents=True)
+        old_file = old_dir / "0.md"
+        old_file.write_text("stale", encoding="utf-8")
+        old_time = time.time() - 30 * 86400
+        os.utime(old_file, (old_time, old_time))
+
+        messages = _make_messages([_short_content(10)])
+        cc.compact_messages(
+            messages, cycle_id="a1b-below-threshold", iteration=1, state_root=tmp_path,
+            threshold=0.99, keep_tokens=20_000, window_tokens=98_304,
+        )
+        ev = _last_journal_event(tmp_path)
+        assert ev["reason"] == "below_threshold"
+        assert old_dir.exists(), "a non-compacting round must never sweep"
+
+    def test_a1c_second_compacting_round_same_cycle_does_not_repeat_sweep(self, tmp_path, monkeypatch):
+        calls = []
+        real_sweep = cc.sweep_preservation_retention
+
+        def _counting_sweep(*args, **kwargs):
+            calls.append((args, kwargs))
+            return real_sweep(*args, **kwargs)
+
+        monkeypatch.setattr(cc, "sweep_preservation_retention", _counting_sweep)
+
+        base = _normal_compacting_history()
+        round1 = cc.compact_messages(
+            list(base), cycle_id="a1c-repeat-cycle", iteration=1, state_root=tmp_path,
+            threshold=0.001, keep_tokens=50, window_tokens=98_304, execution_id="exec-a1c",
+        )
+        fresh_pair = [
+            {"role": "assistant", "content": "",
+             "tool_calls": [{"id": "tc1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "tc1", "name": "bash", "content": _long_content(20_000)},
+        ]
+        round2_input = round1[:-1] + fresh_pair + [round1[-1]]
+        cc.compact_messages(
+            round2_input, cycle_id="a1c-repeat-cycle", iteration=2, state_root=tmp_path,
+            threshold=0.001, keep_tokens=50, window_tokens=98_304, execution_id="exec-a1c",
+        )
+        assert len(calls) == 1, (
+            f"expected exactly 1 sweep call across 2 compacting rounds of the SAME cycle, got {len(calls)}"
+        )
+
+    def test_a1d_current_cycles_own_directory_is_never_swept(self, tmp_path):
+        safe_cycle = cc._sanitize_path_component("a1d-active-cycle", "")
+        own_dir = Path(tmp_path) / "compaction" / safe_cycle / "exec-old"
+        own_dir.mkdir(parents=True)
+        own_file = own_dir / "0.md"
+        own_file.write_text("earlier round of the SAME cycle", encoding="utf-8")
+        old_time = time.time() - 30 * 86400
+        os.utime(own_file, (old_time, old_time))
+
+        messages = _normal_compacting_history()
+        cc.compact_messages(
+            messages, cycle_id="a1d-active-cycle", iteration=1, state_root=tmp_path,
+            threshold=0.001, keep_tokens=50, window_tokens=98_304, execution_id="exec-a1d-new",
+        )
+        assert own_dir.exists(), "the sweep must never delete the CURRENT cycle's own directory"
+
+    def test_a1e_a_failing_sweep_still_leaves_the_file_written_and_round_compacted(self, tmp_path, monkeypatch):
+        calls = []
+
+        def _raising_sweep(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise PermissionError("simulated rmtree failure")
+
+        monkeypatch.setattr(cc, "sweep_preservation_retention", _raising_sweep)
+
+        messages = _normal_compacting_history()
+        result = cc.compact_messages(
+            messages, cycle_id="a1e-failing-sweep", iteration=1, state_root=tmp_path,
+            threshold=0.001, keep_tokens=50, window_tokens=98_304, execution_id="exec-a1e",
+        )
+        assert calls, "the sweep must actually have been invoked for this assertion to mean anything"
+        ev = _last_journal_event(tmp_path)
+        assert ev["reason"] == "compacted", "a failing sweep must not cancel the round"
+        assert ev.get("preservation_path") and Path(ev["preservation_path"]).is_file(), (
+            "a failing sweep must not cancel the preservation write"
+        )
+        assert result != messages
+
+
+# ---------------------------------------------------------------------------
+# #1930 architect review round 2 (B1-B8, ChatGPT-reproduced) @ 0da52baf
+# ---------------------------------------------------------------------------
+
+class TestB1RawContentPreservation:
+    """B1 (P1, I1): _message_text is a lossy projection for content lists --
+    (a) a block with both text and content keeps only text, silently
+    dropping content's middle on excerpt; (b) a list carrier is flattened
+    to a string, silently dropping non-text blocks (e.g. image_url)."""
+
+    def test_b1a_block_with_both_text_and_content_preserves_content_verbatim(self, tmp_path):
+        block_content = "THE REAL CONTENT: " + ("c" * 2000)
+        block_text = "a decoy text field, not what should be measured"
+        list_content = [{"type": "tool_result", "text": block_text, "content": block_content}]
+        messages = _normal_compacting_history() + [
+            {"role": "tool", "tool_call_id": "tc-list", "name": "bash", "content": list_content},
+            {"role": "assistant", "content": "keep me recent 2 " + "z" * 200},
+        ]
+        result = cc.compact_messages(
+            messages, cycle_id="b1a-block", iteration=1, state_root=tmp_path,
+            threshold=0.001, keep_tokens=50, window_tokens=98_304, execution_id="exec-b1a",
+        )
+        ev = _last_journal_event(tmp_path)
+        assert ev["reason"] == "compacted"
+        preservation_path = Path(ev["preservation_path"])
+        raw = preservation_path.read_text(encoding="utf-8")
+        assert "THE REAL CONTENT" in raw, (
+            "the raw content block (not just its 'text' sibling key) must survive in the preservation file"
+        )
+
+    def test_b1b_non_text_block_in_a_list_carrier_survives_the_preservation_record(self, tmp_path):
+        image_block = {"type": "image_url", "image_url": {"url": "https://example.invalid/pic.png"}}
+        list_content = [
+            {"type": "tool_result", "content": "y" * 5000},
+            image_block,
+        ]
+        messages = _normal_compacting_history() + [
+            {"role": "tool", "tool_call_id": "tc-img", "name": "bash", "content": list_content},
+            {"role": "assistant", "content": "keep me recent 2 " + "z" * 200},
+        ]
+        result = cc.compact_messages(
+            messages, cycle_id="b1b-image", iteration=1, state_root=tmp_path,
+            threshold=0.001, keep_tokens=50, window_tokens=98_304, execution_id="exec-b1b",
+        )
+        ev = _last_journal_event(tmp_path)
+        assert ev["reason"] == "compacted"
+        preservation_path = Path(ev["preservation_path"])
+        raw = preservation_path.read_text(encoding="utf-8")
+        assert "example.invalid/pic.png" in raw, (
+            "a non-text block (image_url) must survive verbatim in the preservation record, "
+            "not be silently dropped by a text-only flattening"
+        )
+
+
+class TestB2OnlyFlagWhenTokensActuallyDrop:
+    """B2 (P1, I4): a candidate was marked touched even when _excerpt_content
+    returned changed=False (a list of small/non-tool_result blocks) -- the
+    message did not shrink, but was flagged and dropped out of future
+    rounds; _drop_detail recorded a nonzero dropped_chars for a message
+    that lost nothing."""
+
+    def test_b2_a_list_content_candidate_that_cannot_shrink_is_never_flagged(self, tmp_path):
+        unshrinkable = [{"type": "text", "text": "short text block, no tool_result present"}]
+        messages = _normal_compacting_history() + [
+            {"role": "tool", "tool_call_id": "tc-unshrink", "name": "bash", "content": unshrinkable},
+            {"role": "assistant", "content": "keep me recent 2 " + "z" * 200},
+        ]
+        before = [dict(m) for m in messages]
+        assert cc._worth_compacting(messages[-2]) is False, (
+            "a list-content message _excerpt_content cannot shrink must be proactively excluded"
+        )
+        result = cc.compact_messages(
+            messages, cycle_id="b2-unshrinkable", iteration=1, state_root=tmp_path,
+            threshold=0.001, keep_tokens=50, window_tokens=98_304, execution_id="exec-b2",
+        )
+        unshrink_idx = len(messages) - 2
+        assert result[unshrink_idx] == before[unshrink_idx], (
+            "an unshrinkable list-content candidate must be left completely untouched, never flagged"
+        )
+        assert cc._COMPACTED_FLAG not in result[unshrink_idx]
+
+
+def test_b3_carrier_selection_counts_the_preservation_overhead_itself(tmp_path):
+    """B3 (P1, local I2): carrier selection previously checked
+    len(summary+excerpt) WITHOUT the preservation index -- the index was
+    spliced in afterwards, so a carrier could grow net (reproduced:
+    643->1126 chars) while the pre-index comparison still reported success.
+    A history sized so a candidate fits WITHOUT the index but not WITH it
+    must decline instead of silently growing."""
+    messages = _normal_compacting_history(tool_size=1_200)
+    result = cc.compact_messages(
+        messages, cycle_id="b3-overhead", iteration=1, state_root=tmp_path,
+        threshold=0.001, keep_tokens=50, window_tokens=98_304, execution_id="exec-b3",
+    )
+    ev = _last_journal_event(tmp_path)
+    if ev["reason"] == "compacted":
+        for m in result:
+            if m.get(cc._CARRIER_FLAG):
+                assert len(str(m["content"])) < 1_200 + 4_000, (
+                    "if a carrier WAS installed, its full content (summary + excerpt + "
+                    "preservation index/file-list) must still be smaller than a generous "
+                    "bound -- never silently larger than what carrier selection measured"
+                )
+    else:
+        assert ev["reason"] == "declined_no_reduction"
+
+
+def test_b4_sanitized_segment_collision_gets_distinct_directories(tmp_path):
+    """B4 (P1, paths): sanitisation alone is many-to-one -- 'cycle/a,job:b'
+    and 'cycle?a,job/b' both clean to 'cycle_a_job_b', so a second write
+    would land in (and overwrite) the first's directory."""
+    a = cc._sanitize_path_component("cycle/a,job:b", "fallback")
+    b = cc._sanitize_path_component("cycle?a,job/b", "fallback")
+    assert a != b, "two different raw values must never sanitize to the same directory name"
+
+    path_a = cc._preservation_path(tmp_path, "cycle/a,job:b", "exec1", 0)
+    path_b = cc._preservation_path(tmp_path, "cycle?a,job/b", "exec1", 0)
+    assert path_a.parent.parent != path_b.parent.parent
+
+
+def test_b5_two_compactions_same_iteration_both_files_exist_old_index_unchanged(tmp_path):
+    """B5 (P1): a second write to the same (cycle, execution, iteration)
+    overwrote the earlier evidence, and a shared <iteration>.md.tmp let two
+    writers race. Fix: the final path is never overwritten (suffix -1, -2,
+    ...); the temp file is unique."""
+    records_1 = [(0, "assistant", {"content": "FIRST ROUND CONTENT " + "a" * 500})]
+    records_2 = [(0, "assistant", {"content": "SECOND ROUND CONTENT " + "b" * 500})]
+    nominal = cc._preservation_path(tmp_path, "same-cycle", "same-exec", 3)
+
+    path_1 = cc._first_free_preservation_path(nominal)
+    actual_1, _ = cc._write_preservation_file(path_1, records_1)
+
+    path_2 = cc._first_free_preservation_path(nominal)
+    assert path_2 != actual_1, "the second write must be reserved a DIFFERENT path than the first"
+    actual_2, _ = cc._write_preservation_file(path_2, records_2)
+
+    assert actual_1.is_file() and actual_2.is_file(), "both files must exist"
+    assert actual_1 != actual_2
+
+    content_1 = actual_1.read_text(encoding="utf-8")
+    assert "FIRST ROUND CONTENT" in content_1
+    assert "SECOND ROUND CONTENT" not in content_1, (
+        "the old file's content must be unchanged by the second write"
+    )
+
+
+def test_b6_journal_before_after_est_are_scale_consistent_trigger_signal_separate(tmp_path):
+    """B6 (P2, measuring I2): before=trigger_signal (real provider tokens)
+    and after=an estimate -- two different scales in one series (reproduced:
+    before=10, after=231 for an actual 25003->231-char reduction)."""
+    messages = _normal_compacting_history()
+    real_total_before = cc._total_tokens(messages)
+    # threshold/reserve chosen so trigger_tokens is comfortably below the
+    # small prompt_tokens=10 used to simulate the real provider-reported
+    # number -- otherwise the round declines below_threshold before ever
+    # reaching the scale-consistency check this test is about.
+    cc.compact_messages(
+        messages, cycle_id="b6-scale", iteration=1, state_root=tmp_path,
+        threshold=0.00005, keep_tokens=50, window_tokens=98_304, reserve_tokens=0,
+        prompt_tokens=10, prompt_token_delta=0, execution_id="exec-b6",
+    )
+    ev = _last_journal_event(tmp_path)
+    assert ev["reason"] == "compacted"
+    assert ev["before_tokens"] == real_total_before, (
+        "before_tokens must be this module's own _total_tokens estimate, not the provider trigger_signal"
+    )
+    assert ev["after_tokens"] < ev["before_tokens"], "after must be the same-scale estimate, strictly smaller"
+    assert ev["trigger_signal"] == 10, "the real provider-reported number must still be recorded, separately"
+
+
+class TestB7ThinkingBlocksKeyPresence:
+    """B7 (P3, I5): the guard tested truthiness, so thinking_blocks=[] (an
+    empty list, falsy) was not protected."""
+
+    def test_b7_empty_thinking_blocks_list_is_still_protected(self):
+        msg = {"role": "assistant", "content": "x" * 5000, "thinking_blocks": []}
+        assert cc._worth_compacting(msg) is False, (
+            "thinking_blocks=[] must still be treated as present -- key presence, not truthiness"
+        )
+
+
+def test_b8_lone_surrogate_falls_back_to_ensure_ascii_true(tmp_path):
+    """B8 (P3): with ensure_ascii=False (A5), a string holding a lone UTF-16
+    surrogate fails to encode to UTF-8, the write fails, and the fail-open
+    round declines. Fix: fall back to ensure_ascii=True for that record."""
+    lone_surrogate_text = "before" + "\ud800" + "after" + ("x" * 500)
+    parts = {"content": lone_surrogate_text}
+    encoded = cc._json_dumps_preservation_safe(parts)
+    encoded.encode("utf-8")  # must not raise
+    assert json.loads(encoded) == parts
+
+    messages = _normal_compacting_history() + [
+        {"role": "tool", "tool_call_id": "tc-surrogate", "name": "bash", "content": lone_surrogate_text},
+        {"role": "assistant", "content": "keep me recent 2 " + "z" * 200},
+    ]
+    result = cc.compact_messages(
+        messages, cycle_id="b8-surrogate", iteration=1, state_root=tmp_path,
+        threshold=0.001, keep_tokens=50, window_tokens=98_304, execution_id="exec-b8",
+    )
+    ev = _last_journal_event(tmp_path)
+    assert ev["reason"] == "compacted", "a lone surrogate anywhere in the dropped span must not fail the round"

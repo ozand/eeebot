@@ -812,6 +812,7 @@ def build_report(state_dir: Path, days: int) -> dict[str, Any]:
         "scorecard": _scorecard_block(state_dir),
         "rsi": _rsi_block(state_dir, now=now),
         "integrity": _integrity_block(rows),
+        "compaction_usage": _compaction_usage_block(state_dir, days),
     }
 
 
@@ -844,6 +845,86 @@ def _integrity_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
         reason = str(row.get("reason") or "unknown")
         by_reason[reason] = by_reason.get(reason, 0) + 1
     return {"incidents": incidents, "by_reason": by_reason}
+
+
+def _compaction_reads_for_cycle(state_dir: Path, cycle_id: str, day: str) -> int:
+    """Count of ``read_file`` actions in ``day``'s action index recorded
+    against a path under the compaction preservation directory, for one
+    ``cycle_id`` (#1930 condition E).
+
+    Mirrors ``nanobot.runtime.context_compaction.count_preservation_reads``'s
+    matching rule (#1930 review A3: "compaction" must be an actual path
+    SEGMENT of the recorded ``read:<path>`` detail, not merely a substring --
+    a bare substring match also counted a read of
+    ``context_compaction.py`` itself or its tests as a hit) -- duplicated
+    here rather than imported, because this script has zero non-stdlib
+    dependencies and imports no ``nanobot.runtime`` code by design (see the
+    module docstring's note by ``_DEFAULT_STATE_DIR``)."""
+    path = state_dir / "action_index" / f"{day}.jsonl"
+    if not path.is_file():
+        return 0
+    count = 0
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict) or row.get("cycle_id") != cycle_id:
+                continue
+            for detail in row.get("actions_detail") or []:
+                if not isinstance(detail, str) or not detail.startswith("read:"):
+                    continue
+                detail_path = detail[len("read:"):].replace("\\", "/")
+                if "compaction" in detail_path.split("/"):
+                    count += 1
+    except Exception:
+        return count
+    return count
+
+
+def _compaction_usage_block(state_dir: Path, days: int) -> dict[str, Any]:
+    """#1930 condition E: for every cycle whose compaction journal recorded
+    ``reason == "compacted"`` in the window, how many ``read_file`` actions
+    its own action-index day recorded against the preservation directory --
+    this report is the real caller of ``count_preservation_reads``'s logic;
+    the runtime writer only sweeps its own storage (condition C), it never
+    reads this counter itself. Missing journal/index data reads as an absent
+    block, never a crash -- this script's gap-visibility convention."""
+    journal_path = state_dir / "compaction" / "journal.jsonl"
+    if not journal_path.is_file():
+        return {"status": "absent", "cycles_compacted": 0, "reads_by_cycle": {}, "total_reads": 0}
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    reads_by_cycle: dict[str, int] = {}
+    seen_cycle_days: set[tuple[str, str]] = set()
+    for line in journal_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(event, dict) or event.get("reason") != "compacted":
+            continue
+        ts = _parse_ts(event.get("ts"))
+        if ts is not None and ts < cutoff:
+            continue
+        cycle_id = str(event.get("cycle_id") or "")
+        day = str(event.get("ts") or "")[:10]
+        if not cycle_id or not day or (cycle_id, day) in seen_cycle_days:
+            continue
+        seen_cycle_days.add((cycle_id, day))
+        reads_by_cycle[cycle_id] = reads_by_cycle.get(cycle_id, 0) + _compaction_reads_for_cycle(state_dir, cycle_id, day)
+    return {
+        "status": "present",
+        "cycles_compacted": len(reads_by_cycle),
+        "reads_by_cycle": reads_by_cycle,
+        "total_reads": sum(reads_by_cycle.values()),
+    }
 
 
 def _fmt_rate(metric: dict[str, Any]) -> str:
@@ -1004,6 +1085,17 @@ def render_table(report: dict[str, Any]) -> str:
     for reason, count in sorted((integ.get("by_reason") or {}).items(), key=lambda kv: -kv[1]):
         if count:
             lines.append(f"  {reason:<28} {count}")
+
+    # #1930 condition E: how many read_file actions the executor made
+    # against a compacted cycle's own I1 preservation files. Legacy state
+    # dirs predate the compaction journal entirely -- tolerate its absence.
+    comp = report.get("compaction_usage") or {"status": "absent", "cycles_compacted": 0, "total_reads": 0}
+    lines.append("")
+    lines.append(
+        f"Compaction preservation usage (#1930 — cycles compacted: "
+        f"{comp.get('cycles_compacted', 0)}, preservation-file reads: "
+        f"{comp.get('total_reads', 0)})"
+    )
 
     # #765: instance scorecard — latest snapshot + trend arrows vs the
     # previous history entry + open goal gaps. Legacy state dirs predate

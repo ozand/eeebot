@@ -124,11 +124,13 @@ weaken the compaction logic or remove the deny-set entry itself.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -213,9 +215,20 @@ def _sanitize_path_component(value: str, fallback: str) -> str:
     """A safe, single-path-component version of ``value`` -- never contains
     ``/``, ``\\``, or ``..`` -- for use as one segment of a filesystem path.
     Falls back to ``fallback`` when nothing safe remains (empty, all
-    separators/dots)."""
-    cleaned = _SAFE_PATH_COMPONENT_RE.sub("_", str(value or "")).strip("_.")
-    return cleaned or fallback
+    separators/dots).
+
+    #1930 review B4: sanitization alone is many-to-one -- ``cycle/a,job:b``
+    and ``cycle?a,job/b`` both clean to ``cycle_a_job_b``, so the second
+    write would silently land in (and overwrite) the first's directory.
+    An 8-hex-char sha256 prefix of the ORIGINAL (pre-sanitization) value is
+    appended to every non-fallback result, so two different raw values can
+    never collide on the same sanitized directory name."""
+    raw = str(value or "")
+    cleaned = _SAFE_PATH_COMPONENT_RE.sub("_", raw).strip("_.")
+    if not cleaned:
+        return fallback
+    digest = hashlib.sha256(raw.encode("utf-8", errors="surrogatepass")).hexdigest()[:8]
+    return f"{cleaned}-{digest}"
 
 
 def _is_under(path: Path, directory: Path) -> bool:
@@ -230,14 +243,17 @@ def _is_under(path: Path, directory: Path) -> bool:
 def _preservation_path(
     state_root: "Path | str", cycle_id: str, execution_id: "str | None", iteration: int,
 ) -> Path:
-    """The per-call preservation file path (I1):
+    """The NOMINAL per-call preservation file path (I1):
     ``{state_root}/compaction/<cycle_id>/<execution_id>/<iteration>.md`` --
-    both id segments restricted to a safe single-path-component charset, and
-    the fully joined path checked to resolve inside
-    ``{state_root}/compaction`` before any write, never interpolated raw.
-    Raises ``ValueError`` on a containment failure (the caller's existing
-    fail-open contract turns that into a declined/errored round, never a
-    write outside the intended root)."""
+    both id segments restricted to a safe single-path-component charset (and
+    hash-suffixed against collision -- #1930 review B4), and the fully
+    joined path checked to resolve inside ``{state_root}/compaction`` before
+    any write, never interpolated raw. Raises ``ValueError`` on a
+    containment failure (the caller's existing fail-open contract turns
+    that into a declined/errored round, never a write outside the intended
+    root). "Nominal": the caller still resolves this through
+    :func:`_first_free_preservation_path` before using it (#1930 review
+    B5) -- this function alone does not guarantee the path is unclaimed."""
     root = (Path(state_root) / "compaction").resolve()
     safe_cycle = _sanitize_path_component(cycle_id, "unknown-cycle")
     safe_execution = _sanitize_path_component(execution_id or "", "unknown-execution")
@@ -245,6 +261,26 @@ def _preservation_path(
     if not _is_under(path.parent, root):
         raise ValueError(f"preservation path escaped compaction root: {path}")
     return path
+
+
+def _first_free_preservation_path(nominal_path: Path) -> Path:
+    """The first of (``nominal_path``, ``<stem>-1<suffix>``,
+    ``<stem>-2<suffix>``, ...) that does not already exist (#1930 review
+    B5): a second write to the SAME (cycle_id, execution_id, iteration) --
+    e.g. a retried spawn -- must never silently overwrite the first round's
+    evidence. Existence-checked here so the index/carrier/journal this
+    round builds can reference the FINAL path before the write itself;
+    :func:`_write_preservation_file` re-confirms exclusivity atomically at
+    write time (a hard-link create, not a check-then-create race) and
+    advances further on a genuine concurrent collision."""
+    if not nominal_path.exists():
+        return nominal_path
+    n = 1
+    while True:
+        candidate = nominal_path.with_name(f"{nominal_path.stem}-{n}{nominal_path.suffix}")
+        if not candidate.exists():
+            return candidate
+        n += 1
 
 
 def _wrap_preservation_payload(encoded: str) -> list[str]:
@@ -263,51 +299,160 @@ def _wrap_preservation_payload(encoded: str) -> list[str]:
     return lines
 
 
-def _preservation_record_lines(index: int, role: str, text: str) -> list[str]:
+def _json_dumps_preservation_safe(obj: Any) -> str:
+    """``json.dumps(obj, ensure_ascii=False)`` (#1930 review A5: the default
+    ``True`` turns Cyrillic and any other non-ASCII text into ``\\uXXXX``
+    escapes -- up to 6x larger and unreadable for the executor via
+    ``read_file``), falling back to ``ensure_ascii=True`` when the result
+    cannot itself be encoded to UTF-8 (#1930 review B8: a lone UTF-16
+    surrogate somewhere in the payload -- malformed input some upstream
+    tool produced -- round-trips through ``ensure_ascii=False`` as a
+    literal surrogate character that ``str.encode("utf-8")`` refuses;
+    without this fallback the whole preservation write fails, and via this
+    module's fail-open contract, so does the round). Still valid JSON,
+    still restorable byte-for-byte either way -- just larger for that one
+    record."""
+    encoded = json.dumps(obj, ensure_ascii=False)
+    try:
+        encoded.encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(obj, ensure_ascii=True)
+    return encoded
+
+
+_SAFE_ROLE_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _sanitize_role_for_header(role: str) -> str:
+    """A short, safe value for the record header line (#1930 review B8):
+    an unbounded or newline-carrying ``role`` could otherwise break the
+    header's own single-line shape that :func:`_decode_preservation_file`
+    (and any other reader) parses by."""
+    cleaned = _SAFE_ROLE_RE.sub("_", str(role or ""))[:20]
+    return cleaned or "unknown"
+
+
+def _preservation_record_lines(index: int, role: str, parts: "dict[str, Any]") -> list[str]:
     """Lines for one message's preservation record: a header naming the
     message, the JSON-encoded (so no raw newline needs escaping -- the
-    encoding alone makes the payload one logical line before wrapping) full
-    text wrapped to :data:`_PRESERVATION_LINE_WIDTH`, and a footer."""
-    lines = [f"## message {index} role={role} chars={len(text)}"]
-    lines.extend(_wrap_preservation_payload(json.dumps(text)))
+    encoding alone makes the payload one logical line before wrapping)
+    ``parts`` object, wrapped to :data:`_PRESERVATION_LINE_WIDTH`, and a
+    footer.
+
+    #1930 review B1: ``parts`` carries the message's RAW ``content`` (as-is
+    -- a plain string, or the raw Anthropic content-block list, unmodified)
+    plus ``reasoning_content`` if present, as SEPARATE keys -- not the
+    lossy ``_message_text`` projection (which prefers a block's ``text``
+    over ``content`` and flattens a block list to a string, silently
+    dropping non-text blocks like ``image_url``) and not joined with
+    ``"\\n"`` (#1930 review A6 -- ambiguous for a per-field byte restore)."""
+    total_chars = len(json.dumps(parts, ensure_ascii=False))
+    safe_role = _sanitize_role_for_header(role)
+    lines = [f"## message {index} role={safe_role} chars={total_chars}"]
+    lines.extend(_wrap_preservation_payload(_json_dumps_preservation_safe(parts)))
     lines.append("## end")
     return lines
 
 
-def _write_preservation_file(path: Path, records: "list[tuple[int, str, str]]") -> None:
-    """Write every ``(index, role, text)`` record to ``path`` atomically:
-    ``<path>.tmp``, ``fsync``, then ``os.replace`` -- an existing file (from a
-    retried call) is fully replaced or untouched, never partially written.
-    Raises on any I/O error; the caller's fail-open contract handles it, so
-    no message is ever returned mutated without this call having succeeded
-    first."""
+def _write_preservation_file(
+    path: Path, records: "list[tuple[int, str, dict[str, Any]]]",
+) -> "tuple[Path, int]":
+    """Write every ``(index, role, parts)`` record, returning ``(actual_path,
+    bytes_written)``. ``actual_path`` is normally ``path`` (the caller
+    already picked a free name via :func:`_first_free_preservation_path`)
+    but can advance further on a genuine concurrent collision.
+
+    #1930 review B5: writes to a per-call UNIQUE temp file (``tempfile``, in
+    the same directory as ``path`` so the later link stays on one
+    filesystem -- a SHARED ``<iteration>.md.tmp`` name let two concurrent
+    writers race on the same temp file), then hard-links it onto the final
+    name. ``os.link`` raises ``FileExistsError`` atomically if the target
+    already exists -- no check-then-create gap the way ``os.replace``
+    (which always overwrites unconditionally) would have -- so a genuine
+    collision advances to the next suffix instead of silently overwriting
+    an earlier round's evidence. Raises on any other I/O error; the
+    caller's fail-open contract handles it, so no message is ever returned
+    mutated without this call having succeeded first."""
     path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
-    for index, role, text in records:
-        lines.extend(_preservation_record_lines(index, role, text))
+    for index, role, parts in records:
+        lines.extend(_preservation_record_lines(index, role, parts))
     content = "\n".join(lines) + "\n"
-    tmp_path = path.with_name(path.name + ".tmp")
-    with tmp_path.open("w", encoding="utf-8") as fh:
-        fh.write(content)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp_path, path)
+    content_bytes = content.encode("utf-8")
+
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".preservation-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(content_bytes)
+            fh.flush()
+            os.fsync(fh.fileno())
+        candidate = path
+        n = 0
+        while True:
+            try:
+                os.link(tmp_name, candidate)
+                break
+            except FileExistsError:
+                n += 1
+                candidate = path.with_name(f"{path.stem}-{n}{path.suffix}")
+    finally:
+        try:
+            os.remove(tmp_name)
+        except OSError:
+            pass
+    return candidate, len(content_bytes)
 
 
 def _preservation_index_lines(
-    records: "list[tuple[int, str, str]]", path: Path,
+    records: "list[tuple[int, str, dict[str, Any]]]", path: Path,
 ) -> list[str]:
     """One line per preserved message (I1's carrier index): turn index, role,
-    first line (<=80 chars), size, and the path where the full text lives --
-    stating explicitly that the complete text is retrievable from there."""
+    first line/preview (<=80 chars), size, and the path where the full text
+    lives -- stating explicitly that the complete text is retrievable from
+    there."""
     lines = []
-    for index, role, text in records:
-        first_line = text.splitlines()[0] if text else ""
+    for index, role, parts in records:
+        content = parts.get("content", "")
+        if isinstance(content, str):
+            first_line = content.splitlines()[0] if content else ""
+        else:
+            first_line = json.dumps(content, ensure_ascii=False)
+        total_chars = len(json.dumps(parts, ensure_ascii=False))
         lines.append(
-            f"- turn {index} ({role}): {first_line[:80]!r} ({len(text)} chars) "
+            f"- turn {index} ({role}): {first_line[:80]!r} ({total_chars} chars) "
             f"-- full text preserved at {path}"
         )
     return lines
+
+
+# #1930 review A1: "once per (process, cycle_id)" -- an in-process set keyed
+# on (pid, cycle_id) rather than a cycle_id alone, so a cycle_id that were
+# ever reused across a process boundary (not expected, but not this
+# function's job to rule out) still gets its own sweep per process.
+_SWEPT_PRESERVATION_CYCLES: "set[tuple[int, str]]" = set()
+
+
+def _maybe_sweep_preservation_retention(state_root: "Path | str", cycle_id: str) -> None:
+    """Call :func:`sweep_preservation_retention` at most once per (process,
+    ``cycle_id``) -- the writer sweeping its own storage the moment it knows
+    a round actually compacted (#1930 review A1): files only ever appear in
+    a round that compacts, so only those rounds need to trigger cleanup; a
+    below-threshold or declined round never calls this at all.
+
+    Marks the guard BEFORE calling the sweep (not after), so a sweep that
+    itself raises still counts as "already attempted this cycle" and is
+    never retried mid-cycle -- and wraps the call in its own ``try/except``
+    ON TOP OF :func:`sweep_preservation_retention`'s own internal fail-open,
+    so an exception here can never cancel the file write or the round that
+    is about to happen right after this call."""
+    key = (os.getpid(), str(cycle_id))
+    if key in _SWEPT_PRESERVATION_CYCLES:
+        return
+    _SWEPT_PRESERVATION_CYCLES.add(key)
+    try:
+        sweep_preservation_retention(state_root, active_cycle_id=cycle_id)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -321,14 +466,27 @@ def _estimate_tokens(text: str) -> int:
 
 def _message_tokens(msg: dict[str, Any]) -> int:
     """Estimate tokens for a single message dict, #1930: including
-    ``reasoning_content``/``thinking_blocks`` — see :func:`_message_text`."""
+    ``reasoning_content``/``thinking_blocks`` — see :func:`_message_text`.
+
+    #1930 review B1/B2: a block's ``text`` and ``content`` are counted
+    TOGETHER, not "whichever is present, preferring text" -- both are real,
+    separate JSON keys a provider bills for when both are populated, and
+    :func:`_excerpt_content` only ever shrinks ``content``, never ``text``.
+    Preferring one would make a content-only shrink invisible to this
+    estimate (the token count before/after a real reduction comes out
+    identical, because the unchanged ``text`` dominates both), which is
+    exactly the false "did tokens actually go down" negative B2's
+    per-candidate check exists to catch."""
     content = msg.get("content") or ""
     if isinstance(content, list):
         # Anthropic-style block list
         total = 0
         for block in content:
             if isinstance(block, dict):
-                total += _estimate_tokens(str(block.get("text") or block.get("content") or ""))
+                block_text = str(block.get("text") or "")
+                block_content = block.get("content")
+                block_content_text = str(block_content) if isinstance(block_content, str) else ""
+                total += _estimate_tokens(block_text) + _estimate_tokens(block_content_text)
             else:
                 total += _estimate_tokens(str(block))
     else:
@@ -429,6 +587,28 @@ def _message_text(msg: dict[str, Any]) -> str:
     if thinking_text:
         parts.append(thinking_text)
     return "\n".join(parts)
+
+
+def _message_raw_parts(msg: dict[str, Any]) -> dict[str, Any]:
+    """The RAW content this module is about to drop from ``msg`` -- keeps
+    ``content`` and ``reasoning_content`` as SEPARATE keys (#1930 review A6:
+    joining them with ``"\\n"`` made a per-field byte-for-byte preservation
+    restore ambiguous -- a real ``"\\n"`` inside ``content`` is
+    indistinguishable from the join), and ``content`` is preserved EXACTLY
+    as the message carries it -- a plain string, or the raw Anthropic
+    content-block list, UNMODIFIED (#1930 review B1: :func:`_message_text`
+    is a lossy projection for this purpose -- it prefers a block's ``text``
+    over ``content`` when both are present, silently discarding whichever
+    it doesn't pick, and flattens a block list to one string, silently
+    dropping non-text blocks like ``image_url`` entirely). Never includes
+    ``thinking_blocks``: a message carrying it is never a candidate here
+    (:func:`_worth_compacting` excludes it -- I5), so it never reaches a
+    preservation record."""
+    result: dict[str, Any] = {"content": msg.get("content") if msg.get("content") is not None else ""}
+    reasoning = msg.get("reasoning_content")
+    if reasoning:
+        result["reasoning_content"] = reasoning
+    return result
 
 
 _PATH_RE = re.compile(
@@ -642,11 +822,38 @@ def _worth_compacting(msg: dict[str, Any]) -> bool:
     message is left completely untouched by compaction (still counted
     toward the token estimate via ``_message_tokens`` -- see
     :func:`_thinking_blocks_text` -- as incompressible, never itself
-    shrunk)."""
-    if msg.get("thinking_blocks"):
+    shrunk).
+
+    #1930 review B7: checks KEY PRESENCE, not truthiness --
+    ``thinking_blocks: []`` (an empty list, falsy) previously slipped past a
+    truthy check and was treated as a normal candidate, even though its
+    presence at all still carries the same "must be replayed unmodified"
+    provider constraint.
+
+    #1930 review B1/B2: a list-``content`` message :func:`_excerpt_content`
+    cannot actually shrink (no ``tool_result`` block, or none long enough to
+    matter) is never a candidate either -- flagging it as touched with
+    nothing to show for it would retire its evidence (I4) for no reason.
+    Treated as incompressible, exactly like the ``thinking_blocks`` guard
+    above.
+
+    #1930 review B1(a): for LIST content, worthiness is judged purely by
+    whether :func:`_excerpt_content` can actually shrink it -- NOT by
+    ``_message_text``'s length, which prefers a block's ``text`` key over
+    its ``content`` key when both are present. A block with a short
+    ``text`` (a summary/caption) and a long ``content`` (the real payload)
+    would otherwise measure as "too short to bother" by ``_message_text``
+    while `_excerpt_content`'s own real shrink of ``content`` says
+    otherwise -- the size check must agree with what actually gets
+    shrunk, not a different, lossy projection of the same message."""
+    if "thinking_blocks" in msg or _already_marked(msg):
         return False
+    content = msg.get("content")
+    if isinstance(content, list):
+        _, changed = _excerpt_content(content)
+        return changed
     text = _message_text(msg)
-    return bool(text) and not _already_marked(msg) and len(text) > _min_compact_len()
+    return bool(text) and len(text) > _min_compact_len()
 
 
 def _excerpt_content(content: Any) -> tuple[Any, bool]:
@@ -688,6 +895,9 @@ def _write_journal(
     reason: str,
     real_prev_prompt: int | None = None,
     compacted_details: "list[dict[str, Any]] | None" = None,
+    preservation_path: "str | None" = None,
+    preservation_bytes: "int | None" = None,
+    trigger_signal: "int | None" = None,
 ) -> None:
     """Append one JSONL event to state_root/compaction/journal.jsonl.
 
@@ -698,6 +908,20 @@ def _write_journal(
     are distinguishable in the data for the first time. ``compacted_details``
     (only non-empty when ``reason == "compacted"``) names, per compacted
     message, the tool and a mechanical characterization of what was dropped.
+    ``preservation_path``/``preservation_bytes`` (#1930 review A4, only set
+    when ``reason == "compacted"``) name I1's own preservation file and its
+    on-disk size -- the journal row otherwise has no way to measure I1 at all.
+
+    ``before_tokens``/``after_tokens`` (mirrored to ``tokens_before_est``/
+    ``tokens_after_est``) are ALWAYS this module's own ``_total_tokens``
+    estimate, same scale before and after (#1930 review B6: the caller used
+    to pass the real provider-reported ``trigger_signal`` as "before" and
+    this module's own estimate as "after" for a ``compacted`` row --
+    reproduced live as before=10, after=231 for an actual 25003->231-char
+    reduction -- two different measurement scales masquerading as one
+    series, which is exactly what I2's strict comparison checks). The
+    provider-reported number, when available, is now its own explicit
+    ``trigger_signal`` field instead.
 
     Fail-open: any I/O error is silently swallowed — this must never be the
     reason a cycle fails, including when it is reporting that compaction
@@ -720,6 +944,9 @@ def _write_journal(
             "tokens_after_est": after_tokens,
             "messages_trimmed": results_compacted,
             "compacted_details": compacted_details or [],
+            "preservation_path": preservation_path,
+            "preservation_bytes": preservation_bytes,
+            "trigger_signal": trigger_signal,
         }
         with journal_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -865,67 +1092,127 @@ def compact_messages(
         goal = _message_text(messages[1]) if len(messages) > 1 else ""
         summary = _structural_summary(evidence_span, goal=goal, previous=previous)
 
-        # #1930 (Codex 4113995954): try every worth-compacting candidate for
-        # the refreshed summary, not just the first. A small first candidate
-        # can be too small to hold it (the guard below then falls back to a
-        # bare excerpt) even when a later, larger candidate easily could --
-        # discarding this round's fresh evidence for no reason. The first
-        # candidate whose combined (summary + its own excerpt) is smaller
-        # than its own original text becomes the carrier; if none qualify,
-        # no carrier is installed this round (every candidate gets a plain
-        # excerpt, same as before).
+        def _decline(reason: str) -> list[dict[str, Any]]:
+            # #1930 review B6: before/after are ALWAYS this module's own
+            # _total_tokens estimate (before_tokens, computed once at the
+            # top, unchanged by a decline) -- never trigger_signal, which
+            # can be a completely different scale (the real provider-
+            # reported prompt tokens). trigger_signal is its own field.
+            _write_journal(
+                state_root, cycle_id, iteration, before_tokens, before_tokens, 0,
+                reason=reason, real_prev_prompt=real_prompt, trigger_signal=trigger_signal,
+            )
+            return messages
+
+        # Precompute per-candidate excerpt outcomes (read-only, no mutation)
+        # BEFORE selecting which becomes the carrier -- #1930 review B3
+        # needs the preservation index/A2(b) file-list overhead counted in
+        # THIS SAME comparison, and #1930 review B2 needs a per-candidate
+        # "would this actually shrink" check that does not depend on which
+        # candidate ends up carrying the summary.
+        excerpt_by_index: dict[int, tuple[Any, bool]] = {
+            i: _excerpt_content(messages[i].get("content")) for i in worth_indices
+        }
+
+        # #1930 review A2(a) + B1: preservation records for every worth-
+        # compacting candidate (RAW content/reasoning_content -- see
+        # _message_raw_parts, not the lossy _message_text projection) plus
+        # the retiring carrier, if any -- built BEFORE carrier selection so
+        # its size (the index + A2(b)'s file list) can be counted against
+        # EVERY candidate's own growth-guard check below, not added as an
+        # afterthought once one is already picked (#1930 review B3;
+        # reproduced there: a carrier grew 643 -> 1126 chars once the index
+        # was added afterwards, hidden by the pre-index comparison passing).
+        preservation_records: list[tuple[int, str, dict[str, Any]]] = [
+            (i, str(messages[i].get("role") or ""), _message_raw_parts(messages[i]))
+            for i in worth_indices
+        ]
+        # #1930 review B7: a retiring carrier that itself somehow carried
+        # thinking_blocks (never happens in practice -- a carrier is always
+        # this module's own synthetic text -- but guarded defensively,
+        # mirroring _worth_compacting's own check) is never retired/touched.
+        retired_index = next(
+            (i for i, m in enumerate(messages) if m.get(_CARRIER_FLAG) and "thinking_blocks" not in m),
+            None,
+        )
+        if retired_index is not None:
+            preservation_records.append((
+                retired_index, str(messages[retired_index].get("role") or ""),
+                _message_raw_parts(messages[retired_index]),
+            ))
+
+        # #1930 review B5: the NOMINAL path may already be claimed (a retry
+        # of the same cycle_id/execution_id/iteration) -- resolved to the
+        # first free name before it's referenced anywhere below.
+        preservation_path = _first_free_preservation_path(
+            _preservation_path(state_root, cycle_id, execution_id, iteration)
+        )
+        index_lines = _preservation_index_lines(preservation_records, preservation_path)
+
+        # #1930 review A2(b): the FULL list of every preservation file this
+        # (cycle_id, execution_id) has ever written -- one line per file,
+        # derived straight from what's already on disk (this round's own
+        # file doesn't exist yet, so it's added explicitly) rather than
+        # carried forward through summary text, which the growth cap can
+        # truncate away. Spliced in OUTSIDE `_structural_summary`'s
+        # MAX_SUMMARY_CHARS budget -- never truncated -- so a file that
+        # holds a message's SOLE copy stays reachable from the carrier for
+        # the lifetime of the cycle, however many rounds follow.
+        preservation_dir = preservation_path.parent
+        existing_files = sorted(preservation_dir.glob("*.md")) if preservation_dir.is_dir() else []
+        all_preservation_files = [*existing_files, preservation_path]
+        preservation_overhead_text = (
+            "\n" + "\n".join(["Preserved evidence (full original text, read via read_file):", *index_lines])
+            + "\n" + "\n".join([
+                "All preservation files this cycle+execution (never truncated):",
+                *(f"- {p}" for p in all_preservation_files),
+            ])
+        )
+
+        # #1930 (Codex 4113995954) + review B3: try every worth-compacting
+        # candidate for the refreshed summary, counting the FULL overhead
+        # this round's carrier will actually carry -- summary + this
+        # candidate's own excerpt + the preservation index + A2(b)'s file
+        # list -- against its own original text. The first candidate whose
+        # combined total is smaller becomes the carrier; if none qualify,
+        # no carrier is installed this round.
         carrier: int | None = None
         carrier_content: str | None = None
         for i in worth_indices:
             msg = messages[i]
             old_text = _message_text(msg)
-            excerpt, _ = _excerpt_content(msg.get("content"))
+            excerpt, _ = excerpt_by_index[i]
             excerpt_text = excerpt if isinstance(excerpt, str) else _message_text(dict(msg, content=excerpt))
             candidate_content = f"{summary}\n{excerpt_text}"
-            # A summary is useful only if adding it does not defeat
-            # compaction. If it would grow this carrier, another candidate
-            # (or none) must carry it instead.
-            if len(candidate_content) < len(old_text):
+            if len(candidate_content) + len(preservation_overhead_text) < len(old_text):
                 carrier = i
                 carrier_content = candidate_content
                 break
 
         # I4 (#1930, Codex 4115904095): "installs a carrier AND shrinks every
         # candidate, or changes nothing at all" -- no half-outcome. When no
-        # candidate can hold the refreshed summary without growing, the whole
-        # round declines here, before anything is touched: no candidate is
-        # excerpted, no message is flagged, and this round's fresh evidence
-        # is simply re-derived (from the still-untouched messages) the next
-        # time compaction runs, rather than being discarded with nothing to
-        # show for it. Shares I2's decline reason -- this is the same
-        # "would not actually buy back anything" outcome.
+        # candidate can hold the refreshed summary (plus overhead) without
+        # growing, the whole round declines here, before anything is
+        # touched: no candidate is excerpted, no message is flagged, and
+        # this round's fresh evidence is simply re-derived (from the still-
+        # untouched messages) the next time compaction runs, rather than
+        # being discarded with nothing to show for it. Shares I2's decline
+        # reason -- this is the same "would not actually buy back anything"
+        # outcome.
         if carrier is None:
-            _write_journal(
-                state_root, cycle_id, iteration, trigger_signal, trigger_signal, 0,
-                reason="declined_no_reduction", real_prev_prompt=real_prompt,
-            )
-            return messages
+            return _decline("declined_no_reduction")
 
         new_messages = list(messages)
         results_compacted = 0
         compacted_details: list[dict[str, Any]] = []
-        # I1: the full pre-compaction text of every candidate this round
-        # touches, captured BEFORE any mutation below -- the sole input to
-        # the preservation write further down. Nothing here is written to
-        # disk or returned to the caller yet: everything up to the I2 check
-        # is a purely local, side-effect-free tentative build (`messages`
-        # and its message dicts are never mutated in place), so this whole
-        # candidate can still be discarded intact if I2's strict check fails.
-        preservation_records: list[tuple[int, str, str]] = []
         for i in worth_indices:
             msg = messages[i]
             old_text = _message_text(msg)
-            preservation_records.append((i, str(msg.get("role") or ""), old_text))
             tool_name = str(msg.get("name") or "tool")
             if i == carrier:
                 new_content = carrier_content
             else:
-                new_content, _ = _excerpt_content(msg.get("content"))
+                new_content, _ = excerpt_by_index[i]
             new_msg = dict(msg, content=new_content)
             # #1930: an old turn's reasoning payload is exactly as compacted
             # as its content — leaving it in place would keep resending the
@@ -934,6 +1221,21 @@ def compact_messages(
             # later call). Messages carrying thinking_blocks never reach
             # this loop at all (_worth_compacting excludes them).
             new_msg.pop("reasoning_content", None)
+            # #1930 review B2: count/flag a candidate only if its tokens
+            # ACTUALLY went down -- previously every worth_indices candidate
+            # was flagged unconditionally, even when _excerpt_content
+            # returned changed=False (a list of already-short or non-
+            # tool_result blocks): the message never shrank, but was still
+            # marked touched, permanently dropping it out of every future
+            # round's evidence (I4), and _drop_detail recorded a nonzero
+            # dropped_chars for a message that lost nothing. I4: a
+            # worth-compacting candidate that turns out not to actually
+            # shrink breaks "shrinks EVERY candidate" -- the round declines
+            # in full here, the same as "no candidate fits" above (the
+            # proactive _worth_compacting guard makes this unreachable in
+            # practice; kept as defense in depth per the exact review ask).
+            if _message_tokens(new_msg) >= _message_tokens(msg):
+                return _decline("declined_no_reduction")
             new_msg[_COMPACTED_FLAG] = True
             new_msg[_CARRIER_FLAG] = (i == carrier)
             new_messages[i] = new_msg
@@ -941,29 +1243,28 @@ def compact_messages(
             results_compacted += 1
 
         # Retire the prior carrier now that a new summary has been installed
-        # (carrier is guaranteed not-None past the I4 guard above).
-        for i, msg in enumerate(messages):
-            if i != carrier and msg.get(_CARRIER_FLAG):
-                retired = dict(
-                    msg, content="[Earlier compaction summary incorporated below.]"
-                )
-                retired[_COMPACTED_FLAG] = True
-                retired[_CARRIER_FLAG] = False
-                new_messages[i] = retired
+        # (carrier is guaranteed not-None past the I4 guard above). Its full
+        # text (#1930 review A2(a): itself accumulating earlier rounds'
+        # summaries, decisions, progress and preservation index/file-list
+        # lines) was already captured into preservation_records above,
+        # before the stub replaces it here.
+        if retired_index is not None and "thinking_blocks" not in messages[retired_index]:
+            retired = dict(
+                messages[retired_index], content="[Earlier compaction summary incorporated below.]"
+            )
+            retired[_COMPACTED_FLAG] = True
+            retired[_CARRIER_FLAG] = False
+            new_messages[retired_index] = retired
 
-        # I1/B: splice the preservation index into the installed carrier's
-        # own content BEFORE measuring `after_tokens` -- the index is real
-        # returned-history bytes and must count against the same budget I2
-        # enforces, not be a free addition outside it. Path computation has
-        # no I/O (pure string/containment logic); the actual write happens
-        # only once I2 confirms this round is worth keeping, below.
-        preservation_path = _preservation_path(state_root, cycle_id, execution_id, iteration)
-        index_lines = _preservation_index_lines(preservation_records, preservation_path)
+        # I1/B: splice the preservation index + A2(b) file list into the
+        # installed carrier's own content BEFORE measuring `after_tokens` --
+        # both count as real returned-history bytes against the same budget
+        # I2 enforces (and already counted toward the carrier-selection
+        # check above -- #1930 review B3), not a free addition outside it.
         carrier_with_index = new_messages[carrier]
         new_messages[carrier] = dict(
             carrier_with_index,
-            content=str(carrier_with_index["content"]) + "\n"
-            + "\n".join(["Preserved evidence (full original text, read via read_file):", *index_lines]),
+            content=str(carrier_with_index["content"]) + preservation_overhead_text,
         )
 
         after_tokens = _total_tokens(new_messages)
@@ -976,11 +1277,16 @@ def compact_messages(
         # "no candidate fits" case: nothing is returned mutated, nothing is
         # flagged, and I1 writes nothing for a round that never happened.
         if after_tokens >= before_tokens:
-            _write_journal(
-                state_root, cycle_id, iteration, trigger_signal, trigger_signal, 0,
-                reason="declined_no_reduction", real_prev_prompt=real_prompt,
-            )
-            return messages
+            return _decline("declined_no_reduction")
+
+        # #1930 review A1: the writer sweeps its own storage, once per
+        # (process, cycle_id) -- files only ever appear in a round that
+        # actually compacts, so only those rounds need to trigger cleanup.
+        # Deliberately BEFORE the write below (not after): a fresh write is
+        # never itself swept away by its own cleanup pass. Fail-open at the
+        # call site too (on top of the function's own internal fail-open) --
+        # an exception here must never cancel the file write or the round.
+        _maybe_sweep_preservation_retention(state_root, cycle_id)
 
         # I1: write the FULL pre-compaction text of every touched message to
         # its per-cycle/per-execution file BEFORE returning the mutated
@@ -988,18 +1294,23 @@ def compact_messages(
         # propagates to the outer fail-open handler below -- so no message is
         # ever returned mutated without an on-disk copy of what it is about
         # to lose already having succeeded.
-        _write_preservation_file(preservation_path, preservation_records)
+        actual_preservation_path, preservation_bytes = _write_preservation_file(
+            preservation_path, preservation_records
+        )
 
         _write_journal(
             state_root,
             cycle_id,
             iteration,
-            trigger_signal,
+            before_tokens,
             after_tokens,
             results_compacted,
             reason="compacted",
             real_prev_prompt=real_prompt,
             compacted_details=compacted_details,
+            preservation_path=str(actual_preservation_path),
+            preservation_bytes=preservation_bytes,
+            trigger_signal=trigger_signal,
         )
         return new_messages
 
@@ -1193,7 +1504,16 @@ def count_preservation_reads(state_root: "Path | str", cycle_id: str, *, day: "s
             if not isinstance(row, dict) or row.get("cycle_id") != cycle_id:
                 continue
             for detail in row.get("actions_detail") or []:
-                if isinstance(detail, str) and detail.startswith("read:") and "compaction" in detail:
+                if not isinstance(detail, str) or not detail.startswith("read:"):
+                    continue
+                # #1930 review A3: a bare substring match on "compaction"
+                # also matched "context_compaction.py" (this very module) or
+                # its tests -- a false hit with no relation to the
+                # preservation directory. Require "compaction" as an actual
+                # PATH SEGMENT (workspace-relative, as action_index records
+                # it) instead of anywhere in the string.
+                detail_path = detail[len("read:"):].replace("\\", "/")
+                if "compaction" in detail_path.split("/"):
                     count += 1
         return count
     except Exception:
