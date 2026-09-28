@@ -871,13 +871,14 @@ def test_verify_only_has_no_mutation_or_health_wait_path() -> None:
     assert 'VERIFY_ONLY HEALTH_FETCH_FAILED' in remote
 
 
-def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
+def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path, monkeypatch):
     """Execute the remote heredoc in a sandbox and record all mock commands."""
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     remote = script.split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
     root = tmp_path / "sandbox"
     release = root / "opt/eeepc-agent/runtimes/self-evolving-agent/current"
     release.mkdir(parents=True)
+    monkeypatch.setenv("VERIFY_ONLY_DIMENSION_COMPARE", "")
     sha = "a" * 40
     (release / "SOURCE_COMMIT").write_text(sha + "\n", encoding="utf-8")
     commands = root / "commands.log"
@@ -928,7 +929,7 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
     mock("chown", f'''echo "chown $*" >> {log}; exit 0''')
     mock("env", f'''echo "env $*" >> {log}; while [[ "$1" == *=* ]]; do shift; done; exec "$@"''')
     mock("tar", f'''echo "tar $*" >> {log}; exit 0''')
-    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"), VERIFY_ONLY_DIMENSION_COMPARE="")
+    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"))
     result = subprocess.run(["bash", str(remote_path)], cwd=root, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     seen = commands.read_text(encoding="utf-8")
