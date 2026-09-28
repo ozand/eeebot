@@ -19,8 +19,13 @@ Covers:
 - no provider/LLM calls involved
 - deny-set entry is present and immutable (module listed in runtime_deny)
 """
+import asyncio
 import json
 import math
+import os
+import random
+import re
+import time
 from pathlib import Path
 
 import pytest
@@ -1347,3 +1352,455 @@ def test_tool_result_containing_marker_text_is_not_treated_as_already_compacted(
         "a tool result that merely CONTAINS marker-like text must still be "
         "compacted, not skipped as if it were already compacted"
     )
+
+
+# ---------------------------------------------------------------------------
+# #1930 invariants I1-I5 -- docs/changes/1930-compaction-invariants/proposal.md
+# @ 66c75439. One property test per invariant, named test_invariant_iN_*, per
+# a random-history generator run across a SEQUENCE of compaction calls (not
+# only the first), re-asserting after every single call -- a property that
+# only holds at the end of a fixed sequence would hide an intermediate-round
+# violation.
+# ---------------------------------------------------------------------------
+
+def _random_history_with_payloads(
+    rng: "random.Random", n_turns: int,
+) -> tuple[list[dict], dict[int, str]]:
+    """Build ``[system, user]`` plus ``n_turns`` alternating assistant/tool
+    messages, each independently randomized across content length, an
+    embedded marker, a ``decision:``/``we will`` phrase, a
+    ``reasoning_content`` payload, ``thinking_blocks`` (occasionally shaped
+    like ``redacted_thinking``, ``data``-key only), path-like text, and a
+    marker-lookalike (``"[Compaction summary"``/``cc._OMIT_MARKER``) tool
+    result -- per the invariants doc's Test plan generator.
+
+    Returns ``(messages, index_payload)``: ``index_payload[i]`` is the
+    EXACT full pre-compaction payload (``cc._message_text``-equivalent) of
+    ``messages[i]`` at construction time -- the ground truth an I1 check
+    compares a preserved copy against once that index is first touched.
+    """
+    messages: list[dict] = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Investigate and fix the failing test."},
+    ]
+    index_payload: dict[int, str] = {}
+    length_choices = {
+        "short": lambda: rng.randint(5, 30),
+        "over_min": lambda: cc._min_compact_len() + rng.randint(1, 80),
+        "large": lambda: rng.randint(2_000, 6_000),
+        "huge": lambda: rng.randint(20_000, 40_000),
+    }
+    alphabet = "abcdefghijklmnopqrstuvwxyz "
+
+    for t in range(n_turns):
+        marker = f"MARK{t}_{rng.randrange(10**9)}"
+        body_len = length_choices[rng.choice(list(length_choices))]()
+        body = "".join(rng.choice(alphabet) for _ in range(body_len))
+        content = f"{marker} {body}"
+        if rng.random() < 0.3:
+            content += " decision: we will use plan B for this turn"
+        assistant_msg: dict = {
+            "role": "assistant", "content": content,
+            "tool_calls": [{"id": f"tc{t}", "type": "function",
+                            "function": {"name": "bash", "arguments": "{}"}}],
+        }
+        full_text_parts = [content]
+        if rng.random() < 0.3:
+            reasoning = f"REASONING_{marker} " + "".join(rng.choice(alphabet) for _ in range(rng.randint(50, 600)))
+            assistant_msg["reasoning_content"] = reasoning
+            full_text_parts.append(reasoning)
+        has_thinking = rng.random() < 0.15
+        if has_thinking:
+            thinking_text = f"THINKING_{marker} " + "".join(rng.choice(alphabet) for _ in range(rng.randint(50, 400)))
+            if rng.random() < 0.5:
+                assistant_msg["thinking_blocks"] = [{"data": thinking_text}]
+            else:
+                assistant_msg["thinking_blocks"] = [{"thinking": thinking_text}]
+            full_text_parts.append(thinking_text)
+        messages.append(assistant_msg)
+        index_payload[len(messages) - 1] = "\n".join(full_text_parts)
+
+        tool_marker = f"TMARK{t}_{rng.randrange(10**9)}"
+        tool_len = length_choices[rng.choice(["short", "over_min", "large"])]()
+        tool_body = "".join(rng.choice(alphabet + "/.") for _ in range(tool_len))
+        tool_content = f"{tool_marker} src/module_{t}.py {tool_body}"
+        if rng.random() < 0.1:
+            tool_content += "\n" + rng.choice(["[Compaction summary", cc._OMIT_MARKER])
+        messages.append({
+            "role": "tool", "tool_call_id": f"tc{t}", "name": "bash", "content": tool_content,
+        })
+        index_payload[len(messages) - 1] = tool_content
+    return messages, index_payload
+
+
+def _decode_preservation_file(path: Path) -> dict[int, tuple[str, str]]:
+    """Test-side reverse of :func:`cc._write_preservation_file`: ``{index:
+    (role, text)}``. Reconstruction is positional (fixed-width chunks), so
+    this only needs to strip the readability-only continuation marker from
+    every physical line but a record's last and re-``json.loads`` the
+    concatenated payload -- never a marker SEARCH."""
+    records: dict[int, tuple[str, str]] = {}
+    lines = path.read_text(encoding="utf-8").split("\n")
+    i = 0
+    header_re = re.compile(r"^## message (\d+) role=(.*) chars=(\d+)$")
+    while i < len(lines):
+        m = header_re.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        index, role = int(m.group(1)), m.group(2)
+        i += 1
+        payload_lines = []
+        while lines[i] != "## end":
+            payload_lines.append(lines[i])
+            i += 1
+        i += 1  # past "## end"
+        stripped = [
+            ln[:-len(cc._PRESERVATION_CONTINUATION_MARKER)] if ln.endswith(cc._PRESERVATION_CONTINUATION_MARKER) else ln
+            for ln in payload_lines
+        ]
+        encoded = "".join(stripped)
+        text = json.loads(encoded) if encoded else ""
+        records[index] = (role, text)
+    return records
+
+
+_PRESERVATION_PATH_RE = re.compile(r"-- full text preserved at (\S+\.md)")
+
+
+def _referenced_preservation_records(history: list[dict]) -> dict[int, tuple[str, str]]:
+    """Every ``(index -> (role, text))`` record from every preservation file
+    still named in ANY message's current text (the carrier's index, folded
+    forward across rounds) -- not only the file the most recent round wrote,
+    since a message compacted in an earlier round may no longer be in
+    context to re-check this round."""
+    all_records: dict[int, tuple[str, str]] = {}
+    seen_paths: set[str] = set()
+    for msg in history:
+        text = cc._message_text(msg)
+        for match in _PRESERVATION_PATH_RE.finditer(text):
+            seen_paths.add(match.group(1))
+    for raw_path in seen_paths:
+        p = Path(raw_path)
+        if p.is_file():
+            all_records.update(_decode_preservation_file(p))
+    return all_records
+
+
+def _run_sequence(rng_seed: int, n_calls: int, tmp_path, *, turns_per_round: int = 6):
+    """Run ``compact_messages`` ``n_calls`` times over a growing random
+    history (fresh turns appended between calls, simulating an ongoing
+    cycle), yielding one record per call for the invariant assertions."""
+    rng = random.Random(rng_seed)
+    messages, index_payload = _random_history_with_payloads(rng, turns_per_round)
+    cycle_id = f"prop-{rng_seed}"
+    for call_n in range(n_calls):
+        before_messages = [dict(m) for m in messages]
+        before_touched = {i for i, m in enumerate(messages) if m.get(cc._COMPACTED_FLAG)}
+        before_tokens = cc._total_tokens(messages)
+        result = cc.compact_messages(
+            messages, cycle_id=cycle_id, iteration=call_n, state_root=tmp_path,
+            threshold=0.01, keep_tokens=2_000, window_tokens=98_304,
+            execution_id=f"exec-{rng_seed}",
+        )
+        after_tokens = cc._total_tokens(result)
+        reason = _last_journal_event(tmp_path)["reason"]
+        newly_touched = {
+            i for i, m in enumerate(result)
+            if m.get(cc._COMPACTED_FLAG) and i not in before_touched
+        }
+        yield {
+            "before_messages": before_messages,
+            "result": result,
+            "reason": reason,
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
+            "newly_touched": newly_touched,
+            "index_payload": dict(index_payload),
+            "worth_indices_existed": reason != "nothing_older_than_cut",
+        }
+        messages = result
+        # Fresh turns between calls, simulating an ongoing cycle (per the
+        # doc's Test plan: "appending fresh random turns between calls").
+        extra, extra_payload = _random_history_with_payloads(rng, 2)
+        offset = len(messages)
+        for j, m in enumerate(extra[2:]):  # skip the synthetic system/user pair
+            messages.append(m)
+            index_payload[offset + j] = extra_payload[j + 2]
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_invariant_i1_preservation_files_round_trip_every_touched_message(tmp_path, seed):
+    """I1: for every message a round touches, the complete pre-compaction
+    payload (not just a marker token) is recoverable byte-for-byte -- either
+    still literally present in some message's current text, or inside a
+    preservation file still referenced by the carrier's index."""
+    for round_record in _run_sequence(seed, n_calls=8, tmp_path=tmp_path):
+        if not round_record["newly_touched"]:
+            continue
+        result = round_record["result"]
+        referenced = None
+        for i in round_record["newly_touched"]:
+            original_payload = round_record["index_payload"][i]
+            still_in_context = any(original_payload in cc._message_text(m) for m in result)
+            if still_in_context:
+                continue
+            if referenced is None:
+                referenced = _referenced_preservation_records(result)
+            match = referenced.get(i)
+            assert match is not None, (
+                f"turn {i}'s full pre-compaction payload is neither still in "
+                f"context nor recoverable from any preservation file the "
+                f"carrier's index currently references"
+            )
+            _role, recovered_text = match
+            assert recovered_text == original_payload, (
+                f"turn {i}'s preserved text does not round-trip byte-for-byte"
+            )
+
+
+def test_invariant_i1_preservation_file_readable_through_real_read_file_tool(tmp_path):
+    """I1: 'retrievable in full through the real ReadFileTool' -- no line in
+    the preservation file exceeds the tool's limit, including a single line
+    longer than 128,000 characters (the doc's own explicit test case)."""
+    from nanobot.agent.tools.filesystem import ReadFileTool
+
+    huge_line = "H" * 250_000  # single logical line, far past the tool's 128_000-char cap
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "tc0", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "tc0", "name": "bash", "content": huge_line},
+        {"role": "assistant", "content": "keep me recent " + "z" * 200},
+    ]
+    result = cc.compact_messages(
+        messages, cycle_id="huge-line", iteration=1, state_root=tmp_path,
+        threshold=0.001, keep_tokens=50, window_tokens=98_304, execution_id="exec-huge",
+    )
+    ev = _last_journal_event(tmp_path)
+    assert ev["reason"] == "compacted"
+
+    referenced = _referenced_preservation_records(result)
+    assert 3 in referenced, "the huge tool result must have a preservation record"
+    _role, recovered_text = referenced[3]
+    assert recovered_text == huge_line
+
+    preservation_path = next(iter(
+        p for p in (Path(tmp_path) / "compaction").rglob("*.md")
+    ))
+    tool = ReadFileTool(allowed_dir=Path(tmp_path))
+    collected = ""
+    offset = 1
+    for _ in range(50):
+        page = asyncio.run(tool.execute(path=str(preservation_path), offset=offset, limit=2000))
+        assert not page.startswith("Error"), page
+        body = page.rsplit("\n\n(", 1)[0]
+        for numbered_line in body.splitlines():
+            _, _, text_part = numbered_line.partition("| ")
+            collected += text_part + "\n"
+        if "End of file" in page:
+            break
+        # "Use offset=N to continue."
+        offset = int(page.rsplit("offset=", 1)[1].split(" ", 1)[0])
+    else:
+        pytest.fail("tool pagination did not terminate -- a line exceeded the tool's cap")
+
+    stripped_lines = [
+        ln[:-len(cc._PRESERVATION_CONTINUATION_MARKER)] if ln.endswith(cc._PRESERVATION_CONTINUATION_MARKER) else ln
+        for ln in collected.split("\n")
+        if not ln.startswith("## ")
+    ]
+    encoded = "".join(stripped_lines)
+    assert json.loads(encoded) == huge_line, (
+        "the huge line must reconstruct byte-for-byte through the real tool's pagination"
+    )
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_invariant_i2_strict_monotonicity_or_exact_noop(tmp_path, seed):
+    """I2: a round is journalled 'compacted' only when after < before,
+    strictly; any other reason means an EXACT no-op (byte-identical
+    messages, no new touched flags)."""
+    for round_record in _run_sequence(seed, n_calls=8, tmp_path=tmp_path):
+        if round_record["reason"] == "compacted":
+            assert round_record["after_tokens"] < round_record["before_tokens"], (
+                "a 'compacted' round must strictly reduce total estimated tokens"
+            )
+        else:
+            assert round_record["result"] == round_record["before_messages"], (
+                f"a non-'compacted' round ({round_record['reason']}) must change nothing"
+            )
+            assert not round_record["newly_touched"], (
+                f"a non-'compacted' round ({round_record['reason']}) must flag no new message"
+            )
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_invariant_i3_at_most_one_live_carrier(tmp_path, seed):
+    """I3: at most one message ever carries `_compaction_carrier: True`,
+    across the whole lifetime of a cycle, over N random-history rounds."""
+    for round_record in _run_sequence(seed, n_calls=15, tmp_path=tmp_path):
+        carriers = sum(1 for m in round_record["result"] if m.get(cc._CARRIER_FLAG))
+        assert carriers <= 1, f"found {carriers} live carriers after one call"
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_invariant_i4_full_commit_or_full_decline(tmp_path, seed):
+    """I4: a round either installs a carrier AND shrinks every
+    worth-compacting candidate, or changes nothing at all -- no partial
+    state (some candidates excerpted/flagged, no carrier installed)."""
+    for round_record in _run_sequence(seed, n_calls=8, tmp_path=tmp_path):
+        if round_record["reason"] == "compacted":
+            carriers = [m for m in round_record["result"] if m.get(cc._CARRIER_FLAG)]
+            assert carriers, "a 'compacted' round must install exactly one carrier"
+        else:
+            assert not round_record["newly_touched"], (
+                "a non-'compacted' round must not have partially touched candidates"
+            )
+
+
+def test_invariant_i4_closes_codex_4115904095_preserve_fresh_evidence_when_no_carrier_fits(tmp_path):
+    """I4's own reproducer (Codex 4115904095, closed by I4's definition):
+    many similarly-sized turns, none individually large enough to hold the
+    refreshed summary -- the round must fully decline, not bare-excerpt
+    every candidate while installing no carrier."""
+    messages = _make_messages([_long_content(cc._min_compact_len() + 50)] * 45)
+    before = [dict(m) for m in messages]
+    result = cc.compact_messages(
+        messages, cycle_id="no-carrier-fits", iteration=1, state_root=tmp_path,
+        threshold=0.01, keep_tokens=0, window_tokens=98_304,
+    )
+    ev = _last_journal_event(tmp_path)
+    assert ev["reason"] == "declined_no_reduction"
+    assert result == before, "a fully-declined round must change nothing at all"
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_invariant_i5_thinking_blocks_untouched_and_counted(tmp_path, seed):
+    """I5: a message carrying `thinking_blocks` is byte-identical before and
+    after every compaction call across its lifetime, and its token
+    contribution is never zero when its payload is non-empty."""
+    for round_record in _run_sequence(seed, n_calls=8, tmp_path=tmp_path):
+        for before_msg, after_msg in zip(round_record["before_messages"], round_record["result"]):
+            if before_msg.get("thinking_blocks"):
+                assert after_msg == before_msg, (
+                    "a thinking_blocks-carrying message must never be modified by compaction"
+                )
+                assert cc._message_tokens(after_msg) > 0
+
+
+def test_invariant_i1_closes_codex_4115904099_preserve_progress_from_turns_with_decisions(tmp_path):
+    """Codex 4115904099 (closed by I1): a turn that both reports progress
+    AND states a decision loses whichever half the heuristic's
+    mutually-exclusive branch doesn't pick from the RENDERED summary -- I1
+    guarantees the complete original turn (both halves) survives on disk
+    regardless."""
+    progress_text = "Completed the migration of the auth module. " * 20
+    full_turn = progress_text + "decision: use plan B for the rollout"
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": full_turn,
+         "tool_calls": [{"id": "tc0", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "tc0", "name": "bash", "content": _long_content(20_000)},
+        {"role": "assistant", "content": "keep me recent " + "z" * 200},
+    ]
+    result = cc.compact_messages(
+        messages, cycle_id="decision-and-progress", iteration=1, state_root=tmp_path,
+        threshold=0.001, keep_tokens=50, window_tokens=98_304, execution_id="exec-dp",
+    )
+    ev = _last_journal_event(tmp_path)
+    assert ev["reason"] == "compacted"
+    referenced = _referenced_preservation_records(result)
+    assert 2 in referenced, "the decision+progress turn must have a preservation record"
+    _role, recovered_text = referenced[2]
+    assert recovered_text == full_turn, (
+        "both the progress and the decision half of the turn must survive on disk verbatim"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Conditions C/E (#1930): retention sweep, volume measurement, usage counter
+# ---------------------------------------------------------------------------
+
+def test_sweep_preservation_retention_deletes_aged_out_cycles_never_touching_active(tmp_path):
+    compaction_root = Path(tmp_path) / "compaction"
+    old_cycle = compaction_root / "old-cycle" / "exec1"
+    old_cycle.mkdir(parents=True)
+    old_file = old_cycle / "0.md"
+    old_file.write_text("stale", encoding="utf-8")
+    old_time = time.time() - 10 * 86400
+    os.utime(old_file, (old_time, old_time))
+
+    active_cycle = compaction_root / "active-cycle" / "exec2"
+    active_cycle.mkdir(parents=True)
+    active_file = active_cycle / "0.md"
+    active_file.write_text("live", encoding="utf-8")
+    os.utime(active_file, (old_time, old_time))  # also old, but is the active cycle
+
+    counts = cc.sweep_preservation_retention(
+        tmp_path, active_cycle_id="active-cycle", max_age_days=7,
+        max_total_bytes=10_000_000,
+    )
+    assert counts["aged_out"] == 1
+    assert not old_cycle.exists()
+    assert active_cycle.exists(), "the active cycle's directory must never be swept"
+
+
+def test_sweep_preservation_retention_enforces_size_cap_oldest_first(tmp_path):
+    compaction_root = Path(tmp_path) / "compaction"
+    now = time.time()
+    for n, age_days in enumerate([3, 2, 1]):
+        cycle_dir = compaction_root / f"cycle{n}" / "exec"
+        cycle_dir.mkdir(parents=True)
+        f = cycle_dir / "0.md"
+        f.write_text("x" * 1000, encoding="utf-8")
+        mtime = now - age_days * 86400
+        os.utime(f, (mtime, mtime))
+
+    counts = cc.sweep_preservation_retention(
+        tmp_path, active_cycle_id=None, max_age_days=365, max_total_bytes=1500,
+    )
+    assert counts["size_capped"] == 2, "must delete oldest-first until under the size cap"
+    assert not (compaction_root / "cycle0").exists()
+    assert not (compaction_root / "cycle1").exists()
+    assert (compaction_root / "cycle2").exists(), "the newest cycle must survive the size cap"
+
+
+def test_measure_preservation_volume_from_journal_sums_dropped_chars_by_day_and_cycle(tmp_path):
+    journal_dir = Path(tmp_path) / "compaction"
+    journal_dir.mkdir(parents=True)
+    events = [
+        {"ts": "2026-09-27T10:00:00Z", "cycle_id": "c1",
+         "compacted_details": [{"dropped_chars": 100}, {"dropped_chars": 50}]},
+        {"ts": "2026-09-27T11:00:00Z", "cycle_id": "c2", "compacted_details": [{"dropped_chars": 200}]},
+        {"ts": "2026-09-28T09:00:00Z", "cycle_id": "c1", "compacted_details": [{"dropped_chars": 10}]},
+    ]
+    with (journal_dir / "journal.jsonl").open("w", encoding="utf-8") as fh:
+        for e in events:
+            fh.write(json.dumps(e) + "\n")
+
+    volume = cc.measure_preservation_volume_from_journal(tmp_path)
+    assert volume["by_day"]["2026-09-27"] == 350
+    assert volume["by_day"]["2026-09-28"] == 10
+    assert volume["by_cycle"]["c1"] == 160
+    assert volume["by_cycle"]["c2"] == 200
+
+
+def test_count_preservation_reads_counts_matching_cycle_and_compaction_path(tmp_path):
+    index_dir = Path(tmp_path) / "action_index"
+    index_dir.mkdir(parents=True)
+    rows = [
+        {"cycle_id": "c1", "actions_detail": ["read:compaction/c1/exec1/0.md", "exec:*"]},
+        {"cycle_id": "c1", "actions_detail": ["read:compaction/c1/exec1/0.md"]},
+        {"cycle_id": "c2", "actions_detail": ["read:compaction/c2/exec1/0.md"]},
+        {"cycle_id": "c1", "actions_detail": ["read:some/other/file.py"]},
+    ]
+    with (index_dir / "2026-09-27.jsonl").open("w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+
+    assert cc.count_preservation_reads(tmp_path, "c1", day="2026-09-27") == 2
+    assert cc.count_preservation_reads(tmp_path, "c2", day="2026-09-27") == 1
+    assert cc.count_preservation_reads(tmp_path, "nonexistent", day="2026-09-27") == 0

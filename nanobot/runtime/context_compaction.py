@@ -1,9 +1,42 @@
-"""Context compaction for the subagent loop. #959, #1776
+"""Context compaction for the subagent loop. #959, #1776, #1930
 
 Reduces the token size of ``messages`` when a running conversation exceeds a
 configurable fraction of the model's context window.  The module is stdlib-only
 (no provider calls, no third-party imports) and fail-open: every public entry
 point returns an unmodified history on any error.
+
+#1930 invariants I1-I5 (docs/changes/1930-compaction-invariants/proposal.md)
+-----------------------------------------------------------------------------
+A structural guarantee replacing the pre-#1930 heuristic-only design (where
+anything the summary heuristic didn't recognize was gone for good):
+
+- **I1 (preservation):** the full pre-compaction text of every message a
+  round touches is written, before that message's in-context content is
+  replaced, to ``{state_root}/compaction/<cycle_id>/<execution_id>/
+  <iteration>.md`` (see :func:`_preservation_path`, :func:`_write_preservation_file`)
+  — retrievable byte-for-byte through the real ``ReadFileTool`` (long lines
+  are wrapped, see :data:`_PRESERVATION_LINE_WIDTH`) — and referenced by an
+  index spliced into the installed carrier (:func:`_preservation_index_lines`).
+- **I2 (monotonicity):** a round is journalled ``"compacted"`` only when
+  ``after < before`` strictly; equality or worse declines
+  (``"declined_no_reduction"``) exactly like "nothing to compact."
+- **I3 (one carrier):** at most one message ever carries
+  ``_compaction_carrier: True``, set/read only by this module
+  (:data:`_CARRIER_FLAG`).
+- **I4 (atomicity):** a round either installs a carrier AND shrinks every
+  worth-compacting candidate, or changes nothing at all — no half-outcome
+  where candidates are excerpted/flagged but no carrier was installed.
+- **I5 (unsupported fields incompressible):** a message carrying
+  ``thinking_blocks`` is never a compaction candidate, regardless of size —
+  left byte-identical, still counted toward the token estimate.
+
+Conditions C (retention: :func:`sweep_preservation_retention`,
+:func:`measure_preservation_volume_from_journal`) and E (usage counter:
+:func:`count_preservation_reads`) ship alongside I1. Condition D (privacy) is
+structural — preservation files live under ``state_root``, formalized on
+ADR-036's private-only inputs list; the dashboard-repo canary test proving a
+planted marker never reaches a public sink is a separate follow-up in that
+repo, not this module.
 
 Char ÷ 4 heuristic
 ------------------
@@ -95,6 +128,7 @@ import json
 import math
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -150,6 +184,130 @@ MAX_SUMMARY_CHARS: int = max(0, _env_int("SELFEVO_COMPACT_MAX_SUMMARY_CHARS", 6_
 
 # Byte marker inserted between head and tail excerpts.
 _OMIT_MARKER = "\n[…compacted…]\n"
+
+
+# ---------------------------------------------------------------------------
+# I1 preservation (#1930): full pre-compaction text of every dropped message,
+# written to a per-cycle/per-execution file before any in-context mutation.
+# ---------------------------------------------------------------------------
+
+#: Physical-line width for a preservation file, comfortably under
+#: ``ReadFileTool._MAX_CHARS`` (128_000, nanobot/agent/tools/filesystem.py)
+#: plus its own ``"N| "`` line-number prefix -- a single physical line at or
+#: near that cap makes the tool's own pagination unable to advance past it
+#: (see ``test_preservation_line_width_fits_under_read_file_tool_cap``).
+_PRESERVATION_LINE_WIDTH = 100_000
+
+#: Readability-only suffix marking a physical line as continued on the next.
+#: Reconstruction is POSITIONAL (fixed-width chunks), never marker-search
+#: based, so this string coinciding with real content is harmless.
+_PRESERVATION_CONTINUATION_MARKER = "↵"
+
+#: cycle_id/execution_id arrive here verbatim from the request/spawn call
+#: (bridge.py never sanitizes either) -- restrict both to a safe
+#: single-path-component charset before they are ever used to build a path.
+_SAFE_PATH_COMPONENT_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _sanitize_path_component(value: str, fallback: str) -> str:
+    """A safe, single-path-component version of ``value`` -- never contains
+    ``/``, ``\\``, or ``..`` -- for use as one segment of a filesystem path.
+    Falls back to ``fallback`` when nothing safe remains (empty, all
+    separators/dots)."""
+    cleaned = _SAFE_PATH_COMPONENT_RE.sub("_", str(value or "")).strip("_.")
+    return cleaned or fallback
+
+
+def _is_under(path: Path, directory: Path) -> bool:
+    """True iff ``path`` resolves to somewhere inside ``directory``."""
+    try:
+        path.resolve().relative_to(directory.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _preservation_path(
+    state_root: "Path | str", cycle_id: str, execution_id: "str | None", iteration: int,
+) -> Path:
+    """The per-call preservation file path (I1):
+    ``{state_root}/compaction/<cycle_id>/<execution_id>/<iteration>.md`` --
+    both id segments restricted to a safe single-path-component charset, and
+    the fully joined path checked to resolve inside
+    ``{state_root}/compaction`` before any write, never interpolated raw.
+    Raises ``ValueError`` on a containment failure (the caller's existing
+    fail-open contract turns that into a declined/errored round, never a
+    write outside the intended root)."""
+    root = (Path(state_root) / "compaction").resolve()
+    safe_cycle = _sanitize_path_component(cycle_id, "unknown-cycle")
+    safe_execution = _sanitize_path_component(execution_id or "", "unknown-execution")
+    path = root / safe_cycle / safe_execution / f"{int(iteration)}.md"
+    if not _is_under(path.parent, root):
+        raise ValueError(f"preservation path escaped compaction root: {path}")
+    return path
+
+
+def _wrap_preservation_payload(encoded: str) -> list[str]:
+    """Split one already-escaped (no raw newline) payload into fixed-width
+    physical lines, each but the last carrying a readability-only
+    continuation suffix. Reconstruction is positional: concatenate the
+    lines in order with the suffix stripped from every line but the last."""
+    width = _PRESERVATION_LINE_WIDTH
+    if not encoded:
+        return [""]
+    lines = []
+    for i in range(0, len(encoded), width):
+        chunk = encoded[i:i + width]
+        is_last = i + width >= len(encoded)
+        lines.append(chunk if is_last else chunk + _PRESERVATION_CONTINUATION_MARKER)
+    return lines
+
+
+def _preservation_record_lines(index: int, role: str, text: str) -> list[str]:
+    """Lines for one message's preservation record: a header naming the
+    message, the JSON-encoded (so no raw newline needs escaping -- the
+    encoding alone makes the payload one logical line before wrapping) full
+    text wrapped to :data:`_PRESERVATION_LINE_WIDTH`, and a footer."""
+    lines = [f"## message {index} role={role} chars={len(text)}"]
+    lines.extend(_wrap_preservation_payload(json.dumps(text)))
+    lines.append("## end")
+    return lines
+
+
+def _write_preservation_file(path: Path, records: "list[tuple[int, str, str]]") -> None:
+    """Write every ``(index, role, text)`` record to ``path`` atomically:
+    ``<path>.tmp``, ``fsync``, then ``os.replace`` -- an existing file (from a
+    retried call) is fully replaced or untouched, never partially written.
+    Raises on any I/O error; the caller's fail-open contract handles it, so
+    no message is ever returned mutated without this call having succeeded
+    first."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    for index, role, text in records:
+        lines.extend(_preservation_record_lines(index, role, text))
+    content = "\n".join(lines) + "\n"
+    tmp_path = path.with_name(path.name + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as fh:
+        fh.write(content)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, path)
+
+
+def _preservation_index_lines(
+    records: "list[tuple[int, str, str]]", path: Path,
+) -> list[str]:
+    """One line per preserved message (I1's carrier index): turn index, role,
+    first line (<=80 chars), size, and the path where the full text lives --
+    stating explicitly that the complete text is retrievable from there."""
+    lines = []
+    for index, role, text in records:
+        first_line = text.splitlines()[0] if text else ""
+        lines.append(
+            f"- turn {index} ({role}): {first_line[:80]!r} ({len(text)} chars) "
+            f"-- full text preserved at {path}"
+        )
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +743,7 @@ def compact_messages(
     prompt_tokens: int | None = None,
     prompt_token_delta: int = 0,
     reserve_tokens: int | None = None,
+    execution_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Compact ``messages`` if their estimated token count exceeds the threshold.
 
@@ -629,6 +788,12 @@ def compact_messages(
         Estimated tokens appended since that provider measurement.
     reserve_tokens:
         Override ``RESERVE_TOKENS`` for this call (used in tests).
+    execution_id:
+        The executing task's own id (e.g. a spawned subagent's task id) --
+        #1930/I1: ``cycle_id`` alone is not unique (a repeated cycle, or two
+        concurrent executions sharing a state root, can share it), so a
+        preservation file is namespaced by both. ``None``/absent falls back
+        to a fixed placeholder segment (legacy callers, tests).
 
     Returns
     -------
@@ -725,12 +890,37 @@ def compact_messages(
                 carrier_content = candidate_content
                 break
 
+        # I4 (#1930, Codex 4115904095): "installs a carrier AND shrinks every
+        # candidate, or changes nothing at all" -- no half-outcome. When no
+        # candidate can hold the refreshed summary without growing, the whole
+        # round declines here, before anything is touched: no candidate is
+        # excerpted, no message is flagged, and this round's fresh evidence
+        # is simply re-derived (from the still-untouched messages) the next
+        # time compaction runs, rather than being discarded with nothing to
+        # show for it. Shares I2's decline reason -- this is the same
+        # "would not actually buy back anything" outcome.
+        if carrier is None:
+            _write_journal(
+                state_root, cycle_id, iteration, trigger_signal, trigger_signal, 0,
+                reason="declined_no_reduction", real_prev_prompt=real_prompt,
+            )
+            return messages
+
         new_messages = list(messages)
         results_compacted = 0
         compacted_details: list[dict[str, Any]] = []
+        # I1: the full pre-compaction text of every candidate this round
+        # touches, captured BEFORE any mutation below -- the sole input to
+        # the preservation write further down. Nothing here is written to
+        # disk or returned to the caller yet: everything up to the I2 check
+        # is a purely local, side-effect-free tentative build (`messages`
+        # and its message dicts are never mutated in place), so this whole
+        # candidate can still be discarded intact if I2's strict check fails.
+        preservation_records: list[tuple[int, str, str]] = []
         for i in worth_indices:
             msg = messages[i]
             old_text = _message_text(msg)
+            preservation_records.append((i, str(msg.get("role") or ""), old_text))
             tool_name = str(msg.get("name") or "tool")
             if i == carrier:
                 new_content = carrier_content
@@ -750,21 +940,56 @@ def compact_messages(
             compacted_details.append(_drop_detail(tool_name, old_text))
             results_compacted += 1
 
-        # Retire the prior carrier only after a new summary was installed.
-        # If no candidate could fit the refreshed summary, preserve old
-        # cumulative evidence instead of replacing it with a marker.
-        installed_carrier = carrier is not None
-        if installed_carrier:
-            for i, msg in enumerate(messages):
-                if i != carrier and msg.get(_CARRIER_FLAG):
-                    retired = dict(
-                        msg, content="[Earlier compaction summary incorporated below.]"
-                    )
-                    retired[_COMPACTED_FLAG] = True
-                    retired[_CARRIER_FLAG] = False
-                    new_messages[i] = retired
+        # Retire the prior carrier now that a new summary has been installed
+        # (carrier is guaranteed not-None past the I4 guard above).
+        for i, msg in enumerate(messages):
+            if i != carrier and msg.get(_CARRIER_FLAG):
+                retired = dict(
+                    msg, content="[Earlier compaction summary incorporated below.]"
+                )
+                retired[_COMPACTED_FLAG] = True
+                retired[_CARRIER_FLAG] = False
+                new_messages[i] = retired
+
+        # I1/B: splice the preservation index into the installed carrier's
+        # own content BEFORE measuring `after_tokens` -- the index is real
+        # returned-history bytes and must count against the same budget I2
+        # enforces, not be a free addition outside it. Path computation has
+        # no I/O (pure string/containment logic); the actual write happens
+        # only once I2 confirms this round is worth keeping, below.
+        preservation_path = _preservation_path(state_root, cycle_id, execution_id, iteration)
+        index_lines = _preservation_index_lines(preservation_records, preservation_path)
+        carrier_with_index = new_messages[carrier]
+        new_messages[carrier] = dict(
+            carrier_with_index,
+            content=str(carrier_with_index["content"]) + "\n"
+            + "\n".join(["Preserved evidence (full original text, read via read_file):", *index_lines]),
+        )
 
         after_tokens = _total_tokens(new_messages)
+
+        # I2: strict monotonicity. Equality (or worse) is not a compaction --
+        # it spent carrier/index overhead without buying back any headroom,
+        # while still marking its candidates touched and excluding their
+        # evidence from later rounds (I4's flag-based marking) -- so it must
+        # not be allowed to pass as a success. Declines exactly like I4's
+        # "no candidate fits" case: nothing is returned mutated, nothing is
+        # flagged, and I1 writes nothing for a round that never happened.
+        if after_tokens >= before_tokens:
+            _write_journal(
+                state_root, cycle_id, iteration, trigger_signal, trigger_signal, 0,
+                reason="declined_no_reduction", real_prev_prompt=real_prompt,
+            )
+            return messages
+
+        # I1: write the FULL pre-compaction text of every touched message to
+        # its per-cycle/per-execution file BEFORE returning the mutated
+        # history. Any failure here (I/O error, path containment failure)
+        # propagates to the outer fail-open handler below -- so no message is
+        # ever returned mutated without an on-disk copy of what it is about
+        # to lose already having succeeded.
+        _write_preservation_file(preservation_path, preservation_records)
+
         _write_journal(
             state_root,
             cycle_id,
@@ -786,3 +1011,190 @@ def compact_messages(
             reason=f"error:{type(exc).__name__}",
         )
         return messages
+
+
+# ---------------------------------------------------------------------------
+# Condition C (#1930): retention/rotation for I1's preservation files.
+# ---------------------------------------------------------------------------
+
+#: Default total-size cap across all cycles' preservation files. No
+#: production volume measurement exists yet -- see
+#: :func:`measure_preservation_volume_from_journal`, condition C's own "first
+#: implementation step" -- so this is a conservative placeholder pending a
+#: real measurement, not a value derived from observed usage.
+_DEFAULT_PRESERVATION_MAX_TOTAL_BYTES = 500 * 1024 * 1024
+
+_DEFAULT_PRESERVATION_MAX_AGE_DAYS = 7
+
+
+def measure_preservation_volume_from_journal(state_root: "Path | str") -> dict[str, dict[str, int]]:
+    """Condition C's "first implementation step": total
+    ``compacted_details[].dropped_chars`` (the exact character count of each
+    dropped middle span -- a much closer proxy for on-disk preservation bytes
+    than a net *token* delta) from the existing journal, summed per day
+    (``ts``'s date) and per ``cycle_id``. Sizes the retention cap in
+    :func:`sweep_preservation_retention` from real usage instead of a guess.
+    Fail-open: an unreadable/missing/malformed journal yields ``{}``."""
+    result: dict[str, dict[str, int]] = {"by_day": {}, "by_cycle": {}}
+    try:
+        journal_path = Path(state_root) / "compaction" / "journal.jsonl"
+        if not journal_path.is_file():
+            return result
+        for line in journal_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(event, dict):
+                continue
+            details = event.get("compacted_details") or []
+            if not isinstance(details, list):
+                continue
+            dropped = sum(
+                int(d.get("dropped_chars") or 0) for d in details if isinstance(d, dict)
+            )
+            if not dropped:
+                continue
+            day = str(event.get("ts") or "")[:10]
+            cycle = str(event.get("cycle_id") or "")
+            if day:
+                result["by_day"][day] = result["by_day"].get(day, 0) + dropped
+            if cycle:
+                result["by_cycle"][cycle] = result["by_cycle"].get(cycle, 0) + dropped
+    except Exception:
+        pass
+    return result
+
+
+def sweep_preservation_retention(
+    state_root: "Path | str",
+    *,
+    active_cycle_id: "str | None" = None,
+    max_age_days: int = _DEFAULT_PRESERVATION_MAX_AGE_DAYS,
+    max_total_bytes: int = _DEFAULT_PRESERVATION_MAX_TOTAL_BYTES,
+) -> dict[str, int]:
+    """Bound I1's preservation directory (#1930 condition C): run once per
+    cycle start.
+
+    1. Age sweep: every cycle dir directly under ``{state_root}/compaction/``
+       other than ``active_cycle_id`` whose newest file's mtime is older than
+       ``max_age_days`` is deleted whole.
+    2. Size cap: across whatever cycle dirs remain (again, never
+       ``active_cycle_id``), oldest-mtime-first, delete entire cycle dirs
+       until the total size of what's left is at or under
+       ``max_total_bytes``.
+
+    ``active_cycle_id``'s own directory is never touched by either pass, so
+    a currently-running cycle's own preservation files are always safe.
+    Fail-open: returns ``{"aged_out": 0, "size_capped": 0}`` (or partial
+    counts) on any error, never raises.
+    """
+    counts = {"aged_out": 0, "size_capped": 0}
+    try:
+        compaction_root = Path(state_root) / "compaction"
+        if not compaction_root.is_dir():
+            return counts
+        safe_active = (
+            _sanitize_path_component(active_cycle_id, "") if active_cycle_id else ""
+        )
+
+        def _newest_mtime(cycle_dir: Path) -> float:
+            newest = 0.0
+            for f in cycle_dir.rglob("*"):
+                if f.is_file():
+                    try:
+                        newest = max(newest, f.stat().st_mtime)
+                    except OSError:
+                        continue
+            return newest
+
+        def _dir_size(cycle_dir: Path) -> int:
+            total = 0
+            for f in cycle_dir.rglob("*"):
+                if f.is_file():
+                    try:
+                        total += f.stat().st_size
+                    except OSError:
+                        continue
+            return total
+
+        cycle_dirs = [d for d in compaction_root.iterdir() if d.is_dir()]
+        cutoff = time.time() - max(0, max_age_days) * 86400
+        remaining: list[Path] = []
+        for cycle_dir in cycle_dirs:
+            if safe_active and cycle_dir.name == safe_active:
+                remaining.append(cycle_dir)
+                continue
+            if _newest_mtime(cycle_dir) < cutoff:
+                shutil.rmtree(cycle_dir, ignore_errors=True)
+                counts["aged_out"] += 1
+            else:
+                remaining.append(cycle_dir)
+
+        sized = [
+            (d, _newest_mtime(d), _dir_size(d)) for d in remaining
+            if not (safe_active and d.name == safe_active)
+        ]
+        sized.sort(key=lambda t: t[1])  # oldest mtime first
+        total_size = sum(size for _, _, size in sized) + sum(
+            _dir_size(d) for d in remaining if safe_active and d.name == safe_active
+        )
+        for cycle_dir, _mtime, size in sized:
+            if total_size <= max_total_bytes:
+                break
+            shutil.rmtree(cycle_dir, ignore_errors=True)
+            total_size -= size
+            counts["size_capped"] += 1
+    except Exception:
+        pass
+    return counts
+
+
+# ---------------------------------------------------------------------------
+# Condition E (#1930): usage counter -- is the carrier's I1 index ever used?
+# ---------------------------------------------------------------------------
+
+def count_preservation_reads(state_root: "Path | str", cycle_id: str, *, day: "str | None" = None) -> int:
+    """How many ``read_file`` actions this cycle's action index recorded
+    against a path under ``compaction/`` (#1930 condition E) -- read-side
+    only; ``nanobot/runtime/action_index.py`` already records a generic
+    read/write/edit target path per tool call, so this needs no new live
+    instrumentation, only a query over its existing per-day JSONL output.
+
+    A low count doesn't argue for dropping I1 (the file is still a
+    correctness guarantee) -- it argues the carrier's index isn't doing its
+    job, and becomes the next hypothesis to test (see the module docstring's
+    condition E). Fail-open: ``0`` on any error, including a missing index.
+
+    Queries ``{state_root}/action_index/<day>.jsonl`` directly (the exact
+    per-day path/row shape ``nanobot/runtime/action_index.py`` writes:
+    ``cycle_id``, ``actions_detail`` -- a ``read:<path>``-templated list,
+    same length/order as ``actions``) rather than importing that module, so
+    this stays a pure read-side query with no coupling to its internals.
+    """
+    try:
+        index_dir = Path(state_root) / "action_index"
+        target_day = day or time.strftime("%Y-%m-%d", time.gmtime())
+        path = index_dir / f"{target_day}.jsonl"
+        if not path.is_file():
+            return 0
+        count = 0
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict) or row.get("cycle_id") != cycle_id:
+                continue
+            for detail in row.get("actions_detail") or []:
+                if isinstance(detail, str) and detail.startswith("read:") and "compaction" in detail:
+                    count += 1
+        return count
+    except Exception:
+        return 0
