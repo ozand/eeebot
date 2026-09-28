@@ -909,7 +909,6 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
     scripts_dir.mkdir(parents=True, exist_ok=True)
     verifier = scripts_dir / "verify_release_health.py"
     verifier.write_text("#!/usr/bin/env python3\nprint('mock health')\n", encoding="utf-8")
-    verifier.chmod(0o755)
     mock("python3", f'''echo "python3 $*" >> {log}; exit 0''')
     mock("sleep", f'''echo "sleep $*" >> {log}; exit 97''')
     mock("stat", f'''echo "stat $*" >> {log}; echo 0:0''')
@@ -928,7 +927,7 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
     mock("chown", f'''echo "chown $*" >> {log}; exit 0''')
     mock("env", f'''echo "env $*" >> {log}; while [[ "$1" == *=* ]]; do shift; done; exec "$@"''')
     mock("tar", f'''echo "tar $*" >> {log}; exit 0''')
-    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"))
+    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"), VERIFY_ONLY_DIMENSION_COMPARE="")
     result = subprocess.run(["bash", str(remote_path)], cwd=root, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     seen = commands.read_text(encoding="utf-8")
