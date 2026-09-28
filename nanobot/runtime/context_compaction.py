@@ -752,7 +752,7 @@ def _compact_content(content: str) -> str:
     return content[:EXCERPT_HEAD] + _OMIT_MARKER + content[-EXCERPT_TAIL:]
 
 
-def _drop_detail(tool_name: str, original: str) -> dict[str, Any]:
+def _drop_detail(tool_name: str, original: str, compacted: str | None = None) -> dict[str, Any]:
     """#1776: a mechanical (never content-interpreted) characterization of
     what a compaction dropped — the tool name, the char counts, and the
     line count of the dropped middle span. This is deliberately NOT the
@@ -761,17 +761,21 @@ def _drop_detail(tool_name: str, original: str) -> dict[str, Any]:
     roughly what shape" so the journal stops being silent about WHAT was
     cut, only how much.
     """
-    dropped_start = min(EXCERPT_HEAD, len(original))
-    dropped_end = max(dropped_start, len(original) - EXCERPT_TAIL)
-    dropped = original[dropped_start:dropped_end]
-    dropped_lines = dropped.count("\n") + (1 if dropped else 0)
+    chars_after = (
+        len(compacted) if compacted is not None
+        else EXCERPT_HEAD + len(_OMIT_MARKER) + EXCERPT_TAIL
+    )
+    dropped_chars = max(0, len(original) - chars_after)
     name = tool_name or "unknown"
     return {
         "tool_name": name,
         "chars_before": len(original),
-        "chars_after": EXCERPT_HEAD + len(_OMIT_MARKER) + EXCERPT_TAIL,
-        "dropped_chars": len(dropped),
-        "dropped_summary": f"{dropped_lines} line(s), {len(dropped)} char(s) dropped from {name} output",
+        "chars_after": chars_after,
+        "dropped_chars": dropped_chars,
+        "dropped_summary": (
+            f"{dropped_chars} char(s) dropped from {name} output "
+            f"({len(original)} before, {chars_after} after)"
+        ),
     }
 
 
@@ -1248,7 +1252,7 @@ def compact_messages(
             new_msg[_COMPACTED_FLAG] = True
             new_msg[_CARRIER_FLAG] = (i == carrier)
             new_messages[i] = new_msg
-            compacted_details.append(_drop_detail(tool_name, old_text))
+            compacted_details.append(_drop_detail(tool_name, old_text, _message_text(new_msg)))
             results_compacted += 1
 
         # Retire the prior carrier now that a new summary has been installed
