@@ -1066,7 +1066,7 @@ case "$1" in
   *) echo "unexpected sudo command: $*" >&2; exit 97 ;;
 esac
 ''')
-    env = {"REPORT": str(candidate_path), "BASELINE_REPORT": str(baseline_path)}
+    env = {"REPORT": str(candidate_path), "BASELINE_REPORT": str(baseline_path), "VERIFY_ONLY_DIMENSION_COMPARE": "1"}
     result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", candidate_commit], env_overrides=env)
     output = result.stdout + result.stderr
     print(output)
