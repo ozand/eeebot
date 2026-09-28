@@ -41,7 +41,7 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
     source.mkdir()
     gate_path = source / "scripts/verify_release_health.py"
     gate_path.parent.mkdir()
-    gate_path.write_text("def verify_release_health(): return {'health': {'dimensions': {}}}\\n", encoding="utf-8")
+    gate_path.write_text("def verify_release_health(): return {'health': {'dimensions': {}}}\n", encoding="utf-8")
     _git("init", cwd=source, check=True)
     hooks = source / ".test-hooks"
     hooks.mkdir()
@@ -52,7 +52,7 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
     _git("commit", "-qm", "head gate", cwd=source, check=True, env=identity)
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
     gate_path.write_text(
-        "def verify_release_health(): return {'health': {'dimensions': {}}}\\n" + gate_source,
+        "def verify_release_health(): return {'health': {'dimensions': {}}}\n" + gate_source,
         encoding="utf-8",
     )
     _git("add", "scripts/verify_release_health.py", cwd=source, check=True)
