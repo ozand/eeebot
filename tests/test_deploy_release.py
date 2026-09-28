@@ -778,11 +778,9 @@ case "$*" in
 esac
 case "$*" in
   *"mktemp -d /tmp/eeebot-verify-gate."*)
-    archive_ref={shlex.quote(candidate)}
-    output=$(git -C {shlex.quote(str(repo))} archive --format=tar "$archive_ref" scripts nanobot host/eeepc/etc | bash -c "$2") || exit $?
+    output=$(bash -c "$2") || exit $?
     staged=$(printf '%s\\n' "$output" | tail -n 1)
     python3 "$staged/scripts/verify_release_health.py" >&2 || exit $?
-    rm -rf "$staged"
     printf '%s\\n' "$staged"
     ;;
   *"GATE_TMP="*) cat >/dev/null; exit 0 ;;
