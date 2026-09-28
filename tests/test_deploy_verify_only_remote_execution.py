@@ -32,6 +32,11 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
         remote = remote.replace(old, new)
     live = Path(roots["/opt/eeepc-agent"]) / "runtimes/self-evolving-agent/current"
     live.mkdir(parents=True)
+    (live / "scripts").mkdir()
+    (live / "scripts/verify_release_health.py").write_text(
+        "import json; from pathlib import Path; verify_release_health = lambda: {'health': {'dimensions': {}}}\\n",
+        encoding="utf-8",
+    )
     source = tmp_path / "source"
     source.mkdir()
     gate_path = source / "scripts/verify_release_health.py"
@@ -93,8 +98,8 @@ esac
 ''')
     _write_mock(bindir / "systemctl", f'''echo "systemctl $*" >> {log_path}
 case "$*" in
-  *eeepc-network-fallback*"LoadState"*) echo not-found ;;
-  *eeebot-network-fallback*"LoadState"*) echo not-found ;;
+  *eeepc-network-fallback.timer*"-p LoadState"*|*eeepc-network-fallback.service*"-p LoadState"*) echo not-found ;;
+  *eeebot-network-fallback*"-p LoadState"*) echo not-found ;;
   *"-p LoadState"*) echo loaded ;;
   *"-p UnitFileState"*) echo enabled ;;
   *"is-enabled"*) echo enabled ;;

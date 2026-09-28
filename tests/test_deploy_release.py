@@ -982,6 +982,7 @@ def test_verify_only_dimension_delta_through_production_path(
     assert candidate_commit != original_head
     monkeypatch.setenv("REPO_ROOT", str(repo))
     monkeypatch.setenv("REPORT", str(candidate_path))
+    monkeypatch.setenv("BASELINE_REPORT", str(baseline_path))
     commands = repo / "verify-only-commands.log"
     log = shlex.quote(str(commands))
     ssh = f'''echo "$*" >> {log}
@@ -1008,14 +1009,15 @@ exit 0
     live_release = runtime_root / "releases/baseline"
     live_gate = live_release / "scripts"
     live_gate.mkdir(parents=True)
+    (live_gate / "__init__.py").write_text("", encoding="utf-8")
     (live_gate / "verify_release_health.py").write_text(
-        "import json, os; from pathlib import Path; p=Path(os.environ['REPORT']); print(json.dumps({'health': {'dimensions': {r.split()[1]: {'status': r.split()[2]} for r in json.loads(p.read_text())['dimensions']}}}))\\n",
+        "import json, os; from pathlib import Path; verify_release_health = lambda: {'health': {'dimensions': {r.split()[1]: {'status': r.split()[2]} for r in json.loads(Path(os.environ['BASELINE_REPORT']).read_text())['dimensions']}}}\\n",
         encoding="utf-8",
     )
     remote_script.write_text(remote, encoding="utf-8")
     _write_mock(mock_bin / "ssh", ssh)
     _write_mock(mock_bin / "stat", '''if [[ "$*" == *current* ]]; then echo 0:0; else command stat "$@"; fi''')
-    _write_mock(mock_bin / "systemctl", '''case "$*" in *eeepc-network-fallback*"-p LoadState"*) echo not-found ;; *"-p LoadState"*eeepc-network-fallback*) echo not-found ;; *"show eeepc-promotion-verifier.timer -p LoadState"*|*"show eeebot-*.timer -p LoadState"*) echo loaded ;; *"-p LoadState"*) echo loaded ;; *is-active*eeepc-network-fallback*) exit 1 ;; *is-active*) exit 0 ;; *is-enabled*) echo enabled ;; *"-p UnitFileState"*) echo disabled ;; *) exit 0 ;; esac''')
+    _write_mock(mock_bin / "systemctl", '''case "$*" in *eeepc-network-fallback.timer*"-p LoadState"*|*eeepc-network-fallback.service*"-p LoadState"*) echo not-found ;; *eeebot-*timer*"-p LoadState"*) echo loaded ;; *eeebot-dashboard.service*"-p LoadState"*) echo loaded ;; *"-p LoadState"*) echo not-found ;; *is-active*eeepc-network-fallback*) exit 1 ;; *is-active*) exit 0 ;; *is-enabled*) echo enabled ;; *"-p UnitFileState"*) echo disabled ;; *) exit 0 ;; esac''')
     _write_mock(mock_bin / "sudo", f'''while [[ "$1" == -* ]]; do
   case "$1" in -n) shift ;; -u) shift 2 ;; *) exit 97 ;; esac
 done
@@ -1028,7 +1030,7 @@ case "$1" in
   *) echo "unexpected sudo command: $*" >&2; exit 97 ;;
 esac
 ''')
-    env = {"REPORT": str(candidate_path)}
+    env = {"REPORT": str(candidate_path), "BASELINE_REPORT": str(baseline_path)}
     result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", candidate_commit], env_overrides=env)
     output = result.stdout + result.stderr
     print(output)
