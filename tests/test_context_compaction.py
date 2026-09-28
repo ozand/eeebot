@@ -865,6 +865,36 @@ def test_drop_detail_names_the_tool_and_a_mechanical_characterization():
     assert "char(s) dropped" in detail["dropped_summary"]
 
 
+def test_journal_and_summary_attribute_compacted_assistant_to_actual_tools(tmp_path):
+    messages = _make_messages([_long_content(20_000)] * 3, tool_name="grep")
+    messages[3] = {
+        "role": "assistant",
+        "content": "x" * 20_000,
+        "tool_calls": [
+            {"id": "tc-read", "type": "function", "function": {
+                "name": "read_file", "arguments": '{"path": "src/input.py"}',
+            }},
+            {"id": "tc-write", "type": "function", "function": {
+                "name": "write_file", "arguments": '{"path": "src/output.py"}',
+            }},
+        ],
+    }
+    result = cc.compact_messages(
+        messages, cycle_id="assistant-tool-attribution", iteration=1, state_root=tmp_path,
+        threshold=0.01, keep_tokens=1, window_tokens=98_304,
+    )
+    event = _last_journal_event(tmp_path)
+    detail = next(item for item in event["compacted_details"]
+                  if item["tool_name"] == "read_file, write_file")
+    carrier = next(message for message in result if message.get(cc._CARRIER_FLAG))
+
+    assert detail["tool_name"] == "read_file, write_file"
+    assert "Files read (paths observed in tool calls/results):" in carrier["content"]
+    assert "- src/input.py" in carrier["content"]
+    assert "Files modified (paths observed in write/edit/patch tools):" in carrier["content"]
+    assert "- src/output.py" in carrier["content"]
+
+
 def test_carrier_journal_detail_reports_actual_summary_content_size(tmp_path):
     messages = _make_messages([_long_content(20_000)] * 3, tool_name="grep")
     result = cc.compact_messages(

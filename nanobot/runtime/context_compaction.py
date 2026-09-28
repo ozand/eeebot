@@ -752,6 +752,36 @@ def _compact_content(content: str) -> str:
     return content[:EXCERPT_HEAD] + _OMIT_MARKER + content[-EXCERPT_TAIL:]
 
 
+def _append_tool_attribution(summary: str, evidence_span: list[dict[str, Any]]) -> str:
+    """Add actual called tools for assistant turns to the carrier summary."""
+    entries = []
+    for msg in evidence_span:
+        if msg.get("role") != "assistant":
+            continue
+        names = _called_tool_names(msg)
+        if names:
+            entries.append(names)
+    if not entries:
+        return summary
+    section = "Tools called (from assistant tool-call metadata):\n" + "\n".join(
+        f"- {names}" for names in dict.fromkeys(entries)
+    )
+    return _bounded_summary(summary + "\n" + section, MAX_SUMMARY_CHARS)
+
+
+def _called_tool_names(msg: dict[str, Any]) -> str:
+    """Actual function tools invoked in an assistant turn, in call order."""
+    names = []
+    for call in msg.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function")
+        name = function.get("name") if isinstance(function, dict) else None
+        if name:
+            names.append(str(name))
+    return ", ".join(dict.fromkeys(names))
+
+
 def _drop_detail(tool_name: str, original: str, compacted: str | None = None) -> dict[str, Any]:
     """#1776: a mechanical (never content-interpreted) characterization of
     what a compaction dropped — the tool name, the char counts, and the
@@ -1092,6 +1122,7 @@ def compact_messages(
         ]
         goal = _message_text(messages[1]) if len(messages) > 1 else ""
         summary = _structural_summary(evidence_span, goal=goal, previous=previous)
+        summary = _append_tool_attribution(summary, evidence_span)
 
         def _decline(reason: str) -> list[dict[str, Any]]:
             # #1930 review B6: before/after are ALWAYS this module's own
@@ -1209,7 +1240,7 @@ def compact_messages(
         for i in worth_indices:
             msg = messages[i]
             old_text = _message_text(msg)
-            tool_name = str(msg.get("name") or "tool")
+            tool_name = _called_tool_names(msg) or str(msg.get("name") or "tool")
             if i == carrier:
                 new_content = carrier_content
             else:
