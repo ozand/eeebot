@@ -23,7 +23,6 @@ from tests.test_cycle_ledger import (
     _FakeSubagentManager,
     _init_selfevo_repo,
     _read_ledger,
-    _seed_bridge_request,
 )
 
 
@@ -97,7 +96,31 @@ def _setup(base, monkeypatch):
     monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
     monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
     monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+    # #1222: the bridge resolves the active goal from goals/goal_text.json.
+    (state_dir / "goals").mkdir(parents=True, exist_ok=True)
+    (state_dir / "goals" / "goal_text.json").write_text(
+        json.dumps({"schema_version": "goal-text-v1", "goal_id": "goal-1", "text": "test goal"}),
+        encoding="utf-8",
+    )
     return state_dir
+
+
+def _seed_plan(monkeypatch, task_title: str, target_path: str) -> None:
+    """ADR-035 rule 1 (#1942): req/task are now built from the planning
+    session's own plan, never from a rotation-picked queue file — stand in
+    for a real planning session with a canned plan whose first line matches
+    the desired task_title and whose body carries the ``Target path:`` line
+    _extract_target_path reads (mirrors the shape llm_proposer.write_request
+    used to produce for the retired queue-seeding path)."""
+    plan_text = f"{task_title}\n\n{TASK_TEXT_TEMPLATE.format(target_path=target_path)}"
+
+    async def _fake_planning_session(**_kwargs):
+        return {
+            'ran': True, 'iterations_used': 1, 'iterations_planned': 1,
+            'tampered_files': [], 'plan': {'plan': plan_text, 'candidate_id': None},
+        }
+
+    monkeypatch.setattr(bridge, "_run_planning_session", _fake_planning_session)
 
 
 class TestResultRecordsTargetPath:
@@ -111,18 +134,15 @@ class TestResultRecordsTargetPath:
         _init_selfevo_repo(base)
 
         target_path = "scripts/check_memory_pressure.py"  # does NOT exist in repo
-        _seed_bridge_request(
-            state_dir, "req-record", "cycle-record",
-            task_title=f"Implement and commit: {TITLE}",
-            task=TASK_TEXT_TEMPLATE.format(target_path=target_path),
-            recommended_next_action=f"Implement and commit: {TITLE} (target: {target_path})",
-        )
+        _seed_plan(monkeypatch, f"Implement and commit: {TITLE}", target_path)
 
         result = asyncio.run(bridge._main_impl())
         assert result == 0
 
-        result_path = state_dir / "subagents" / "results" / "result-req-record.json"
-        data = json.loads(result_path.read_text(encoding="utf-8"))
+        results_dir = state_dir / "subagents" / "results"
+        result_files = [p for p in results_dir.glob("result-*.json") if p.name != "result-req-prior.json"]
+        assert len(result_files) == 1
+        data = json.loads(result_files[0].read_text(encoding="utf-8"))
         assert data["target_path"] == target_path
 
 
@@ -149,12 +169,7 @@ class TestSkipRowsDoNotFeedRecentFailure:
         )
 
         target_path = "scripts/check_memory_pressure.py"  # does NOT exist in repo
-        _seed_bridge_request(
-            state_dir, "req-after-skip", "cycle-after-skip",
-            task_title=f"Implement and commit: {TITLE}",
-            task=TASK_TEXT_TEMPLATE.format(target_path=target_path),
-            recommended_next_action=f"Implement and commit: {TITLE} (target: {target_path})",
-        )
+        _seed_plan(monkeypatch, f"Implement and commit: {TITLE}", target_path)
 
         result = asyncio.run(bridge._main_impl())
         assert result == 0
@@ -162,7 +177,7 @@ class TestSkipRowsDoNotFeedRecentFailure:
         rows = _read_ledger(state_dir)
         outcome_rows = [
             r for r in rows
-            if r.get("cycle_id") == "cycle-after-skip" and r["phase"] == "outcome"
+            if r["phase"] == "outcome" and r.get("cycle_id") not in ("", None)
         ]
         assert len(outcome_rows) == 1
         # Proceeded to spawn (success), NOT suppressed off the prior skip row.

@@ -375,6 +375,38 @@ class TestEditBudget:
         assert "5 revisions" in feedback
         assert matched == "edit-budget:scripts/flaky_tool.py"
 
+    def test_checkpoint_commits_never_count_toward_the_edit_budget(self, tmp_path):
+        """ADR-035 keep-work architect resolution (#1942 B2): reads
+        ``--first-parent main``, so ONE real cycle integration is one log
+        entry regardless of how many checkpoint commits its cycle branch
+        held -- 5 checkpoint commits merged via ``--no-ff`` (the real
+        production shape: checkpoints only ever exist on a cycle branch,
+        folded into ONE merge commit on first-parent) count as 1
+        integration, not 5, against the budget.
+        """
+        import subprocess as _sp2
+
+        repo = _init_repo_with_scripts(tmp_path, ["scripts/flaky_tool.py"])
+        state = _state_dir(tmp_path)
+        _write_usage_sidecar(state, {"scripts/flaky_tool.py": {"last_used": "2020-01-01T00:00:00+00:00"}})
+
+        _sp2.run(["git", "-C", str(repo), "checkout", "-b", "selfevo/cycle-ckpt-01"], check=True, capture_output=True)
+        for i in range(5):
+            _commit_file_change(
+                repo, "scripts/flaky_tool.py", f"selfevo: checkpoint — scripts/flaky_tool.py ({i})",
+                iso_date="2021-01-01T00:00:00",
+            )
+        _sp2.run(["git", "-C", str(repo), "checkout", "main"], check=True, capture_output=True)
+        _sp2.run(
+            ["git", "-C", str(repo), "merge", "--no-ff", "selfevo/cycle-ckpt-01",
+             "-m", "merge: integrate selfevo/cycle-ckpt-01"],
+            check=True, capture_output=True,
+        )
+
+        proposal = {"task_title": "improve flaky tool further", "target_path": "scripts/flaky_tool.py"}
+        dup, _, _ = llm_proposer._is_duplicate_proposal(state, repo, proposal)
+        assert dup is False
+
     def test_below_m_commits_passes(self, tmp_path):
         repo = _init_repo_with_scripts(tmp_path, ["scripts/flaky_tool.py"])
         state = _state_dir(tmp_path)
@@ -482,30 +514,70 @@ class TestEditBudget:
         assert not matched.startswith("edit-budget:")
 
     def test_fail_open_git_unavailable(self, tmp_path, monkeypatch):
+        repo = _init_repo_with_scripts(tmp_path, ["scripts/flaky_tool.py"])
+        state = _state_dir(tmp_path)
+
         def _boom(*args, **kwargs):
             raise RuntimeError("git not found")
 
         import subprocess as _sp
 
-        monkeypatch.setattr(_sp, "check_output", _boom)
-        repo = _init_repo_with_scripts(tmp_path, ["scripts/flaky_tool.py"])
-        state = _state_dir(tmp_path)
+        # ADR-035 keep-work architect resolution (#1942 B2): both readers
+        # now use subprocess.run (not check_output) -- patch what's
+        # actually called, or this test silently stops exercising them.
+        # Repo built BEFORE patching: _init_repo_with_scripts itself uses
+        # subprocess.run.
+        monkeypatch.setattr(_sp, "run", _boom)
         proposal = {"task_title": "improve flaky tool further", "target_path": "scripts/flaky_tool.py"}
         dup, _, _ = llm_proposer._is_duplicate_proposal(state, repo, proposal)
         assert dup is False
 
     def test_fail_open_git_timeout(self, tmp_path, monkeypatch):
+        repo = _init_repo_with_scripts(tmp_path, ["scripts/flaky_tool.py"])
+        state = _state_dir(tmp_path)
+
         def _timeout(*args, **kwargs):
             raise sp.TimeoutExpired(cmd="git", timeout=10)
 
         import subprocess as _sp
 
-        monkeypatch.setattr(_sp, "check_output", _timeout)
-        repo = _init_repo_with_scripts(tmp_path, ["scripts/flaky_tool.py"])
-        state = _state_dir(tmp_path)
+        monkeypatch.setattr(_sp, "run", _timeout)
         proposal = {"task_title": "improve flaky tool further", "target_path": "scripts/flaky_tool.py"}
         dup, _, _ = llm_proposer._is_duplicate_proposal(state, repo, proposal)
         assert dup is False
+
+    def test_git_error_returns_none_not_zero(self, tmp_path, monkeypatch):
+        """ADR-035 keep-work architect resolution (#1942 B2), point 4: a
+        git error/timeout is NOT 0 (which would mean "confirmed zero
+        integrations") -- the reader returns None, and the caller
+        (_edit_budget_match) must never block on it."""
+        repo = _init_repo_with_scripts(tmp_path, ["scripts/flaky_tool.py"])
+
+        import subprocess as _sp
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("git not found")
+
+        monkeypatch.setattr(_sp, "run", _boom)
+        result = llm_proposer._git_commit_count_for_path(repo, "scripts/flaky_tool.py", None)
+        assert result is None, f"expected None on git error, got {result!r}"
+
+    def test_edit_budget_never_blocks_on_unknown(self, tmp_path, monkeypatch):
+        """The caller decides explicitly: None from the reader must never
+        be compared as if it were a real count."""
+        repo = _init_repo_with_scripts(tmp_path, ["scripts/flaky_tool.py"])
+        state = _state_dir(tmp_path)
+        _write_usage_sidecar(state, {"scripts/flaky_tool.py": {"last_used": "2020-01-01T00:00:00+00:00"}})
+
+        import subprocess as _sp
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("git not found")
+
+        monkeypatch.setattr(_sp, "run", _boom)
+        proposal = {"task_title": "improve flaky tool further", "target_path": "scripts/flaky_tool.py"}
+        target, count, since = llm_proposer._edit_budget_match(state, repo, proposal)
+        assert (target, count, since) == ("", 0, "")
 
     def test_unreadable_sidecar_treated_as_never_used_but_still_fail_open_on_git_error(self, tmp_path, monkeypatch):
         """An unreadable/malformed sidecar degrades to '{}' (never used) per
@@ -522,7 +594,7 @@ class TestEditBudget:
 
         import subprocess as _sp
 
-        monkeypatch.setattr(_sp, "check_output", _boom)
+        monkeypatch.setattr(_sp, "run", _boom)
         proposal = {"task_title": "improve flaky tool further", "target_path": "scripts/flaky_tool.py"}
         dup, _, _ = llm_proposer._is_duplicate_proposal(state, repo, proposal)
         assert dup is False

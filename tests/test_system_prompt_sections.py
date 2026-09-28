@@ -43,6 +43,7 @@ import pytest
 from nanobot import crash_record
 from nanobot.agent.context import ContextBuilder, SystemPromptOverflowError
 from nanobot.runtime import bridge
+from tests.test_bridge_executor_llm_error import _stub_planning_session
 from tests.test_context_prompt_fit import LOOP_SECTION_NAMES, MARK, _builder, _loop_builder, _section
 from tests.test_cycle_ledger import (
     _FakeSubagentManager,
@@ -382,6 +383,7 @@ def test_bridge_healthy_row_carries_sections_and_chars(tmp_path, monkeypatch):
     ``sections`` breakdown verbatim, plus its ``chars``."""
     state_dir = _wire(tmp_path, monkeypatch, _HealthySectionsManager)
     _seed_bridge_request(state_dir, "req-fit", "cycle-fit", task_title="Extend a skill")
+    _stub_planning_session(monkeypatch, "Extend a skill")
 
     rc = asyncio.run(bridge._main_impl())
 
@@ -397,6 +399,7 @@ def test_bridge_healthy_row_carries_sections_and_chars(tmp_path, monkeypatch):
 def test_bridge_healthy_row_carries_catalogue_observation(tmp_path, monkeypatch):
     state_dir = _wire(tmp_path, monkeypatch, _HealthySectionsManager)
     _seed_bridge_request(state_dir, "req-fit", "cycle-fit", task_title="Extend a skill")
+    _stub_planning_session(monkeypatch, "Extend a skill")
     _HealthySectionsManager._catalogue_observation = {
         "status": "bounded", "source_chars": 20_000, "retained_chars": 12_000,
         "budget": 12_500, "total_count": 40, "retained_count": 24,
@@ -425,6 +428,7 @@ def test_bridge_overflow_row_carries_sections_with_a_zero_entry_and_reconciles_t
     state_dir = _wire(tmp_path, monkeypatch, _OverflowSectionsManager)
     _OverflowSectionsManager.spawned = False
     _seed_bridge_request(state_dir, "req-over", "cycle-over", task_title="Extend a skill")
+    _stub_planning_session(monkeypatch, "Extend a skill")
 
     rc = asyncio.run(bridge._main_impl())
 

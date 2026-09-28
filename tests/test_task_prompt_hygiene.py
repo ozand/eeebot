@@ -108,10 +108,11 @@ def test_1727_goal_id_absent(tmp_path):
 
 def test_1727_system_mission_one_line_non_priority_task(tmp_path):
     """AC: '## System mission' is one line for a non-priority task; no
-    full priority text appears."""
+    full priority text appears. ADR-035 rule 1 (#1942): attributes the
+    choice to the planning session, never a proposer."""
     req = _base_req(tmp_path)
     prompt = build_task(req, "derived", "")
-    assert "This task is not an operator priority; priorities are handled by the proposer." in prompt
+    assert "This task is not an operator priority; the planning session chose it." in prompt
 
 
 def test_1727_system_mission_one_line_priority_task(tmp_path):

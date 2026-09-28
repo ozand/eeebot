@@ -16,14 +16,16 @@ the cycle left it (no new untracked or modified files).
 from __future__ import annotations
 
 import asyncio
-import json
 import subprocess
 from unittest.mock import patch
 
 import pytest
 
 from nanobot.runtime import bridge
-from tests.test_bridge_executor_llm_error import _LLMBadRequestSubagentManager
+from tests.test_bridge_executor_llm_error import (
+    _LLMBadRequestSubagentManager,
+    _stub_planning_session,
+)
 from tests.test_cycle_ledger import (
     _FakeSubagentManager,
     _init_selfevo_repo,
@@ -59,12 +61,8 @@ def _wire(tmp_path, monkeypatch, manager_cls=_FakeSubagentManager):
 def test_error_card_recording_created(tmp_path, monkeypatch):
     state_dir = _wire(tmp_path, monkeypatch)
     title = "Test task failure leading to error card created"
-    artifact = tmp_path / "improvements" / "llm-proposed-cycle-fail.json"
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
-    _seed_bridge_request(
-        state_dir, "req-fail", "cycle-fail", task_title=title, source_artifact=str(artifact),
-    )
+    _seed_bridge_request(state_dir, "req-fail", "cycle-fail", task_title=title)
+    _stub_planning_session(monkeypatch, title)
 
     with patch("nanobot.runtime.bridge._run_smoke_tests_with_shrink_guard", return_value=(False, "smoke failed")), \
          patch("nanobot.runtime.bridge._write_structured_error", return_value={"status": "created", "error_id": "ERR-x", "error": None}), \
@@ -77,19 +75,19 @@ def test_error_card_recording_created(tmp_path, monkeypatch):
     assert len(card_events) == 1
     ev = card_events[0]
     assert ev["status"] == "created"
-    assert ev["cycle_id"] == "cycle-fail"
+    # ADR-035 rule 1 (#1942): cycle_id is a fresh per-cycle uuid now, not
+    # the retired queue's literal id -- assert it matches THIS run's own
+    # outcome row instead of a hardcoded value.
+    outcome = [r for r in rows if r["phase"] == "outcome"][-1]
+    assert ev["cycle_id"] == outcome["cycle_id"]
     assert ev.get("rollback_reason") is not None
 
 
 def test_error_card_recording_not_created_diff_mismatch(tmp_path, monkeypatch):
     state_dir = _wire(tmp_path, monkeypatch)
     title = "Test task failure where diff touches more than errors.yaml"
-    artifact = tmp_path / "improvements" / "llm-proposed-cycle-diff.json"
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
-    _seed_bridge_request(
-        state_dir, "req-diff", "cycle-diff", task_title=title, source_artifact=str(artifact),
-    )
+    _seed_bridge_request(state_dir, "req-diff", "cycle-diff", task_title=title)
+    _stub_planning_session(monkeypatch, title)
 
     with patch("nanobot.runtime.bridge._run_smoke_tests_with_shrink_guard", return_value=(False, "smoke failed")), \
          patch("nanobot.runtime.bridge._write_structured_error", return_value={"status": "created", "error_id": "ERR-x", "error": None}), \
@@ -102,18 +100,15 @@ def test_error_card_recording_not_created_diff_mismatch(tmp_path, monkeypatch):
     ev = card_events[0]
     assert ev["status"] == "not_created"
     assert ev["skip_reason"] == "diff_touched_more_than_errors_yaml"
-    assert ev["cycle_id"] == "cycle-diff"
+    outcome = [r for r in rows if r["phase"] == "outcome"][-1]
+    assert ev["cycle_id"] == outcome["cycle_id"]
 
 
 def test_error_card_recording_not_created_push_rejected(tmp_path, monkeypatch):
     state_dir = _wire(tmp_path, monkeypatch)
     title = "Test task failure where push is rejected"
-    artifact = tmp_path / "improvements" / "llm-proposed-cycle-push.json"
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
-    _seed_bridge_request(
-        state_dir, "req-push", "cycle-push", task_title=title, source_artifact=str(artifact),
-    )
+    _seed_bridge_request(state_dir, "req-push", "cycle-push", task_title=title)
+    _stub_planning_session(monkeypatch, title)
 
     with patch("nanobot.runtime.bridge._run_smoke_tests_with_shrink_guard", return_value=(False, "smoke failed")), \
          patch("nanobot.runtime.bridge._write_structured_error", return_value={"status": "created", "error_id": "ERR-x", "error": None}), \
@@ -127,7 +122,8 @@ def test_error_card_recording_not_created_push_rejected(tmp_path, monkeypatch):
     ev = card_events[0]
     assert ev["status"] == "not_created"
     assert ev["skip_reason"] == "push_rejected"
-    assert ev["cycle_id"] == "cycle-push"
+    outcome = [r for r in rows if r["phase"] == "outcome"][-1]
+    assert ev["cycle_id"] == outcome["cycle_id"]
 
 
 def test_error_card_recording_not_created_write_failed(tmp_path, monkeypatch):
@@ -135,12 +131,8 @@ def test_error_card_recording_not_created_write_failed(tmp_path, monkeypatch):
     class and path in `error`, distinct from `already_recorded` below."""
     state_dir = _wire(tmp_path, monkeypatch)
     title = "Test task failure where write_structured_error returns False"
-    artifact = tmp_path / "improvements" / "llm-proposed-cycle-wf.json"
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
-    _seed_bridge_request(
-        state_dir, "req-wf", "cycle-wf", task_title=title, source_artifact=str(artifact),
-    )
+    _seed_bridge_request(state_dir, "req-wf", "cycle-wf", task_title=title)
+    _stub_planning_session(monkeypatch, title)
 
     with patch("nanobot.runtime.bridge._run_smoke_tests_with_shrink_guard", return_value=(False, "smoke failed")), \
          patch(
@@ -155,7 +147,8 @@ def test_error_card_recording_not_created_write_failed(tmp_path, monkeypatch):
     ev = card_events[0]
     assert ev["status"] == "not_created"
     assert ev["skip_reason"] == "write_failed"
-    assert ev["cycle_id"] == "cycle-wf"
+    outcome = [r for r in rows if r["phase"] == "outcome"][-1]
+    assert ev["cycle_id"] == outcome["cycle_id"]
     assert ev["error"] == "PermissionError:/tmp/lessons/errors.yaml"
     assert "card_id" not in ev
 
@@ -166,12 +159,8 @@ def test_error_card_recording_already_recorded_on_retry(tmp_path, monkeypatch):
     -- it is proof the retry ran and found the card, not a lost record."""
     state_dir = _wire(tmp_path, monkeypatch)
     title = "Test task failure where the card was already recorded on a prior attempt"
-    artifact = tmp_path / "improvements" / "llm-proposed-cycle-ar.json"
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
-    _seed_bridge_request(
-        state_dir, "req-ar", "cycle-ar", task_title=title, source_artifact=str(artifact),
-    )
+    _seed_bridge_request(state_dir, "req-ar", "cycle-ar", task_title=title)
+    _stub_planning_session(monkeypatch, title)
 
     with patch("nanobot.runtime.bridge._run_smoke_tests_with_shrink_guard", return_value=(False, "smoke failed")), \
          patch(
@@ -186,7 +175,8 @@ def test_error_card_recording_already_recorded_on_retry(tmp_path, monkeypatch):
     ev = card_events[0]
     assert ev["status"] == "already_recorded"
     assert ev["card_id"] == "ERR-20260917-cyclearx"
-    assert ev["cycle_id"] == "cycle-ar"
+    outcome = [r for r in rows if r["phase"] == "outcome"][-1]
+    assert ev["cycle_id"] == outcome["cycle_id"]
     assert "skip_reason" not in ev
     assert "error" not in ev
 
@@ -210,12 +200,12 @@ def test_error_card_recording_created_then_already_recorded_across_retries(tmp_p
     state_dir = _wire(tmp_path, monkeypatch, _LLMBadRequestSubagentManager)
     monkeypatch.setattr(bridge, "LLM_ERROR_MAX_RETRIES", 3)
     title = "Retry same cycle three times, card recorded once"
-    artifact = tmp_path / "improvements" / "llm-proposed-cycle-retry-card.json"
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
-    _seed_bridge_request(
-        state_dir, "req-retry-card", "cycle-retry-card", task_title=title, source_artifact=str(artifact),
-    )
+    _seed_bridge_request(state_dir, "req-retry-card", "cycle-retry-card", task_title=title)
+    # ADR-035 rule 1 (#1942): the planner is stubbed to keep re-proposing
+    # the SAME title every cycle -- _retry_key_for's stable hash of that
+    # title is what "the same underlying attempt" now means; cycle_id
+    # itself is a fresh uuid every call and no longer repeats.
+    _stub_planning_session(monkeypatch, title)
 
     for _ in range(3):
         asyncio.run(bridge._main_impl())
@@ -226,7 +216,9 @@ def test_error_card_recording_created_then_already_recorded_across_retries(tmp_p
     assert [e["status"] for e in card_events] == ["created", "already_recorded", "already_recorded"]
     assert [e.get("skip_reason") for e in card_events] == [None, None, None]
     assert [e["attempt"] for e in card_events] == ["1/3", "2/3", "3/3"]
-    assert {e["cycle_id"] for e in card_events} == {"cycle-retry-card"}
+    # Three distinct cycle_ids (a fresh uuid each call) but the SAME card,
+    # since _write_structured_error's dedup id now keys on retry_key.
+    assert len({e["cycle_id"] for e in card_events}) == 3
     assert "card_id" not in card_events[0]
     assert card_events[1]["card_id"] == card_events[2]["card_id"]
     assert card_events[1]["card_id"]
@@ -236,12 +228,8 @@ def test_error_card_recording_created_with_unintegrated_cycle_commits(tmp_path, 
     state_dir = _wire(tmp_path, monkeypatch)
     repo = tmp_path / "eeebot-self-evolving"
     title = "Test task failure with extra cycle commits"
-    artifact = tmp_path / "improvements" / "extra.json"
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
-    _seed_bridge_request(
-        state_dir, "req-extra", "cycle-extra", task_title=title, source_artifact=str(artifact),
-    )
+    _seed_bridge_request(state_dir, "req-extra", "cycle-extra", task_title=title)
+    _stub_planning_session(monkeypatch, title)
 
     # Fake subagent adds an unintegrated commit to the cycle branch
     class _UnintegratedSubagentManager(_FakeSubagentManager):
@@ -269,7 +257,8 @@ def test_error_card_recording_created_with_unintegrated_cycle_commits(tmp_path, 
     # and the ledger names the very commit that landed.
     subprocess.run(["git", "-C", str(repo), "fetch", "origin"], check=True, capture_output=True)
     out = subprocess.run(["git", "-C", str(repo), "log", "origin/main", "--oneline"], capture_output=True, text=True, check=True).stdout
-    assert "chore: record structured error for [cycle-extra]" in out
+    outcome = [r for r in rows if r["phase"] == "outcome"][-1]
+    assert f'chore: record structured error for [{outcome["cycle_id"][:12]}]' in out
     assert "cycle commit" not in out
     remote_head = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "origin/main"], capture_output=True, text=True, check=True,
@@ -310,12 +299,8 @@ def test_error_card_f6_guard_still_refuses_extra_files_on_isolated_ref(tmp_path,
     state_dir = _wire(tmp_path, monkeypatch)
     repo = tmp_path / "eeebot-self-evolving"
     title = "Test task failure where the card commit smuggles a file"
-    artifact = tmp_path / "improvements" / "smuggle.json"
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    artifact.write_text(json.dumps({"next_bounded_candidate": {"title": title}}), encoding="utf-8")
-    _seed_bridge_request(
-        state_dir, "req-smuggle", "cycle-smuggle", task_title=title, source_artifact=str(artifact),
-    )
+    _seed_bridge_request(state_dir, "req-smuggle", "cycle-smuggle", task_title=title)
+    _stub_planning_session(monkeypatch, title)
 
     real_writer = bridge._write_structured_error
 

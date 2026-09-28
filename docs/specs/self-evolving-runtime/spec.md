@@ -440,8 +440,16 @@ cannot finish. A bounded
 subagent stop (`stop_reason`) or exhausted iterations with no final response
 records `planning_session.outcome=no_plan` with its specific reason, not
 `malformed` or `integrated`. An attempted final answer that fails the JSON
-contract remains `malformed`. Neither failure writes a diary plan; both leave
-the ranked-queue fallback available. No additional model turn is granted.
+contract remains `malformed`. Neither failure writes a diary plan. No
+additional model turn is granted.
+
+ADR-035 rule 1 (#1942 B2): the planning session is now the sole, authoritative
+source of the cycle's candidate — the ranked-queue fallback (`find_pending_request`
+and its rotation-based selection) is retired, not merely deprioritized. A
+`no_plan` or `malformed` outcome ends the tick with no task selected and no
+subagent spawned; it does not fall through to any other selection mechanism.
+The next tick's own planning session is the only recovery path, bounded by
+`no_plan_recovery`'s consecutive-failure accounting.
 
 ## References
 
