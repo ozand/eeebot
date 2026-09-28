@@ -94,6 +94,7 @@ esac
     _write_mock(bindir / "systemctl", f'''echo "systemctl $*" >> {log_path}
 case "$*" in
   *eeepc-network-fallback*"LoadState"*) echo not-found ;;
+  *eeebot-network-fallback*"LoadState"*) echo not-found ;;
   *"-p LoadState"*) echo loaded ;;
   *"-p UnitFileState"*) echo enabled ;;
   *"is-enabled"*) echo enabled ;;

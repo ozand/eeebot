@@ -928,7 +928,7 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
     mock("chown", f'''echo "chown $*" >> {log}; exit 0''')
     mock("env", f'''echo "env $*" >> {log}; while [[ "$1" == *=* ]]; do shift; done; exec "$@"''')
     mock("tar", f'''echo "tar $*" >> {log}; exit 0''')
-    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"))
+    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"), VERIFY_ONLY_DIMENSION_COMPARE=""
     result = subprocess.run(["bash", str(remote_path)], cwd=root, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     seen = commands.read_text(encoding="utf-8")
@@ -1016,7 +1016,7 @@ exit 0
     remote_script.write_text(remote, encoding="utf-8")
     _write_mock(mock_bin / "ssh", ssh)
     _write_mock(mock_bin / "stat", '''if [[ "$*" == *current* ]]; then echo 0:0; else command stat "$@"; fi''')
-    _write_mock(mock_bin / "systemctl", '''case "$*" in *eeepc-network-fallback*"-p LoadState"*) echo not-found ;; *"-p LoadState"*eeepc-network-fallback*) echo not-found ;; *"show eeepc-promotion-verifier.timer -p LoadState"*|*"show eeebot-*.timer -p LoadState"*) echo loaded ;; *"-p LoadState"*) echo not-found ;; *is-active*eeepc-network-fallback*) exit 1 ;; *is-active*) exit 0 ;; *is-enabled*) echo enabled ;; *"-p UnitFileState"*) echo disabled ;; *is-active*) exit 0 ;; *) exit 0 ;; esac''')
+    _write_mock(mock_bin / "systemctl", '''case "$*" in *eeepc-network-fallback*"-p LoadState"*) echo not-found ;; *"-p LoadState"*eeepc-network-fallback*) echo not-found ;; *"show eeepc-promotion-verifier.timer -p LoadState"*|*"show eeebot-*.timer -p LoadState"*) echo loaded ;; *"-p LoadState"*) echo loaded ;; *is-active*eeepc-network-fallback*) exit 1 ;; *is-active*) exit 0 ;; *is-enabled*) echo enabled ;; *"-p UnitFileState"*) echo disabled ;; *) exit 0 ;; esac''')
     _write_mock(mock_bin / "sudo", f'''while [[ "$1" == -* ]]; do
   case "$1" in -n) shift ;; -u) shift 2 ;; *) exit 97 ;; esac
 done
