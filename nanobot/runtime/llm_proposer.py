@@ -2199,12 +2199,15 @@ def propose(
     rejection_reason: str | None = None,
     timeout: float = 120.0,
     system_prompt: str | None = None,
+    component: str = "proposer",
 ) -> dict[str, Any] | None:
     """One chat completion via the same LiteLLM gateway the bridge uses.
 
     ``system_prompt`` (#760): demand-driven callers pass
     :data:`_DEMAND_PROPOSER_SYSTEM_PROMPT`; default (``None``) keeps the
     pre-#760 :data:`_PROPOSER_SYSTEM_PROMPT` for the kill-switch-off path.
+    ``component`` controls telemetry attribution; normal proposer callers keep
+    the default while goal-review records its own component.
 
     Fails open (returns ``None``) on any missing config, network error, or
     unparseable reply — never raises.
@@ -2267,7 +2270,7 @@ def propose(
         try:
             # #1374: keep the cycle the caller attributed (maybe_propose sets
             # it before the first call); ``None`` here erased it to "".
-            with call_context(current_cycle_id(), "proposer"):
+            with call_context(current_cycle_id(), component):
                 record_llm_call(
                     model=model, duration_ms=duration_ms, usage=usage,
                     finish_reason=finish_reason, retries=0,

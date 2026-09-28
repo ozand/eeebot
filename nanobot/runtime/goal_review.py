@@ -772,7 +772,9 @@ def _call_llm(context: str) -> dict[str, Any] | None:
     no new client code. Fails open to ``None``."""
     from nanobot.runtime import llm_proposer
 
-    return llm_proposer.propose(context, system_prompt=_GOAL_REVIEW_SYSTEM_PROMPT)
+    return llm_proposer.propose(
+        context, system_prompt=_GOAL_REVIEW_SYSTEM_PROMPT, component="goal_review"
+    )
 
 
 # ─── ledger ─────────────────────────────────────────────────────────────────
