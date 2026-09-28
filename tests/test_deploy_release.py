@@ -106,6 +106,12 @@ def _git(*args, cwd=None, **kwargs):
     the environment rather than depending on the host's git configuration.
     """
     env = dict(kwargs.pop("env", None) or os.environ)
+    # Test commits must not inherit user/system signing keys or executable hooks.
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_COUNT"] = "1"
+    env["GIT_CONFIG_KEY_0"] = "commit.gpgSign"
+    env["GIT_CONFIG_VALUE_0"] = "false"
     env.setdefault("GIT_AUTHOR_NAME", "eeebot tests")
     env.setdefault("GIT_AUTHOR_EMAIL", "tests@eeebot.invalid")
     env.setdefault("GIT_COMMITTER_NAME", "eeebot tests")
@@ -128,6 +134,9 @@ def repo(tmp_path):
     shutil.copy(DEPLOY_SCRIPT.with_name("lib_bridge_exit.sh"), script_dir / "lib_bridge_exit.sh")
 
     _git("init", cwd=repo_root, check=True)
+    hooks_dir = repo_root / ".test-hooks"
+    hooks_dir.mkdir()
+    _git("config", "core.hooksPath", str(hooks_dir), cwd=repo_root, check=True)
     (repo_root / "README").write_text("hello")
     _git("add", ".", cwd=repo_root, check=True)
     _git("commit", "-m", "init", cwd=repo_root, check=True)
@@ -157,9 +166,11 @@ def mock_bin(tmp_path):
     _write_mock(bin_dir / "ssh", "exit 0")
     return bin_dir
 
-def run_deploy(repo_root, mock_bin, args):
+def run_deploy(repo_root, mock_bin, args, *, env_overrides=None):
     env = os.environ.copy()
     env["PATH"] = str(mock_bin).replace('\\', '/') + ":" + env["PATH"]
+    if env_overrides:
+        env.update(env_overrides)
     script = repo_root / "host" / "eeepc" / "scripts" / "deploy_release.sh"
     res = subprocess.run(
         ["bash", str(script)] + args,
@@ -653,8 +664,9 @@ def test_dashboard_cmdline_check_matches_the_current_symlink_not_a_release_dir()
 
 def test_verify_only_uses_privileged_current_reads_and_skips_mutations() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    assert 'RELEASE_DIR="$(gate_read "$CURRENT_SYMLINK" sudo readlink -v "$CURRENT_SYMLINK")"' in script
-    assert 'FULL_COMMIT="$(sudo cat "$RELEASE_DIR/SOURCE_COMMIT")"' in script
+    assert '[remote] VERIFY-ONLY mode: running selected candidate gate' in script
+    assert 'GATE_TMP="${GATE_TMP:?candidate gate temp directory was not supplied}"' in script
+    assert 'FULL_COMMIT="$(git -C "$REPO_ROOT" rev-parse "$COMMIT^{commit}")"' in script
     assert 'if [ "$VERIFY_ONLY" -eq 0 ]; then' in script
     assert 'VERIFY_ONLY" -eq 1' in script
     gate_script = (REPO_ROOT / "scripts" / "verify_release_health.py").read_text(encoding="utf-8")
@@ -677,11 +689,182 @@ def test_verify_only_semantic_gate_rejects_stale_raw_dashboard(monkeypatch) -> N
     assert 'materialize_synthesized_improvement' in gate_script
 
 
+def test_verify_only_streams_candidate_gate_without_requiring_live_gate_file(repo, mock_bin, monkeypatch) -> None:
+    """Regression: verify the candidate gate, not code installed in current."""
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    remote = _remote_block(script)
+    assert 'VERIFY_ONLY' in script and 'git -C "$REPO_ROOT" archive --format=tar "$COMMIT" scripts nanobot host/eeepc/etc' in script
+    assert "VERIFY_ONLY" in remote
+    assert "verify_release_health.py" in remote
+    assert "GATE_TMP=" in remote
+    assert 'sudo -u eeepc-agent env PYTHONPATH="$GATE_TMP"' in remote
+    assert '"$GATE_TMP/scripts/verify_release_health.py"' in remote
+    assert '"$RELEASE_DIR/scripts/verify_release_health.py"' in remote
+    assert 'test -f "$RELEASE_DIR/scripts/verify_release_health.py"' not in remote
+    usage = script.splitlines()[5]
+    assert "--ref <sha>" in usage and "--verify-only" in usage
+    assert "candidate" in script.lower() and "empty state" in script.lower()
+
+    for relative in ("scripts/verify_release_health.py", "nanobot/__init__.py", "host/eeepc/etc/presets/test.env"):
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("candidate gate fixture\\n", encoding="utf-8")
+    candidate_gate = repo / "scripts" / "verify_release_health.py"
+    candidate_gate.write_text("print('candidate-gate-v2')\\n", encoding="utf-8")
+    _git("add", ".", cwd=repo, check=True)
+    _git("commit", "-m", "candidate gate", cwd=repo, check=True)
+    monkeypatch.setenv("REPO_ROOT", str(repo))
+    commands = repo / "commands.log"
+    mock_log = shlex.quote(str(commands))
+    candidate_tmp = shlex.quote(str(repo / "candidate-gate-temp"))
+    candidate_py = shlex.quote(str(candidate_gate))
+    ssh_body = f'''#!/usr/bin/env bash
+set -e
+if [[ "$*" == *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"* ]]; then
+  echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/old
+  exit 0
+fi
+if [[ "$*" == *"mktemp -d /tmp/eeebot-verify-gate."* ]]; then
+  mkdir -p {candidate_tmp}/scripts
+  cp {candidate_py} {candidate_tmp}/scripts/verify_release_health.py
+  echo {candidate_tmp}
+  exit 0
+fi
+case "$*" in
+  *"sudo rm -rf {candidate_tmp}"*) rm -rf {candidate_tmp}; exit 0 ;;
+  *) : ;;
+esac
+if [[ "$*" == *"VERIFY_ONLY=1"* ]]; then
+  echo candidate-gate-v2 >> {mock_log}
+  grep -q candidate-gate-v2 {candidate_tmp}/scripts/verify_release_health.py || exit $?
+  exit 0
+fi
+exit 0
+'''
+    _write_mock(mock_bin / "ssh", ssh_body)
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", "HEAD"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "candidate-gate-v2" in commands.read_text(encoding="utf-8")
+    # The deployment EXIT trap is exercised on the remote shell path; this
+    # staging-only SSH mock has no remote EXIT trap to run.
+
+
+def test_verify_only_runs_gate_from_requested_commit_not_checkout_head(repo, mock_bin, monkeypatch, tmp_path) -> None:
+    """The production archive selection must deliver and run the requested gate."""
+    gate = repo / "scripts/verify_release_health.py"
+    gate.parent.mkdir(parents=True)
+    gate.write_text("print('CANDIDATE_GATE_ONLY')\n", encoding="utf-8")
+    (repo / "nanobot").mkdir()
+    (repo / "nanobot/__init__.py").write_text("# fixture\n", encoding="utf-8")
+    (repo / "host/eeepc/etc/presets").mkdir(parents=True)
+    (repo / "host/eeepc/etc/presets/test.env").write_text("FIXTURE=1\n", encoding="utf-8")
+    _git("add", "scripts", "nanobot", "host/eeepc/etc/presets", cwd=repo, check=True)
+    _git("commit", "-m", "candidate verifier", cwd=repo, check=True)
+    candidate = _git("rev-parse", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    gate.write_text("print('ADVANCED_HEAD_ONLY')\n", encoding="utf-8")
+    _git("add", "scripts/verify_release_health.py", cwd=repo, check=True)
+    _git("commit", "-m", "advance verifier after candidate", cwd=repo, check=True)
+    head = _git("rev-parse", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    assert candidate != head
+
+    stage = tmp_path / "candidate-stage"
+    stage_arg = shlex.quote(str(stage).replace("\\", "/"))
+    _write_mock(mock_bin / "mktemp", f'mkdir -p {stage_arg}; printf "%s\\n" {stage_arg}')
+    _write_mock(mock_bin / "sudo", 'exit 0')
+    ssh_log = shlex.quote(str(tmp_path / "ssh.log").replace("\\", "/"))
+    _write_mock(mock_bin / "ssh", f'''echo "$*" >> {ssh_log}
+case "$*" in
+  *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/old; exit 0 ;;
+esac
+case "$*" in
+  *"mktemp -d /tmp/eeebot-verify-gate."*)
+    output=$(bash -c "$2") || exit $?
+    staged=$(printf '%s\\n' "$output" | tail -n 1)
+    python3 "$staged/scripts/verify_release_health.py" >&2 || exit $?
+    printf '%s\\n' "$staged"
+    ;;
+  *"GATE_TMP="*) cat >/dev/null; exit 0 ;;
+  *) exit 0 ;;
+esac
+''')
+    monkeypatch.setenv("REPO_ROOT", str(repo))
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", candidate])
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "CANDIDATE_GATE_ONLY" in output
+    assert "ADVANCED_HEAD_ONLY" not in output
+
+
+def test_verify_only_passes_when_live_release_has_no_gate_file(repo, mock_bin, monkeypatch) -> None:
+    """The live release must not supply or be required to contain the candidate gate."""
+    for relative in ("scripts/verify_release_health.py", "nanobot/__init__.py", "host/eeepc/etc/presets/test.env"):
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("candidate gate fixture\\n", encoding="utf-8")
+    gate = repo / "scripts" / "verify_release_health.py"
+    gate.write_text("print('candidate-gate-v2')\\n", encoding="utf-8")
+    _git("add", ".", cwd=repo, check=True)
+    _git("commit", "-m", "candidate with gate", cwd=repo, check=True)
+    monkeypatch.setenv("REPO_ROOT", str(repo))
+    candidate_tmp = shlex.quote(str(repo / "candidate-gate-temp"))
+    candidate_py = shlex.quote(str(gate))
+    mock_log = shlex.quote(str(repo / "commands.log"))
+    _write_mock(mock_bin / "ssh", f'''#!/usr/bin/env bash
+set -e
+case "$*" in
+  *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/old; exit 0 ;;
+  *"mktemp -d /tmp/eeebot-verify-gate."*) mkdir -p {candidate_tmp}/scripts; cp {candidate_py} {candidate_tmp}/scripts/verify_release_health.py; echo {candidate_tmp}; exit 0 ;;
+  *"rm -rf '{candidate_tmp}'"*) rm -rf {candidate_tmp}; exit 0 ;;
+  *"rm -rf /tmp/eeebot-verify-gate."*) exit 0 ;;
+  *"GATE_TMP="*) echo candidate-gate-v2 >> {mock_log}; exit 0 ;;
+  *"VERIFY_ONLY=1"*) test -f {candidate_tmp}/scripts/verify_release_health.py; echo candidate-gate-v2 >> {mock_log}; exit 0 ;;
+esac
+exit 0
+''')
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", "HEAD"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "candidate-gate-v2" in (repo / "commands.log").read_text(encoding="utf-8")
+
+
+def test_verify_only_remote_cleanup_happens_after_gate_invocation(repo, mock_bin, monkeypatch) -> None:
+    """Candidate cleanup belongs to the remote EXIT trap, after gate execution."""
+    script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    remote = _remote_block(script)
+    assert "VERIFY_ONLY=1" in script
+    gate_command = '"$GATE_TMP/scripts/verify_release_health.py"'
+    cleanup_command = "trap 'sudo rm -rf \"$GATE_TMP\"' EXIT"
+    assert gate_command in remote and cleanup_command in remote
+    assert "cleanup_candidate_gate()" in script
+    assert 'sudo -n rm -rf -- \'$GATE_TMP\'' in script
+    assert 'VERIFY_GATE_REMOTE_STARTED=0' not in script
+
+    # --dry-run is an offline plan: no SSH call (including staging) is allowed.
+    calls = repo / "ssh-calls.txt"
+    _write_mock(mock_bin / "ssh", f'echo called >> {shlex.quote(str(calls))}; exit 0')
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--dry-run", "--ref", "HEAD"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not calls.exists()
+
+
+def test_verify_only_other_candidate_ref_is_allowed_from_clean_checkout(repo, mock_bin, monkeypatch) -> None:
+    _git("branch", "other-candidate", cwd=repo, check=True)
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", "other-candidate"])
+    assert "Refuse to verify" not in (result.stdout + result.stderr)
+
+
+def test_verify_only_dry_run_does_not_contact_ssh(repo, mock_bin):
+    calls = repo / "ssh-calls.txt"
+    _write_mock(mock_bin / "ssh", f'echo called >> {shlex.quote(str(calls))}; exit 0')
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--dry-run", "--ref", "HEAD"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not calls.exists()
+
+
 def test_verify_only_has_no_mutation_or_health_wait_path() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    assert 'VERIFY-ONLY mode active. Skipping archive and upload.' in script
+    assert 'VERIFY-ONLY mode: candidate $COMMIT; stream candidate gate only' in script
     assert 'if [ "$VERIFY_ONLY" -eq 0 ]; then' in script
-    assert 'if [ "$NO_HEALTH_GATE" -eq 1 ] || [ "$DRY_RUN" -eq 1 ] || [ "$VERIFY_ONLY" -eq 1 ]' in script
+    assert 'if [ "$VERIFY_ONLY" -eq 1 ]; then\n  log "Health gate passed against candidate $COMMIT."' in script
     remote = script.split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
     assert 'if [ "$VERIFY_ONLY" -eq 0 ]; then' in remote
     assert 'if [ "$VERIFY_ONLY" -eq 1 ]; then' in remote
@@ -705,10 +888,11 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
         _write_mock(bindir / name, body)
 
     log = shlex.quote(str(commands))
+    gate_tmp = root / "candidate-gate"
     mock("systemctl", f'''echo "systemctl $*" >> {log}
-    case "$*" in *eeepc-network-fallback.*"-p LoadState"*) echo not-found;; *"-p LoadState"*) echo loaded;; *"-p MainPID"*) echo 4242;; *"-p ExecMainStartTimestamp"*) echo now;; *"is-enabled"*) echo enabled;; *"is-active"*eeepc-network-fallback.*) exit 1;; *"is-active"*) exit 0;; *) exit 97;; esac''')
+    case "$*" in *eeepc-network-fallback.*"-p LoadState"*) echo not-found;; *"-p LoadState"*) echo loaded;; *"-p MainPID"*) echo 4242;; *"-p ExecMainStartTimestamp"*) echo now;; *"is-enabled"*) echo enabled;; *"is-active"*eeepc-network-fallback.*) exit 1;; *"is-active"*) exit 0;; *) exit 0;; esac''')
     mock("sudo", f'''echo "sudo $*" >> {log}
-    case "$1" in -u) shift 2; "$@";; readlink) echo {shlex.quote(str(release))};; cat) if [[ "$2" == *SOURCE_COMMIT ]]; then echo {sha}; else printf "python3 /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0\\0"; fi;; ss) echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("python3",pid=4242,fd=3))';; *) exit 97;; esac''')
+    case "$1" in -u) shift 2; "$@";; readlink) if [[ "$2" == */cwd ]]; then echo {shlex.quote(str(gate_tmp))}; else echo {shlex.quote(str(release))}; fi;; cat) if [[ "$2" == *SOURCE_COMMIT ]]; then echo {sha}; else printf "python3 /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0\\0"; fi;; ss) echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("python3",pid=4242,fd=3))';; chown|rm) exit 0;; *) exit 97;; esac''')
     mock("ss", f'''echo "ss $*" >> {log}; echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("python3",pid=4242,fd=3))' ''')
     mock("curl", f'''echo "curl $*" >> {log}; case "$*" in *--write-out*) out=""; prev=""; for a in "$@"; do [ "$prev" = "--output" ] && out="$a"; prev="$a"; done; head -c 2048 /dev/zero | tr "\\0" x > "$out"; echo 200;; *health*) echo '{{"overall":"WARN","dimensions":{{"reward":{{"status":"WARN","detail":"source=stale"}},"gate":{{"status":"WARN","detail":"source=stale"}}}},"goal":"stale","active_task":"stale","reward_average":"stale; age=100.0h (context-only artifact)"}}';; *) echo '{{"goal":"stale; age=100.0h (context-only artifact)","active_task":"stale; age=100.0h (context-only artifact)","approval_gate_state":"stale; age=100.0h (context-only artifact)","reward_average":"stale; age=100.0h (context-only artifact)","reward_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"goal_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"active_task_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"approval_gate_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"latest_report_path":null,"materialized_path":null}}';; esac''')
     scripts_dir = release / "scripts"
@@ -717,15 +901,27 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
     mock("python3", f'''echo "python3 $*" >> {log}; exit 0''')
     mock("sleep", f'''echo "sleep $*" >> {log}; exit 97''')
     mock("stat", f'''echo "stat $*" >> {log}; echo 0:0''')
+    mock("install", f'''echo "install $*" >> {log}; exit 0''')
+    mock("cp", f'''echo "cp $*" >> {log}; exit 0''')
+    mock("mkdir", f'''echo "mkdir $*" >> {log}; exit 0''')
+    mock("tee", f'''echo "tee $*" >> {log}; cat >/dev/null; exit 0''')
+    mock("rmdir", f'''echo "rmdir $*" >> {log}; exit 0''')
 
     remote_path = root / "remote.sh"
     remote_path.write_text(remote.replace("/opt/eeepc-agent", str(root / "opt/eeepc-agent")), encoding="utf-8")
-    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release))
+    (gate_tmp / "scripts").mkdir(parents=True)
+    (gate_tmp / "scripts" / "verify_release_health.py").write_text("print('candidate')\\n", encoding="utf-8")
+    mock("rm", f'''echo "rm $*" >> {log}; exit 0''')
+    mock("chown", f'''echo "chown $*" >> {log}; exit 0''')
+    mock("env", f'''echo "env $*" >> {log}; while [[ "$1" == *=* ]]; do shift; done; exec "$@"''')
+    mock("tar", f'''echo "tar $*" >> {log}; exit 0''')
+    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"))
     result = subprocess.run(["bash", str(remote_path)], cwd=root, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     seen = commands.read_text(encoding="utf-8")
-    for token in ("tar xzf", "scp ", "ln -sfn", "chown", "chmod", "daemon-reload", "restart", "stop ", "disable ", "sleep "):
+    for token in ("tar xzf", "scp ", "ln -sfn", "chmod", "daemon-reload", "restart", "stop ", "disable ", "sleep "):
         assert token not in seen, seen
+    assert f"chown -R eeepc-agent:eeepc-agent {gate_tmp}" in seen
     assert "verify_release_health.py" in seen
     assert "curl" not in seen
 
@@ -761,13 +957,14 @@ def test_gate_reads_distinguish_unreadable_from_empty() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     block = _remote_block(script)
 
-    for what in ('"/proc/$DASHBOARD_PID/cwd"', '"/proc/$DASHBOARD_PID/cmdline"', '"$CURRENT_SYMLINK"'):
+    for what in ('"/proc/$DASHBOARD_PID/cwd"', '"/proc/$DASHBOARD_PID/cmdline"'):
         assert f"gate_read {what} sudo " in block, f"gate read missing for {what}"
     assert 'readlink "/proc/$DASHBOARD_PID/cwd" 2>/dev/null || true' not in block
     assert 'cmdline" 2>/dev/null | tr' not in block
     assert 'sudo ss -ltnpH 2>/dev/null' not in block
     assert 'sudo ss -ltnH 2>/dev/null' not in block
     assert 'readlink "$CURRENT_SYMLINK" || true' not in block
+    assert 'gate_read "$CURRENT_SYMLINK" sudo ' not in block  # verify-only no longer reads current's release target
     assert 'unreadable: $what (exit $rc:' in block
     # The health gate's recorder read says "unreadable" once instead of polling
     # silently to a timeout; the decision it feeds is unchanged.
