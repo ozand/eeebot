@@ -704,11 +704,19 @@ from scripts.verify_release_health import compare_health_dimensions
 def read(path):
     with open(path, encoding="utf-8") as stream:
         data = json.load(stream)
-    rows = data.get("dimensions") if isinstance(data, dict) else None
-    if not isinstance(rows, list):
-        raise ValueError("dimension report must contain a list")
+    dimensions = data.get("dimensions") if isinstance(data, dict) else None
+    if isinstance(dimensions, dict):
+        result = {}
+        for name, value in dimensions.items():
+            status = value.get("status") if isinstance(value, dict) else value
+            if not isinstance(name, str) or not name or status not in {"OK", "WARN", "CRIT"}:
+                raise ValueError(f"malformed dimension: {name!r}={value!r}")
+            result[name] = status
+        return result
+    if not isinstance(dimensions, list):
+        raise ValueError("dimension report must contain a list or mapping")
     result = {}
-    for row in rows:
+    for row in dimensions:
         fields = row.split()
         if len(fields) != 3 or fields[0] != "dim" or fields[2] not in {"OK", "WARN", "CRIT"}:
             raise ValueError(f"malformed dimension row: {row!r}")

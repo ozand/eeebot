@@ -144,7 +144,9 @@ exec {shlex.quote(sys.executable)} "$@"
 def test_remote_verify_runs_candidate_and_never_mutates_units_or_current(tmp_path: Path, gate_source: str, expected_rc: int, marker: str) -> None:
     result, before_systemd, sandbox = _run_remote_gate(tmp_path, gate_source)
     output = result.stdout + result.stderr
-    assert result.returncode == expected_rc, output
+    assert result.returncode == expected_rc, (
+        f"remote verify rc={result.returncode}, expected={expected_rc}; full output/final remote trace:\n{output}"
+    )
     assert marker in output
     assert "ADVANCED_HEAD_ONLY" not in output, "candidate gate must not come from advanced checkout HEAD"
     assert not (tmp_path / "candidate").exists()
