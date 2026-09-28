@@ -113,6 +113,34 @@ def test_malformed_records_counted_and_backfill_processes_two_days(tmp_path: Pat
     }
 
 
+def test_goal_review_prompt_does_not_define_cycle_actions(tmp_path: Path):
+    _seed_ledger(tmp_path, "cycle-review", "Goal review")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    _write(tmp_path / "llm_calls" / "prompts" / f"{today}.jsonl", [
+        {
+            "cycle_id": "cycle-review", "component": "goal_review", "seq": 1,
+            "messages": [{"role": "assistant", "tool_calls": [{
+                "function": {"name": "edit_file", "arguments": {"path": "scripts/not-an-action.py"}},
+            }]}],
+        },
+        {
+            "cycle_id": "cycle-review", "component": "executor", "seq": 1,
+            "messages": [{"role": "assistant", "tool_calls": [{
+                "function": {"name": "edit_file", "arguments": {"path": "scripts/real-action.py"}},
+            }]}],
+        },
+    ])
+
+    summary = build_action_index(tmp_path)
+
+    assert summary["written"] == 1
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    rows = [json.loads(line) for line in
+            (tmp_path / "action_index" / f"{today}.jsonl").read_text().splitlines()]
+    assert rows[0]["actions"] == ["edit:scripts/*.py"]
+    assert rows[0]["actions_detail"] == ["edit:scripts/*.py"]
+
+
 def test_skips_fully_indexed_historical_day_files_without_opening(tmp_path: Path, monkeypatch):
     """Issue #1059: historical day files that are already fully indexed must not be opened."""
     import gzip
