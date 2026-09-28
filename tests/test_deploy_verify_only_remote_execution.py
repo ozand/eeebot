@@ -119,11 +119,15 @@ exec {shlex.quote(sys.executable)} "$@"
     return result, before_systemd, (systemd_sandbox, roots)
 
 
-def test_remote_verify_runs_candidate_and_never_mutates_units_or_current(tmp_path: Path):
-    result, before_systemd, sandbox = _run_remote_gate(tmp_path, "print('CANDIDATE_GATE_EXECUTED')\n")
+@pytest.mark.parametrize(("gate_source", "expected_rc", "marker"), [
+    ("print('CANDIDATE_GATE_EXECUTED')\n", 0, "CANDIDATE_GATE_EXECUTED"),
+    ("raise SystemExit(23)\n", 1, "VERIFY_ONLY HEALTH_FETCH_FAILED"),
+])
+def test_remote_verify_runs_candidate_and_never_mutates_units_or_current(tmp_path: Path, gate_source: str, expected_rc: int, marker: str) -> None:
+    result, before_systemd, sandbox = _run_remote_gate(tmp_path, gate_source)
     output = result.stdout + result.stderr
-    assert result.returncode == 0, output
-    assert "CANDIDATE_GATE_EXECUTED" in output
+    assert result.returncode == expected_rc, output
+    assert marker in output
     assert "ADVANCED_HEAD_ONLY" not in output, "candidate gate must not come from advanced checkout HEAD"
     assert not (tmp_path / "candidate").exists()
     assert not (tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent/current/SOURCE_COMMIT").exists()
@@ -192,13 +196,23 @@ def test_production_archive_stream_matches_candidate_tree_and_not_advanced_head(
     _git("commit", "-m", "advance HEAD", cwd=source, check=True)
 
     deploy = DEPLOY_SCRIPT.read_text(encoding="utf-8")
-    archive_command = next(line.strip().removesuffix("\\") for line in deploy.splitlines()
-                           if 'GATE_TMP="$(git -C "$REPO_ROOT" archive --format=tar' in line)
-    archive_args = ["archive", "--format=tar", candidate, "scripts", "nanobot", "host/eeepc/etc"]
+    archive_prefix = '  GATE_TMP="$(git -C "$REPO_ROOT" archive --format=tar '
+    archive_lines = deploy.splitlines()
+    archive_start = next(i for i, line in enumerate(archive_lines) if line.startswith(archive_prefix))
+    archive_command = "\n".join(
+        line.strip().removesuffix("\\")
+        for line in archive_lines[archive_start:]
+        if line.strip()
+    ).split(" |", 1)[0]
+    archive_pipeline = archive_command.removeprefix('GATE_TMP="$(')
+    mutated_pipeline = archive_pipeline.replace('"$COMMIT"', 'HEAD', 1)
+    assert mutated_pipeline != archive_pipeline, "production archive-ref mutation did not apply"
+    archive_args = archive_pipeline.removeprefix('git -C "$REPO_ROOT" archive --format=tar ').split()
+    archive_args = [candidate if arg == '"$COMMIT"' else arg.strip('"') for arg in archive_args]
     if os.environ.get("MUTATE_ARCHIVE_REF"):
         archive_args[archive_args.index(candidate)] = "HEAD"
     archive = subprocess.run(
-        ["git", "-C", str(source), *archive_args], capture_output=True, check=True,
+        ["git", "-C", str(source), "archive", "--format=tar", *archive_args], capture_output=True, check=True,
     )
     expected = subprocess.check_output(
         ["git", "-C", str(source), "ls-tree", "-r", "--name-only", candidate, "--", "scripts", "nanobot", "host/eeepc/etc"], text=True
@@ -209,6 +223,7 @@ def test_production_archive_stream_matches_candidate_tree_and_not_advanced_head(
         archive_members = sorted(member.name for member in bundle.getmembers() if member.isfile())
         bundle.extractall(stage, filter="data")
     assert archive_members == sorted(expected)
+    assert "ADVANCED_HEAD_ONLY" not in archive_members
     actual = sorted(p.relative_to(stage).as_posix() for p in stage.rglob("*") if p.is_file())
     assert actual == sorted(expected)
     result = subprocess.run([sys.executable, str(stage / "scripts/verify_release_health.py")], capture_output=True, text=True)
