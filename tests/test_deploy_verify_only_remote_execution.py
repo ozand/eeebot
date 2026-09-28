@@ -59,7 +59,7 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
             import json
 
             def verify_release_health():
-                return {"health": {"dimensions": {}}}
+                return {"health": {"dimensions": {"disk": {"status": "OK"}}}}
 
             def compare_health_dimensions(baseline, candidate):
                 rows, findings = [], []

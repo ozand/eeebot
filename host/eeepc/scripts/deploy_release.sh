@@ -702,9 +702,18 @@ import sys
 from scripts.verify_release_health import compare_health_dimensions
 
 def read(path):
-    with open(path, encoding="utf-8") as stream:
-        data = json.load(stream)
-    dimensions = data.get("dimensions") if isinstance(data, dict) and "dimensions" in data else data
+    with open(path, "rb") as stream:
+        raw = stream.read()
+    if not raw.strip():
+        raise ValueError(f"empty dimension JSON input (bytes={len(raw)})")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid dimension JSON (bytes={len(raw)}): {exc.msg} at line {exc.lineno} column {exc.colno}") from exc
+    dimensions = data
+    if isinstance(dimensions, dict) and isinstance(dimensions.get("health"), dict):
+        dimensions = dimensions["health"]
+    dimensions = dimensions.get("dimensions") if isinstance(dimensions, dict) and "dimensions" in dimensions else dimensions
     if isinstance(dimensions, dict):
         result = {}
         for name, value in dimensions.items():

@@ -1072,7 +1072,7 @@ esac
     print(output)
     assert (result.returncode == 0) is should_pass, (
         f"verify-only remote exit={result.returncode}, expected_pass={should_pass}; "
-        f"stdout/stderr and final remote trace:\n{output}"
+        f"full deploy stdout/stderr:\n{output}"
     )
     assert "candidate gate staged at /tmp/eeebot-verify-gate.ABC123" in output
     assert expected_output in output
