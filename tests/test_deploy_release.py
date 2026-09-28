@@ -987,6 +987,7 @@ def test_verify_only_dimension_delta_through_production_path(
     monkeypatch.setenv("REPO_ROOT", str(repo))
     monkeypatch.setenv("REPORT", str(candidate_path))
     monkeypatch.setenv("BASELINE_REPORT", str(baseline_path))
+    monkeypatch.setenv("VERIFY_ONLY_DIMENSION_COMPARE", "1")
     commands = repo / "verify-only-commands.log"
     log = shlex.quote(str(commands))
     ssh = f'''echo "$*" >> {log}
