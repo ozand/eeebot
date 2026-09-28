@@ -696,7 +696,7 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
     if ! sudo -n -u eeepc-agent env PYTHONPATH="$GATE_TMP" PYTHONDONTWRITEBYTECODE=1 "$HEALTH_GATE_PYTHON" -c 'import json; from scripts.verify_release_health import verify_release_health; print(json.dumps(verify_release_health()["health"]["dimensions"], sort_keys=True))' > "$VERIFY_ONLY_CANDIDATE_DIMENSIONS"; then
       die "could not collect candidate health dimensions"
     fi
-    if ! "$HEALTH_GATE_PYTHON" - "$VERIFY_ONLY_LIVE_DIMENSIONS" "$VERIFY_ONLY_CANDIDATE_DIMENSIONS" <<'VERIFY_DIMENSIONS'
+    if ! PYTHONPATH="$GATE_TMP" "$HEALTH_GATE_PYTHON" - "$VERIFY_ONLY_LIVE_DIMENSIONS" "$VERIFY_ONLY_CANDIDATE_DIMENSIONS" <<'VERIFY_DIMENSIONS'
 import json
 import sys
 from scripts.verify_release_health import compare_health_dimensions

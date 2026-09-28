@@ -975,7 +975,36 @@ def test_verify_only_dimension_delta_through_production_path(
     (repo / "nanobot/__init__.py").write_text("# test runtime package\\n", encoding="utf-8")
     (repo / "host/eeepc/etc/presets").mkdir(parents=True)
     (repo / "host/eeepc/etc/presets/test.env").write_text("TEST=1\\n", encoding="utf-8")
-    (scripts / "verify_release_health.py").write_text("import json, os; from pathlib import Path; report = json.loads(Path(os.environ['REPORT']).read_text()); verify_release_health = lambda: {'health': {'dimensions': {r.split()[1]: {'status': r.split()[2]} for r in report['dimensions']}}}; print(json.dumps(verify_release_health())); print('CANDIDATE_GATE_EXECUTED')\n", encoding="utf-8")
+    (scripts / "verify_release_health.py").write_text(textwrap.dedent('''\
+        import json
+        import os
+        from pathlib import Path
+
+        def verify_release_health():
+            report = json.loads(Path(os.environ['REPORT']).read_text())
+            dimensions = {row.split()[1]: {'status': row.split()[2]} for row in report['dimensions']}
+            return {'health': {'dimensions': dimensions}}
+
+        def compare_health_dimensions(baseline, candidate):
+            rows, findings = [], []
+            for name in sorted(baseline.keys() - candidate.keys()):
+                rows.append(f'VERIFY_ONLY DIMENSION_MISSING {name}')
+                findings.append(f'dimension missing: {name}')
+            for name in sorted(candidate.keys() - baseline.keys()):
+                rows.append(f'VERIFY_ONLY DIMENSION_ADDED {name} {candidate[name]}')
+                if name not in {'cpu', 'queue'} and candidate[name] in {'WARN', 'CRIT'}:
+                    findings.append(f'new dimension {name}: {candidate[name]}')
+            for name in sorted(baseline.keys() & candidate.keys()):
+                before, after = baseline[name], candidate[name]
+                rows.append(f'VERIFY_ONLY DIMENSION {name} {before} -> {after}')
+                if name not in {'cpu', 'queue'} and not (name in {'reward', 'gate'} and after == 'WARN'):
+                    if {'OK': 0, 'WARN': 1, 'CRIT': 2}[after] > {'OK': 0, 'WARN': 1, 'CRIT': 2}[before]:
+                        findings.append(f'{name}: {before} -> {after}')
+            return rows, findings
+
+        print(json.dumps(verify_release_health()))
+        print('CANDIDATE_GATE_EXECUTED')
+    '''), encoding="utf-8")
     original_head = _git("rev-parse", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
     _git("add", "scripts/verify_release_health.py", "nanobot", "host/eeepc/etc/presets", cwd=repo, check=True)
     _git("commit", "-m", "candidate dimension gate", cwd=repo, check=True, env={
@@ -1001,7 +1030,7 @@ case "$*" in
     remote_script={shlex.quote(str(repo / "remote-script.sh"))}
     cat > "$remote_script"
     export REPORT={shlex.quote(str(candidate_path))}
-    bash -c "$2" < "$remote_script"
+    PS4='+ $(date +%s) ' bash -x -c "$2" < "$remote_script"
     exit $? ;;
 esac
 exit 0
@@ -1041,7 +1070,10 @@ esac
     result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", candidate_commit], env_overrides=env)
     output = result.stdout + result.stderr
     print(output)
-    assert (result.returncode == 0) is should_pass, output
+    assert (result.returncode == 0) is should_pass, (
+        f"verify-only remote exit={result.returncode}, expected_pass={should_pass}; "
+        f"stdout/stderr and final remote trace:\n{output}"
+    )
     assert "candidate gate staged at /tmp/eeebot-verify-gate.ABC123" in output
     assert expected_output in output
     if expected_status:
