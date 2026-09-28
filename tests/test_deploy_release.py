@@ -978,9 +978,10 @@ case "$*" in
   *"mktemp -d /tmp/eeebot-verify-gate."*) mkdir -p /tmp/eeebot-verify-gate.ABC123; cp -R {shlex.quote(str(repo / "scripts"))} /tmp/eeebot-verify-gate.ABC123/; echo /tmp/eeebot-verify-gate.ABC123; exit 0 ;;
   *"sudo -n rm -rf -- '/tmp/eeebot-verify-gate.ABC123'"*) exit 0 ;;
   *"GATE_TMP='/tmp/eeebot-verify-gate.ABC123'"*)
-    export REPORT={shlex.quote(str(candidate_path))}
     remote_script={shlex.quote(str(repo / "remote-script.sh"))}
-    bash "$remote_script"
+    cat > "$remote_script"
+    export REPORT={shlex.quote(str(candidate_path))}
+    bash -c "$2" < "$remote_script"
     exit $? ;;
 esac
 exit 0
@@ -988,7 +989,11 @@ exit 0
     remote_script = repo / "remote-script.sh"
     remote = DEPLOY_SCRIPT.read_text(encoding="utf-8").split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
     remote = remote.replace("/opt/eeepc-agent", str(tmp_path / "opt/eeepc-agent").replace("\\", "/"))
-    live_release = tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent/releases/baseline"
+    runtime_root = tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent"
+    runtime_root.mkdir(parents=True)
+    current = runtime_root / "current"
+    current.symlink_to(runtime_root / "releases/baseline", target_is_directory=True)
+    live_release = runtime_root / "releases/baseline"
     live_gate = live_release / "scripts"
     live_gate.mkdir(parents=True)
     (live_gate / "verify_release_health.py").write_text(
@@ -997,6 +1002,20 @@ exit 0
     )
     remote_script.write_text(remote, encoding="utf-8")
     _write_mock(mock_bin / "ssh", ssh)
+    _write_mock(mock_bin / "stat", '''if [[ "$*" == *current* ]]; then echo 0:0; else command stat "$@"; fi''')
+    _write_mock(mock_bin / "systemctl", '''case "$*" in *eeepc-network-fallback*"-p LoadState"*) echo not-found ;; *"-p LoadState"*eeepc-network-fallback*) echo not-found ;; *"-p LoadState"*) echo loaded ;; *is-active*eeepc-network-fallback*) exit 1 ;; *is-active*) exit 0 ;; *is-enabled*) echo enabled ;; *"-p UnitFileState"*) echo disabled ;; *) exit 0 ;; esac''')
+    _write_mock(mock_bin / "sudo", f'''while [[ "$1" == -* ]]; do
+  case "$1" in -n) shift ;; -u) shift 2 ;; *) exit 97 ;; esac
+done
+case "$1" in
+  env) shift; while [[ "$1" == *=* ]]; do export "$1"; shift; done; exec "$@" ;;
+  rm|chown|chmod|mkdir|cp|install|tee|rmdir|ln|tar) exit 0 ;;
+  systemctl) exit 0 ;;
+  python3) shift; exec python "$@" ;;
+  stat) echo 0:0 ;;
+  *) echo "unexpected sudo command: $*" >&2; exit 97 ;;
+esac
+''')
     env = {"REPORT": str(candidate_path)}
     result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", candidate_commit], env_overrides=env)
     output = result.stdout + result.stderr
