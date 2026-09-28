@@ -976,12 +976,26 @@ def test_verify_only_dimension_delta_through_production_path(
 case "$*" in
   *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/baseline; exit 0 ;;
   *"mktemp -d /tmp/eeebot-verify-gate."*) mkdir -p /tmp/eeebot-verify-gate.ABC123; cp -R {shlex.quote(str(repo / "scripts"))} /tmp/eeebot-verify-gate.ABC123/; echo /tmp/eeebot-verify-gate.ABC123; exit 0 ;;
-  *"VERIFY_ONLY=1"*)
+  *"sudo -n rm -rf -- '/tmp/eeebot-verify-gate.ABC123'"*) exit 0 ;;
+  *"GATE_TMP='/tmp/eeebot-verify-gate.ABC123'"*)
     export REPORT={shlex.quote(str(candidate_path))}
-    bash -c "${{@: -1}}"; exit $? ;;
+    remote_script={shlex.quote(str(repo / "remote-script.sh"))}
+    bash "$remote_script"
+    exit $? ;;
 esac
 exit 0
 '''
+    remote_script = repo / "remote-script.sh"
+    remote = DEPLOY_SCRIPT.read_text(encoding="utf-8").split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
+    remote = remote.replace("/opt/eeepc-agent", str(tmp_path / "opt/eeepc-agent").replace("\\", "/"))
+    live_release = tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent/releases/baseline"
+    live_gate = live_release / "scripts"
+    live_gate.mkdir(parents=True)
+    (live_gate / "verify_release_health.py").write_text(
+        "import json, os; from pathlib import Path; p=Path(os.environ['REPORT']); print(json.dumps({'health': {'dimensions': {r.split()[1]: {'status': r.split()[2]} for r in json.loads(p.read_text())['dimensions']}}}))\\n",
+        encoding="utf-8",
+    )
+    remote_script.write_text(remote, encoding="utf-8")
     _write_mock(mock_bin / "ssh", ssh)
     env = {"REPORT": str(candidate_path)}
     result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", candidate_commit], env_overrides=env)
