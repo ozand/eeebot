@@ -704,7 +704,7 @@ from scripts.verify_release_health import compare_health_dimensions
 def read(path):
     with open(path, encoding="utf-8") as stream:
         data = json.load(stream)
-    dimensions = data.get("dimensions") if isinstance(data, dict) else None
+    dimensions = data.get("dimensions") if isinstance(data, dict) and "dimensions" in data else data
     if isinstance(dimensions, dict):
         result = {}
         for name, value in dimensions.items():

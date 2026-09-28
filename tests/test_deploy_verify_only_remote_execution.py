@@ -56,11 +56,28 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
     gate_path.write_text(
         textwrap.dedent('''
+            import json
+
             def verify_release_health():
                 return {"health": {"dimensions": {}}}
 
             def compare_health_dimensions(baseline, candidate):
-                return [], []
+                rows, findings = [], []
+                for name in sorted(baseline.keys() - candidate.keys()):
+                    rows.append(f"VERIFY_ONLY DIMENSION_MISSING {name}")
+                    findings.append(f"dimension missing: {name}")
+                for name in sorted(candidate.keys() - baseline.keys()):
+                    status = candidate[name]
+                    rows.append(f"VERIFY_ONLY DIMENSION_ADDED {name} {status}")
+                    if name not in {"cpu", "queue"} and status in {"WARN", "CRIT"}:
+                        findings.append(f"new dimension {name}: {status}")
+                for name in sorted(baseline.keys() & candidate.keys()):
+                    before, after = baseline[name], candidate[name]
+                    rows.append(f"VERIFY_ONLY DIMENSION {name} {before} -> {after}")
+                    if name not in {"cpu", "queue"} and not (name in {"reward", "gate"} and after == "WARN"):
+                        if {"OK": 0, "WARN": 1, "CRIT": 2}[after] > {"OK": 0, "WARN": 1, "CRIT": 2}[before]:
+                            findings.append(f"{name}: {before} -> {after}")
+                return rows, findings
         ''') + gate_source,
         encoding="utf-8",
     )
