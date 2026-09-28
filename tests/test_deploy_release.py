@@ -924,10 +924,8 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path, monkeypatch):
     remote_path = root / "remote.sh"
     remote_path.write_text(remote.replace("/opt/eeepc-agent", str(root / "opt/eeepc-agent")), encoding="utf-8")
     (gate_tmp / "scripts").mkdir(parents=True)
-    (gate_tmp / "scripts" / "verify_release_health.py").write_text(
-        "from pathlib import Path; report = Path(__import__('os').environ['REPORT']).read_text(); exec('def verify_release_health(): return {\\\"health\\\": {\\\"dimensions\\\": {row.split()[1]: {\\\"status\\\": row.split()[2]} for row in __import__(\\\"json\\\").loads(report)[\\\"dimensions\\\"]}}}'); print('candidate')\\n",
-        encoding="utf-8",
-    )
+    candidate_verifier = "\n".join(['import json, os', 'from pathlib import Path', 'def verify_release_health():', "    report = json.loads(Path(os.environ['REPORT']).read_text())", "    dimensions = {row.split()[1]: {'status': row.split()[2]} for row in report['dimensions']}", "    return {'health': {'dimensions': dimensions}}", 'def compare_health_dimensions(baseline, candidate):', '    rows, findings = [], []', '    for name in sorted(baseline.keys() - candidate.keys()):', "        rows.append(f'VERIFY_ONLY DIMENSION_MISSING {name}'); findings.append(f'dimension missing: {name}')", '    for name in sorted(candidate.keys() - baseline.keys()):', "        status = candidate[name]; rows.append(f'VERIFY_ONLY DIMENSION_ADDED {name} {status}')", "        if name not in {'cpu', 'queue'} and status in {'WARN', 'CRIT'}: findings.append(f'new dimension {name}: {status}')", '    for name in sorted(baseline.keys() & candidate.keys()):', "        before, after = baseline[name], candidate[name]; rows.append(f'VERIFY_ONLY DIMENSION {name} {before} -> {after}')", "        if name not in {'cpu', 'queue'} and not (name in {'reward', 'gate'} and after == 'WARN'):", "            if {'OK': 0, 'WARN': 1, 'CRIT': 2}[after] > {'OK': 0, 'WARN': 1, 'CRIT': 2}[before]: findings.append(f'{name}: {before} -> {after}')", '    return rows, findings', "print(json.dumps(verify_release_health())); print('CANDIDATE_GATE_EXECUTED')"]) + "\n"
+    (gate_tmp / "scripts" / "verify_release_health.py").write_text(candidate_verifier, encoding="utf-8")
     (gate_tmp / "scripts" / "__init__.py").write_text("", encoding="utf-8")
     mock("rm", f'''echo "rm $*" >> {log}; exit 0''')
     mock("head", "/usr/bin/head \"$@\"")
