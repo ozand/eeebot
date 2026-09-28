@@ -357,10 +357,8 @@ def _preservation_record_lines(index: int, role: str, parts: "dict[str, Any]") -
 def _write_preservation_file(
     path: Path, records: "list[tuple[int, str, dict[str, Any]]]",
 ) -> "tuple[Path, int]":
-    """Write every ``(index, role, parts)`` record, returning ``(actual_path,
-    bytes_written)``. ``actual_path`` is normally ``path`` (the caller
-    already picked a free name via :func:`_first_free_preservation_path`)
-    but can advance further on a genuine concurrent collision.
+    """Write every ``(index, role, parts)`` record to EXACTLY ``path``,
+    returning ``(path, bytes_written)``.
 
     #1930 review B5: writes to a per-call UNIQUE temp file (``tempfile``, in
     the same directory as ``path`` so the later link stays on one
@@ -368,11 +366,18 @@ def _write_preservation_file(
     writers race on the same temp file), then hard-links it onto the final
     name. ``os.link`` raises ``FileExistsError`` atomically if the target
     already exists -- no check-then-create gap the way ``os.replace``
-    (which always overwrites unconditionally) would have -- so a genuine
-    collision advances to the next suffix instead of silently overwriting
-    an earlier round's evidence. Raises on any other I/O error; the
-    caller's fail-open contract handles it, so no message is ever returned
-    mutated without this call having succeeded first."""
+    (which always overwrites unconditionally) would have.
+
+    #1930 review D1: on that ``FileExistsError`` this RAISES -- it does NOT
+    advance to a ``-n`` suffix and retry. The carrier's index and A2(b)'s
+    file list were already built (by the caller, before this call) against
+    ``path`` specifically; advancing to a different name here would leave
+    the returned history's own index pointing at a path that is either
+    someone else's file (a genuine concurrent collision) or simply wrong.
+    Raising lets the caller's existing fail-open contract decline the whole
+    round instead -- the NEXT round picks a fresh name via
+    :func:`_first_free_preservation_path` and tries again. Also raises on
+    any other I/O error, same fail-open contract."""
     path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
     for index, role, parts in records:
@@ -386,21 +391,13 @@ def _write_preservation_file(
             fh.write(content_bytes)
             fh.flush()
             os.fsync(fh.fileno())
-        candidate = path
-        n = 0
-        while True:
-            try:
-                os.link(tmp_name, candidate)
-                break
-            except FileExistsError:
-                n += 1
-                candidate = path.with_name(f"{path.stem}-{n}{path.suffix}")
+        os.link(tmp_name, path)
     finally:
         try:
             os.remove(tmp_name)
         except OSError:
             pass
-    return candidate, len(content_bytes)
+    return path, len(content_bytes)
 
 
 def _preservation_index_lines(
@@ -1231,9 +1228,21 @@ def compact_messages(
             # dropped_chars for a message that lost nothing. I4: a
             # worth-compacting candidate that turns out not to actually
             # shrink breaks "shrinks EVERY candidate" -- the round declines
-            # in full here, the same as "no candidate fits" above (the
-            # proactive _worth_compacting guard makes this unreachable in
-            # practice; kept as defense in depth per the exact review ask).
+            # in full here, the same as "no candidate fits" above.
+            #
+            # #1930 review D2: with the CURRENT _worth_compacting proactive
+            # guard, this branch is unreachable -- every worth_indices
+            # candidate is already known to shrink before this loop ever
+            # runs, so this is defense in depth, not a live path. If
+            # _worth_compacting's guard is ever loosened such that this
+            # DOES become reachable, the correct fix is to SKIP just this
+            # one candidate (exclude it from worth_indices and re-derive the
+            # carrier/summary without it), not decline the whole round --
+            # a full-round decline here would then be needlessly discarding
+            # OTHER candidates that genuinely do shrink, for a fault that is
+            # local to one candidate. Left as a full decline for now
+            # precisely because it cannot fire today; do not read this as
+            # the intended behavior once the guard changes.
             if _message_tokens(new_msg) >= _message_tokens(msg):
                 return _decline("declined_no_reduction")
             new_msg[_COMPACTED_FLAG] = True
@@ -1512,9 +1521,19 @@ def count_preservation_reads(state_root: "Path | str", cycle_id: str, *, day: "s
                 # preservation directory. Require "compaction" as an actual
                 # PATH SEGMENT (workspace-relative, as action_index records
                 # it) instead of anywhere in the string.
+                #
+                # #1930 review D2: a segment match alone also counted a read
+                # of compaction/journal.jsonl itself (E's own instrument) as
+                # a "preservation file read" -- require the path to actually
+                # be a preservation FILE: >= 3 segments after "compaction"
+                # (cycle_id, execution_id, <iteration>.md), the last ending
+                # in .md, matching _preservation_path's own shape exactly.
                 detail_path = detail[len("read:"):].replace("\\", "/")
-                if "compaction" in detail_path.split("/"):
-                    count += 1
+                segments = detail_path.split("/")
+                if "compaction" in segments:
+                    rest = segments[segments.index("compaction") + 1:]
+                    if len(rest) >= 3 and rest[-1].endswith(".md"):
+                        count += 1
         return count
     except Exception:
         return 0

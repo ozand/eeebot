@@ -853,13 +853,19 @@ def _compaction_reads_for_cycle(state_dir: Path, cycle_id: str, day: str) -> int
     ``cycle_id`` (#1930 condition E).
 
     Mirrors ``nanobot.runtime.context_compaction.count_preservation_reads``'s
-    matching rule (#1930 review A3: "compaction" must be an actual path
-    SEGMENT of the recorded ``read:<path>`` detail, not merely a substring --
-    a bare substring match also counted a read of
-    ``context_compaction.py`` itself or its tests as a hit) -- duplicated
-    here rather than imported, because this script has zero non-stdlib
-    dependencies and imports no ``nanobot.runtime`` code by design (see the
-    module docstring's note by ``_DEFAULT_STATE_DIR``)."""
+    matching rule -- duplicated here rather than imported, because this
+    script has zero non-stdlib dependencies and imports no
+    ``nanobot.runtime`` code by design (see the module docstring's note by
+    ``_DEFAULT_STATE_DIR``):
+    - (#1930 review A3) "compaction" must be an actual path SEGMENT of the
+      recorded ``read:<path>`` detail, not merely a substring -- a bare
+      substring match also counted a read of ``context_compaction.py``
+      itself or its tests as a hit;
+    - (#1930 review D2) a segment match alone also counted a read of
+      ``compaction/journal.jsonl`` itself (this very counter's own
+      instrument) as a "preservation file read" -- the path must actually
+      BE a preservation file: >= 3 segments after "compaction" (cycle_id,
+      execution_id, <iteration>.md), the last ending in ``.md``."""
     path = state_dir / "action_index" / f"{day}.jsonl"
     if not path.is_file():
         return 0
@@ -879,8 +885,11 @@ def _compaction_reads_for_cycle(state_dir: Path, cycle_id: str, day: str) -> int
                 if not isinstance(detail, str) or not detail.startswith("read:"):
                     continue
                 detail_path = detail[len("read:"):].replace("\\", "/")
-                if "compaction" in detail_path.split("/"):
-                    count += 1
+                segments = detail_path.split("/")
+                if "compaction" in segments:
+                    rest = segments[segments.index("compaction") + 1:]
+                    if len(rest) >= 3 and rest[-1].endswith(".md"):
+                        count += 1
     except Exception:
         return count
     return count

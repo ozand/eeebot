@@ -2319,3 +2319,74 @@ def test_b8_lone_surrogate_falls_back_to_ensure_ascii_true(tmp_path):
     )
     ev = _last_journal_event(tmp_path)
     assert ev["reason"] == "compacted", "a lone surrogate anywhere in the dropped span must not fail the round"
+
+
+# ---------------------------------------------------------------------------
+# #1930 architect review round 3 (D1-D2) @ b290a66f
+# ---------------------------------------------------------------------------
+
+def test_d1_write_preservation_file_raises_on_collision_instead_of_advancing(tmp_path):
+    """D1 (P2, I1): a FileExistsError previously advanced to a -n suffix and
+    retried -- but the carrier's index/A2(b) file list were already built
+    against the ORIGINAL name before this call. On a genuine collision, the
+    carrier would point at a path that is either someone else's file or
+    simply wrong. Must raise instead, so the round declines/errors and the
+    NEXT round picks a fresh name."""
+    target = tmp_path / "target.md"
+    target.write_text("PRE-EXISTING CONTENT, must not be touched", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        cc._write_preservation_file(target, [(0, "assistant", {"content": "new content"})])
+
+    assert target.read_text(encoding="utf-8") == "PRE-EXISTING CONTENT, must not be touched"
+    assert not any(target.parent.glob(".preservation-*")), "the unique temp file must be cleaned up"
+
+
+def test_d1_a_collision_at_write_time_declines_the_round_history_unchanged(tmp_path, monkeypatch):
+    """D1's end-to-end shape: the target name gets claimed BETWEEN
+    selection (_first_free_preservation_path) and the actual write --
+    history must come back unchanged, and the file some other writer
+    already put there must be untouched."""
+    real_first_free = cc._first_free_preservation_path
+    claimed_path_holder = {}
+
+    def _race_first_free(nominal):
+        chosen = real_first_free(nominal)
+        # Simulate another writer claiming this exact name right after we
+        # "select" it, before our own write attempt below.
+        chosen.parent.mkdir(parents=True, exist_ok=True)
+        chosen.write_text("SOMEONE ELSE'S FILE", encoding="utf-8")
+        claimed_path_holder["path"] = chosen
+        return chosen
+
+    monkeypatch.setattr(cc, "_first_free_preservation_path", _race_first_free)
+
+    messages = _normal_compacting_history()
+    before = [dict(m) for m in messages]
+    result = cc.compact_messages(
+        messages, cycle_id="d1-race", iteration=1, state_root=tmp_path,
+        threshold=0.001, keep_tokens=50, window_tokens=98_304, execution_id="exec-d1",
+    )
+    assert result == before, "a write-time collision must decline/error the round, history unchanged"
+    assert claimed_path_holder["path"].read_text(encoding="utf-8") == "SOMEONE ELSE'S FILE", (
+        "the file the other writer put there must not be overwritten"
+    )
+    ev = _last_journal_event(tmp_path)
+    assert ev["reason"] != "compacted"
+
+
+def test_d2_reading_the_journal_itself_does_not_count_as_a_preservation_read(tmp_path):
+    """D2 (P3, E): a path-segment match alone also counted a read of
+    compaction/journal.jsonl (E's own instrument) as a preservation-file
+    read. Must require an actual preservation FILE shape: >= 3 segments
+    after "compaction" (cycle_id, execution_id, <iteration>.md)."""
+    index_dir = Path(tmp_path) / "action_index"
+    index_dir.mkdir(parents=True)
+    rows = [
+        {"cycle_id": "c1", "actions_detail": ["read:compaction/journal.jsonl"]},
+        {"cycle_id": "c1", "actions_detail": ["read:compaction/c1/exec1/0.md"]},
+    ]
+    with (index_dir / "2026-09-28.jsonl").open("w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+    assert cc.count_preservation_reads(tmp_path, "c1", day="2026-09-28") == 1

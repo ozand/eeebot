@@ -861,3 +861,35 @@ def test_compaction_usage_absent_when_no_compaction_journal(tmp_path, mod):
     assert report["compaction_usage"]["status"] == "absent"
     table = mod.render_table(report)  # must not crash
     assert "Compaction preservation usage" in table
+
+
+def test_compaction_usage_d2_journal_read_itself_not_counted(tmp_path, mod):
+    """D2 (P3, E): a path-segment match alone also counted a read of
+    compaction/journal.jsonl (this counter's own instrument) as a
+    preservation-file read. Must require an actual preservation FILE shape
+    (>= 3 segments after "compaction", the last ending in .md)."""
+    now = datetime.now(timezone.utc)
+    day = now.strftime("%Y-%m-%d")
+
+    compaction_dir = tmp_path / "compaction"
+    compaction_dir.mkdir(parents=True)
+    with (compaction_dir / "journal.jsonl").open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "ts": f"{day}T10:00:00Z", "cycle_id": "c1", "reason": "compacted",
+            "preservation_path": str(compaction_dir / "c1" / "exec1" / "0.md"),
+        }) + "\n")
+
+    index_dir = tmp_path / "action_index"
+    index_dir.mkdir(parents=True)
+    with (index_dir / f"{day}.jsonl").open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "cycle_id": "c1", "task_title": "x", "outcome": "success",
+            "actions": ["read:*.jsonl", "read:*.md"],
+            "actions_detail": [
+                "read:compaction/journal.jsonl",
+                "read:compaction/c1/exec1/0.md",
+            ],
+        }) + "\n")
+
+    report = mod.build_report(tmp_path, days=7)
+    assert report["compaction_usage"]["reads_by_cycle"] == {"c1": 1}
