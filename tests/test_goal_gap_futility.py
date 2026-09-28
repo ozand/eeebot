@@ -694,6 +694,32 @@ def test_pushed_late_resets_family_futility_run_like_success(tmp_path):
     assert rec["attempt_count"] == 1
 
 
+def test_unknown_late_push_does_not_reset_futility_run(tmp_path):
+    state = tmp_path / "state"
+    item_id = "defect-unknown-late-push"
+    item = {"id": item_id, "kind": "defect", "summary": "test defect"}
+    now = datetime.now(timezone.utc)
+    rows = []
+    for i in range(5):
+        cycle = f"prior-fail-{i}"
+        ts = (now + timedelta(seconds=i + 1)).isoformat()
+        rows.extend([
+            {"phase": "proposed", "cycle_id": cycle, "demand_id": item_id, "ts": ts},
+            {"phase": "outcome", "cycle_id": cycle, "outcome": "validation_failed", "ts": ts},
+        ])
+    ts = (now + timedelta(seconds=10)).isoformat()
+    rows.extend([
+        {"phase": "proposed", "cycle_id": "unknown-late", "demand_id": item_id, "ts": ts},
+        {"phase": "outcome", "cycle_id": "unknown-late", "outcome": "pushed_late", "delivery_state": "unknown", "ts": ts},
+        {"phase": "proposed", "cycle_id": "after-unknown", "demand_id": item_id, "ts": (now + timedelta(seconds=11)).isoformat()},
+        {"phase": "outcome", "cycle_id": "after-unknown", "outcome": "validation_failed", "ts": (now + timedelta(seconds=11)).isoformat()},
+    ])
+    result = futility.futile_gap_ids(state, [item], ledger_rows=rows)
+    assert item_id in result
+    record = json.loads((state / "demand" / "futility.json").read_text(encoding="utf-8"))[item_id]
+    assert record["attempt_count"] == 7
+
+
 def test_demand_attempt_count_success_resets_run_and_corpus_shapes(tmp_path):
     """#1394 review: non-goal families count consecutive non-success cycles since last success.
 

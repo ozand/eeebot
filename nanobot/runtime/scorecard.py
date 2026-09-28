@@ -587,8 +587,9 @@ def _loop_section(
     decay_integrations = 0
     # #814: confirmed vs unconfirmed split of `integrations` (decay archivals
     # excluded — they are churn, not new value, and are never the numerator
-    # either split targets). Confirmation is POST-HOC (usage evidence arrives
-    # after the cycle), so this joins each success-outcome cycle_id against
+    # either split targets). Known-delivery pushed_late rows are integrations;
+    # delivery-unknown late pushes are excluded. Confirmation is POST-HOC (usage
+    # evidence arrives after the cycle), so this joins each cycle_id against
     # `confirmed_cycle_ids` (built from demand/completed.json, same
     # harness-signal guard as confirmed_ratio) rather than gating at cycle
     # time — the per-cycle scorer cannot know confirmation yet.
