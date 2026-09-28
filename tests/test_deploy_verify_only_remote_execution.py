@@ -34,7 +34,7 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
     live.mkdir(parents=True)
     (live / "scripts").mkdir()
     (live / "scripts/verify_release_health.py").write_text(
-        "import json; from pathlib import Path; verify_release_health = lambda: {'health': {'dimensions': {}}}\n",
+        "import json; verify_release_health = lambda: {'health': {'dimensions': {}}}\n",
         encoding="utf-8",
     )
     source = tmp_path / "source"
