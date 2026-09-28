@@ -919,17 +919,19 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path, monkeypatch):
     mock("mkdir", f'''echo "mkdir $*" >> {log}; exit 0''')
     mock("tee", f'''echo "tee $*" >> {log}; cat >/dev/null; exit 0''')
     mock("rmdir", f'''echo "rmdir $*" >> {log}; exit 0''')
+    mock("python3", f'''echo "python3 $*" >> {log}; case "$*" in *verify_release_health.py*) exit 0 ;; *) exit 1 ;; esac''')
 
     remote_path = root / "remote.sh"
     remote_path.write_text(remote.replace("/opt/eeepc-agent", str(root / "opt/eeepc-agent")), encoding="utf-8")
     (gate_tmp / "scripts").mkdir(parents=True)
     (gate_tmp / "scripts" / "verify_release_health.py").write_text("print('candidate')\\n", encoding="utf-8")
+    (gate_tmp / "scripts" / "__init__.py").write_text("", encoding="utf-8")
     mock("rm", f'''echo "rm $*" >> {log}; exit 0''')
     mock("head", "/usr/bin/head \"$@\"")
     mock("chown", f'''echo "chown $*" >> {log}; exit 0''')
     mock("env", f'''echo "env $*" >> {log}; while [[ "$1" == *=* ]]; do shift; done; exec "$@"''')
     mock("tar", f'''echo "tar $*" >> {log}; exit 0''')
-    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"))
+    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"), VERIFY_ONLY_DIMENSION_COMPARE="0")
     result = subprocess.run(["bash", str(remote_path)], cwd=root, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     seen = commands.read_text(encoding="utf-8")
