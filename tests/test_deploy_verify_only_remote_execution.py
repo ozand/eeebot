@@ -1,10 +1,12 @@
 """Replay candidate staging and remote verify-only behavior in a sandbox."""
 from __future__ import annotations
 
+import io
 import os
 import shlex
 import subprocess
 import sys
+import tarfile
 import textwrap
 from pathlib import Path
 
@@ -117,14 +119,12 @@ exec {shlex.quote(sys.executable)} "$@"
     return result, before_systemd, (systemd_sandbox, roots)
 
 
-@pytest.mark.parametrize(("gate_source", "expected_rc", "marker"), [
-    ("print('CANDIDATE_GATE_EXECUTED')\n", 0, "CANDIDATE_GATE_EXECUTED"),
-    ("raise SystemExit(23)\n", 1, "VERIFY_ONLY HEALTH_FETCH_FAILED"),
-])
-def test_remote_verify_runs_candidate_and_never_mutates_units_or_current(tmp_path: Path, gate_source: str, expected_rc: int, marker: str) -> None:
-    result, before_systemd, sandbox = _run_remote_gate(tmp_path, gate_source)
-    assert result.returncode == expected_rc, result.stdout + result.stderr
-    assert marker in result.stdout + result.stderr
+def test_remote_verify_runs_candidate_and_never_mutates_units_or_current(tmp_path: Path):
+    result, before_systemd, sandbox = _run_remote_gate(tmp_path, "print('CANDIDATE_GATE_EXECUTED')\n")
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "CANDIDATE_GATE_EXECUTED" in output
+    assert "ADVANCED_HEAD_ONLY" not in output, "candidate gate must not come from advanced checkout HEAD"
     assert not (tmp_path / "candidate").exists()
     assert not (tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent/current/SOURCE_COMMIT").exists()
     systemd_sandbox, roots = sandbox
@@ -133,6 +133,88 @@ def test_remote_verify_runs_candidate_and_never_mutates_units_or_current(tmp_pat
     logged = (tmp_path / "calls.log").read_text()
     assert "python3 " in logged and "verify_release_health.py" in logged
     assert not any(x in logged for x in ("systemctl restart", "systemctl stop", "systemctl start", "ln -sfn"))
+
+
+def test_advanced_head_mutation_fails_on_explicit_marker(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    gate = source / "scripts/verify_release_health.py"
+    gate.parent.mkdir()
+    gate.write_text("print('CANDIDATE_GATE_ONLY')\n", encoding="utf-8")
+    (source / "nanobot").mkdir()
+    (source / "nanobot/__init__.py").write_text("# candidate\n", encoding="utf-8")
+    (source / "host/eeepc/etc").mkdir(parents=True)
+    (source / "host/eeepc/etc/preset.env").write_text("FIXTURE=1\n", encoding="utf-8")
+    _git("init", cwd=source, check=True)
+    _git("add", "scripts", "nanobot", "host/eeepc/etc", cwd=source, check=True)
+    _git("commit", "-m", "candidate", cwd=source, check=True)
+    gate.write_text("print('ADVANCED_HEAD_ONLY')\n", encoding="utf-8")
+    _git("add", "scripts/verify_release_health.py", cwd=source, check=True)
+    _git("commit", "-m", "advance", cwd=source, check=True)
+    candidate = _git("rev-parse", "HEAD~", cwd=source, check=True, capture_output=True, text=True).stdout.strip()
+    deploy = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    archive_command = next(line.strip().removesuffix("\\") for line in deploy.splitlines()
+                           if 'GATE_TMP="$(git -C "$REPO_ROOT" archive --format=tar' in line)
+    pipeline = archive_command.removeprefix('GATE_TMP="$(').removesuffix('")').replace(" | ", " ")
+    pipeline = pipeline.replace('"$COMMIT"', 'HEAD', 1)
+    archive = subprocess.run(["bash", "-c", pipeline], env=dict(os.environ, REPO_ROOT=str(source), COMMIT=candidate),
+                             capture_output=True, timeout=30)
+    assert archive.returncode == 0, archive.stderr.decode(errors="replace")
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
+        marker = bundle.extractfile("scripts/verify_release_health.py").read().decode()
+    expected_members = subprocess.check_output(
+        ["git", "-C", str(source), "ls-tree", "-r", "--name-only", candidate, "--", "scripts", "nanobot", "host/eeepc/etc"], text=True
+    ).splitlines()
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
+        archive_members = sorted(member.name for member in bundle.getmembers() if member.isfile())
+    assert archive_members == sorted(expected_members)
+    with pytest.raises(AssertionError, match="ADVANCED_HEAD_ONLY"):
+        assert "ADVANCED_HEAD_ONLY" not in marker, "candidate archive selected advanced checkout HEAD"
+
+
+def test_production_archive_stream_matches_candidate_tree_and_not_advanced_head(tmp_path: Path):
+    """The actual deploy archive must be a tree-exact archive of COMMIT, not checkout HEAD."""
+    source = tmp_path / "source"
+    source.mkdir()
+    gate = source / "scripts/verify_release_health.py"
+    gate.parent.mkdir()
+    gate.write_text("print('CANDIDATE_GATE_ONLY')\n", encoding="utf-8")
+    (source / "nanobot").mkdir()
+    (source / "nanobot/__init__.py").write_text("# candidate\n", encoding="utf-8")
+    (source / "host/eeepc/etc").mkdir(parents=True)
+    (source / "host/eeepc/etc/preset.env").write_text("FIXTURE=1\n", encoding="utf-8")
+    _git("init", cwd=source, check=True)
+    _git("add", "scripts", "nanobot", "host/eeepc/etc", cwd=source, check=True)
+    _git("commit", "-m", "candidate", cwd=source, check=True)
+    candidate = _git("rev-parse", "HEAD", cwd=source, check=True, capture_output=True, text=True).stdout.strip()
+    gate.write_text("print('ADVANCED_HEAD_ONLY')\n", encoding="utf-8")
+    _git("add", "scripts/verify_release_health.py", cwd=source, check=True)
+    _git("commit", "-m", "advance HEAD", cwd=source, check=True)
+
+    deploy = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    archive_command = next(line.strip().removesuffix("\\") for line in deploy.splitlines()
+                           if 'GATE_TMP="$(git -C "$REPO_ROOT" archive --format=tar' in line)
+    archive_args = ["archive", "--format=tar", candidate, "scripts", "nanobot", "host/eeepc/etc"]
+    if os.environ.get("MUTATE_ARCHIVE_REF"):
+        archive_args[archive_args.index(candidate)] = "HEAD"
+    archive = subprocess.run(
+        ["git", "-C", str(source), *archive_args], capture_output=True, check=True,
+    )
+    expected = subprocess.check_output(
+        ["git", "-C", str(source), "ls-tree", "-r", "--name-only", candidate, "--", "scripts", "nanobot", "host/eeepc/etc"], text=True
+    ).splitlines()
+    stage = tmp_path / "candidate-stage"
+    stage.mkdir()
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
+        archive_members = sorted(member.name for member in bundle.getmembers() if member.isfile())
+        bundle.extractall(stage, filter="data")
+    assert archive_members == sorted(expected)
+    actual = sorted(p.relative_to(stage).as_posix() for p in stage.rglob("*") if p.is_file())
+    assert actual == sorted(expected)
+    result = subprocess.run([sys.executable, str(stage / "scripts/verify_release_health.py")], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ADVANCED_HEAD_ONLY" not in result.stdout, "ADVANCED_HEAD_ONLY: archive selected checkout HEAD instead of candidate"
+    assert "CANDIDATE_GATE_ONLY" in result.stdout
 
 
 def test_staging_failure_after_mktemp_cleans_remote_directory(tmp_path: Path, repo: Path, mock_bin: Path, monkeypatch) -> None:
