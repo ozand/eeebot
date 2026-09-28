@@ -243,7 +243,6 @@ async def test_watchdog_repeated_cancellation_finishes_real_process_cleanup(tmp_
 
 
 @pytest.mark.skipif(__import__("os").name != "nt", reason="Windows process-tree cleanup follow-up #2027")
-@pytest.mark.xfail(reason="Windows Job Object ownership follow-up #2027", strict=True)
 @pytest.mark.asyncio
 async def test_watchdog_cancellation_kills_windows_descendant_after_shell_exits(tmp_path, monkeypatch):
     """Use a saved shell PID to verify tree cleanup after the shell exits."""
