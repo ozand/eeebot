@@ -58,6 +58,9 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
         textwrap.dedent('''
             def verify_release_health():
                 return {"health": {"dimensions": {}}}
+
+            def compare_health_dimensions(baseline, candidate):
+                return [], []
         ''') + gate_source,
         encoding="utf-8",
     )

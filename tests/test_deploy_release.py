@@ -964,6 +964,7 @@ def test_verify_only_dimension_delta_through_production_path(
     baseline, candidate, expected_status, expected_output, should_pass,
 ):
     import json
+    import textwrap
 
     baseline_path = tmp_path / "baseline.json"
     candidate_path = tmp_path / "candidate.json"
@@ -1038,6 +1039,7 @@ exit 0
     remote_script = repo / "remote-script.sh"
     remote = DEPLOY_SCRIPT.read_text(encoding="utf-8").split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
     remote = remote.replace("/opt/eeepc-agent", str(tmp_path / "opt/eeepc-agent").replace("\\", "/"))
+    monkeypatch.setenv("VERIFY_ONLY_DIMENSION_COMPARE", "1")
     runtime_root = tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent"
     runtime_root.mkdir(parents=True)
     current = runtime_root / "current"
