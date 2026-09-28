@@ -919,12 +919,15 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path, monkeypatch):
     mock("mkdir", f'''echo "mkdir $*" >> {log}; exit 0''')
     mock("tee", f'''echo "tee $*" >> {log}; cat >/dev/null; exit 0''')
     mock("rmdir", f'''echo "rmdir $*" >> {log}; exit 0''')
-    mock("python3", f'''echo "python3 $*" >> {log}; case "$*" in *verify_release_health.py*) exit 0 ;; *) exit 1 ;; esac''')
+    mock("python3", f'''echo "python3 $*" >> {log}; case "$*" in *verify_release_health.py*) exit 0 ;; *"import json; from scripts.verify_release_health"*) exec python "$@" ;; *) exit 1 ;; esac''')
 
     remote_path = root / "remote.sh"
     remote_path.write_text(remote.replace("/opt/eeepc-agent", str(root / "opt/eeepc-agent")), encoding="utf-8")
     (gate_tmp / "scripts").mkdir(parents=True)
-    (gate_tmp / "scripts" / "verify_release_health.py").write_text("print('candidate')\\n", encoding="utf-8")
+    (gate_tmp / "scripts" / "verify_release_health.py").write_text(
+        "from pathlib import Path; report = Path(__import__('os').environ['REPORT']).read_text(); exec('def verify_release_health(): return {\\\"health\\\": {\\\"dimensions\\\": {row.split()[1]: {\\\"status\\\": row.split()[2]} for row in __import__(\\\"json\\\").loads(report)[\\\"dimensions\\\"]}}}'); print('candidate')\\n",
+        encoding="utf-8",
+    )
     (gate_tmp / "scripts" / "__init__.py").write_text("", encoding="utf-8")
     mock("rm", f'''echo "rm $*" >> {log}; exit 0''')
     mock("head", "/usr/bin/head \"$@\"")
@@ -972,7 +975,7 @@ def test_verify_only_dimension_delta_through_production_path(
     (repo / "nanobot/__init__.py").write_text("# test runtime package\\n", encoding="utf-8")
     (repo / "host/eeepc/etc/presets").mkdir(parents=True)
     (repo / "host/eeepc/etc/presets/test.env").write_text("TEST=1\\n", encoding="utf-8")
-    (scripts / "verify_release_health.py").write_text("import json, os; from pathlib import Path; p = Path(os.environ['REPORT']); print(json.dumps({'health': {'dimensions': {r.split()[1]: {'status': r.split()[2]} for r in json.loads(p.read_text())['dimensions']}}})); print('CANDIDATE_GATE_EXECUTED')\n", encoding="utf-8")
+    (scripts / "verify_release_health.py").write_text("import json, os; from pathlib import Path; report = json.loads(Path(os.environ['REPORT']).read_text()); verify_release_health = lambda: {'health': {'dimensions': {r.split()[1]: {'status': r.split()[2]} for r in report['dimensions']}}}; print(json.dumps(verify_release_health())); print('CANDIDATE_GATE_EXECUTED')\n", encoding="utf-8")
     original_head = _git("rev-parse", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
     _git("add", "scripts/verify_release_health.py", "nanobot", "host/eeepc/etc/presets", cwd=repo, check=True)
     _git("commit", "-m", "candidate dimension gate", cwd=repo, check=True, env={
@@ -1017,7 +1020,7 @@ exit 0
     live_gate.mkdir(parents=True)
     (live_gate / "__init__.py").write_text("", encoding="utf-8")
     (live_gate / "verify_release_health.py").write_text(
-        "import json, os; from pathlib import Path; verify_release_health = lambda: {'health': {'dimensions': {r.split()[1]: {'status': r.split()[2]} for r in json.loads(Path(os.environ['BASELINE_REPORT']).read_text())['dimensions']}}}\\n",
+        "from pathlib import Path; report = Path(__import__('os').environ['BASELINE_REPORT']).read_text(); exec('def verify_release_health(): return {\\\"health\\\": {\\\"dimensions\\\": {row.split()[1]: {\\\"status\\\": row.split()[2]} for row in __import__(\\\"json\\\").loads(report)[\\\"dimensions\\\"]}}}')\\n",
         encoding="utf-8",
     )
     remote_script.write_text(remote, encoding="utf-8")
