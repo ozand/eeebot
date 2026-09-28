@@ -24,7 +24,13 @@ from pathlib import Path
 import pytest
 
 from nanobot.runtime import bridge
-from tests.test_cycle_ledger import _init_selfevo_repo, _read_ledger, _run, _seed_bridge_request
+from tests.test_bridge_executor_llm_error import _stub_planning_session
+from tests.test_cycle_ledger import (
+    _init_selfevo_repo,
+    _read_ledger,
+    _run,
+    _seed_bridge_request,
+)
 
 PRIMARY_TASK_ID = "acf80d1f"
 REPAIR_TASK_ID = "a6ca8f4c"
@@ -148,6 +154,7 @@ class TestAuthoritativeSpawnEndToEnd:
         """A real bridge cycle must not spawn repair without wall+reserve budget (#1899 F1)."""
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-repair-budget", "cycle-repair-budget")
+        _stub_planning_session(monkeypatch, "add feature")
         monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "1000")
         monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "300")
         now = [0.0]
@@ -250,6 +257,7 @@ class TestAuthoritativeSpawnEndToEnd:
     def test_success_outcome_records_executor_call_gap(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-call-gap", "cycle-call-gap")
+        _stub_planning_session(monkeypatch, "add feature")
         monkeypatch.setattr(bridge, "SubagentManager", _PrimaryManager)
 
         assert asyncio.run(bridge._main_impl()) == 0
@@ -269,6 +277,7 @@ class TestAuthoritativeSpawnEndToEnd:
 
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("cancelled", REPAIR_TEXT_CANCELLED))
         _seed_bridge_request(state_dir, "req-gap-cancel", "cycle-gap-cancel")
+        _stub_planning_session(monkeypatch, "add feature")
         monkeypatch.setattr(bridge, "SubagentManager", _CancelledPrimary)
         assert asyncio.run(bridge._main_impl()) == 0
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
@@ -305,6 +314,7 @@ class TestAuthoritativeSpawnEndToEnd:
 
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("cancelled", REPAIR_TEXT_CANCELLED))
         _seed_bridge_request(state_dir, "req-gap-error", "cycle-gap-error")
+        _stub_planning_session(monkeypatch, "add feature")
         monkeypatch.setattr(bridge, "SubagentManager", _ErrorPrimary)
         assert asyncio.run(bridge._main_impl()) == bridge.EXIT_EXECUTOR_LLM_ERROR
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
@@ -431,6 +441,7 @@ class TestAuthoritativeSpawnEndToEnd:
     def test_repair_manager_receives_shared_deadline(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-repair-deadline", "cycle-repair-deadline")
+        _stub_planning_session(monkeypatch, "add feature")
         deadline_seen = []
 
         class _DeadlineRepair(_make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)):
@@ -470,6 +481,7 @@ class TestAuthoritativeSpawnEndToEnd:
     def test_repair_turn_that_succeeds_is_read_not_the_stale_primary(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-repair-ok", "cycle-repair-ok")
+        _stub_planning_session(monkeypatch, "add feature")
 
         rc = asyncio.run(bridge._main_impl())
 
@@ -483,6 +495,7 @@ class TestAuthoritativeSpawnEndToEnd:
     def test_repair_turn_that_fails_falls_back_to_the_primary_not_its_stub(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("cancelled", REPAIR_TEXT_CANCELLED))
         _seed_bridge_request(state_dir, "req-repair-cancelled", "cycle-repair-cancelled")
+        _stub_planning_session(monkeypatch, "add feature")
 
         rc = asyncio.run(bridge._main_impl())
 
@@ -496,6 +509,310 @@ class TestAuthoritativeSpawnEndToEnd:
         assert row["marker_count"] == 0
         assert row["scanned_chars"] == len(PRIMARY_TEXT)
         assert row["scanned_chars"] != len(REPAIR_TEXT_CANCELLED)
+
+
+def _make_committing_repair_manager(status: str, result: str):
+    """Unlike ``_make_repair_manager`` above, this repair spawn also commits
+    a REAL file change -- round 3 item 1 (architect resolution
+    2026-09-26): "its commits integrate only if the repair session's OWN
+    telemetry has status=ok. Otherwise the cycle is unfinished." Round 2's
+    barrier only ever read the PRIMARY spawn's status; a repair session
+    that commits real work but ends in anything other than ``ok`` must
+    still block the whole cycle from integrating.
+    """
+    class _CommittingRepairManager:
+        task_id = REPAIR_TASK_ID
+
+        def __init__(self, *, workspace, **_kwargs):
+            self.workspace = workspace
+            self._running_tasks: dict = {}
+            self._skill_reads_this_cycle: list = []
+
+        async def spawn(self, **_kwargs):
+            (self.workspace / "scripts").mkdir(exist_ok=True)
+            (self.workspace / "scripts" / "repair_fix.py").write_text("def fix():\n    return True\n")
+            _run(self.workspace, "add", "scripts/repair_fix.py")
+            _run(self.workspace, "commit", "-m", "fix: repair turn commits a partial fix")
+            _write_telemetry(bridge.STATE_DIR, self.task_id, status, result)
+
+            async def _done():
+                return None
+
+            self._running_tasks[self.task_id] = asyncio.ensure_future(_done())
+            return "fake repair spawned"
+
+    return _CommittingRepairManager
+
+
+class TestUnfinishedRepairNeverIntegrates:
+    def test_repair_commit_with_non_ok_status_blocks_the_whole_cycle(self, tmp_path, monkeypatch):
+        """Static execution path the re-check named: primary executor
+        finishes normally (status ok) -> initial smoke fails -> repair
+        commits a partial fix and ends with status 'error' -> smoke now
+        passes -> integration must NOT be reachable, for either the
+        repair's commit or the primary's own otherwise-finished work.
+        """
+        import subprocess
+
+        repair_cls = _make_committing_repair_manager("error", "Error: repair turn crashed mid-fix")
+        state_dir = _wire(tmp_path, monkeypatch, repair_cls)
+        _seed_bridge_request(state_dir, "req-repair-unfinished", "cycle-repair-unfinished")
+        _stub_planning_session(monkeypatch, "add feature")
+
+        rc = asyncio.run(bridge._main_impl())
+        assert rc == 0
+
+        work = tmp_path / "eeebot-self-evolving"
+        main_tree = subprocess.run(
+            ["git", "-C", str(work), "ls-tree", "-r", "--name-only", "main"],
+            capture_output=True, text=True,
+        ).stdout
+        assert "scripts/repair_fix.py" not in main_tree, (
+            "an unfinished repair session's own commit must never integrate"
+        )
+        assert "scripts/feature.py" not in main_tree, (
+            "the whole cycle must not integrate when the repair session never finished, "
+            "even though the primary executor's own status was ok"
+        )
+
+        from nanobot.runtime import open_increment
+
+        pending = open_increment.pending_open_increment(state_dir)
+        assert pending is not None, "an unfinished repair must leave the branch as a pending open increment"
+
+
+def _make_amending_repair_manager(status: str, result: str):
+    """Round 4 P1-b (architect resolution 2026-09-26): a repair turn that
+    runs ``git commit --amend`` changes the branch tip WITHOUT growing
+    the commit count -- ``_repair_added_commits`` (round 3 item 1) keyed
+    purely on ``rev-list --count`` growth, so this shape slipped past the
+    barrier entirely: the amended tip could integrate even with a
+    non-``ok`` repair status.
+    """
+    class _AmendingRepairManager:
+        task_id = REPAIR_TASK_ID
+
+        def __init__(self, *, workspace, **_kwargs):
+            self.workspace = workspace
+            self._running_tasks: dict = {}
+            self._skill_reads_this_cycle: list = []
+
+        async def spawn(self, **_kwargs):
+            (self.workspace / "scripts" / "feature.py").write_text(
+                "def feature():\n    return 43  # repaired\n"
+            )
+            _run(self.workspace, "add", "scripts/feature.py")
+            _run(self.workspace, "commit", "--amend", "--no-edit")
+            _write_telemetry(bridge.STATE_DIR, self.task_id, status, result)
+
+            async def _done():
+                return None
+
+            self._running_tasks[self.task_id] = asyncio.ensure_future(_done())
+            return "fake repair spawned"
+
+    return _AmendingRepairManager
+
+
+class TestUnfinishedAmendedRepairNeverIntegrates:
+    def test_repair_amend_with_non_ok_status_blocks_the_whole_cycle(self, tmp_path, monkeypatch):
+        """The repair turn amends the primary's OWN commit (same commit
+        count, new tip sha) and ends with a non-'ok' status -- the
+        barrier must still catch it, exactly as it does a repair that
+        ADDS a new commit.
+        """
+        import subprocess
+
+        repair_cls = _make_amending_repair_manager("error", "Error: repair turn crashed mid-fix")
+        state_dir = _wire(tmp_path, monkeypatch, repair_cls)
+        _seed_bridge_request(state_dir, "req-repair-amend-unfinished", "cycle-repair-amend-unfinished")
+        _stub_planning_session(monkeypatch, "add feature")
+
+        rc = asyncio.run(bridge._main_impl())
+        assert rc == 0
+
+        work = tmp_path / "eeebot-self-evolving"
+        main_blob = subprocess.run(
+            ["git", "-C", str(work), "show", "main:scripts/feature.py"],
+            capture_output=True, text=True,
+        )
+        assert main_blob.returncode != 0 or "repaired" not in main_blob.stdout, (
+            "an unfinished (amended) repair session's own commit must never integrate"
+        )
+
+        from nanobot.runtime import open_increment
+
+        pending = open_increment.pending_open_increment(state_dir)
+        assert pending is not None, (
+            "an unfinished amended repair must leave the branch as a pending open increment"
+        )
+
+
+class TestUnfinishedAmendedRepairWithFailedTipReadNeverIntegrates:
+    def test_one_failed_sha_read_still_blocks_an_unfinished_amend(self, tmp_path, monkeypatch):
+        """Round 5 external re-check, item N1 (architect resolution
+        2026-09-26): ``_current_tip_sha()`` returns ``''`` on a git
+        failure or exception, and the old comparison
+        (``bool(before) and bool(after) and before != after``) required
+        BOTH reads to be truthy before it would even consider them
+        different -- so a single failed read (before OR after) made
+        ``_repair_tip_changed`` read False, i.e. "unchanged", exactly
+        the same as a genuinely no-op repair. Combined with an amend
+        (which never grows the commit count), the barrier never fires
+        even though the repair's own status is not 'ok'. One of the two
+        tip-sha reads is forced to fail here; the amend and the non-ok
+        telemetry are both real, same as the ordinary amend test above.
+        """
+        import subprocess
+
+        repair_cls = _make_amending_repair_manager("error", "Error: repair turn crashed mid-fix")
+        state_dir = _wire(tmp_path, monkeypatch, repair_cls)
+        _seed_bridge_request(state_dir, "req-repair-amend-tipreadfail", "cycle-repair-amend-tipreadfail")
+        _stub_planning_session(monkeypatch, "add feature")
+
+        _real_tip_sha = bridge._current_tip_sha
+        _tip_calls = {"n": 0}
+
+        def _flaky_tip_sha(repo):
+            _tip_calls["n"] += 1
+            if _tip_calls["n"] == 1:
+                # Simulates a transient git failure on the "before" read --
+                # the real repo state is untouched, only this ONE read fails.
+                return ""
+            return _real_tip_sha(repo)
+
+        monkeypatch.setattr(bridge, "_current_tip_sha", _flaky_tip_sha)
+
+        rc = asyncio.run(bridge._main_impl())
+        assert rc == 0
+
+        work = tmp_path / "eeebot-self-evolving"
+        main_blob = subprocess.run(
+            ["git", "-C", str(work), "show", "main:scripts/feature.py"],
+            capture_output=True, text=True,
+        )
+        assert main_blob.returncode != 0 or "repaired" not in main_blob.stdout, (
+            "a failed tip-sha read must never turn an unfinished amend into a verified no-op -- "
+            "the unfinished repair must never integrate"
+        )
+
+        from nanobot.runtime import open_increment
+
+        pending = open_increment.pending_open_increment(state_dir)
+        assert pending is not None, (
+            "an unverifiable (failed tip read) repair must leave the branch as a pending open increment, "
+            "not be silently treated as unchanged"
+        )
+
+
+class TestRepairBarrierInterruptionPersistFailure:
+    def test_repair_barrier_does_not_finish_cycle_when_interruption_persist_fails(self, tmp_path, monkeypatch):
+        """Codex review of 22e1aeb8, P1 (architect resolution 2026-09-27):
+        same fix as the primary D1 barrier, applied to the repair
+        barrier's own interruption-recording call -- if that write fails
+        to verifiably persist, the barrier must not mark the cycle
+        "finished" (handled marker, terminal ledger row) regardless.
+        """
+        from nanobot.runtime import open_increment
+
+        repair_cls = _make_committing_repair_manager("error", "Error: repair turn crashed mid-fix")
+        state_dir = _wire(tmp_path, monkeypatch, repair_cls)
+        _seed_bridge_request(state_dir, "req-repair-persistfail", "cycle-repair-persistfail")
+        _stub_planning_session(monkeypatch, "add feature")
+
+        _real_save_state = open_increment._save_state
+
+        def _fail_on_pending_write(sd, st):
+            if st.pending is not None:
+                return False
+            return _real_save_state(sd, st)
+
+        monkeypatch.setattr(open_increment, "_save_state", _fail_on_pending_write)
+
+        rc = asyncio.run(bridge._main_impl())
+        assert rc == 0
+
+        pending = open_increment.pending_open_increment(state_dir)
+        assert pending is None, (
+            f"the interruption write genuinely failed -- no pending increment should have landed: {pending!r}"
+        )
+
+        from tests.test_cycle_ledger import _read_ledger
+
+        outcome_rows = [r for r in _read_ledger(state_dir) if r.get("phase") == "outcome"]
+        assert not outcome_rows, (
+            f"a cycle whose repair-barrier interruption record failed to persist must not be "
+            f"recorded as finished at all: {outcome_rows!r}"
+        )
+
+
+class TestTimedOutRepairNeverIntegrates:
+    def test_timed_out_repair_with_real_commits_blocks_the_whole_cycle(self, tmp_path, monkeypatch):
+        """Codex review of 777ada1a (nanobot/runtime/bridge.py:5636), P2
+        (architect resolution 2026-09-26): the ``except asyncio.TimeoutError``
+        branch for a repair turn only prints and ``break``s -- it never
+        sets ``_repair_unfinished_status``/``_repair_unfinished_task_id``,
+        so the barrier right after the loop never fires. A repair that
+        commits a real (partial) fix and then hits the wall-clock timeout
+        (instead of finishing with a bad status) integrates anyway, the
+        exact same risk item 1/round 3 already closed for a non-'ok'
+        status.
+        """
+        import asyncio as _asyncio_mod
+        import subprocess
+
+        repair_cls = _make_committing_repair_manager("ok", "irrelevant -- the wait_for call itself times out")
+        state_dir = _wire(tmp_path, monkeypatch, repair_cls)
+        _seed_bridge_request(state_dir, "req-repair-timeout", "cycle-repair-timeout")
+        _stub_planning_session(monkeypatch, "add feature")
+
+        _real_wait_for = _asyncio_mod.wait_for
+
+        class _TimeoutOnRepairWaitAsyncio:
+            """Delegates every asyncio attribute to the real module except
+            wait_for's REPAIR-specific call (the literal 1200.0s timeout) --
+            awaits the real coroutine (so the repair's own commit actually
+            lands, exactly as it would in the real race where the repair
+            finishes writing its commit just as the harness gives up
+            waiting on it) then reports a timeout regardless."""
+
+            def __getattr__(self, name):
+                return getattr(_asyncio_mod, name)
+
+            async def wait_for(self, coro, timeout=None):
+                if timeout == 1200.0:
+                    try:
+                        await coro
+                    except Exception:
+                        pass
+                    raise _asyncio_mod.TimeoutError()
+                return await _real_wait_for(coro, timeout=timeout)
+
+        monkeypatch.setattr(bridge, "asyncio", _TimeoutOnRepairWaitAsyncio())
+
+        rc = asyncio.run(bridge._main_impl())
+        assert rc == 0
+
+        work = tmp_path / "eeebot-self-evolving"
+        main_tree = subprocess.run(
+            ["git", "-C", str(work), "ls-tree", "-r", "--name-only", "main"],
+            capture_output=True, text=True,
+        ).stdout
+        assert "scripts/repair_fix.py" not in main_tree, (
+            "a timed-out repair's own commit must never integrate"
+        )
+        assert "scripts/feature.py" not in main_tree, (
+            "the whole cycle must not integrate when the repair session timed out with real "
+            "changes on the branch, even though the primary executor's own status was ok"
+        )
+
+        from nanobot.runtime import open_increment
+
+        pending = open_increment.pending_open_increment(state_dir)
+        assert pending is not None, (
+            "a timed-out repair with real branch changes must leave the branch as a pending "
+            "open increment, not be silently treated as a clean break"
+        )
 
 
 class TestHelpers:

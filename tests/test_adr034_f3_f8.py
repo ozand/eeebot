@@ -26,19 +26,15 @@ def _priority_text(number: int = 7, title: str = "Operator priority", body: str 
 
 
 def test_f3_unreadable_operator_priorities_do_not_stop_bridge(tmp_path, monkeypatch, capsys):
+    """ADR-035 rule 1 (#1942): the rotation-queue `find_pending_request`
+    this test used to probe with is retired -- `goal_review.active_goal_id`
+    already fails open on unreadable/malformed goal_text.json (returns
+    "", by its own docstring's contract), which now surfaces as the
+    graceful `no_active_goal` early-return rather than a crash. "Does not
+    stop bridge" means result 0 and no exception, not reaching a
+    request-lookup step that no longer exists."""
     state = _state(tmp_path)
     bridge_root = state / "subagent_bridge"
-    (state / "subagents" / "requests").mkdir(parents=True)
-    (state / "subagents" / "requests" / "pending.json").write_text(json.dumps({"request_status": "queued"}), encoding="utf-8")
-    class ReachedRequestLookup(Exception): pass
-    monkeypatch.setattr(bridge, "find_pending_request", lambda: (_ for _ in ()).throw(ReachedRequestLookup()))
-    class FakeManager:
-        def __init__(self, *args, **kwargs): pass
-        def __getattr__(self, _name): return lambda *args, **kwargs: None
-        async def spawn(self, **kwargs):
-            from nanobot.agent.subagent import SubagentResult
-            return SubagentResult(success=True, output="done")
-    monkeypatch.setattr(bridge, "SubagentManager", FakeManager)
     monkeypatch.setattr(bridge, "STATE_DIR", state)
     monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", bridge_root)
     monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "workspace")
@@ -50,12 +46,9 @@ def test_f3_unreadable_operator_priorities_do_not_stop_bridge(tmp_path, monkeypa
     goals.mkdir()
     (goals / "goal_text.json").write_text("{malformed", encoding="utf-8")
 
-    try:
-        asyncio.run(bridge._main_impl())
-    except ReachedRequestLookup:
-        pass
-    else:
-        raise AssertionError("unreadable priority metadata blocked before request lookup")
+    result = asyncio.run(bridge._main_impl())
+    assert result == 0
+    assert "no_active_goal" in capsys.readouterr().out
 
 
 def test_f4_unreadable_derived_state_is_not_depth_zero_or_none(tmp_path):

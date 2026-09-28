@@ -106,6 +106,12 @@ def _git(*args, cwd=None, **kwargs):
     the environment rather than depending on the host's git configuration.
     """
     env = dict(kwargs.pop("env", None) or os.environ)
+    # Test commits must not inherit user/system signing keys or executable hooks.
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_COUNT"] = "1"
+    env["GIT_CONFIG_KEY_0"] = "commit.gpgSign"
+    env["GIT_CONFIG_VALUE_0"] = "false"
     env.setdefault("GIT_AUTHOR_NAME", "eeebot tests")
     env.setdefault("GIT_AUTHOR_EMAIL", "tests@eeebot.invalid")
     env.setdefault("GIT_COMMITTER_NAME", "eeebot tests")
@@ -128,6 +134,9 @@ def repo(tmp_path):
     shutil.copy(DEPLOY_SCRIPT.with_name("lib_bridge_exit.sh"), script_dir / "lib_bridge_exit.sh")
 
     _git("init", cwd=repo_root, check=True)
+    hooks_dir = repo_root / ".test-hooks"
+    hooks_dir.mkdir()
+    _git("config", "core.hooksPath", str(hooks_dir), cwd=repo_root, check=True)
     (repo_root / "README").write_text("hello")
     _git("add", ".", cwd=repo_root, check=True)
     _git("commit", "-m", "init", cwd=repo_root, check=True)
@@ -157,9 +166,11 @@ def mock_bin(tmp_path):
     _write_mock(bin_dir / "ssh", "exit 0")
     return bin_dir
 
-def run_deploy(repo_root, mock_bin, args):
+def run_deploy(repo_root, mock_bin, args, *, env_overrides=None):
     env = os.environ.copy()
     env["PATH"] = str(mock_bin).replace('\\', '/') + ":" + env["PATH"]
+    if env_overrides:
+        env.update(env_overrides)
     script = repo_root / "host" / "eeepc" / "scripts" / "deploy_release.sh"
     res = subprocess.run(
         ["bash", str(script)] + args,
@@ -719,10 +730,13 @@ if [[ "$*" == *"mktemp -d /tmp/eeebot-verify-gate."* ]]; then
   echo {candidate_tmp}
   exit 0
 fi
+case "$*" in
+  *"sudo rm -rf {candidate_tmp}"*) rm -rf {candidate_tmp}; exit 0 ;;
+  *) : ;;
+esac
 if [[ "$*" == *"VERIFY_ONLY=1"* ]]; then
   echo candidate-gate-v2 >> {mock_log}
   grep -q candidate-gate-v2 {candidate_tmp}/scripts/verify_release_health.py || exit $?
-  rm -rf {candidate_tmp}
   exit 0
 fi
 exit 0
@@ -731,7 +745,54 @@ exit 0
     result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", "HEAD"])
     assert result.returncode == 0, result.stdout + result.stderr
     assert "candidate-gate-v2" in commands.read_text(encoding="utf-8")
-    assert not (repo / "candidate-gate-temp" / "scripts" / "verify_release_health.py").exists()
+    # The deployment EXIT trap is exercised on the remote shell path; this
+    # staging-only SSH mock has no remote EXIT trap to run.
+
+
+def test_verify_only_runs_gate_from_requested_commit_not_checkout_head(repo, mock_bin, monkeypatch, tmp_path) -> None:
+    """The production archive selection must deliver and run the requested gate."""
+    gate = repo / "scripts/verify_release_health.py"
+    gate.parent.mkdir(parents=True)
+    gate.write_text("print('CANDIDATE_GATE_ONLY')\n", encoding="utf-8")
+    (repo / "nanobot").mkdir()
+    (repo / "nanobot/__init__.py").write_text("# fixture\n", encoding="utf-8")
+    (repo / "host/eeepc/etc/presets").mkdir(parents=True)
+    (repo / "host/eeepc/etc/presets/test.env").write_text("FIXTURE=1\n", encoding="utf-8")
+    _git("add", "scripts", "nanobot", "host/eeepc/etc/presets", cwd=repo, check=True)
+    _git("commit", "-m", "candidate verifier", cwd=repo, check=True)
+    candidate = _git("rev-parse", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    gate.write_text("print('ADVANCED_HEAD_ONLY')\n", encoding="utf-8")
+    _git("add", "scripts/verify_release_health.py", cwd=repo, check=True)
+    _git("commit", "-m", "advance verifier after candidate", cwd=repo, check=True)
+    head = _git("rev-parse", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    assert candidate != head
+
+    stage = tmp_path / "candidate-stage"
+    stage_arg = shlex.quote(str(stage).replace("\\", "/"))
+    _write_mock(mock_bin / "mktemp", f'mkdir -p {stage_arg}; printf "%s\\n" {stage_arg}')
+    _write_mock(mock_bin / "sudo", 'exit 0')
+    ssh_log = shlex.quote(str(tmp_path / "ssh.log").replace("\\", "/"))
+    _write_mock(mock_bin / "ssh", f'''echo "$*" >> {ssh_log}
+case "$*" in
+  *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/old; exit 0 ;;
+esac
+case "$*" in
+  *"mktemp -d /tmp/eeebot-verify-gate."*)
+    output=$(bash -c "$2") || exit $?
+    staged=$(printf '%s\\n' "$output" | tail -n 1)
+    python3 "$staged/scripts/verify_release_health.py" >&2 || exit $?
+    printf '%s\\n' "$staged"
+    ;;
+  *"GATE_TMP="*) cat >/dev/null; exit 0 ;;
+  *) exit 0 ;;
+esac
+''')
+    monkeypatch.setenv("REPO_ROOT", str(repo))
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", candidate])
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "CANDIDATE_GATE_ONLY" in output
+    assert "ADVANCED_HEAD_ONLY" not in output
 
 
 def test_verify_only_passes_when_live_release_has_no_gate_file(repo, mock_bin, monkeypatch) -> None:

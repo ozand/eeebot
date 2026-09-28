@@ -152,6 +152,57 @@ def test_read_autonomous_commits_24h_missing_repo_returns_none(tmp_path: Path):
     assert read_autonomous_commits_24h(state) is None
 
 
+def test_read_autonomous_commits_24h_excludes_checkpoint_and_residual(tmp_path: Path):
+    """ADR-035 keep-work architect addendum (#1942 B2): this activity
+    metric must not rise from checkpointing or residual auto-commits
+    alone -- only real work counts."""
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+
+    state = tmp_path / "state"
+    state.mkdir()
+    selfevo_repo = tmp_path / "eeebot-self-evolving"
+    _init_git_repo_with_commit(selfevo_repo)
+
+    (selfevo_repo / "wip.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "wip.py"], cwd=selfevo_repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "selfevo: checkpoint — wip.py", "-m", CHECKPOINT_TRAILER],
+        cwd=selfevo_repo, check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "--allow-empty", "-m", "selfevo: auto-commit residual state — misc",
+         "-m", "Selfevo-Residual: true"],
+        cwd=selfevo_repo, check=True, capture_output=True, text=True,
+    )
+
+    assert read_autonomous_commits_24h(state) == 1
+
+
+def test_read_checkpoint_commits_24h_counts_what_the_other_excludes(tmp_path: Path):
+    """ADR-035 keep-work architect addendum (#1942 B2), point 3: checkpoint
+    activity is counted separately, not silently dropped -- a
+    killed-and-resumed cycle's activity must stay visible on the
+    dashboard even though it does not count as completed work."""
+    from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
+    from nanobot.runtime.health import read_checkpoint_commits_24h
+
+    state = tmp_path / "state"
+    state.mkdir()
+    selfevo_repo = tmp_path / "eeebot-self-evolving"
+    _init_git_repo_with_commit(selfevo_repo)
+
+    for i in range(3):
+        (selfevo_repo / "wip.py").write_text(f"x = {i}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "wip.py"], cwd=selfevo_repo, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", f"selfevo: checkpoint — wip.py ({i})", "-m", CHECKPOINT_TRAILER],
+            cwd=selfevo_repo, check=True, capture_output=True, text=True,
+        )
+
+    assert read_autonomous_commits_24h(state) == 1
+    assert read_checkpoint_commits_24h(state) == 3
+
+
 def test_read_derived_priorities_queue(tmp_path: Path):
     from nanobot.runtime.health import read_derived_priorities_queue
 

@@ -7,6 +7,7 @@ import pytest
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.runtime import bridge
+from tests.test_bridge_executor_llm_error import _stub_planning_session
 from tests.test_bridge_system_prompt_overflow import _FittingManager, _wire
 from tests.test_cycle_ledger import _read_ledger, _seed_bridge_request
 
@@ -54,6 +55,7 @@ class _FittingManagerWithTrim(_FittingManager):
 def test_bridge_journals_uniform_trim_breakdown(tmp_path, monkeypatch):
     state_dir = _wire(tmp_path, monkeypatch, _FittingManagerWithTrim)
     _seed_bridge_request(state_dir, "req-trim", "cycle-trim", task_title="Fit prompt")
+    _stub_planning_session(monkeypatch, "Fit prompt")
 
     assert asyncio.run(bridge._main_impl()) == 0
 

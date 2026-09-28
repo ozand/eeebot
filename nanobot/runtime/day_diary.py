@@ -75,6 +75,16 @@ def _today(now: "datetime | None" = None, *, local_tz: Any = None) -> date:
     return date.fromisoformat(day_key.day_key(now, local_tz=local_tz))
 
 
+def _now() -> datetime:
+    """The one full-timestamp clock call this module uses (ADR-035's plan
+    entry headers need an hour:minute, not just a day) -- kept beside
+    :func:`_today` for the same one-place-to-migrate reason, and on the
+    same UTC clock so a plan entry's own timestamp never disagrees with the
+    day file it lives in.
+    """
+    return datetime.now(timezone.utc)
+
+
 def diary_relpath(day: "date | str | None" = None, *, now: "datetime | None" = None, local_tz: Any = None) -> str:
     """Workspace-relative path for *day*'s diary file: ``diary/YYYY-MM-DD.md``
     (ADR-028 rule 1). *day* defaults to :func:`_today` -- see its docstring
@@ -158,14 +168,25 @@ def append_entry(content: str, entry: str) -> str:
 
 def set_plan_block(content: str, plan_text: str) -> str:
     """Replace everything between :data:`PLAN_BEGIN` and :data:`PLAN_END`
-    with ``plan_text`` -- REPLACE, not append: only the latest planning
-    session's output is worth a reader's attention, and the position stays
-    fixed so a reader never has to find it among a growing entries list.
+    with ``plan_text`` -- REPLACE, not append.
+
+    Superseded by :func:`append_plan_entry` for the planning session's real
+    writes (ADR-035 rule 1: "the plan is appended, never overwritten ...
+    today's writer replaces a single plan block, so the history of plans is
+    lost"). Kept only because it is still a pure, independently useful
+    region-replace primitive and existing callers/tests exercise it
+    directly; :mod:`nanobot.runtime.bridge`'s ``_write_diary_plan_block``
+    no longer calls this function.
 
     Raises :class:`ValueError` when either marker is missing, either occurs
     more than once, or ``PLAN_END`` does not follow ``PLAN_BEGIN`` -- the
     file is malformed and replacing a region in it would be a guess.
     """
+    start, end = _plan_block_span(content)
+    return content[:start] + "\n" + plan_text.strip() + "\n" + content[end:]
+
+
+def _plan_block_span(content: str) -> "tuple[int, int]":
     if content.count(PLAN_BEGIN) != 1 or content.count(PLAN_END) != 1:
         raise ValueError(
             f"expected exactly one plan-block marker pair, found "
@@ -175,4 +196,79 @@ def set_plan_block(content: str, plan_text: str) -> str:
     end = content.index(PLAN_END)
     if end < start:
         raise ValueError("plan-block end marker precedes its begin marker")
-    return content[:start] + "\n" + plan_text.strip() + "\n" + content[end:]
+    return start, end
+
+
+def append_plan_entry(
+    content: str, plan_text: str, *, cycle_id: str,
+    iterations_planned: "int | None" = None, timestamp: "datetime | None" = None,
+) -> str:
+    """ADR-035 rule 1: append a new dated plan entry above the previous
+    ones, inside the same plan-block region :func:`set_plan_block` used to
+    replace wholesale. "Each session's plan is a new dated entry in the
+    diary, with the cycle id, above the previous one" -- so the previous
+    plan (needed by rule 3's insight step) is never lost, and the most
+    recent plan is still the first thing a reader of the block sees.
+
+    Raises :class:`ValueError` under the same malformed-marker conditions as
+    :func:`set_plan_block`.
+    """
+    start, end = _plan_block_span(content)
+    ts = (timestamp or _now()).strftime("%Y-%m-%dT%H:%M:%SZ")
+    header = f"### {ts} cycle {cycle_id}"
+    if iterations_planned is not None:
+        header += f" (forecast: {iterations_planned} iterations)"
+    existing_region = content[start:end].strip()
+    if existing_region == _NO_PLAN_YET:
+        existing_region = ""
+    new_region = f"{header}\n{plan_text.strip()}"
+    if existing_region:
+        new_region += "\n\n" + existing_region
+    return content[:start] + "\n" + new_region + "\n" + content[end:]
+
+
+def record_plan_actual_iterations(content: str, cycle_id: str, actual_iterations: int) -> str:
+    """ADR-035 rule 1: "the plan carries its own size ... the harness
+    records the actual count beside it." Finds the most recent
+    ``append_plan_entry`` header for ``cycle_id`` and appends the actual
+    count to it in place.
+
+    Raises :class:`ValueError` if no header for ``cycle_id`` is found --
+    the caller must have already appended that cycle's plan entry.
+    """
+    marker = f"cycle {cycle_id}"
+    idx = content.find(marker)
+    if idx == -1:
+        raise ValueError(f"no plan entry header found for cycle_id {cycle_id!r}")
+    line_end = content.index("\n", idx)
+    header_line = content[:line_end]
+    if header_line.rstrip().endswith(")"):
+        insertion = f", actual: {actual_iterations} iterations)"
+        new_header = header_line.rstrip()[:-1] + insertion
+    else:
+        new_header = header_line + f" (actual: {actual_iterations} iterations)"
+    return new_header + content[line_end:]
+
+
+def append_plan_amendment(
+    content: str, cycle_id: str, reason: str, *, amended_by: str = "executor",
+) -> str:
+    """ADR-035 rule 1: the executor may amend the plan; the amendment is
+    attributed and recorded in the diary with its reason -- "data for the
+    next session, not a failure." Inserts one line directly under the
+    ``cycle_id``'s plan-entry header, appended (never replacing) if the
+    same cycle amends more than once.
+
+    Raises :class:`ValueError` if no plan entry header for ``cycle_id``
+    exists yet, or ``reason`` is blank -- an amendment without a reason is
+    exactly the silent course-change rule 1 requires be recorded.
+    """
+    if not reason or not reason.strip():
+        raise ValueError("append_plan_amendment requires a non-blank reason")
+    marker = f"cycle {cycle_id}"
+    idx = content.find(marker)
+    if idx == -1:
+        raise ValueError(f"no plan entry header found for cycle_id {cycle_id!r}")
+    line_end = content.index("\n", idx)
+    amendment_line = f"Amended by {amended_by}: {reason.strip()}"
+    return content[:line_end + 1] + amendment_line + "\n" + content[line_end + 1:]
