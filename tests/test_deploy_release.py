@@ -1003,7 +1003,6 @@ exit 0
     remote_script = repo / "remote-script.sh"
     remote = DEPLOY_SCRIPT.read_text(encoding="utf-8").split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
     remote = remote.replace("/opt/eeepc-agent", str(tmp_path / "opt/eeepc-agent").replace("\\", "/"))
-    monkeypatch.setenv("VERIFY_ONLY_DIMENSION_COMPARE", "")
     runtime_root = tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent"
     runtime_root.mkdir(parents=True)
     current = runtime_root / "current"
