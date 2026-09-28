@@ -687,7 +687,7 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
     VERIFY_ONLY_LIVE_RELEASE="${VERIFY_ONLY_LIVE_RELEASE:-$(readlink -f "$CURRENT_SYMLINK")}"
     VERIFY_ONLY_LIVE_PYTHON="${VERIFY_ONLY_LIVE_PYTHON:-$HEALTH_GATE_PYTHON}"
     trap 'sudo rm -rf "$GATE_TMP"; rm -f "${VERIFY_ONLY_LIVE_DIMENSIONS:-}" "${VERIFY_ONLY_CANDIDATE_DIMENSIONS:-}"' EXIT
-    if [ ! -x "$VERIFY_ONLY_LIVE_RELEASE/scripts/verify_release_health.py" ]; then
+    if [ ! -f "$VERIFY_ONLY_LIVE_RELEASE/scripts/verify_release_health.py" ]; then
       die "could not find live baseline verifier under current release"
     fi
     if ! sudo -n -u eeepc-agent env PYTHONPATH="$VERIFY_ONLY_LIVE_RELEASE" PYTHONDONTWRITEBYTECODE=1 "$VERIFY_ONLY_LIVE_PYTHON" -c 'import json; from scripts.verify_release_health import verify_release_health; print(json.dumps(verify_release_health()["health"]["dimensions"], sort_keys=True))' > "$VERIFY_ONLY_LIVE_DIMENSIONS"; then

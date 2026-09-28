@@ -890,14 +890,26 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
     log = shlex.quote(str(commands))
     gate_tmp = root / "candidate-gate"
     mock("systemctl", f'''echo "systemctl $*" >> {log}
-    case "$*" in *eeepc-network-fallback.*"-p LoadState"*) echo not-found;; *"-p LoadState"*) echo loaded;; *"-p MainPID"*) echo 4242;; *"-p ExecMainStartTimestamp"*) echo now;; *"is-enabled"*) echo enabled;; *"is-active"*eeepc-network-fallback.*) exit 1;; *"is-active"*) exit 0;; *) exit 0;; esac''')
+    case "$*" in
+      *eeepc-network-fallback*"-p LoadState"*) echo not-found ;;
+      *"-p LoadState"*) echo loaded ;;
+      *"-p MainPID"*) echo 4242 ;;
+      *"-p ExecMainStartTimestamp"*) echo now ;;
+      *is-enabled*) echo enabled ;;
+      *"is-active --quiet eeepc-network-fallback.timer"*) exit 1 ;;
+      *"is-active --quiet eeepc-network-fallback.service"*) exit 1 ;;
+      *is-active*) exit 0 ;;
+      *) exit 0 ;;
+    esac''')
     mock("sudo", f'''echo "sudo $*" >> {log}
     case "$1" in -u) shift 2; "$@";; readlink) if [[ "$2" == */cwd ]]; then echo {shlex.quote(str(gate_tmp))}; else echo {shlex.quote(str(release))}; fi;; cat) if [[ "$2" == *SOURCE_COMMIT ]]; then echo {sha}; else printf "python3 /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0\\0"; fi;; ss) echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("python3",pid=4242,fd=3))';; chown|rm) exit 0;; *) exit 97;; esac''')
     mock("ss", f'''echo "ss $*" >> {log}; echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("python3",pid=4242,fd=3))' ''')
     mock("curl", f'''echo "curl $*" >> {log}; case "$*" in *--write-out*) out=""; prev=""; for a in "$@"; do [ "$prev" = "--output" ] && out="$a"; prev="$a"; done; head -c 2048 /dev/zero | tr "\\0" x > "$out"; echo 200;; *health*) echo '{{"overall":"WARN","dimensions":{{"reward":{{"status":"WARN","detail":"source=stale"}},"gate":{{"status":"WARN","detail":"source=stale"}}}},"goal":"stale","active_task":"stale","reward_average":"stale; age=100.0h (context-only artifact)"}}';; *) echo '{{"goal":"stale; age=100.0h (context-only artifact)","active_task":"stale; age=100.0h (context-only artifact)","approval_gate_state":"stale; age=100.0h (context-only artifact)","reward_average":"stale; age=100.0h (context-only artifact)","reward_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"goal_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"active_task_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"approval_gate_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"latest_report_path":null,"materialized_path":null}}';; esac''')
     scripts_dir = release / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
-    (scripts_dir / "verify_release_health.py").write_text("#!/usr/bin/env python3\nprint('mock health')\n", encoding="utf-8")
+    verifier = scripts_dir / "verify_release_health.py"
+    verifier.write_text("#!/usr/bin/env python3\nprint('mock health')\n", encoding="utf-8")
+    verifier.chmod(0o755)
     mock("python3", f'''echo "python3 $*" >> {log}; exit 0''')
     mock("sleep", f'''echo "sleep $*" >> {log}; exit 97''')
     mock("stat", f'''echo "stat $*" >> {log}; echo 0:0''')
@@ -912,11 +924,12 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
     (gate_tmp / "scripts").mkdir(parents=True)
     (gate_tmp / "scripts" / "verify_release_health.py").write_text("print('candidate')\\n", encoding="utf-8")
     mock("rm", f'''echo "rm $*" >> {log}; exit 0''')
+    mock("head", "/usr/bin/head \"$@\"")
     mock("chown", f'''echo "chown $*" >> {log}; exit 0''')
     mock("env", f'''echo "env $*" >> {log}; while [[ "$1" == *=* ]]; do shift; done; exec "$@"''')
     mock("tar", f'''echo "tar $*" >> {log}; exit 0''')
     env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"))
-    result = subprocess.run(["bash", str(remote_path)], cwd=root, env=env, capture_output=True, text=True)
+    result = subprocess.run(["bash", str(remote_path)], cwd=root, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     seen = commands.read_text(encoding="utf-8")
     for token in ("tar xzf", "scp ", "ln -sfn", "chmod", "daemon-reload", "restart", "stop ", "disable ", "sleep "):
@@ -1003,7 +1016,7 @@ exit 0
     remote_script.write_text(remote, encoding="utf-8")
     _write_mock(mock_bin / "ssh", ssh)
     _write_mock(mock_bin / "stat", '''if [[ "$*" == *current* ]]; then echo 0:0; else command stat "$@"; fi''')
-    _write_mock(mock_bin / "systemctl", '''case "$*" in *eeepc-network-fallback*"-p LoadState"*) echo not-found ;; *"-p LoadState"*eeepc-network-fallback*) echo not-found ;; *"-p LoadState"*) echo loaded ;; *is-active*eeepc-network-fallback*) exit 1 ;; *is-active*) exit 0 ;; *is-enabled*) echo enabled ;; *"-p UnitFileState"*) echo disabled ;; *) exit 0 ;; esac''')
+    _write_mock(mock_bin / "systemctl", '''case "$*" in *eeepc-network-fallback*"-p LoadState"*) echo not-found ;; *"-p LoadState"*eeepc-network-fallback*) echo not-found ;; *"show eeepc-promotion-verifier.timer -p LoadState"*|*"show eeebot-*.timer -p LoadState"*) echo loaded ;; *"-p LoadState"*) echo not-found ;; *is-active*eeepc-network-fallback*) exit 1 ;; *is-active*) exit 0 ;; *is-enabled*) echo enabled ;; *"-p UnitFileState"*) echo disabled ;; *is-active*) exit 0 ;; *) exit 0 ;; esac''')
     _write_mock(mock_bin / "sudo", f'''while [[ "$1" == -* ]]; do
   case "$1" in -n) shift ;; -u) shift 2 ;; *) exit 97 ;; esac
 done
