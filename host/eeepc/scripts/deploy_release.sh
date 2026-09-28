@@ -681,7 +681,7 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
     echo "VERIFY_ONLY HEALTH_FETCH_FAILED" >&2
     die "could not verify candidate release health"
   fi
-  if [ -n "${VERIFY_ONLY_DIMENSION_COMPARE:-1}" ]; then
+  if [ "${VERIFY_ONLY_DIMENSION_COMPARE:-1}" != "0" ]; then
     VERIFY_ONLY_LIVE_DIMENSIONS="${VERIFY_ONLY_LIVE_DIMENSIONS:-$(mktemp)}"
     VERIFY_ONLY_CANDIDATE_DIMENSIONS="${VERIFY_ONLY_CANDIDATE_DIMENSIONS:-$(mktemp)}"
     VERIFY_ONLY_LIVE_RELEASE="${VERIFY_ONLY_LIVE_RELEASE:-$(readlink -f "$CURRENT_SYMLINK")}"
