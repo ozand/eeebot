@@ -1019,7 +1019,7 @@ exit 0
     remote_script.write_text(remote, encoding="utf-8")
     _write_mock(mock_bin / "ssh", ssh)
     _write_mock(mock_bin / "stat", '''if [[ "$*" == *current* ]]; then echo 0:0; else command stat "$@"; fi''')
-    _write_mock(mock_bin / "systemctl", '''case "$*" in *eeepc-network-fallback.timer*"-p LoadState"*|*eeepc-network-fallback.service*"-p LoadState"*) echo not-found ;; *eeebot-*timer*"-p LoadState"*) echo loaded ;; *eeebot-dashboard.service*"-p LoadState"*) echo loaded ;; *"-p LoadState"*) echo not-found ;; *is-active*eeepc-network-fallback*) exit 1 ;; *is-active*) exit 0 ;; *is-enabled*) echo enabled ;; *"-p UnitFileState"*) echo disabled ;; *) exit 0 ;; esac''')
+    _write_mock(mock_bin / "systemctl", '''case "$*" in *eeepc-network-fallback.timer*"-p LoadState"*|*eeepc-network-fallback.service*"-p LoadState"*) echo not-found ;; *"-p LoadState"*) echo loaded ;; *is-active*eeepc-network-fallback*) exit 1 ;; *is-active*) exit 0 ;; *is-enabled*) echo enabled ;; *"-p UnitFileState"*) echo disabled ;; *) exit 0 ;; esac''')
     _write_mock(mock_bin / "sudo", f'''while [[ "$1" == -* ]]; do
   case "$1" in -n) shift ;; -u) shift 2 ;; *) exit 97 ;; esac
 done
