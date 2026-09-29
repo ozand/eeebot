@@ -196,6 +196,7 @@ class TestAuthoritativeSpawnEndToEnd:
     def test_primary_call_gap_survives_repair_manager_without_gap(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-primary-gap-repair-none", "cycle-primary-gap-repair-none")
+        _stub_planning_session(monkeypatch, "add feature")
 
         class _MeasuredPrimary(_PrimaryManager):
             last_max_call_gap_s = 17.5
@@ -219,6 +220,7 @@ class TestAuthoritativeSpawnEndToEnd:
     def test_primary_max_call_gap_survives_smaller_repair_gap_on_exception(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-primary-gap-repair-exception", "cycle-primary-gap-repair-exception")
+        _stub_planning_session(monkeypatch, "add feature")
         monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "4000")
         monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "100")
         monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "100")
@@ -291,6 +293,7 @@ class TestAuthoritativeSpawnEndToEnd:
 
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("cancelled", REPAIR_TEXT_CANCELLED))
         _seed_bridge_request(state_dir, "req-gap-unexpected", "cycle-gap-unexpected")
+        _stub_planning_session(monkeypatch, "add feature")
         monkeypatch.setattr(bridge, "SubagentManager", _ExceptionPrimary)
         monkeypatch.setattr(
             bridge, "_changed_files_and_violations",
@@ -323,6 +326,7 @@ class TestAuthoritativeSpawnEndToEnd:
     def test_repair_cancelled_before_first_step_finalizes_telemetry_and_preserves_metadata(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-repair-cancel-telemetry", "cycle-repair-cancel-telemetry")
+        _stub_planning_session(monkeypatch, "add feature")
         monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "4000")
         monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "100")
         monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "100")
@@ -399,6 +403,7 @@ class TestAuthoritativeSpawnEndToEnd:
     def test_repair_wait_is_recomputed_immediately_before_wait(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-repair-recompute", "cycle-repair-recompute")
+        _stub_planning_session(monkeypatch, "add feature")
         now = [0.0]
         monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "4000")
         monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "100")
