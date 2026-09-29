@@ -110,6 +110,14 @@ class TestPriorityDemand:
 
 
 class TestLedgerDefects:
+    def test_model_call_incomplete_is_not_defect_demand(self, tmp_path):
+        state_dir = _state_dir(tmp_path)
+        cycle_ledger.append_event(
+            state_dir,
+            {"phase": "outcome", "cycle_id": "c-incomplete", "outcome": "model_call_incomplete", "reason": "model_call_incomplete", "ts": _now_iso(30)},
+        )
+        assert demand.collect_demand(state_dir, None) == []
+
     def test_recent_failed_outcome_is_demand(self, tmp_path):
         state_dir = _state_dir(tmp_path)
         cycle_ledger.append_event(

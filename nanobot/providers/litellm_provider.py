@@ -324,6 +324,7 @@ class LiteLLMProvider(LLMProvider):
             return LLMResponse(
                 content=f"Error calling LLM: {str(e)}",
                 finish_reason="error",
+                error_type=type(e).__name__,
             )
 
     def _parse_response(self, response: Any) -> LLMResponse:

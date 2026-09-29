@@ -1,6 +1,8 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-18 (#768: added R45 — the periodic
+_Status: current. Last updated: 2026-09-27 (#1765: distinguish supplier outages,
+incomplete model calls, and request failures; bounded incomplete retries and
+matching attempt diagnostics). Previous entry: 2026-07-18 (#768: added R45 — the periodic
 goal-review: `nanobot/runtime/goal_review.py`, behind
 `SELFEVO_GOAL_REVIEW_ENABLED` (default OFF) + a daily watermark, formulates
 1-3 bounded priorities from goal vectors + measured evidence (scorecard
@@ -1457,6 +1459,14 @@ freeze that record points to._
 - Given a request already has a `handled_<id>.txt` marker
 - When the bridge runs again
 - Then it prints `already_handled` and does not re-spawn the subagent.
+
+## #1765 — provider failures, incomplete calls, and retry evidence
+
+Supplier outages (`paused-supplier`) are distinct from ordinary executor/request failures and from `model_call_incomplete`. Supplier classification is positive-evidence-only; numeric status codes require HTTP/error-code context, so payload values such as `maximum output is 500 tokens` remain ordinary failures. Persisted affirmative provider/transport types (rate limit, server unavailable, connection/timeout) also classify as supplier outages. `model_call_incomplete` requires telemetry identifying the tracked model-call stage and is not assigned for tool, response-handling, or local-code failures. Affirmative client/request rejection evidence (known request-validation/authentication error types or invalid-parameter/context/tool-payload markers) remains an ordinary failure even when the model-call stage is known.
+
+Incomplete model calls persist bounded diagnostic evidence and use `retry_incomplete_<request>.json`, separate from the ordinary executor-error retry counter. Provider calls retain local transient timeout retries before this bridge-level retry budget. Exhaustion pauses automatic re-offer and directs the operator to inspect request size/budget. While retries remain, incomplete calls do not seed recent-failure suppression; after exhaustion, matching proposals are eligible for the normal bounded suppression window. Incomplete calls return a distinct non-zero exit code that process/systemd recorders persist as an explicit incomplete run/exit record without mutating the success/failure streak. Deployment activation and post-flip gates treat this exit as inconclusive and keep the release active pending a clean cycle. Error-card recording reports the matching retry counter's attempt. Scorecard and daily movement expose incomplete calls separately; lessons/futility readers treat them as infrastructure rather than code defects. Health excludes these calls from the count-based stall signal but preserves the independent time-without-success alert.
+
+Design record: `docs/changes/1765-incomplete-model-call/proposal.md` and `design.md`.
 
 ## References
 

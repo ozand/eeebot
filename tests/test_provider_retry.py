@@ -47,6 +47,25 @@ async def test_chat_with_retry_retries_transient_error_then_succeeds(monkeypatch
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("message", ["Request timed out after 60s", "litellm.Timeout: Read timeout"])
+async def test_chat_with_retry_retries_timeout_error_then_succeeds(monkeypatch, message) -> None:
+    provider = ScriptedProvider([
+        LLMResponse(content=message, finish_reason="error"),
+        LLMResponse(content="ok"),
+    ])
+    delays: list[int] = []
+
+    async def _fake_sleep(delay: int) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("nanobot.providers.base.asyncio.sleep", _fake_sleep)
+    response = await provider.chat_with_retry(messages=[{"role": "user", "content": "hello"}])
+    assert response.content == "ok"
+    assert provider.calls == 2
+    assert delays == [1]
+
+
+@pytest.mark.asyncio
 async def test_chat_with_retry_does_not_retry_non_transient_error(monkeypatch) -> None:
     provider = ScriptedProvider([
         LLMResponse(content="401 unauthorized", finish_reason="error"),

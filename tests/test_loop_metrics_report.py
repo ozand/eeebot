@@ -225,6 +225,17 @@ def test_gate_fail_breakdown_attributes_gate_and_outcome_stages(tmp_path, mod):
     assert breakdown[("outcome", "no_commit")] == 1
 
 
+def test_model_call_incomplete_is_included_in_outcome_failure_breakdown(tmp_path, mod):
+    now = datetime.now(timezone.utc)
+    state_dir = _make_ledger(tmp_path, now)
+    with (state_dir / "ledger" / "cycles.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"phase": "outcome", "cycle_id": "incomplete", "outcome": "model_call_incomplete", "reason": "model_call_incomplete", "ts": now.isoformat()}) + "\n")
+    report = mod.build_report(state_dir, days=7)
+    breakdown = {(row["stage"], row["reason"]): row["count"] for row in report["gate_fail_breakdown"]}
+    assert breakdown[("outcome", "model_call_incomplete")] == 1
+    assert report["outcome_counts"]["model_call_incomplete"] == 1
+
+
 def test_dedup_breakdown_counts_decisions_and_top_matched_against(tmp_path, mod):
     now = datetime.now(timezone.utc)
     state_dir = _make_ledger(tmp_path, now)

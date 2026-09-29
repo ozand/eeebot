@@ -785,10 +785,8 @@ def _recent_proposed_titles(rows: list[dict[str, Any]], n: int = _RECENT_PROPOSE
     return titles
 
 
-# #716: outcomes that mean attempted but NOT DELIVERED. `partial` includes
-# Rule-C service-only merges: Git integrated them, but they did not deliver work.
-# `skipped-duplicate` is not an attempt at new work.
-_NOT_DELIVERED_OUTCOMES = frozenset({"failed", "partial", "timeout"})
+# Non-delivery outcomes include supplier outages and incomplete model calls.
+_NOT_DELIVERED_OUTCOMES = frozenset({"failed", "partial", "timeout", "model_call_incomplete", "paused-supplier"})
 
 # #716: gate rollback reasons that mean the cycle produced real work but it
 # was blocked from delivery — same "not delivered" bucket as the outcome set,

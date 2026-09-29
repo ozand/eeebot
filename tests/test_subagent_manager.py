@@ -197,6 +197,29 @@ import uuid
 import json
 
 @pytest.mark.asyncio
+async def test_subagent_model_call_failure_preserves_response_handling_stage(tmp_path):
+    import json
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMResponse
+
+    class Provider:
+        def get_default_model(self):
+            return "test-model"
+
+        async def chat_with_retry(self, **kwargs):
+            return LLMResponse(content="empty choices", finish_reason="error", error_type="InvalidResponseError")
+
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus(), model="test-model")
+    task_id = await manager.spawn("test task")
+    await asyncio.sleep(0.1)
+    payloads = [json.loads(path.read_text(encoding="utf-8")) for path in manager._telemetry_dir.glob("*.json")]
+    failure = next(payload["model_call_failure"] for payload in payloads if payload.get("model_call_failure"))
+    assert failure["stage"] == "response_handling"
+    assert failure["call_stage"] == "model_call"
+
+
+@pytest.mark.asyncio
 async def test_subagent_telemetry_tracks_context_usage(tmp_path):
     # Dummy provider returning a mocked LLMChatResponse
     class FakeResponse:

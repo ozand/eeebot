@@ -154,12 +154,16 @@ EXIT_SYSTEM_PROMPT_OVERFLOW = 4
 # during an outage), so nothing here hides the outage — it is simply not
 # counted as evidence the LOOP is stuck.
 EXIT_SUPPLIER_PAUSED = 5
+# A model-call interruption is not a healthy completion, but it is distinct
+# from a defect failure so crash streak health does not cool the work itself.
+EXIT_MODEL_CALL_INCOMPLETE = 6
 # How many times a request whose subagent died on the LLM call is re-offered
 # before it is retired with the handled_ marker like any other request. Bounded
 # so a permanently-bad request (bad model name, oversize prompt) cannot spin
 # through every cycle forever; 3 covers an outage of two or three cycles and
 # leaves the rest to the next proposal.
 LLM_ERROR_MAX_RETRIES = int(os.environ.get('SUBAGENT_BRIDGE_LLM_ERROR_MAX_RETRIES', '3'))
+MODEL_CALL_INCOMPLETE_MAX_RETRIES = int(os.environ.get('SUBAGENT_BRIDGE_MODEL_CALL_INCOMPLETE_MAX_RETRIES', '3'))
 # #1765: distinct rollback reason for "the supplier could not serve us" —
 # kept apart from 'executor_llm_error' (which stays reserved for "the
 # supplier rejected OUR request", our own defect) so every reason-keyed
@@ -4664,6 +4668,7 @@ async def _main_impl_body():
             _target_path = _extract_target_path(req)
         except Exception:
             _target_path = None
+        _failure_evidence = None
 
         # #716: _recent_failure_match is a bounded-recency (default 24h) check
         # over recent bridge results. A proposal that was blocked/rolled-back/
@@ -4672,10 +4677,14 @@ async def _main_impl_body():
         # guard that does not affect [Done] bookkeeping — only prevents
         # re-spawning the same rejected work within the suppression window.
         if _dup_check_title and (
-            _recent_failure_title := _recent_failure_match(
-                _dup_check_title, STATE_DIR, target_path=_target_path,
+            _failure_evidence := _recent_failure_match(
+                _dup_check_title, STATE_DIR, target_path=_target_path, return_evidence=True,
             )
         ):
+            _recent_failure_title = (
+                _failure_evidence.get('title', '') if isinstance(_failure_evidence, dict)
+                else str(_failure_evidence or '')
+            )
             print(
                 f'bridge: task "{_dup_check_title[:60]}" matches recent failure/rejection '
                 f'"{_recent_failure_title[:60]}" (within {FAILURE_SUPPRESS_HOURS}h); '
@@ -4711,6 +4720,10 @@ async def _main_impl_body():
             record_cycle_outcome(
                 STATE_DIR, _cycle_id, 'skipped-duplicate', 'recent_duplicate_failure', [], None,
                 verdict=_v, verdict_reason=_vr, lane=req.get('lane') or None,
+                duplicate_failure_skip={
+                    'cycle_id': str((_failure_evidence or {}).get('cycle_id') or '') if isinstance(_failure_evidence, dict) else '',
+                    'error_class': str((_failure_evidence or {}).get('error_class') or 'unknown') if isinstance(_failure_evidence, dict) else 'unknown',
+                },
                 real_result=_real_result_ledger_inputs({'result_status': 'blocked', 'status': 'blocked', 'materialized_from': 'bridge_llm_execution'}),
                 delivered=False,
             )
@@ -5283,6 +5296,8 @@ async def _main_impl_body():
                     _run_record.set_run_metadata(classification='loop_breaker_abort', reason=_run_stop_reason)
                 elif _run_stop_reason == 'wall_clock_deadline':
                     _run_record.set_run_metadata(classification='wall_clock_abort', reason=_run_stop_reason)
+                elif _run_stop_reason == 'model_call_incomplete':
+                    _run_record.set_run_metadata(classification='model_call_incomplete', reason=_run_stop_reason)
                 elif _run_stop_reason == 'progress_watchdog_timeout':
                     _run_record.set_run_metadata(classification='progress_watchdog_abort', reason=_run_stop_reason)
                     _rollback_reason = 'progress_watchdog_timeout'
@@ -5293,6 +5308,7 @@ async def _main_impl_body():
             # counted, so a request whose subagent died on the LLM call is
             # re-offered (bounded) instead of retired with nothing done.
             _executor_llm_error_text = _executor_llm_error(STATE_DIR, _subagent_task_id)
+            _model_call_failure = _executor_model_call_failure(STATE_DIR, _subagent_task_id)
             if _executor_llm_error_text:
                 _executor_llm_error_text = (
                     f"model={config.agents.defaults.model}; "
@@ -5456,19 +5472,24 @@ async def _main_impl_body():
             # bypasses the retry counter entirely (see _decide_handled_marker)
             # so an outage never burns the request's retry budget.
             _llm_error_class = (
-                _classify_llm_error(_executor_llm_error_text)
+                _classify_llm_error(
+                    _executor_llm_error_text, model_call_failure=_model_call_failure
+                )
                 if (_executor_llm_error_text and cycle_commit_count == 0) else ''
             )
             if _executor_llm_error_text and cycle_commit_count == 0:
                 _rollback_reason = _rollback_reason or (
                     LLM_SUPPLIER_PAUSED_REASON if _llm_error_class == 'paused-supplier'
+                    else 'model_call_incomplete' if _llm_error_class == 'model_call_incomplete'
                     else 'executor_llm_error'
                 )
             _decide_handled_marker(
                 handled_marker, req_path,
                 llm_error=bool(_executor_llm_error_text and cycle_commit_count == 0),
                 supplier_paused=(_llm_error_class == 'paused-supplier'),
-                state_dir=STATE_DIR, retry_key=req.get('retry_key'),
+                model_call_incomplete=(_llm_error_class == 'model_call_incomplete'),
+                state_dir=STATE_DIR, cycle_id=_cycle_id,
+                retry_key=req.get('retry_key'),
             )
             # Architect resolution 2026-09-25 (ADR-035 rule 3 / ADR-031 rule
             # 2): a supplier-side interruption is not retried or requeued --
@@ -6829,6 +6850,7 @@ async def _main_impl_body():
     _subagent_task_id = _res.get('subagent_task_id')
     _citation_subagent_task_id = _res.get('citation_subagent_task_id', _subagent_task_id)
     _executor_llm_error_text = str(_res.get('executor_llm_error') or '')
+    _model_call_failure = _executor_model_call_failure(STATE_DIR, _subagent_task_id)
     _system_prompt_overflow_text = str(_res.get('system_prompt_overflow') or '')
     _prompt_fit_rung = None
     commits_pushed = cycle_commit_count if _integrated else 0
@@ -6847,7 +6869,7 @@ async def _main_impl_body():
     _bridge_status = 'completed'
     if _revision_record and _revision_record['outcome'] == 'blocked':
         _bridge_status = 'blocked'
-    if _rollback_reason in ('executor_llm_error', 'system_prompt_overflow', LLM_SUPPLIER_PAUSED_REASON):
+    if _rollback_reason in ('executor_llm_error', 'model_call_incomplete', 'system_prompt_overflow', LLM_SUPPLIER_PAUSED_REASON):
         # #1280 / #1300: the executor's LLM call never returned, or no
         # executor was spawned because the prompt could not hold its critical
         # sections, and nothing was committed — this is `blocked`, not a new
@@ -6870,6 +6892,7 @@ async def _main_impl_body():
         'main_sha_before': main_sha_before,
         'main_sha_after': main_sha_after,
         'reason': _rollback_reason,
+        **({'error_class': _classify_llm_error(_executor_llm_error_text, model_call_failure=_model_call_failure)} if _executor_llm_error_text else {}),
         # #666: bridge committed uncommitted subagent work itself (see
         # _auto_commit_uncommitted_work) because the subagent finished without
         # a git commit despite having a dirty working tree.
@@ -6951,6 +6974,8 @@ async def _main_impl_body():
         # demand cooling and futility (see their own call sites) never count
         # an outage as a defect of the work or the proposal.
         _cycle_outcome = 'paused-supplier'
+    elif _rollback_reason == 'model_call_incomplete':
+        _cycle_outcome = 'model_call_incomplete'
     elif _rollback_reason in ('internal_error', 'executor_llm_error', 'system_prompt_overflow'):
         # #1280: an executor whose LLM call never returned is a failure with
         # zero commits, not a `partial` no-op — `partial` is what eleven
@@ -6974,7 +6999,7 @@ async def _main_impl_body():
     # ``outcome: skipped`` self-report upgrades the verdict reason so a
     # verified already-done skip records 'reject', not 'inconclusive'.
     _verdict_reason_hint = _rollback_reason
-    if _cycle_outcome in ('partial', 'failed') and not _rollback_reason:
+    if _cycle_outcome in ('partial', 'failed', 'model_call_incomplete') and not _rollback_reason:
         if _executor_reported_skipped(STATE_DIR, _subagent_task_id):
             _verdict_reason_hint = 'executor_reported_skipped'
     if _service_only:
@@ -6982,15 +7007,18 @@ async def _main_impl_body():
     _verdict, _verdict_reason = _derive_cycle_verdict(_cycle_outcome, _verdict_reason_hint)
     try:
         from nanobot import crash_record as _run_record
-        if not _res.get('run_stop_reason'):
-            _run_record.set_run_metadata(
-                # A service-only cycle merged cleanly and the bridge run
-                # completed; only its delivery verdict is non-success.
-                classification=(
-                    "completion" if _cycle_outcome == "success" or _service_only else "failed"
-                ),
-                reason=_rollback_reason or _cycle_outcome,
-            )
+        if _cycle_outcome == 'model_call_incomplete':
+            run_classification = 'model_call_incomplete'
+        elif _cycle_outcome == 'paused-supplier':
+            run_classification = 'paused_supplier'
+        elif _cycle_outcome == 'success' or _service_only:
+            run_classification = 'completion'
+        else:
+            run_classification = 'failed'
+        _run_record.set_run_metadata(
+            classification=run_classification,
+            reason=_rollback_reason or _cycle_outcome,
+        )
     except Exception:
         pass
     _lesson_candidate: dict[str, object] | None = None
@@ -7127,9 +7155,12 @@ async def _main_impl_body():
         # #1765: the classifier's decision AND the raw error text, together,
         # so a misclassification is auditable after the fact — never just
         # the derived outcome/reason with the evidence discarded.
+        model_call_failure=_model_call_failure,
         llm_error_classification=(
             {
-                "class": _classify_llm_error(_executor_llm_error_text),
+                "class": _classify_llm_error(
+                    _executor_llm_error_text, model_call_failure=_model_call_failure
+                ),
                 "raw_error": _executor_llm_error_text[:400],
             }
             if _executor_llm_error_text else None
@@ -7295,14 +7326,25 @@ async def _main_impl_body():
         # cross-cycle-stable id -- see _retry_key_for) -- the same counter
         # `_decide_handled_marker` above just wrote/read. Absent for every
         # other rollback reason, which has no retry structure to name.
+        # Name the attempt for the retry policy that produced this rollback;
+        # incomplete model calls and ordinary executor errors use independent counters.
         _rec_attempt: str | None = None
         try:
-            _retry_path = _llm_error_retry_path(req.get('retry_key'))
+            _retry_path = (
+                _model_call_incomplete_retry_path(req.get('retry_key') or request_id)
+                if _rollback_reason == 'model_call_incomplete'
+                else _llm_error_retry_path(req.get('retry_key') or request_id)
+            )
             if _retry_path is not None and _retry_path.exists():
                 _retry_data = json.loads(_retry_path.read_text(encoding='utf-8'))
                 _retry_count = int(_retry_data.get('count') or 0)
                 if _retry_count:
-                    _retry_max = int(_retry_data.get('max') or LLM_ERROR_MAX_RETRIES)
+                    _retry_max_default = (
+                        MODEL_CALL_INCOMPLETE_MAX_RETRIES
+                        if _rollback_reason == 'model_call_incomplete'
+                        else LLM_ERROR_MAX_RETRIES
+                    )
+                    _retry_max = int(_retry_data.get('max') or _retry_max_default)
                     _rec_attempt = f"{_retry_count}/{_retry_max}"
         except Exception:
             pass
@@ -7341,6 +7383,10 @@ async def _main_impl_body():
         # move consecutive_failures the way OUR OWN executor defect still
         # does below. The process still exits non-zero.
         return EXIT_SUPPLIER_PAUSED
+    if _rollback_reason == 'model_call_incomplete':
+        # The call did not yield a usable response. Preserve a non-zero process
+        # result, but keep it distinct from a request/code defect for streaks.
+        return EXIT_MODEL_CALL_INCOMPLETE
     if _rollback_reason == 'executor_llm_error':
         # #1280: say it with the exit status. The __main__ guard records any
         # other non-zero code as a `failure` in bridge/exit_streak.json, so
@@ -7357,6 +7403,10 @@ async def _main_impl_body():
 from nanobot.runtime import gate as _gate
 from nanobot.runtime import mutation_policy as _mutation_policy
 from nanobot.runtime.gate import _git_cmd, _is_runtime_deny
+from nanobot.runtime.llm_error_classification import (
+    SUPPLIER_UNAVAILABLE_RX as _SUPPLIER_UNAVAILABLE_RX,
+    classify_llm_error as _classify_llm_error,
+)
 
 # Compatibility mirrors retained for AST/external callers. The mutation policy
 # itself is authoritative; these mirrors are projections only.
@@ -7644,7 +7694,7 @@ _INCONCLUSIVE_REASONS = frozenset({
     'gate_failed', 'mutation_surface_violation', 'blocked_file_present',
     'out_of_band_main_detected', 'switch_base_gate_error',
     'switch_base_gate_blocked', 'head_on_main_precondition_failed', 'service_only',
-    'no_commit', 'internal_error', 'executor_llm_error',
+    'no_commit', 'internal_error', 'executor_llm_error', 'model_call_incomplete',
     # #1765: a supplier outage is infra trouble by definition — never
     # upgraded to accept/reject.
     LLM_SUPPLIER_PAUSED_REASON,
@@ -7705,17 +7755,6 @@ def _authoritative_subagent_task_id(
     return primary_task_id
 
 
-# #1765/round-2 item 2 (external re-check, architect resolution
-# 2026-09-26): the classifier now lives in its own leaf module
-# (nanobot/runtime/llm_error_classification.py) so open_increment.py's
-# check_running_for_kill (D2) can classify a stale error registration
-# immediately, without importing bridge.py -- see that module's docstring.
-from nanobot.runtime.llm_error_classification import (
-    SUPPLIER_UNAVAILABLE_RX as _SUPPLIER_UNAVAILABLE_RX,
-    classify_llm_error as _classify_llm_error,
-)
-
-
 def _executor_llm_error(state_dir: Path, task_id: 'str | None') -> str:
     """#1280: the executor's own verdict that its LLM call never returned.
 
@@ -7743,6 +7782,21 @@ def _executor_llm_error(state_dir: Path, task_id: 'str | None') -> str:
         return text.strip()[:400]
     except Exception:
         return ''
+
+
+def _executor_model_call_failure(state_dir: Path, task_id: str | None) -> dict | None:
+    if not task_id:
+        return None
+    try:
+        payload = json.loads((Path(state_dir) / 'subagents' / f'{task_id}.json').read_text(encoding='utf-8'))
+        failure = payload.get('model_call_failure') if isinstance(payload, dict) else None
+        if not isinstance(failure, dict):
+            return None
+        if failure.get('stage') == 'model_call' or failure.get('call_stage') == 'model_call':
+            return failure
+        return None
+    except Exception:
+        return None
 
 
 def _retry_key_for(candidate_id: 'str | None', task_title: str) -> str:
@@ -7834,10 +7888,31 @@ def _recorded_llm_error_attempts(state_dir: 'Path | str', retry_key: 'str | None
         return 0
 
 
+def _model_call_incomplete_retries_exhausted(request_id: str | None) -> bool:
+    retry_path = _model_call_incomplete_retry_path(request_id)
+    if retry_path is None:
+        return False
+    try:
+        if not retry_path.exists():
+            return False
+        return int((json.loads(retry_path.read_text(encoding='utf-8')) or {}).get('count') or 0) >= MODEL_CALL_INCOMPLETE_MAX_RETRIES
+    except Exception:
+        return True
+
+
+def _model_call_incomplete_retry_path(request_id: str | None) -> Path | None:
+    if not request_id:
+        return None
+    safe_id = str(request_id).replace('/', '_')[:120]
+    return BRIDGE_STATE_DIR / f'retry_incomplete_{safe_id}.json'
+
+
 def _decide_handled_marker(
     handled_marker: Path, req_path: 'Path | str', *, llm_error: bool,
     supplier_paused: bool = False,
-    state_dir: 'Path | str | None' = None, retry_key: 'str | None' = None,
+    model_call_incomplete: bool = False,
+    state_dir: 'Path | str | None' = None, cycle_id: 'str | None' = None,
+    retry_key: 'str | None' = None,
 ) -> str:
     """#1280: write the ``handled_`` marker — retiring the request forever —
     unless the subagent died on its LLM call without producing anything, in
@@ -7884,6 +7959,27 @@ def _decide_handled_marker(
                 '(#1765) — not counted toward the LLM-error retry budget'
             )
             return 'supplier_paused'
+        if model_call_incomplete:
+            retry_path = handled_marker.with_name(
+                handled_marker.name.replace('handled_', 'retry_incomplete_', 1)
+            ).with_suffix('.json')
+            try:
+                count = int((json.loads(retry_path.read_text(encoding='utf-8')) or {}).get('count') or 0) if retry_path.exists() else 0
+            except Exception:
+                count = MODEL_CALL_INCOMPLETE_MAX_RETRIES
+            count += 1
+            retry_path.write_text(json.dumps({
+                'count': count, 'max': MODEL_CALL_INCOMPLETE_MAX_RETRIES,
+                'last_ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                'reason': 'model_call_incomplete',
+                'operator_check': 'check request size / budget',
+            }), encoding='utf-8')
+            if count >= MODEL_CALL_INCOMPLETE_MAX_RETRIES:
+                handled_marker.write_text(str(req_path), encoding='utf-8')
+                print('model_call_incomplete: automatic retries paused; check request size / budget')
+                return 'incomplete_retries_paused'
+            print(f'model_call_incomplete: retry pending ({count}/{MODEL_CALL_INCOMPLETE_MAX_RETRIES}); check request size / budget')
+            return 'incomplete_retry'
         if not llm_error:
             handled_marker.write_text(str(req_path), encoding='utf-8')
             return 'handled'
@@ -8066,7 +8162,8 @@ def _recent_failure_match(
     max_scan: int = 10,
     target_path: 'str | None' = None,
     entries: 'list[tuple[Path, dict, float]] | None' = None,
-) -> 'str | None':
+    return_evidence: bool = False,
+) -> 'str | dict | None':
     """Return the title of a recently-failed/rejected result that
     ``dup_check_title`` matches, or None (#716; #757 return type — the
     matched HISTORICAL title, so the ledger's ``matched_against`` can record
@@ -8196,12 +8293,17 @@ def _recent_failure_match(
                 continue
             if not reason and status not in ('blocked', 'no_commit'):
                 continue
+            if reason == 'model_call_incomplete' and not _model_call_incomplete_retries_exhausted(
+                data.get('retry_key') or data.get('request_id')
+            ):
+                continue
             # #1280/#1765: retry_key is the cross-cycle-stable key (ADR-035
             # rule 1, #1942 broke request_id's stability); request_id stays
             # as a fallback for result rows written before this field existed.
             if reason == 'executor_llm_error' and not _llm_error_retries_exhausted(
                 data.get('retry_key') or data.get('request_id')
             ):
+                continue
                 # #1280: a cycle that died on the LLM call says nothing about
                 # the proposal, so while its request still has retry budget
                 # the row must not feed suppression — otherwise this branch
@@ -8231,6 +8333,11 @@ def _recent_failure_match(
             candidate_intent = derive_intent(title, hist_target)
             if proposal_intent is not None and candidate_intent is not None:
                 if intents_match(proposal_intent, candidate_intent):
+                    if return_evidence:
+                        rollback = data.get('rollback') if isinstance(data.get('rollback'), dict) else {}
+                        classification = data.get('llm_error_classification')
+                        error_class = classification.get('class') if isinstance(classification, dict) else rollback.get('error_class') or rollback.get('reason')
+                        return {'title': title, 'cycle_id': str(data.get('cycle_id') or ''), 'error_class': str(error_class or 'unknown')}
                     return title
                 continue
             # #798: both sides name a concrete target path but intent
@@ -8249,6 +8356,11 @@ def _recent_failure_match(
                 continue
             matches = sum(1 for w in words if w in candidate_words)
             if matches >= min(3, len(words)):
+                if return_evidence:
+                    rollback = data.get('rollback') if isinstance(data.get('rollback'), dict) else {}
+                    classification = data.get('llm_error_classification')
+                    error_class = classification.get('class') if isinstance(classification, dict) else rollback.get('error_class') or rollback.get('reason')
+                    return {'title': title, 'cycle_id': str(data.get('cycle_id') or ''), 'error_class': str(error_class or 'unknown')}
                 return title
 
         return None
@@ -8951,14 +9063,24 @@ if __name__ == '__main__':
     # (uncaught exceptions are recorded by the sys.excepthook armed in
     # nanobot/__init__). A disabled bridge still never touches STATE_DIR.
     if BRIDGE_ENABLED:
-        # #1765: a supplier outage exits non-zero (systemd still sees a
-        # non-clean run) but is deliberately NEVER handed to record_exit —
-        # its outcome is a strict success|failure binary with no third
-        # state, and forcing either box would move exit_streak's
-        # consecutive_failures for a supplier's uptime, not the loop's own
-        # defect (see EXIT_SUPPLIER_PAUSED's own comment).
+        # #1765: supplier outages do not write a process exit row. Incomplete
+        # model calls write an explicit run/exit record but pass
+        # ``outcome_classification`` so the defect streak is not mutated.
         _skip_exit_record = _exit_code == EXIT_SUPPLIER_PAUSED
-        if not _skip_exit_record:
+        if _exit_code == EXIT_MODEL_CALL_INCOMPLETE:
+            try:
+                from nanobot import crash_record as _crash_record
+
+                _crash_record.record_exit(
+                    STATE_DIR,
+                    outcome="model_call_incomplete",
+                    exit_status=_exit_code,
+                    outcome_classification="model_call_incomplete",
+                    update_streak=False,
+                )
+            except Exception as _record_exc:
+                print(f"bridge: incomplete-call run record not written: {_record_exc!r}", file=sys.stderr)
+        elif not _skip_exit_record:
             try:
                 from nanobot import crash_record as _crash_record
 

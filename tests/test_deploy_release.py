@@ -211,6 +211,14 @@ def _journal_replay_mock(*journal_lines):
         printf '%s\\n' {shlex.quote(payload)} | eval "${{cmd#*| }}"
         exit 0
     fi
+    if [[ "$cmd" == *journalctl* && "$cmd" == *"tail -n 1"* ]]; then
+        printf '%s\\n' {shlex.quote(payload)} | grep -E 'systemd\\[1\\]: Starting' | tail -n 1
+        exit 0
+    fi
+    if [[ "$cmd" == *journalctl* && "$cmd" == *"--no-pager"* ]]; then
+        printf '%s\\n' {shlex.quote(payload)}
+        exit 0
+    fi
     exit 0
     """
 
@@ -547,6 +555,18 @@ def test_m_invocation_without_finish_is_no_crash_after_the_hold(repo, tmp_path, 
     assert res.returncode == 0, combined
     assert "health gate: no-crash" in combined, combined
     assert "weaker than clean-exit" in combined
+    assert "health gate: pass" not in combined and "health gate: clean-exit" not in combined
+
+
+def test_incomplete_then_new_invocation_can_satisfy_no_crash(repo, tmp_path, mock_bin):
+    incomplete_exit = f"2026-09-27T20:01:00+00:00 eeepc systemd[1]: {BRIDGE_UNIT}: Main process exited, code=exited, status=6/NOTIMPLEMENTED"
+    earlier_start = f"2026-09-27T20:00:00+00:00 {STARTING_TEXT}"
+    later_start = f"2026-09-27T20:02:00+00:00 eeepc systemd[1]: Starting {BRIDGE_UNIT} - Run eeepc self-evolving subagent bridge... (retry)"
+    set_ssh_mock(mock_bin, _journal_replay_mock(earlier_start, incomplete_exit, later_start))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "1", "--no-crash-hold", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert res.returncode == 0, combined
+    assert "health gate: no-crash" in combined
     assert "health gate: pass" not in combined and "health gate: clean-exit" not in combined
 
 

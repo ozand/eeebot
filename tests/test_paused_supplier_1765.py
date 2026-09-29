@@ -58,14 +58,21 @@ def _wire(tmp_path, monkeypatch, manager_cls):
 
 class TestClassifyLlmError:
     @pytest.mark.parametrize("text", [
+        "Error code: 429 - rate limited",
+        "HTTP 503 Service Unavailable",
+        "received status code 500 from upstream",
+    ])
+    def test_http_contextual_supplier_status_remains_paused(self, text):
+        assert bridge._classify_llm_error(text) == "paused-supplier"
+
+    @pytest.mark.parametrize("text", [
         "Error: LLM execution failed: Error calling LLM: litellm.InternalServerError: "
         "OpenAIException - Connection error.",
         "litellm.APIConnectionError: connection refused",
         "connection reset by peer",
-        "Request timed out after 60s",
-        "litellm.Timeout: Read timeout",
         "Error code: 429 - {'error': 'rate limited'}",
         "Error code: 503 - Service Unavailable",
+        "HTTP 502 Bad Gateway",
         "litellm.RateLimitError: Error code: 429",
         "litellm.ServiceUnavailableError: Error code: 502",
         "No deployments available for selected model",
@@ -86,6 +93,14 @@ class TestClassifyLlmError:
     def test_supplier_side_signals_classify_as_paused_supplier(self, text):
         assert bridge._classify_llm_error(text) == "paused-supplier"
 
+    @pytest.mark.parametrize("text", [
+        "maximum output is 500 tokens",
+        "requested 500 tokens but the model allows 400",
+        "limit is 429 tokens",
+    ])
+    def test_bare_numeric_data_does_not_claim_supplier_outage(self, text):
+        assert bridge._classify_llm_error(text) == "failed"
+
     def test_bare_400_status_code_alone_is_not_a_supplier_signal(self):
         """The classifier keys on the MESSAGE, not the HTTP status -- a 400
         with no supplier-shaped phrasing must still default to 'failed'."""
@@ -104,6 +119,99 @@ class TestClassifyLlmError:
     ])
     def test_our_own_defect_signals_stay_failed(self, text):
         assert bridge._classify_llm_error(text) == "failed"
+
+    @pytest.mark.parametrize("text, expected", [
+        ("HTTP 502 Bad Gateway", "paused-supplier"),
+        ("HTTP 503 Service Unavailable", "paused-supplier"),
+        ("http 429", "paused-supplier"),
+        ("HTTP 404 Not Found", "failed"),       # a client status stays ours
+        ("maximum output is 500 tokens", "failed"),  # a bare number is not a status line
+    ])
+    def test_rx_http_status_line_alternative(self, text, expected):
+        """#1919: pins the one alternative added to main's list -- "http",
+        whitespace, then 429/500/502/503/504. Main's verbatim regex does not
+        match an HTTP status line."""
+        assert bridge._classify_llm_error(text) == expected
+
+    @pytest.mark.parametrize("text, expected", [
+        ("received status code 500 from upstream", "paused-supplier"),
+        ("gateway: status code 503 returned by upstream", "paused-supplier"),
+        ("status code 500", "failed"),              # no upstream relay named
+        ("status code 404 from upstream", "failed"),  # a client status stays ours
+    ])
+    def test_rx_upstream_status_code_alternative(self, text, expected):
+        """#1919: pins the second alternative added to main's list -- "status
+        code" + 429/500/502/503/504 followed within 30 chars by "upstream"."""
+        assert bridge._classify_llm_error(text) == expected
+
+    @pytest.mark.parametrize("text", [
+        # the local gateway's own text during the 2026-09-29 incident, verbatim
+        "No deployments available for selected model, Try again in 8355 seconds",
+        "Error code: 503 - Service Unavailable",
+        "Connection error.",
+    ])
+    def test_supplier_outage_text_wins_over_generic_call_site_evidence(self, text):
+        """#1919 review P1: the executor records error_type="provider_error"
+        whenever a response carries none (subagent.py). An affirmative
+        outage match must still classify as paused-supplier, never fall
+        through to the structured branch's model_call_incomplete fallback --
+        that would spend the incomplete-retry budget on the supplier's
+        uptime, which #1765 exists to prevent."""
+        failure = {"stage": "model_call", "call_stage": "model_call", "error_type": "provider_error", "message": text}
+        assert bridge._classify_llm_error(text, model_call_failure=failure) == "paused-supplier"
+
+    def test_gateway_connection_timeout_is_an_outage(self):
+        """#1919 (architect decision): a connection timeout to the gateway
+        is supplier-side -- main's connect-timeout alternative is kept."""
+        assert bridge._classify_llm_error("Connection timed out") == "paused-supplier"
+        assert bridge._classify_llm_error(
+            "Connection timed out",
+            model_call_failure={"stage": "model_call", "error_type": "provider_error", "message": "Connection timed out"},
+        ) == "paused-supplier"
+
+    def test_generic_request_timeout_with_model_call_evidence_is_incomplete(self):
+        """#1919 (architect decision): main's generic timeout alternatives are
+        dropped, so a request timeout with model_call evidence is
+        model_call_incomplete, never promoted to paused-supplier by text."""
+        assert bridge._classify_llm_error(
+            "Request timed out",
+            model_call_failure={"stage": "model_call", "message": "Request timed out"},
+        ) == "model_call_incomplete"
+
+    @pytest.mark.parametrize("text", ["socket timeout", "Request timed out after 60s", "litellm.Timeout: Read timeout"])
+    def test_model_call_timeout_needs_call_site_evidence(self, text):
+        assert bridge._classify_llm_error(text) == "failed"
+        assert bridge._classify_llm_error(text, model_call_failure={"stage": "model_call"}) == "model_call_incomplete"
+        assert bridge._classify_llm_error(text, model_call_failure={"stage": "tool_execution"}) == "failed"
+        assert bridge._classify_llm_error(text, model_call_failure={"stage": "response_handling"}) == "failed"
+        assert bridge._classify_llm_error(text, model_call_failure={"stage": "response_handling", "call_stage": "model_call"}) == "model_call_incomplete"
+
+    @pytest.mark.parametrize("error_type, message", [
+        ("BadRequestError", "Azure OpenAI API Error 400: invalid temperature"),
+        ("BadRequestError", "Azure OpenAI API Error 404: deployment not found"),
+        ("BadRequestError", "invalid temperature"),
+        ("AuthenticationError", "Incorrect API key provided"),
+        ("PermissionDeniedError", "model access denied"),
+        ("provider_error", "Azure OpenAI API Error 401: Incorrect API key"),
+        ("provider_error", "Azure OpenAI API Error 404: Deployment not found"),
+        ("provider_error", "Error calling Codex: Invalid API key"),
+    ])
+    def test_definitive_client_rejection_with_model_call_telemetry_stays_failed(self, error_type, message):
+        failure = {
+            "stage": "response_handling",
+            "call_stage": "model_call",
+            "error_type": error_type,
+            "message": message,
+        }
+        assert bridge._classify_llm_error(
+            f"litellm.{error_type}: {message}",
+            model_call_failure=failure,
+        ) == "failed"
+
+    @pytest.mark.parametrize("error_type", ["RateLimitError", "InternalServerError", "ServiceUnavailableError"])
+    def test_affirmative_provider_error_types_are_supplier_pauses(self, error_type):
+        failure = {"stage": "response_handling", "call_stage": "model_call", "error_type": error_type, "message": "gateway response"}
+        assert bridge._classify_llm_error("gateway response", model_call_failure=failure) == "paused-supplier"
 
     def test_default_is_conservative_not_a_catch_all(self):
         """An error text mentioning neither class's vocabulary at all stays
@@ -145,6 +253,39 @@ def _read_ledger(state_dir: Path) -> list[dict]:
 
 
 class TestDecideHandledMarkerSupplierPaused:
+    def test_model_call_incomplete_has_separate_bounded_retry_stop(self, tmp_path):
+        marker = tmp_path / "handled_req.txt"
+        retry = tmp_path / "retry_incomplete_req.json"
+        for attempt in range(1, bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES + 1):
+            result = bridge._decide_handled_marker(
+                marker, "req.json", llm_error=True, model_call_incomplete=True,
+            )
+            if attempt < bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES:
+                assert result == "incomplete_retry"
+                assert not marker.exists()
+            else:
+                assert result == "incomplete_retries_paused"
+                assert marker.exists()
+        state = json.loads(retry.read_text(encoding="utf-8"))
+        assert state["count"] == bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES
+        assert state["operator_check"] == "check request size / budget"
+        assert not (tmp_path / "retry_req.json").exists()
+
+    def test_error_card_retry_attempt_reads_incomplete_counter(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", tmp_path)
+        (tmp_path / "retry_incomplete_req.json").write_text(
+            json.dumps({"count": 3, "max": 3}), encoding="utf-8",
+        )
+        request_id = "req"
+        retry_path = bridge._model_call_incomplete_retry_path(request_id)
+        attempt = None
+        if retry_path is not None and retry_path.exists():
+            retry_data = json.loads(retry_path.read_text(encoding="utf-8"))
+            retry_count = int(retry_data.get("count") or 0)
+            if retry_count:
+                attempt = f"{retry_count}/{retry_data.get('max') or bridge.LLM_ERROR_MAX_RETRIES}"
+        assert attempt == "3/3"
+
     def test_supplier_paused_writes_no_marker_and_no_retry_counter(self, tmp_path):
         marker = tmp_path / "handled_req.txt"
         result = bridge._decide_handled_marker(
@@ -310,6 +451,63 @@ class TestOutageCycleOffersTheSameItemAgainUnchanged:
         assert (state_dir / "subagent_bridge" / f"handled_{key}.txt").exists()
 
 
+class _IncompleteCallManager(_LLMDeadSubagentManager):
+    """The executor's model call ended without a usable response and without
+    any supplier-outage wording: call-site evidence says model_call, the
+    error type is not a supplier one -> model_call_incomplete."""
+
+    error_text = "Error: LLM execution failed: ValueError: provider response ended before the final chunk"
+
+    async def spawn(self, **kwargs):
+        result = await super().spawn(**kwargs)
+        path = bridge.STATE_DIR / "subagents" / f"{self.task_id}.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["model_call_failure"] = {
+            "stage": "model_call", "call_stage": "model_call",
+            "error_type": "ValueError", "message": self.error_text,
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return result
+
+
+class TestIncompleteRetryCounterIsReadUnderTheWritersKey:
+    def test_both_readers_find_the_counter_the_real_writer_wrote(self, tmp_path, monkeypatch):
+        """#1919 review P1: after #1942 every cycle mints a fresh request_id
+        and the handled/retry bookkeeping keys on the stable retry_key. The
+        counter is written by the real _decide_handled_marker inside a real
+        cycle, and must be found by the attempt label (error_card_recording)
+        and by the recent-failure suppression -- neither may look it up
+        under the per-cycle request_id."""
+        state_dir = _wire(tmp_path, monkeypatch, _IncompleteCallManager)
+        title = "Add retry-key regression coverage for incomplete model calls"
+        _seed_bridge_request(state_dir, "req-incomplete", "cycle-incomplete", task_title=title)
+        _stub_planning_session(monkeypatch, title)
+        key = bridge._retry_key_for(None, title)
+
+        asyncio.run(bridge._main_impl())
+
+        outcome = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"][-1]
+        assert outcome["reason"] == "model_call_incomplete", outcome
+        bridge_state = state_dir / "subagent_bridge"
+        assert (bridge_state / f"retry_incomplete_{key}.json").exists(), sorted(p.name for p in bridge_state.iterdir())
+        results = [
+            json.loads(p.read_text(encoding="utf-8"))
+            for p in (state_dir / "subagents" / "results").rglob("*.json")
+        ]
+        assert results and all(r.get("retry_key") == key and r.get("request_id") != key for r in results), results
+
+        # reader 1: the attempt label on the error-card row
+        card_rows = [r for r in _read_ledger(state_dir) if r["phase"] == "error_card_recording"]
+        assert card_rows and card_rows[-1].get("attempt") == f"1/{bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES}", card_rows
+
+        # reader 2: recent-failure suppression, before and after exhaustion
+        assert bridge._recent_failure_match(title, state_dir) is None
+        marker = bridge_state / f"handled_{key}.txt"
+        for _ in range(bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES - 1):
+            bridge._decide_handled_marker(marker, "req.json", llm_error=True, model_call_incomplete=True)
+        assert bridge._recent_failure_match(title, state_dir) is not None
+
+
 # ─── the exit-code consumers: crash_record's exit_streak, health.py ───────
 
 
@@ -325,6 +523,16 @@ class TestExitStreakAndHealthDoNotCountAnOutage:
 
     def test_supplier_paused_exit_code_is_distinct_from_executor_llm_error(self):
         assert bridge.EXIT_SUPPLIER_PAUSED not in (0, bridge.EXIT_EXECUTOR_LLM_ERROR, bridge.EXIT_SYSTEM_PROMPT_OVERFLOW)
+
+    def test_incomplete_model_call_has_distinct_nonzero_exit_code(self):
+        assert bridge.EXIT_MODEL_CALL_INCOMPLETE not in (
+            0, bridge.EXIT_EXECUTOR_LLM_ERROR, bridge.EXIT_SYSTEM_PROMPT_OVERFLOW,
+            bridge.EXIT_SUPPLIER_PAUSED,
+        )
+
+    def test_crash_record_mirrors_model_call_incomplete_exit_code(self):
+        from nanobot import crash_record
+        assert crash_record.MODEL_CALL_INCOMPLETE_EXIT_CODE == bridge.EXIT_MODEL_CALL_INCOMPLETE
 
     def test_crash_record_mirrors_the_same_exit_code_value(self):
         """crash_record.py must not import bridge.py (module docstring) --
@@ -348,10 +556,43 @@ class TestExitStreakAndHealthDoNotCountAnOutage:
         guard = tree.body[-1]
         assert isinstance(guard, ast.If) and "__main__" in ast.dump(guard.test)
         body_src = ast.get_source_segment(src, guard)
-        assert "_exit_code == EXIT_SUPPLIER_PAUSED" in body_src
+        assert "_exit_code == EXIT_MODEL_CALL_INCOMPLETE" in body_src
+        assert "outcome=\"model_call_incomplete\"" in body_src
+        assert "outcome_classification=\"model_call_incomplete\"" in body_src
+        assert "update_streak=False" in body_src
         assert "if not _skip_exit_record:" in body_src
         assert "_crash_record.record_exit(" in body_src
         assert "if BRIDGE_ENABLED:" in body_src
+
+    def test_systemd_cli_records_model_call_incomplete_without_streak_mutation(self, tmp_path):
+        from nanobot import crash_record
+
+        state = tmp_path / "state"
+        crash_record._start_run_marker(state)
+        crash_record.record_exit(state, outcome="failure", exit_status=1, error="NameError: x")
+        crash_record._start_run_marker(state)
+        before = crash_record._load_streak(state / "bridge" / "exit_streak.json")
+        assert before["consecutive_failures"] == 1
+
+        rc = crash_record.main([
+            "--source", "systemd",
+            "--exit-status", str(bridge.EXIT_MODEL_CALL_INCOMPLETE),
+            "--exit-code", "exited",
+            "--service-result", "exit-code",
+            "--state-dir", str(state),
+        ])
+        assert rc == 0
+        after = crash_record._load_streak(state / "bridge" / "exit_streak.json")
+        assert after["consecutive_failures"] == before["consecutive_failures"]
+        assert after["last_failure_ts"] == before["last_failure_ts"]
+        rows = [json.loads(line) for line in (state / "bridge" / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert rows[-1]["classification"] == "model_call_incomplete"
+        assert rows[-1]["outcome"] == "model_call_incomplete"
+        exit_rows = [json.loads(line) for line in (state / "bridge" / "exits.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert exit_rows[-1]["outcome"] == "model_call_incomplete"
+        assert exit_rows[-1]["classification"] == "model_call_incomplete"
+        assert exit_rows[-1]["streak_updated"] is False
+        assert after["total_records"] == before["total_records"]
 
     def test_systemd_cli_skips_record_exit_for_supplier_paused_and_streak_is_unchanged(self, tmp_path):
         from nanobot import crash_record
@@ -400,8 +641,36 @@ class TestExitStreakAndHealthDoNotCountAnOutage:
         )
         progress = health.read_cycle_progress(state, since_ts="2026-08-01T00:00:00Z")
         assert progress["consecutive_non_integrating_cycles"] == 0
-        assert progress["state"] != "stalled"
+        # The count threshold is exempt, but the independent time-based alert
+        # still fires because the last successful cycle is older than 8 hours.
+        assert progress["state"] == "stalled"
+        assert progress["alert"] is True
         assert progress["dominant_reason"] is None
+
+    def test_incomplete_calls_still_trigger_time_based_stall_alert(self, tmp_path):
+        from nanobot.runtime import health
+
+        state = tmp_path / "state"
+        ledger_dir = state / "ledger"
+        ledger_dir.mkdir(parents=True)
+        rows = [{"phase": "outcome", "cycle_id": "c-success", "outcome": "success",
+                 "ts": "2026-09-01T00:00:00Z"}]
+        for i in range(3):
+            rows.append({
+                "phase": "outcome", "cycle_id": f"c-incomplete-{i}",
+                "outcome": "model_call_incomplete", "reason": "model_call_incomplete",
+                "ts": f"2026-09-01T00:{i + 1:02d}:00Z",
+            })
+        (ledger_dir / "cycles.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8",
+        )
+        progress = health.read_cycle_progress(
+            state, since_ts="2026-08-01T00:00:00Z",
+            now=datetime(2026, 9, 3, tzinfo=timezone.utc).timestamp(),
+        )
+        assert progress["state"] == "stalled"
+        assert progress["alert"] is True
+        assert progress["consecutive_non_integrating_cycles"] == 0
 
     def test_health_a_real_failure_streak_of_the_same_length_still_alerts(self, tmp_path):
         """Control: this is not a change to the threshold itself -- a
@@ -504,8 +773,30 @@ class TestScorecardPausedSupplierCounters:
         assert loop["repeat_failure_rate"] == round(1 / 4, 4)
         assert loop["repeat_failure_rate_new"] == round(2 / 4, 4)
         assert loop["repeat_failure_rate"] == round(1 / 4, 4)
-        assert loop["model_call_incomplete_events"] == "unavailable"
+        assert loop["model_call_incomplete_events"] == 0
+        assert loop["model_call_incomplete_tasks"] == 0
+        assert loop["model_call_incomplete_share"] == 0.0
         assert loop["unknown_failure_cause_events"] == "unavailable"
+
+    def test_model_call_incomplete_fields_are_populated_from_ledger(self):
+        rows = [
+            {"phase": "proposed", "cycle_id": "c-incomplete", "demand_id": "task-a"},
+            {"phase": "outcome", "cycle_id": "c-incomplete", "outcome": "model_call_incomplete"},
+        ]
+        loop = scorecard._loop_section(rows, ledger_status="complete")
+        assert loop["model_call_incomplete_events"] == 1
+        assert loop["model_call_incomplete_tasks"] == 1
+        assert loop["model_call_incomplete_share"] == 1.0
+        assert loop["execution_failure_and_incomplete_events"] == 1
+        assert loop["execution_failure_tasks"] == 0
+        assert loop["execution_failure_events"] == 0
+        assert loop["wasted_attempts"] == 0
+
+    def test_model_call_incomplete_fields_stay_unavailable_if_ledger_unavailable(self):
+        loop = scorecard._loop_section([], ledger_status="unavailable")
+        assert loop["model_call_incomplete_events"] == "unavailable"
+        assert loop["model_call_incomplete_tasks"] == "unavailable"
+        assert loop["model_call_incomplete_share"] == "unavailable"
 
     def test_paused_supplier_counted_and_timed_separately_from_failed(self):
         loop = scorecard._loop_section(self._rows(paused=2, failed=1, success=1), ledger_status="complete")

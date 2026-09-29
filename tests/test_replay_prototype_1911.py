@@ -86,4 +86,3 @@ def test_extract_file_and_commits_skips_checkpoints(tmp_path):
     assert not any(s.startswith("selfevo: checkpoint") for s in subjects), (
         f"a checkpoint commit must never become already-implemented evidence: {subjects!r}"
     )
-

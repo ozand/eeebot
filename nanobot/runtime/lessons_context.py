@@ -105,7 +105,7 @@ REASON_NO_CANDIDATES = "no_candidates"
 # such as ``timeout-desync``. Excluded cards stay in ``errors.yaml`` for the
 # dashboard and the scorecard; this only removes them from executor-facing
 # selection.
-_INFRA_CLASSES_EXACT = frozenset({"executor_llm_error", "push_rejected", "push_pending"})
+_INFRA_CLASSES_EXACT = frozenset({"executor_llm_error", "model_call_incomplete", "push_rejected", "push_pending"})
 _INFRA_CLASS_SUBSTRINGS = ("gateway", "timeout", "llm_unavailable")
 _CLASS_FIELDS = ("category", "reason")
 

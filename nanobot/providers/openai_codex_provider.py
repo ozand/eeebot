@@ -83,6 +83,7 @@ class OpenAICodexProvider(LLMProvider):
             return LLMResponse(
                 content=f"Error calling Codex: {str(e)}",
                 finish_reason="error",
+                error_type=type(e).__name__,
             )
 
     def get_default_model(self) -> str:

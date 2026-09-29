@@ -56,14 +56,15 @@ class CustomProvider(LLMProvider):
             # generic "Expecting value …" message.  Truncate to avoid huge HTML pages.
             body = getattr(e, "doc", None) or getattr(getattr(e, "response", None), "text", None)
             if body and body.strip():
-                return LLMResponse(content=f"Error: {body.strip()[:500]}", finish_reason="error")
-            return LLMResponse(content=f"Error: {e}", finish_reason="error")
+                return LLMResponse(content=f"Error: {body.strip()[:500]}", finish_reason="error", error_type=type(e).__name__)
+            return LLMResponse(content=f"Error: {e}", finish_reason="error", error_type=type(e).__name__)
 
     def _parse(self, response: Any) -> LLMResponse:
         if not response.choices:
             return LLMResponse(
                 content="Error: API returned empty choices. This may indicate a temporary service issue or an invalid model response.",
-                finish_reason="error"
+                finish_reason="error",
+                error_type="InvalidResponseError",
             )
         choice = response.choices[0]
         msg = choice.message

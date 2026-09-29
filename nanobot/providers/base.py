@@ -61,6 +61,7 @@ class LLMResponse:
     # to the requested model in that case, mirroring what llm_proposer.py's
     # own call site already does.
     served_model: str | None = None
+    error_type: str | None = None
 
     @property
     def has_tool_calls(self) -> bool:
@@ -100,9 +101,9 @@ class LLMProvider(ABC):
         "503",
         "504",
         "overloaded",
-        "timeout",
-        "timed out",
         "connection",
+        "timed out",
+        "timeout",
         "server error",
         "temporarily unavailable",
     )
@@ -238,7 +239,10 @@ class LLMProvider(ABC):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            return LLMResponse(content=f"Error calling LLM: {exc}", finish_reason="error")
+            return LLMResponse(
+                content=f"Error calling LLM: {exc}", finish_reason="error",
+                error_type=type(exc).__name__,
+            )
 
     async def chat_with_retry(
         self,
