@@ -5744,13 +5744,20 @@ async def _main_impl_body():
                         expected_cycle_branch=cycle_branch,
                         wall_deadline=_bridge_wall_deadline,
                     )
-                    _last_call_gap_manager = _repair_mgr
-                    _repair_gap = getattr(_repair_mgr, "last_max_call_gap_s", None)
-                    if _repair_gap is not None:
+                    # #2024: fold the gap of the manager this repair REPLACES
+                    # (the primary, or the previous repair) before losing the
+                    # reference -- it has finished its spawn/wait by now. A
+                    # freshly constructed manager has measured nothing yet
+                    # (SubagentManager.__init__ sets None; the value appears
+                    # only while it runs). The last manager is folded at
+                    # finalization via _last_call_gap_manager.
+                    _replaced_gap = getattr(_last_call_gap_manager, "last_max_call_gap_s", None)
+                    if _replaced_gap is not None:
                         _candidate_max_call_gap_s = max(
-                            gap for gap in (_candidate_max_call_gap_s, _repair_gap)
+                            gap for gap in (_candidate_max_call_gap_s, _replaced_gap)
                             if gap is not None
                         )
+                    _last_call_gap_manager = _repair_mgr
                     _repair_tip_before = _current_tip_sha(_selfevo_repo)
                     await _repair_mgr.spawn(
                         task=_repair_prompt,

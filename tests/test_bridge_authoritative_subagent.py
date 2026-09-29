@@ -348,7 +348,8 @@ class TestAuthoritativeSpawnEndToEnd:
             def __new__(cls, **kwargs):
                 manager_cls, gap = next(repair_classes)
                 manager = manager_cls(**kwargs)
-                manager.last_max_call_gap_s = gap
+                # like production: nothing measured until the manager runs
+                # (SubagentManager.__init__ sets None; _spawn below sets it).
                 original_spawn = manager.spawn
 
                 async def _spawn(**spawn_kwargs):
