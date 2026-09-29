@@ -43,7 +43,7 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
     )
     live = live_root / "current"
     live.symlink_to(live_release)
-    candidate_health_json = '{"health": {"dimensions": {"disk": {"status": "OK"}}}}'
+    baseline_health = {"health": {"dimensions": {"disk": {"status": "OK"}}}}
     source = tmp_path / "source"
     source.mkdir()
     gate_path = source / "scripts/verify_release_health.py"
@@ -66,7 +66,7 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
             import json
 
             def verify_release_health():
-                return json.loads(__import__("os").environ["CANDIDATE_HEALTH_JSON"])
+                return json.loads(__import__("os").environ["HEALTH_REPORT_JSON"])
 
             def compare_health_dimensions(baseline, candidate):
                 rows, findings = [], []
@@ -156,7 +156,7 @@ exec {shlex.quote(sys.executable)} "$@"
     env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1",
                FULL_COMMIT="candidate", PREV_RELEASE_PATH=str(live), GATE_TMP=str(gate).replace("\\", "/"),
                RELEASE_DIR=str(live), HEALTH_GATE_PYTHON=str(bindir / "python3"),
-               CANDIDATE_HEALTH_JSON=candidate_health_json)
+               HEALTH_REPORT_JSON=json.dumps(baseline_health))
     result = subprocess.run(["bash", str(remote_path)], cwd=tmp_path, env=env,
                             capture_output=True, text=True, timeout=480)
     return result, before_systemd, (systemd_sandbox, roots)
