@@ -1028,6 +1028,58 @@ def test_ran_proposer_candidate_is_retired_and_not_reoffered(tmp_path: Path, mon
     ), "a proposer request whose candidate already ran must not be offered again"
 
 
+def test_proposer_candidate_not_retired_when_executor_spawn_fails(tmp_path: Path, monkeypatch):
+    """#2010 (Codex re-check on PR #1962, P2, bridge.py:4987): retirement
+    used to run right after the attempt registration persisted, BEFORE
+    SubagentManager construction and mgr.spawn() -- so a prompt-build or
+    spawn failure still retired the request with no executor ever having
+    run, and the candidate could never be reconsidered on a later healthy
+    tick. Retirement now waits for a confirmed running task_id (the same
+    "the candidate runs" moment #2011/#2012 gate the planner's own
+    acknowledgements on)."""
+    import asyncio
+
+    from nanobot.runtime import bridge, llm_proposer
+    from nanobot.runtime.demand import item_id
+    from tests.test_cycle_ledger import _FakeSubagentManager, _init_selfevo_repo
+
+    base = tmp_path
+    _init_selfevo_repo(base)
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+
+    proposer_title = "Add a proposer-authored helper script"
+    req_dir = state_dir / "subagents" / "requests"
+    req_dir.mkdir(parents=True)
+    (req_dir / "llm-proposer-cand.json").write_text(json.dumps({
+        "request_id": "llm-proposer-cand-1",
+        "task_title": proposer_title,
+        "task": "do the proposer-authored work",
+        "request_status": "queued",
+    }), encoding="utf-8")
+
+    candidate_id = item_id("proposer", proposer_title)
+    assert any(i["id"] == candidate_id for i in llm_proposer.proposer_candidate_items(state_dir)), (
+        "setup sanity check: the request must actually surface as this candidate_id"
+    )
+
+    plan_text = "Do the proposer-authored work, per the planner's own reasoning"
+    _stub_planning_session(monkeypatch, plan_text, candidate_id=candidate_id)
+
+    class _ExecutorSpawnFailsManager(_FakeSubagentManager):
+        async def spawn(self, **kwargs):
+            if self._telemetry_component == "planner":
+                return await super().spawn(**kwargs)
+            raise RuntimeError("simulated executor spawn failure -- no task_id ever produced")
+
+    monkeypatch.setattr(bridge, "SubagentManager", _ExecutorSpawnFailsManager)
+
+    asyncio.run(bridge._main_impl())
+
+    assert any(
+        i["id"] == candidate_id for i in llm_proposer.proposer_candidate_items(state_dir)
+    ), "a proposer request must remain live when the executor never actually started"
+
+
 # --- test_supply_interruption_carries_open_increment -----------------------
 # --- test_supply_hold_uses_rest_snapshot_with_backoff ----------------------
 #
