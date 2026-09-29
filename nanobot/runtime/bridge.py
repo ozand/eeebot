@@ -7320,7 +7320,14 @@ async def _main_impl_body():
             _rec_skip_reason = f"exception:{type(_rec_exc).__name__}"
             pass  # fail-open
 
-        # Report the retry counter for the rollback family that occurred.
+        # #1710: name the attempt (e.g. "2/3") when this rollback is an
+        # executor-LLM-error retry of the same retry_key (ADR-035 rule 1,
+        # #1942: cycle_id is a fresh uuid every cycle, retry_key is the
+        # cross-cycle-stable id -- see _retry_key_for) -- the same counter
+        # `_decide_handled_marker` above just wrote/read. Absent for every
+        # other rollback reason, which has no retry structure to name.
+        # Name the attempt for the retry policy that produced this rollback;
+        # incomplete model calls and ordinary executor errors use independent counters.
         _rec_attempt: str | None = None
         try:
             _retry_path = (
@@ -8290,7 +8297,9 @@ def _recent_failure_match(
                 data.get('retry_key') or data.get('request_id')
             ):
                 continue
-            # Prefer cross-cycle retry_key; legacy rows fall back to request_id.
+            # #1280/#1765: retry_key is the cross-cycle-stable key (ADR-035
+            # rule 1, #1942 broke request_id's stability); request_id stays
+            # as a fallback for result rows written before this field existed.
             if reason == 'executor_llm_error' and not _llm_error_retries_exhausted(
                 data.get('retry_key') or data.get('request_id')
             ):
