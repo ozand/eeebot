@@ -7976,8 +7976,7 @@ def _decide_handled_marker(
         if not llm_error:
             handled_marker.write_text(str(req_path), encoding='utf-8')
             return 'handled'
-        retry_id = str(retry_key or req_path).replace('/', '_')[:120]
-        retry_path = BRIDGE_STATE_DIR / f'retry_{retry_id}.json'
+        retry_path = handled_marker.with_name(handled_marker.name.replace('handled_', 'retry_', 1)).with_suffix('.json')
         count = 0
         state_lost = ''
         if retry_path.exists():
