@@ -1046,10 +1046,17 @@ exit 0
     live_gate = live_release / "scripts"
     live_gate.mkdir(parents=True)
     (live_gate / "__init__.py").write_text("", encoding="utf-8")
-    (live_gate / "verify_release_health.py").write_text(
-        "from pathlib import Path; report = Path(__import__('os').environ['BASELINE_REPORT']).read_text(); exec('def verify_release_health(): return {\\\"health\\\": {\\\"dimensions\\\": {row.split()[1]: {\\\"status\\\": row.split()[2]} for row in __import__(\\\"json\\\").loads(report)[\\\"dimensions\\\"]}}}')\\n",
-        encoding="utf-8",
-    )
+    live_gate_source = "
+".join([
+        "import json, os",
+        "from pathlib import Path",
+        "def verify_release_health():",
+        "    report = json.loads(Path(os.environ['BASELINE_REPORT']).read_text())",
+        "    dimensions = {row.split()[1]: {'status': row.split()[2]} for row in report['dimensions']}",
+        "    return {'health': {'dimensions': dimensions}}",
+    ]) + "
+"
+    (live_gate / "verify_release_health.py").write_text(live_gate_source, encoding="utf-8")
     remote_script.write_text(remote, encoding="utf-8")
     _write_mock(mock_bin / "ssh", ssh)
     _write_mock(mock_bin / "stat", '''if [[ "$*" == *current* ]]; then echo 0:0; else command stat "$@"; fi''')
