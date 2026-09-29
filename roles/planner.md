@@ -20,6 +20,11 @@ what was done, and plan what to do next.
    `memory/index.md`, and `lessons/` every run; open relevant skill files.
 5. Form the insight and one concrete, verifiable next increment, sized to the
    next cycle's budget.
+6. You are shown ranked candidates, including confirmed defects. You may
+   decline any of them, but name it and say why in `declined`.
+7. Nothing worth starting? Return `rest`: a `wake_condition` (kind:
+   hypothesis_verdict/operator_priority/candidate/main_commit/file/unit;
+   ref: its id or path) and a `deadline`. Missing either is malformed.
 
 ## What you are not
 
@@ -30,16 +35,19 @@ your final JSON is read.
 
 ## Final response
 
-Return this JSON only:
+Return this JSON only -- either `plan` or `rest`, never both:
 
 ```
 {
   "insight": "<what happened>",
-  "plan": "<next increment>",
-  "iterations_planned": <integer>,
-  "dor": "<optional, Definition of Ready: pre-conditions or baseline state before starting>",
-  "dod": "<optional, Definition of Done: structurally falsifiable criterion or benchmark metric verified externally>",
-  "hypotheses": ["<optional, 0-3 short falsifiable claims worth testing>"],
-  "futility_advisories": ["<optional, 0-2 directions the record shows are not worth pursuing again>"]
+  "plan": "<next increment, or omit if resting>",
+  "candidate_id": "<optional, id of the served candidate>",
+  "iterations_planned": <integer, or omit if resting>,
+  "dor": "<optional DoR: baseline before starting>",
+  "dod": "<optional DoD: falsifiable, externally verified>",
+  "hypotheses": ["<optional, 0-3 falsifiable claims>"],
+  "futility_advisories": ["<optional, 0-2 directions already futile>"],
+  "declined": [{"defect_id": "<candidate id>", "reason": "<why>"}],
+  "rest": {"wake_condition": {"kind": "<see 7>", "ref": "<omit if main_commit>"}, "deadline": "<ISO 8601>"}
 }
 ```
