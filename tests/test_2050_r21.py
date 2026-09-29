@@ -230,3 +230,77 @@ def test_h1_a_genuine_recent_failure_is_still_suppressed(tmp_path: Path, monkeyp
     asyncio.run(bridge._main_impl())
     assert len(log["executor"]) == 1, "the second, identical plan must be suppressed"
     assert _outcomes(state_dir)[-1]["reason"] == "recent_duplicate_failure"
+
+
+# --- H2 -------------------------------------------------------------------------
+
+from tests.test_run_planning_session import (  # noqa: E402
+    _init_repo_with_origin,
+    _make_fake_mgr_factory,
+    _run,
+    _stub_role_prompt,  # noqa: F401  (autouse fixture, same as the planning-session tests)
+)
+
+_EVIDENCE_LINE = "Last increment rejected as a duplicate"
+
+
+def _evidence_file(state: Path) -> Path:
+    """The file record_rejected_duplicate writes (the module's own path)."""
+    return planner_dedup_evidence._state_path(state)
+
+
+def _timeout(awaitable, *, timeout):
+    async def _raise():
+        awaitable.cancel()
+        try:
+            await awaitable
+        except asyncio.CancelledError:
+            pass
+        raise asyncio.TimeoutError
+
+    return _raise()
+
+
+def _release_with_contract(tmp_path: Path, monkeypatch) -> None:
+    release = tmp_path / "release"
+    skill = release / "nanobot" / "skills" / "task-writing" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# contract\n", encoding="utf-8")
+    (release / "goals.md").write_text("test charter", encoding="utf-8")
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
+
+
+def test_h2_evidence_survives_timed_out_and_malformed_sessions(tmp_path: Path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    _release_with_contract(tmp_path, monkeypatch)
+    planner_dedup_evidence.record_rejected_duplicate(
+        state, "cycle-dup", "Wire the archive rotation retry counter", "abc1234", "existence_index_duplicate",
+    )
+
+    # session 1: times out
+    mgr = _make_fake_mgr_factory(state, {"plan": "x"})
+    monkeypatch.setattr(bridge, "SubagentManager", mgr)
+    with monkeypatch.context() as m:
+        m.setattr(asyncio, "wait_for", _timeout)
+        first = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set(), cycle_id="cycle-t"))
+    assert first["ran"] is False
+    assert _EVIDENCE_LINE in (mgr.last_task or "")
+    assert _evidence_file(state).is_file(), "a timed-out session must not use it up"
+
+    # session 2: malformed final answer
+    mgr = _make_fake_mgr_factory(state, "not json at all")
+    monkeypatch.setattr(bridge, "SubagentManager", mgr)
+    asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set(), cycle_id="cycle-m"))
+    assert _EVIDENCE_LINE in (mgr.last_task or "")
+    assert _evidence_file(state).is_file(), "a malformed session must not use it up"
+
+    # session 3: produces a plan -- consumes it
+    plan = {"insight": "the retry counter already exists", "plan": "count archive rotation skips instead",
+            "iterations_planned": 5}
+    mgr = _make_fake_mgr_factory(state, plan)
+    monkeypatch.setattr(bridge, "SubagentManager", mgr)
+    third = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set(), cycle_id="cycle-p"))
+    assert third["plan"] == plan
+    assert _EVIDENCE_LINE in (mgr.last_task or "")
+    assert not _evidence_file(state).is_file(), "a session that planned consumes it"

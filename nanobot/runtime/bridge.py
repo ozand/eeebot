@@ -3510,18 +3510,23 @@ async def _run_planning_session(
     except Exception:
         _candidates_block = ''
 
+    _dedup_evidence_shown = False
     if _minimal_mode_active:
         _dedup_evidence_block = ''
     else:
         # ADR-035 rest amendment (#1964): "the sha and the reason are an
         # input to the next session, or it would choose the same increment
-        # again." Consumed (read-and-cleared) here, so it reaches exactly
-        # this one session -- fail-open, same as the candidates block above.
+        # again." #2050 H2: only PEEKED here -- it is cleared below, once
+        # this session has produced a plan with it in view. A session that
+        # times out or ends malformed/no_plan never acted on it, so the
+        # next session still gets it. Fail-open, same as the candidates
+        # block above.
         try:
             from nanobot.runtime import planner_dedup_evidence as _dedup_evidence_mod
 
-            _dedup_evidence = _dedup_evidence_mod.consume_pending_evidence(state_dir)
+            _dedup_evidence = _dedup_evidence_mod.peek_pending_evidence(state_dir)
             _dedup_evidence_block = _dedup_evidence_mod.render_dedup_evidence_block(_dedup_evidence)
+            _dedup_evidence_shown = _dedup_evidence is not None
         except Exception:
             _dedup_evidence_block = ''
 
@@ -4058,6 +4063,15 @@ async def _run_planning_session(
     )
     no_plan_recovery.record_outcome(state_dir, cycle_id, write_result['outcome'])
     planner_rest.record_non_rest_outcome(state_dir, cycle_id, write_result['outcome'])
+    # #2050 H2: this session produced a plan with the duplicate-rejection
+    # evidence in view -- only now is that one delivery used up.
+    if _dedup_evidence_shown and write_result['outcome'] == 'integrated':
+        try:
+            from nanobot.runtime import planner_dedup_evidence as _dedup_evidence_clear_mod
+
+            _dedup_evidence_clear_mod.clear_pending_evidence(state_dir)
+        except Exception:
+            pass
     return {
         'ran': True, 'iterations_used': iterations_used,
         'iterations_planned': iterations_planned if write_result['outcome'] == 'integrated' else None,
