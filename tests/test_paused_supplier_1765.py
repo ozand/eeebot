@@ -409,6 +409,63 @@ class TestOutageCycleOffersTheSameItemAgainUnchanged:
         assert (state_dir / "subagent_bridge" / f"handled_{key}.txt").exists()
 
 
+class _IncompleteCallManager(_LLMDeadSubagentManager):
+    """The executor's model call ended without a usable response and without
+    any supplier-outage wording: call-site evidence says model_call, the
+    error type is not a supplier one -> model_call_incomplete."""
+
+    error_text = "Error: LLM execution failed: ValueError: provider response ended before the final chunk"
+
+    async def spawn(self, **kwargs):
+        result = await super().spawn(**kwargs)
+        path = bridge.STATE_DIR / "subagents" / f"{self.task_id}.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["model_call_failure"] = {
+            "stage": "model_call", "call_stage": "model_call",
+            "error_type": "ValueError", "message": self.error_text,
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return result
+
+
+class TestIncompleteRetryCounterIsReadUnderTheWritersKey:
+    def test_both_readers_find_the_counter_the_real_writer_wrote(self, tmp_path, monkeypatch):
+        """#1919 review P1: after #1942 every cycle mints a fresh request_id
+        and the handled/retry bookkeeping keys on the stable retry_key. The
+        counter is written by the real _decide_handled_marker inside a real
+        cycle, and must be found by the attempt label (error_card_recording)
+        and by the recent-failure suppression -- neither may look it up
+        under the per-cycle request_id."""
+        state_dir = _wire(tmp_path, monkeypatch, _IncompleteCallManager)
+        title = "Add retry-key regression coverage for incomplete model calls"
+        _seed_bridge_request(state_dir, "req-incomplete", "cycle-incomplete", task_title=title)
+        _stub_planning_session(monkeypatch, title)
+        key = bridge._retry_key_for(None, title)
+
+        asyncio.run(bridge._main_impl())
+
+        outcome = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"][-1]
+        assert outcome["reason"] == "model_call_incomplete", outcome
+        bridge_state = state_dir / "subagent_bridge"
+        assert (bridge_state / f"retry_incomplete_{key}.json").exists(), sorted(p.name for p in bridge_state.iterdir())
+        results = [
+            json.loads(p.read_text(encoding="utf-8"))
+            for p in (state_dir / "subagents" / "results").rglob("*.json")
+        ]
+        assert results and all(r.get("retry_key") == key and r.get("request_id") != key for r in results), results
+
+        # reader 1: the attempt label on the error-card row
+        card_rows = [r for r in _read_ledger(state_dir) if r["phase"] == "error_card_recording"]
+        assert card_rows and card_rows[-1].get("attempt") == f"1/{bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES}", card_rows
+
+        # reader 2: recent-failure suppression, before and after exhaustion
+        assert bridge._recent_failure_match(title, state_dir) is None
+        marker = bridge_state / f"handled_{key}.txt"
+        for _ in range(bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES - 1):
+            bridge._decide_handled_marker(marker, "req.json", llm_error=True, model_call_incomplete=True)
+        assert bridge._recent_failure_match(title, state_dir) is not None
+
+
 # ─── the exit-code consumers: crash_record's exit_streak, health.py ───────
 
 

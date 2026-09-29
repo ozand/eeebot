@@ -7324,7 +7324,7 @@ async def _main_impl_body():
         _rec_attempt: str | None = None
         try:
             _retry_path = (
-                _model_call_incomplete_retry_path(request_id)
+                _model_call_incomplete_retry_path(req.get('retry_key') or request_id)
                 if _rollback_reason == 'model_call_incomplete'
                 else _llm_error_retry_path(req.get('retry_key') or request_id)
             )
@@ -8286,7 +8286,9 @@ def _recent_failure_match(
                 continue
             if not reason and status not in ('blocked', 'no_commit'):
                 continue
-            if reason == 'model_call_incomplete' and not _model_call_incomplete_retries_exhausted(data.get('request_id')):
+            if reason == 'model_call_incomplete' and not _model_call_incomplete_retries_exhausted(
+                data.get('retry_key') or data.get('request_id')
+            ):
                 continue
             # Prefer cross-cycle retry_key; legacy rows fall back to request_id.
             if reason == 'executor_llm_error' and not _llm_error_retries_exhausted(
