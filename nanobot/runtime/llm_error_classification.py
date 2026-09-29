@@ -28,10 +28,11 @@ import re
 # of a catch-all.
 SUPPLIER_UNAVAILABLE_RX = re.compile(
     r'connection (?:refused|reset|error)'
+    # A connection timeout to the gateway is an outage. A generic model-call
+    # timeout is NOT matched here (#1919, architect decision): without
+    # call-site evidence it stays 'failed', with model_call evidence it is
+    # 'model_call_incomplete' -- see classify_llm_error's structured branch.
     r'|connect(?:ion)? timed? ?out'
-    r'|\btimed? ?out\b'
-    r'|\btimeout\b'
-    r'|\bread timeout\b'
     r'|\berror code:\s*(?:429|500|502|503|504)\b'
     r'|\b(?:429|500|502|503|504)\b.{0,20}\berror\b'
     # #1919 (architect-approved addition to main's list): an HTTP status line.

@@ -160,6 +160,24 @@ class TestClassifyLlmError:
         failure = {"stage": "model_call", "call_stage": "model_call", "error_type": "provider_error", "message": text}
         assert bridge._classify_llm_error(text, model_call_failure=failure) == "paused-supplier"
 
+    def test_gateway_connection_timeout_is_an_outage(self):
+        """#1919 (architect decision): a connection timeout to the gateway
+        is supplier-side -- main's connect-timeout alternative is kept."""
+        assert bridge._classify_llm_error("Connection timed out") == "paused-supplier"
+        assert bridge._classify_llm_error(
+            "Connection timed out",
+            model_call_failure={"stage": "model_call", "error_type": "provider_error", "message": "Connection timed out"},
+        ) == "paused-supplier"
+
+    def test_generic_request_timeout_with_model_call_evidence_is_incomplete(self):
+        """#1919 (architect decision): main's generic timeout alternatives are
+        dropped, so a request timeout with model_call evidence is
+        model_call_incomplete, never promoted to paused-supplier by text."""
+        assert bridge._classify_llm_error(
+            "Request timed out",
+            model_call_failure={"stage": "model_call", "message": "Request timed out"},
+        ) == "model_call_incomplete"
+
     @pytest.mark.parametrize("text", ["socket timeout", "Request timed out after 60s", "litellm.Timeout: Read timeout"])
     def test_model_call_timeout_needs_call_site_evidence(self, text):
         assert bridge._classify_llm_error(text) == "failed"
