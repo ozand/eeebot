@@ -320,10 +320,22 @@ class LiteLLMProvider(LLMProvider):
             response = await acompletion(**kwargs)
             return self._parse_response(response)
         except Exception as e:
-            # Return error as content for graceful handling
+            # Preserve safe transport metadata for the shared failure writer;
+            # never include response body or prompt in the failure stream.
+            status = getattr(e, "status_code", None)
+            headers = getattr(e, "headers", None)
+            if headers is None:
+                headers = getattr(getattr(e, "response", None), "headers", None)
+            retry_after = None
+            if headers is not None:
+                try:
+                    retry_after = float(headers.get("Retry-After") or headers.get("retry-after"))
+                except (TypeError, ValueError):
+                    retry_after = None
             return LLMResponse(
-                content=f"Error calling LLM: {str(e)}",
+                content=f"Error calling LLM: {type(e).__name__}: {str(e)}",
                 finish_reason="error",
+                usage={"_http_status": status, "_retry_after_s": retry_after},
             )
 
     def _parse_response(self, response: Any) -> LLMResponse:

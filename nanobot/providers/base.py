@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -12,6 +13,7 @@ from loguru import logger
 
 from nanobot.observability.llm_telemetry import (
     record_llm_call,
+    record_llm_failure,
     record_llm_prompt,
     system_chars,
 )
@@ -274,9 +276,37 @@ class LLMProvider(ABC):
         # every return path (success, non-transient error, image-stripped
         # retry, final exhausted-retries error).
         call_start = time.monotonic()
+        call_start_utc = datetime.now(timezone.utc)
         resolved_model = model or self.get_default_model()
+        failure_recorded = False
+
+        def _record_failure(response: LLMResponse) -> None:
+            status = response.usage.get("_http_status")
+            retry_after = response.usage.get("_retry_after_s")
+            # _safe_chat keeps a bounded exception class prefix and the body,
+            # but only this bounded metadata is persisted to failures/.
+            error_text = response.content or ""
+            if error_text.startswith("Error calling LLM:"):
+                error_type = error_text.split(":", 2)[1].strip().split(".")[-1]
+            else:
+                error_type = "ProviderError"
+            if not isinstance(status, int) or isinstance(status, bool):
+                status = None
+            try:
+                retry_after = float(retry_after) if retry_after is not None else None
+            except (TypeError, ValueError):
+                retry_after = None
+            from nanobot.observability.llm_telemetry import current_component
+            record_llm_failure(
+                component=current_component() or "executor", requested_model=resolved_model,
+                error_type=error_type, http_status=status, retry_after_s=retry_after,
+                ts=call_start_utc.isoformat().replace("+00:00", "Z"),
+            )
 
         def _record(response: LLMResponse, retries: int, sent_messages: list[dict[str, Any]]) -> LLMResponse:
+            if response.finish_reason == "error":
+                _record_failure(response)
+                return response
             # #1660: record BOTH the model this code requested (`model`, as
             # before #1678 -- every reader groups by it) and the one the
             # gateway reports having served (`served_model`). A fallback
