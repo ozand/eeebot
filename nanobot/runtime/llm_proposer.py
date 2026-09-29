@@ -75,6 +75,7 @@ from nanobot.runtime.goal_text_utils import (
 )
 from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
+from nanobot.runtime.mutation_policy import MUTATION_POLICY
 from nanobot.runtime.operator_documents import (
     PRIORITY_UNAVAILABLE,
     STATE_ABSENT,
@@ -88,7 +89,6 @@ from nanobot.runtime.operator_documents import (
     resolve_operator_priorities,
 )
 from nanobot.runtime.reflection_context import build_reflection_hints
-from nanobot.runtime.mutation_policy import MUTATION_POLICY
 
 _LOG = logging.getLogger(__name__)
 
