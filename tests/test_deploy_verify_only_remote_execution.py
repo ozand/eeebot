@@ -30,13 +30,20 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
              "/etc/systemd": str(tmp_path / "etc/systemd").replace("\\", "/")}
     for old, new in roots.items():
         remote = remote.replace(old, new)
-    live = Path(roots["/opt/eeepc-agent"]) / "runtimes/self-evolving-agent/current"
-    live.mkdir(parents=True)
-    (live / "scripts").mkdir()
-    (live / "scripts/verify_release_health.py").write_text(
-        "import json; verify_release_health = lambda: {'health': {'dimensions': {}}}\n",
+    live_root = Path(roots["/opt/eeepc-agent"]) / "runtimes/self-evolving-agent"
+    releases = live_root / "releases"
+    live_release = releases / "baseline"
+    (live_release / "scripts").mkdir(parents=True)
+    (live_release / "scripts/__init__.py").write_text("", encoding="utf-8")
+    (live_release / "scripts/verify_release_health.py").write_text(
+        textwrap.dedent("""            def verify_release_health():
+                return {"health": {"dimensions": {"disk": {"status": "OK"}}}}
+        """),
         encoding="utf-8",
     )
+    live = live_root / "current"
+    live.symlink_to(live_release)
+    candidate_health_json = '{"health": {"dimensions": {"disk": {"status": "OK"}}}}'
     source = tmp_path / "source"
     source.mkdir()
     gate_path = source / "scripts/verify_release_health.py"
@@ -59,7 +66,7 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
             import json
 
             def verify_release_health():
-                return {"health": {"dimensions": {"disk": {"status": "OK"}}}}
+                return json.loads(__import__("os").environ["CANDIDATE_HEALTH_JSON"])
 
             def compare_health_dimensions(baseline, candidate):
                 rows, findings = [], []
@@ -148,7 +155,8 @@ exec {shlex.quote(sys.executable)} "$@"
     remote_path.write_text(remote, encoding="utf-8")
     env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1",
                FULL_COMMIT="candidate", PREV_RELEASE_PATH=str(live), GATE_TMP=str(gate).replace("\\", "/"),
-               RELEASE_DIR=str(live), HEALTH_GATE_PYTHON=str(bindir / "python3"))
+               RELEASE_DIR=str(live), HEALTH_GATE_PYTHON=str(bindir / "python3"),
+               CANDIDATE_HEALTH_JSON=candidate_health_json)
     result = subprocess.run(["bash", str(remote_path)], cwd=tmp_path, env=env,
                             capture_output=True, text=True, timeout=480)
     return result, before_systemd, (systemd_sandbox, roots)
