@@ -28,11 +28,12 @@ import re
 # of a catch-all.
 SUPPLIER_UNAVAILABLE_RX = re.compile(
     r'connection (?:refused|reset|error)'
-    r'|connect(?:ion)? timed? ?out.{0,20}(?:\berror\b|\bfailed\b)'
+    r'|connect(?:ion)? timed? ?out'
+    r'|\btimed? ?out\b'
+    r'|\btimeout\b'
+    r'|\bread timeout\b'
     r'|\berror code:\s*(?:429|500|502|503|504)\b'
-    r'|\b(?:429|500|502|503|504)\b.{0,30}\b(?:error|service unavailable|bad gateway)\b'
-    r'|http\s+(?:429|500|502|503|504)\b'
-    r'|status code\s+(?:429|500|502|503|504)\b.{0,30}\bupstream\b'
+    r'|\b(?:429|500|502|503|504)\b.{0,20}\berror\b'
     r'|ratelimiterror'
     r'|internalservererror'
     r'|serviceunavailableerror'
