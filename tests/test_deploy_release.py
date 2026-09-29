@@ -911,7 +911,6 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path, monkeypatch):
     scripts_dir.mkdir(parents=True, exist_ok=True)
     verifier = scripts_dir / "verify_release_health.py"
     verifier.write_text("#!/usr/bin/env python3\nprint('mock health')\n", encoding="utf-8")
-    mock("python3", f'''echo "python3 $*" >> {log}; exit 0''')
     mock("sleep", f'''echo "sleep $*" >> {log}; exit 97''')
     mock("stat", f'''echo "stat $*" >> {log}; echo 0:0''')
     mock("install", f'''echo "install $*" >> {log}; exit 0''')
@@ -924,7 +923,16 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path, monkeypatch):
     remote_path = root / "remote.sh"
     remote_path.write_text(remote.replace("/opt/eeepc-agent", str(root / "opt/eeepc-agent")), encoding="utf-8")
     (gate_tmp / "scripts").mkdir(parents=True)
-    candidate_verifier = "\n".join(['import json, os', 'from pathlib import Path', 'def verify_release_health():', "    report = json.loads(Path(os.environ['REPORT']).read_text())", "    dimensions = {row.split()[1]: {'status': row.split()[2]} for row in report['dimensions']}", "    return {'health': {'dimensions': dimensions}}", 'def compare_health_dimensions(baseline, candidate):', '    rows, findings = [], []', '    for name in sorted(baseline.keys() - candidate.keys()):', "        rows.append(f'VERIFY_ONLY DIMENSION_MISSING {name}'); findings.append(f'dimension missing: {name}')", '    for name in sorted(candidate.keys() - baseline.keys()):', "        status = candidate[name]; rows.append(f'VERIFY_ONLY DIMENSION_ADDED {name} {status}')", "        if name not in {'cpu', 'queue'} and status in {'WARN', 'CRIT'}: findings.append(f'new dimension {name}: {status}')", '    for name in sorted(baseline.keys() & candidate.keys()):', "        before, after = baseline[name], candidate[name]; rows.append(f'VERIFY_ONLY DIMENSION {name} {before} -> {after}')", "        if name not in {'cpu', 'queue'} and not (name in {'reward', 'gate'} and after == 'WARN'):", "            if {'OK': 0, 'WARN': 1, 'CRIT': 2}[after] > {'OK': 0, 'WARN': 1, 'CRIT': 2}[before]: findings.append(f'{name}: {before} -> {after}')", '    return rows, findings', "print(json.dumps(verify_release_health())); print('CANDIDATE_GATE_EXECUTED')"]) + "\n"
+    candidate_verifier = (Path(__file__).resolve().parents[1] / "scripts/verify_release_health.py").read_text(encoding="utf-8")
+    stubs = "\n".join([
+        "from types import SimpleNamespace",
+        "ed = SimpleNamespace(STATE_DIR=Path(os.environ['REPORT']).parent, _METRICS_CACHE={}, _SUBAGENT_TREE_CACHE={}, _HOST_CAPS_CACHE={}, _REPORT_SCAN_CACHE={}, _MATERIALIZED_CACHE={})",
+        "def collect_metrics(): return {}",
+        "def render_health_json(metrics): return json.dumps({'overall': 'OK', 'dimensions': {name: {'status': status} for name, status in json.loads(Path(os.environ['REPORT']).read_text())['dimensions'].items()}})",
+        "def render_json(metrics): return json.dumps({'goal': '', 'active_task': '', 'approval_gate_state': '', 'reward_average': 'fresh', 'reward_source': {'status': 'fresh', 'age_hours': 0, 'authoritative': False, 'context_only': True}, 'goal_source': {'status': 'fresh', 'age_hours': 0, 'authoritative': False, 'context_only': True}, 'active_task_source': {'status': 'fresh', 'age_hours': 0, 'authoritative': False, 'context_only': True}, 'approval_gate_source': {'status': 'fresh', 'age_hours': 0, 'authoritative': False, 'context_only': True}})",
+        "def render_html(metrics): return 'x' * 2048",
+    ]) + "\n"
+    candidate_verifier = candidate_verifier.replace("from scripts.eeebot_dashboard import (", stubs + "\n# from scripts.eeebot_dashboard import (")
     (gate_tmp / "scripts" / "verify_release_health.py").write_text(candidate_verifier, encoding="utf-8")
     (gate_tmp / "scripts" / "__init__.py").write_text("", encoding="utf-8")
     mock("rm", f'''echo "rm $*" >> {log}; exit 0''')
@@ -932,7 +940,7 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path, monkeypatch):
     mock("chown", f'''echo "chown $*" >> {log}; exit 0''')
     mock("env", f'''echo "env $*" >> {log}; while [[ "$1" == *=* ]]; do shift; done; exec "$@"''')
     mock("tar", f'''echo "tar $*" >> {log}; exit 0''')
-    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"), VERIFY_ONLY_DIMENSION_COMPARE="0")
+    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"), REPORT=str(tmp_path / "baseline.json"), VERIFY_ONLY_DIMENSION_COMPARE="1")
     result = subprocess.run(["bash", str(remote_path)], cwd=root, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     seen = commands.read_text(encoding="utf-8")
