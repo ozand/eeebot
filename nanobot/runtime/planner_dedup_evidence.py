@@ -81,7 +81,6 @@ def peek_pending_evidence(state_dir: "Path") -> "dict[str, Any] | None":
     The planning session preserves the evidence through startup and any
     planning failure; it clears only after producing an integrated plan
     (#2011, #2050 H2)."""
-    """
     path = _state_path(state_dir)
     try:
         raw = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
