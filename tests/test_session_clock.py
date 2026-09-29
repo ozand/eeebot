@@ -60,8 +60,18 @@ class TestWallClockSafetyMargin:
         # Only 400s remain: after the 300s final reserve, 100s cannot cover
         # the 243s call safety margin, so do not start a no-op repair.
         assert repair_wait_budget_secs(400.0, now=0.0) is None
-        # At exactly the required pre-call margin there is no positive repair wait.
-        assert repair_wait_budget_secs(543.0, now=0.0) is None
+        # The final reserve is subtracted once; require only p99 beyond it.
+        assert repair_wait_budget_secs(542.9, now=0.0) is None
+        assert repair_wait_budget_secs(543.0, now=0.0) == 243.0
+        assert repair_wait_budget_secs(543.0, now=200.0) is None
+
+    def test_repair_is_skipped_when_wait_cap_is_below_p99(self, monkeypatch):
+        monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "1500")
+        monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "300")
+        # 1600 seconds remain after reserve, but the bridge caps an individual
+        # repair wait at 1200 seconds, too short to cover the configured p99.
+        assert repair_wait_budget_secs(1900.0, now=0.0, max_wait_secs=1200.0) is None
+        assert repair_wait_budget_secs(1900.0, now=0.0, max_wait_secs=1500.0) == 1500.0
 
     def test_repair_wait_is_capped_by_shared_wall_and_final_reserve(self):
         deadline = 1000.0
@@ -348,6 +358,64 @@ class TestMaxCallGapRecording:
         rows = cycle_ledger.read_events(state_dir)
         assert len(rows) == 1
         assert "max_call_gap_s" not in rows[0]
+
+    async def test_subagent_error_preserves_completed_call_gap(self, tmp_path):
+        """An executor exception must retain gaps measured before the failed call."""
+        class _ProviderFailsAfterTwoCalls(_MockProvider):
+            async def chat(self, messages=None, tools=None, model=None, **kwargs):
+                if self.calls >= 2:
+                    raise RuntimeError("injected provider failure")
+                return await super().chat(messages, tools, model, **kwargs)
+
+        provider = _ProviderFailsAfterTwoCalls(
+            responses=[
+                LLMResponse(content=None, tool_calls=[ToolCallRequest(
+                    id="call-error-gap", name="read_file", arguments={"path": "a.txt"},
+                )]),
+                LLMResponse(content=None, tool_calls=[ToolCallRequest(
+                    id="call-error-gap-2", name="read_file", arguments={"path": "a.txt"},
+                )]),
+            ]
+        )
+        mgr = SubagentManager(
+            provider=provider,
+            workspace=tmp_path,
+            bus=MessageBus(),
+            max_iterations=10,
+        )
+        await mgr.spawn(task="test-task", label="error_gap_test")
+        await asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True)
+
+        files = list((tmp_path / "state" / "subagents").glob("*.json"))
+        assert files
+        telem = json.loads(files[0].read_text(encoding="utf-8"))
+        assert telem["status"] == "error"
+        assert telem.get("max_call_gap_s") is not None
+        assert telem["max_call_gap_s"] == round(mgr.last_max_call_gap_s, 1)
+
+    async def test_error_before_watchdog_initialization_omits_call_gap(self, tmp_path):
+        """Early setup failures keep their original error and omit an unavailable gap."""
+        class _DivergentManager(SubagentManager):
+            def registered_tool_names(self):
+                return super().registered_tool_names()[:-1]
+
+        class _Provider:
+            def get_default_model(self):
+                return "test-model"
+
+            async def chat_with_retry(self, **_kwargs):
+                raise AssertionError("tool parity assertion should run before provider call")
+
+        mgr = _DivergentManager(
+            provider=_Provider(), workspace=tmp_path, bus=MessageBus(), max_iterations=2,
+        )
+        await mgr.spawn(task="setup-failure", label="setup_error")
+        await asyncio.gather(*list(mgr._running_tasks.values()), return_exceptions=True)
+        files = list((tmp_path / "state" / "subagents").glob("*.json"))
+        telem = json.loads(files[0].read_text(encoding="utf-8"))
+        assert telem["status"] == "error"
+        assert "registered tool set must match" in telem["result"]
+        assert "max_call_gap_s" not in telem
 
     async def test_subagent_run_records_max_call_gap_in_telemetry(self, tmp_path):
         """Subagent telemetry records max_call_gap_s across turns (#1899)."""
