@@ -1046,16 +1046,14 @@ exit 0
     live_gate = live_release / "scripts"
     live_gate.mkdir(parents=True)
     (live_gate / "__init__.py").write_text("", encoding="utf-8")
-    live_gate_source = "
-".join([
+    live_gate_source = "\\n".join([
         "import json, os",
         "from pathlib import Path",
         "def verify_release_health():",
         "    report = json.loads(Path(os.environ['BASELINE_REPORT']).read_text())",
         "    dimensions = {row.split()[1]: {'status': row.split()[2]} for row in report['dimensions']}",
         "    return {'health': {'dimensions': dimensions}}",
-    ]) + "
-"
+    ]) + "\\n"
     (live_gate / "verify_release_health.py").write_text(live_gate_source, encoding="utf-8")
     remote_script.write_text(remote, encoding="utf-8")
     _write_mock(mock_bin / "ssh", ssh)
