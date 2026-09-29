@@ -174,6 +174,9 @@ def main(argv: list[str] | None = None) -> int:
         res = verify_release_health(state_dir=state_dir)
         print(f"[remote] release health gate passed (HTML {res['html_bytes']} bytes, health {res['overall']})")
         return 0
+    except SystemExit as exc:
+        print(f"CRITICAL: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"CRITICAL: {exc}", file=sys.stderr)
         return 1
