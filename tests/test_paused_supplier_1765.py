@@ -120,6 +120,19 @@ class TestClassifyLlmError:
     def test_our_own_defect_signals_stay_failed(self, text):
         assert bridge._classify_llm_error(text) == "failed"
 
+    @pytest.mark.parametrize("text, expected", [
+        ("HTTP 502 Bad Gateway", "paused-supplier"),
+        ("HTTP 503 Service Unavailable", "paused-supplier"),
+        ("http 429", "paused-supplier"),
+        ("HTTP 404 Not Found", "failed"),       # a client status stays ours
+        ("maximum output is 500 tokens", "failed"),  # a bare number is not a status line
+    ])
+    def test_rx_http_status_line_alternative(self, text, expected):
+        """#1919: pins the one alternative added to main's list -- "http",
+        whitespace, then 429/500/502/503/504. Main's verbatim regex does not
+        match an HTTP status line."""
+        assert bridge._classify_llm_error(text) == expected
+
     @pytest.mark.parametrize("text", [
         # the local gateway's own text during the 2026-09-29 incident, verbatim
         "No deployments available for selected model, Try again in 8355 seconds",

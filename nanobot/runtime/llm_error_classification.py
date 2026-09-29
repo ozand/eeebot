@@ -34,6 +34,8 @@ SUPPLIER_UNAVAILABLE_RX = re.compile(
     r'|\bread timeout\b'
     r'|\berror code:\s*(?:429|500|502|503|504)\b'
     r'|\b(?:429|500|502|503|504)\b.{0,20}\berror\b'
+    # #1919 (architect-approved addition to main's list): an HTTP status line.
+    r'|http\s+(?:429|500|502|503|504)\b'
     r'|ratelimiterror'
     r'|internalservererror'
     r'|serviceunavailableerror'
