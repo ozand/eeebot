@@ -334,6 +334,7 @@ class TestAuthoritativeSpawnEndToEnd:
     def test_max_call_gap_across_primary_and_multiple_repairs_survives_exception(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-gap-multiple-repairs", "cycle-gap-multiple-repairs")
+        _stub_planning_session(monkeypatch, "add feature")
         monkeypatch.setattr(bridge, "SubagentManager", _PrimaryManager)
         repair_classes = iter((
             (_make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER), 40.0),
