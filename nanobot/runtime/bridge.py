@@ -3516,26 +3516,25 @@ async def _run_planning_session(
         _candidates_block = ''
         _planner_seen_priority_ids_to_commit = None
 
+    _dedup_evidence_shown = False
     if _minimal_mode_active:
         _dedup_evidence_block = ''
-        _dedup_evidence_to_clear = False
     else:
         # ADR-035 rest amendment (#1964): "the sha and the reason are an
         # input to the next session, or it would choose the same increment
-        # again." Peeked (not yet cleared) here -- #2011: clearing is
-        # deferred to the same planner-startup-confirmed point as the
-        # priority-seen-set above, so a failure before the planner actually
-        # receives this prompt leaves the record available for the next
-        # session instead of losing it silently.
+        # again." #2050 H2: only PEEKED here -- it is cleared below, once
+        # this session has produced a plan with it in view. A session that
+        # times out or ends malformed/no_plan never acted on it, so the
+        # next session still gets it. Fail-open, same as the candidates
+        # block above.
         try:
             from nanobot.runtime import planner_dedup_evidence as _dedup_evidence_mod
 
             _dedup_evidence = _dedup_evidence_mod.peek_pending_evidence(state_dir)
             _dedup_evidence_block = _dedup_evidence_mod.render_dedup_evidence_block(_dedup_evidence)
-            _dedup_evidence_to_clear = _dedup_evidence is not None
+            _dedup_evidence_shown = _dedup_evidence is not None
         except Exception:
             _dedup_evidence_block = ''
-            _dedup_evidence_to_clear = False
 
     # Architect resolution 2026-09-25 (ADR-035 rule 3 / ADR-031 rule 2): a
     # plan interrupted by a supplier-side executor failure is this
@@ -3664,13 +3663,6 @@ async def _run_planning_session(
             _planner_candidates_commit_mod.commit_seen_priority_ids(
                 state_dir, _planner_seen_priority_ids_to_commit,
             )
-        except Exception:
-            pass
-    if _dedup_evidence_to_clear:
-        try:
-            from nanobot.runtime import planner_dedup_evidence as _dedup_evidence_commit_mod
-
-            _dedup_evidence_commit_mod.clear_pending_evidence(state_dir)
         except Exception:
             pass
 
@@ -4093,6 +4085,15 @@ async def _run_planning_session(
     )
     no_plan_recovery.record_outcome(state_dir, cycle_id, write_result['outcome'])
     planner_rest.record_non_rest_outcome(state_dir, cycle_id, write_result['outcome'])
+    # #2050 H2: this session produced a plan with the duplicate-rejection
+    # evidence in view -- only now is that one delivery used up.
+    if _dedup_evidence_shown and write_result['outcome'] == 'integrated':
+        try:
+            from nanobot.runtime import planner_dedup_evidence as _dedup_evidence_clear_mod
+
+            _dedup_evidence_clear_mod.clear_pending_evidence(state_dir)
+        except Exception:
+            pass
     return {
         'ran': True, 'iterations_used': iterations_used,
         'iterations_planned': iterations_planned if write_result['outcome'] == 'integrated' else None,
@@ -4706,6 +4707,15 @@ async def _main_impl_body():
         # and re-spawned every cycle. This suppression adds a separate pre-spawn
         # guard that does not affect [Done] bookkeeping — only prevents
         # re-spawning the same rejected work within the suppression window.
+        #
+        # #2050 H1: the gate DOES apply to a continuation of the pending open
+        # increment. An interruption is not failure history (see
+        # _INTERRUPTED_ROLLBACK_REASONS), so a `keep` after an interruption
+        # passes; after a GENUINE failure of the continuation it is
+        # suppressed and recorded as rejected_duplicate, which the next
+        # planning session is guaranteed to see (H2) -- so it edits or
+        # deletes instead of re-running a failing increment every cycle
+        # (record_attempt_finished never clears `pending`).
         if _dup_check_title and (
             _recent_failure_title := _recent_failure_match(
                 _dup_check_title, STATE_DIR, target_path=_target_path,
@@ -8103,6 +8113,22 @@ _SKIP_ROLLBACK_REASONS = frozenset({
 })
 
 
+#: #2050 H1: rollback reasons of an attempt that did NOT FINISH -- the
+#: session was interrupted (our own defect, a kill, a supplier outage) and
+#: its work is the pending open increment, resolved by the planner's
+#: keep/edit/delete. Not a verdict on the proposal, so never recent-failure
+#: history for :func:`_recent_failure_match` (same reasoning as the
+#: supplier-paused entry of :data:`_SKIP_ROLLBACK_REASONS`, and as
+#: ``interrupted_defect`` being inconclusive in :data:`_INCONCLUSIVE_REASONS`).
+_INTERRUPTED_ROLLBACK_REASONS = frozenset({
+    'interrupted_defect',
+    'interrupted_kill',
+    'interrupted_supply',
+})
+
+
+
+
 def _recent_failure_match(
     dup_check_title: str,
     state_dir: 'Path',
@@ -8235,6 +8261,10 @@ def _recent_failure_match(
             # rollback.reason naming the skip. Never let them seed the
             # failure history (see docstring: the decay cascade).
             if reason in _SKIP_ROLLBACK_REASONS:
+                continue
+            # #2050 H1: an interrupted attempt never finished -- not a
+            # failure of the proposal (see _INTERRUPTED_ROLLBACK_REASONS).
+            if reason in _INTERRUPTED_ROLLBACK_REASONS:
                 continue
             if str(status or '').lower().startswith('skipped'):
                 continue

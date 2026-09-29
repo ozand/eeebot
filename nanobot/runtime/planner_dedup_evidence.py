@@ -7,9 +7,11 @@ count toward `no_plan`. The sha and the reason are an input to the next
 session, or it would choose the same increment again."
 
 This module owns that hand-off: :func:`record_rejected_duplicate` persists
-the evidence; :func:`consume_pending_evidence` reads it back for the next
-planning session's context and clears it -- "the next session" is singular,
-so a rejection is surfaced exactly once, not on every subsequent tick.
+the evidence; :func:`peek_pending_evidence` reads it back for the next
+planning session's context, and :func:`clear_pending_evidence` removes it
+once a session has PRODUCED A PLAN with it in view (#2050 H2) -- "the next
+session" means the next session that actually acted on it, so a timed-out
+or malformed session does not use up the one delivery.
 """
 from __future__ import annotations
 
@@ -74,15 +76,13 @@ def record_rejected_duplicate(
 
 
 def peek_pending_evidence(state_dir: "Path") -> "dict[str, Any] | None":
-    """Read-only half of :func:`consume_pending_evidence`: read the
-    pending rejection, if any, WITHOUT clearing it.
+    """Read the pending rejection, if any, WITHOUT clearing it.
 
-    #2011: the planner's prompt needs this before the planner has actually
-    started, but clearing the record must wait until startup is confirmed
-    -- a session that never received the prompt (``SubagentManager``
-    construction or ``spawn()`` failing) must not lose its one delivery of
-    this evidence; pair with :func:`clear_pending_evidence` once startup is
-    confirmed.
+    #2050 H2: the planning session's prompt needs the evidence before the
+    session has produced anything; clearing must wait until that session
+    actually PRODUCED A PLAN (:func:`clear_pending_evidence`). A session
+    that times out or returns a malformed/no-plan answer never acted on the
+    evidence, so it stays for the next session.
     """
     path = _state_path(state_dir)
     try:
@@ -100,8 +100,8 @@ def peek_pending_evidence(state_dir: "Path") -> "dict[str, Any] | None":
 
 
 def clear_pending_evidence(state_dir: "Path") -> None:
-    """Delete the pending rejection record. Call only once planner startup
-    is confirmed (#2011)."""
+    """Delete the pending rejection record. #2050 H2: call only after a
+    planning session that produced a plan."""
     path = _state_path(state_dir)
     try:
         path.unlink(missing_ok=True)
@@ -110,14 +110,9 @@ def clear_pending_evidence(state_dir: "Path") -> None:
 
 
 def consume_pending_evidence(state_dir: "Path") -> "dict[str, Any] | None":
-    """Read and clear the pending rejection, if any -- delivered to exactly
-    one following planning session.
-
-    Peeks and clears in one call, for callers that don't need to gate
-    clearing on a later confirmation. A caller that must defer clearing
-    until planner startup is confirmed (#2011) should use
-    :func:`peek_pending_evidence` + :func:`clear_pending_evidence` instead.
-    """
+    """Read and clear the pending rejection in one call, for callers that do
+    not gate clearing on a later outcome. The planning session does NOT use
+    this (#2050 H2): it peeks, and clears only once it produced a plan."""
     evidence = peek_pending_evidence(state_dir)
     if evidence is not None:
         clear_pending_evidence(state_dir)
