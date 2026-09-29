@@ -78,11 +78,27 @@ def distribution_from_rows(rows: list[dict[str, Any]], *, now: Any = None, days:
 
 
 def classify_integrated_commits(repo_root: Any, *, limit: int = 2288) -> dict[str, Any]:
-    """Classify recent non-merge commit subjects from git history."""
+    """Classify recent non-merge commit subjects from git history.
+
+    Small item (ADR-035 Test Contract, #1962): excludes residual/checkpoint
+    commits via the SAME shared ``--invert-grep`` pattern list every other
+    "is this already done" git-log reader uses
+    (``nanobot.runtime.commit_markers.ARTIFICIAL_COMMIT_GREP_PATTERNS``) --
+    without it, a branch's own checkpoint commits (their subjects name the
+    paths they touched, the same shape as real work) inflate this report's
+    commit count and distribution as if they were real, classified work.
+    """
     import subprocess
+
+    from nanobot.runtime.commit_markers import ARTIFICIAL_COMMIT_GREP_PATTERNS
     try:
         completed = subprocess.run(
-            ["git", "log", "--format=%s", "--no-merges", f"-n{limit}"],
+            [
+                "git", "log", "--format=%s", "--no-merges",
+                "--invert-grep", "-i",
+                *(f"--grep={p}" for p in ARTIFICIAL_COMMIT_GREP_PATTERNS),
+                f"-n{limit}",
+            ],
             cwd=str(repo_root), capture_output=True, text=True, check=True,
         )
     except (OSError, subprocess.SubprocessError) as exc:

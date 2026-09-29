@@ -13,11 +13,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 
 import pytest
 
 from nanobot.runtime import bridge, cycle_ledger
-from tests.test_bridge_executor_llm_error import TRANSPORT_ERROR, _result_for, _wire
+from tests.test_bridge_executor_llm_error import (
+    TRANSPORT_ERROR,
+    _result_for,
+    _stub_planning_session,
+    _wire,
+)
 from tests.test_cycle_ledger import _read_ledger, _seed_bridge_request
 
 
@@ -64,32 +70,61 @@ def _core_smoke_set_matches_fixture_repo(monkeypatch, tmp_path):
     monkeypatch.setattr(bridge, "RELEASE_ROOT", _adr034_release_root)
 
 
-def test_edit_then_dead_llm_still_integrates_via_auto_commit_and_is_countable(tmp_path, monkeypatch):
+def test_edit_then_dead_llm_keeps_work_on_branch_as_interrupted_increment(tmp_path, monkeypatch):
+    """ADR-035 (D1, external review finding #1; round 2 external re-check,
+    architect resolution 2026-09-26): completion is POSITIVE-only, and the
+    barrier applies to ANY commit the session made -- including the #666
+    residual auto-commit that rescued this edit. This is a decision
+    CHANGE, not a deletion: the #1281 decommission-map entry this test
+    used to pin ("the net fired, the gate passed, the cycle integrated")
+    is superseded -- a session whose own telemetry says ``status: error``
+    is not finished, however the commit landed. The edit is not lost: it
+    stays committed on the cycle branch, and the branch becomes a pending
+    open increment (classified ``interrupted_supply`` here -- the
+    TRANSPORT_ERROR text is a recognized supplier-outage pattern) for the
+    next planning session to keep/edit/delete, instead of integrating
+    unverified.
+    """
+    title = "Add feature helper"
     state_dir = _wire(tmp_path, monkeypatch, _EditedThenDiedSubagentManager)
-    _seed_bridge_request(state_dir, "req-edited", "cycle-edited", task_title="Add feature helper")
+    _seed_bridge_request(state_dir, "req-edited", "cycle-edited", task_title=title)
+    _stub_planning_session(monkeypatch, title)
 
     rc = asyncio.run(bridge._main_impl())
-
-    # The kept behaviour (#1281 decision): the net fired, the gate passed, the cycle integrated.
-    res = _result_for(state_dir, "req-edited")
-    assert res["rollback"]["auto_committed"] is True
-    assert res["rollback"]["integrated"] is True
-    assert res["rollback"]["reason"] is None
-    assert res["result_status"] == "completed"
-    assert res["commits_pushed"] == 1
-    assert res["files_changed"] == ["scripts/feature.py"]
-    assert any("EXECUTOR LLM ERROR (#1280)" in s for s in res.get("key_learnings") or [])
-    # Not the #1280 failure path: exit 0, request retired, no retry counter.
     assert rc == 0
-    assert (state_dir / "subagent_bridge" / "handled_req-edited.txt").exists()
-    assert not (state_dir / "subagent_bridge" / "retry_req-edited.json").exists()
 
-    # The countable part (#1281): the ledger row says the executor died even though the cycle succeeded.
+    res = _result_for(state_dir)
+    assert res["rollback"]["integrated"] is False
+    assert res["rollback"]["reason"] == bridge.LLM_SUPPLIER_PAUSED_REASON
+    assert res["result_status"] == "blocked"
+    assert res["commits_pushed"] == 0
+    assert any("did not finish" in s for s in res.get("key_learnings") or [])
+
     outcome = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"][-1]
-    assert outcome["outcome"] == "success"
-    assert outcome["reason"] is None
+    assert outcome["outcome"] == "failed"
+    assert outcome["reason"] == bridge.LLM_SUPPLIER_PAUSED_REASON
     assert outcome["executor_llm_error"] is True
-    assert outcome["files_changed"] == ["scripts/feature.py"]
+
+    from nanobot.runtime import open_increment
+
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is not None, "the auto-committed edit must become a pending open increment, not integrate"
+    assert pending["reason"] == "interrupted_supply"
+
+    # The work itself is NOT lost: the auto-committed edit is still on the
+    # cycle branch the pending increment names, ready for a later keep.
+    work = tmp_path / "eeebot-self-evolving"
+    show = subprocess.run(
+        ["git", "-C", str(work), "show", f"{pending['branch']}:scripts/feature.py"],
+        capture_output=True, text=True,
+    )
+    assert show.returncode == 0 and "def feature" in show.stdout, (
+        f"the edit must survive committed on {pending['branch']!r}, not be discarded: {show.stderr!r}"
+    )
+    main_tree = subprocess.run(
+        ["git", "-C", str(work), "ls-tree", "-r", "--name-only", "main"], capture_output=True, text=True,
+    ).stdout
+    assert "scripts/feature.py" not in main_tree, "the edit must not reach main unverified"
 
 
 class TestOutcomeRowFlag:

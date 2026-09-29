@@ -23,14 +23,20 @@ def _extract_fn(name: str, extra_setup: str = '') -> object:
             func_src = ast.get_source_segment(source, node)
             break
     assert func_src, f'{name} not found in bridge'
+    # ADR-035 keep-work (#1942 B2): _BLOCKED_FILE_PATTERNS moved to
+    # nanobot.runtime.commit_markers.BLOCKED_FILE_PATTERNS (the single
+    # source shared with the checkpoint commit writer) -- bridge.py now
+    # imports it rather than assigning it, so the ast.Assign scan below can
+    # no longer find it there; bind it into the isolated exec namespace
+    # directly, under the name bridge.py's source still uses.
+    from nanobot.runtime.commit_markers import BLOCKED_FILE_PATTERNS as _bridge_blocked_file_patterns
+    constants = f'_BLOCKED_FILE_PATTERNS = {_bridge_blocked_file_patterns!r}\n'
     # Also extract module-level constants needed by the function
-    constants = ''
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             src = ast.get_source_segment(source, node)
             if src and any(
                 n in src for n in (
-                    '_BLOCKED_FILE_PATTERNS',
                     '_BLOCKED_WORD_PATTERNS',
                     '_SENSITIVE_WORDS',
                     '_ALLOWED_SENSITIVE_BASENAMES',

@@ -120,9 +120,10 @@ ruff check <path>                               # lint (configured in pyproject.
 
 ## CI reality
 
-- CI runs **Python tests only**, on Python `3.11`/`3.12`/`3.13`. No system
-  packages are installed first — the Matrix channel (and its `libolm-dev`
-  build dependency) was removed 2026-07-05 per #602.
+- CI runs the **Python test suite plus a `ruff --select F811` redefined-name
+  check**, on Python `3.11`/`3.12`/`3.13`. No system packages are installed
+  first — the Matrix channel (and its `libolm-dev` build dependency) was
+  removed 2026-07-05 per #602.
 
 ## LiteLLM config — single source of truth
 

@@ -267,16 +267,9 @@ def test_results_scandir_single_pass(tmp_path: Path, monkeypatch):
     assert len(entries) == 5
     assert scandir_calls == 1
 
-    # find_pending_request uses the single-pass helper and reuses cached results
-    monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
-    monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagents" / "bridge")
-    (state_dir / "subagents" / "requests").mkdir(parents=True)
-    (state_dir / "subagents" / "requests" / "req_99.json").write_text(
-        json.dumps({"request_id": "req_99"}),
-        encoding="utf-8",
-    )
-    p, d = bridge.find_pending_request()
-    assert p is not None
+    # _get_previous_attempts uses the single-pass helper and reuses cached results
+    prev = bridge._get_previous_attempts(state_dir=state_dir, semantic_task_id="task-none")
+    assert prev == []
     # No extra scandir was made on results_dir
     assert scandir_calls == 1
 
@@ -324,24 +317,19 @@ def test_bridge_composition_single_scandir_across_all_consumers(tmp_path: Path, 
         encoding="utf-8",
     )
 
-    # 1. find_pending_request
-    p, _ = bridge.find_pending_request()
-    assert p is not None
-    assert scandir_calls == 1
-
-    # 2. _get_previous_attempts reuses cache
+    # 1. _get_previous_attempts
     prev = bridge._get_previous_attempts(
         state_dir=state_dir, semantic_task_id="task-0", target_path="scripts/module_0.py",
     )
     assert len(prev) >= 1
     assert scandir_calls == 1
 
-    # 3. _migrate_backlog_title_in_results reuses cache
+    # 2. _migrate_backlog_title_in_results reuses cache
     mig = bridge._migrate_backlog_title_in_results(results_dir)
     assert mig == 0
     assert scandir_calls == 1
 
-    # 4. _recent_activity_context reuses cache
+    # 3. _recent_activity_context reuses cache
     act = bridge._recent_activity_context(state_dir=state_dir, selfevo_repo_root=None)
     assert "Recently rejected" in act
     assert scandir_calls == 1
