@@ -921,6 +921,23 @@ def check_running_for_kill(state_dir: "Path", current_cycle_id: str) -> "dict[st
         return None
     if not running or running.get("cycle_id") == (current_cycle_id or ""):
         return None
+    cycle_id = running.get("cycle_id") or ""
+    # The append-only cycle ledger is the durable terminal source of truth.
+    # A crash or failed open-increment clear after this row was written must
+    # not turn a completed cycle into a fabricated interrupted_kill.
+    try:
+        from nanobot.runtime.cycle_ledger import read_events_across_rotation
+
+        if any(
+            row.get("phase") == "outcome" and row.get("cycle_id") == cycle_id
+            for row in read_events_across_rotation(state_dir, phases={"outcome"})
+        ):
+            record_attempt_finished(state_dir, cycle_id)
+            return None
+    except Exception:
+        # Reconciliation is best-effort; retain existing stale-registration
+        # classification when the ledger cannot be read.
+        pass
     task_id = running.get("task_id") or ""
     executor_status = _read_executor_terminal_status(state_dir, task_id)
     if executor_status == "error":
