@@ -242,6 +242,41 @@ class TestAuthoritativeSpawnEndToEnd:
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
         assert rows[-1]["max_call_gap_s"] == 17.5
 
+    def test_repair_manager_larger_call_gap_is_recorded(self, tmp_path, monkeypatch):
+        """The repair turn's own gap reaches the outcome row when it is the
+        largest -- only true while the bridge points _last_call_gap_manager
+        at the repair manager before its spawn (the #2009 line the other
+        call-gap tests cannot see: there the primary's gap is the max)."""
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
+        _seed_bridge_request(state_dir, "req-repair-gap-larger", "cycle-repair-gap-larger")
+        _stub_planning_session(monkeypatch, "add feature")
+
+        class _MeasuredPrimary(_PrimaryManager):
+            last_max_call_gap_s = 17.5
+
+        monkeypatch.setattr(bridge, "SubagentManager", _MeasuredPrimary)
+        repair_base = _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)
+
+        class _SlowRepair(repair_base):
+            async def spawn(self, **kwargs):
+                result = await super().spawn(**kwargs)
+                self.last_max_call_gap_s = 60.0  # measured during the repair turn
+                return result
+
+        import nanobot.agent.subagent as subagent_module
+        monkeypatch.setattr(subagent_module, "SubagentManager", _SlowRepair)
+        monkeypatch.setattr(
+            "nanobot.runtime.session_clock.compute_cycle_max_call_gap",
+            lambda *args, **kwargs: kwargs.get("fallback_gap"),
+        )
+        primary = _witness(monkeypatch, _MeasuredPrimary)
+        repair = _witness(monkeypatch, _SlowRepair)
+        assert asyncio.run(bridge._main_impl()) == 0
+        assert primary["spawn"] == 1, primary
+        assert repair["init"] >= 1 and repair["spawn"] >= 1, repair  # the repair path really ran
+        rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
+        assert rows[-1]["max_call_gap_s"] == 60.0
+
     def test_primary_max_call_gap_survives_smaller_repair_gap_on_exception(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-primary-gap-repair-exception", "cycle-primary-gap-repair-exception")
