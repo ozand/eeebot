@@ -933,6 +933,7 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path, monkeypatch):
         "def render_html(metrics): return 'x' * 2048",
     ]) + "\n"
     candidate_verifier = candidate_verifier.replace("from scripts.eeebot_dashboard import (", stubs + "\n# from scripts.eeebot_dashboard import (")
+    candidate_verifier = candidate_verifier.replace("        print('CANDIDATE_GATE_EXECUTED')\\n", "")
     (gate_tmp / "scripts" / "verify_release_health.py").write_text(candidate_verifier, encoding="utf-8")
     (gate_tmp / "scripts" / "__init__.py").write_text("", encoding="utf-8")
     mock("rm", f'''echo "rm $*" >> {log}; exit 0''')
