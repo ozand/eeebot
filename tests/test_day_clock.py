@@ -104,7 +104,8 @@ def test_day_actions_counts_success_and_pushed_late_since_day_start(tmp_path):
     now = datetime(2026, 9, 20, 12, 0, 0, tzinfo=timezone.utc)
     events = [
         {"phase": "outcome", "outcome": "success", "files_changed": ["a.py"], "ts": (now - timedelta(hours=2)).isoformat()},
-        {"phase": "outcome", "outcome": "pushed_late", "files_changed": ["b.py"], "ts": (now - timedelta(hours=1)).isoformat()},
+        {"phase": "outcome", "outcome": "pushed_late", "files_changed": ["b.py"], "delivery_state": "known", "ts": (now - timedelta(hours=1)).isoformat()},
+        {"phase": "outcome", "outcome": "pushed_late", "files_changed": ["unknown.py"], "delivery_state": "unknown", "ts": (now - timedelta(minutes=30)).isoformat()},
         # Before today's boundary -- not counted.
         {"phase": "outcome", "outcome": "success", "files_changed": ["yesterday.py"], "ts": (now - timedelta(hours=26)).isoformat()},
         # Failed -- not counted.
@@ -113,9 +114,9 @@ def test_day_actions_counts_success_and_pushed_late_since_day_start(tmp_path):
     _write_ledger(state_dir, events)
 
     result = day_clock.day_actions(state_dir, now=now)
-    assert result["commits_integrated_today"] == 2
-    assert result["files_touched_today"] == ["a.py", "b.py"]
-    assert result["files_touched_today_total"] == 2
+    assert result["commits_integrated_today"] == 3
+    assert result["files_touched_today"] == ["a.py", "b.py", "unknown.py"]
+    assert result["files_touched_today_total"] == 3
     assert result["status"] != "unavailable"
 
 
