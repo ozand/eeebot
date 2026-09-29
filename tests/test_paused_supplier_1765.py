@@ -133,6 +133,17 @@ class TestClassifyLlmError:
         match an HTTP status line."""
         assert bridge._classify_llm_error(text) == expected
 
+    @pytest.mark.parametrize("text, expected", [
+        ("received status code 500 from upstream", "paused-supplier"),
+        ("gateway: status code 503 returned by upstream", "paused-supplier"),
+        ("status code 500", "failed"),              # no upstream relay named
+        ("status code 404 from upstream", "failed"),  # a client status stays ours
+    ])
+    def test_rx_upstream_status_code_alternative(self, text, expected):
+        """#1919: pins the second alternative added to main's list -- "status
+        code" + 429/500/502/503/504 followed within 30 chars by "upstream"."""
+        assert bridge._classify_llm_error(text) == expected
+
     @pytest.mark.parametrize("text", [
         # the local gateway's own text during the 2026-09-29 incident, verbatim
         "No deployments available for selected model, Try again in 8355 seconds",
