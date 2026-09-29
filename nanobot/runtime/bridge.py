@@ -4671,7 +4671,15 @@ async def _main_impl_body():
         # and re-spawned every cycle. This suppression adds a separate pre-spawn
         # guard that does not affect [Done] bookkeeping — only prevents
         # re-spawning the same rejected work within the suppression window.
-        if _dup_check_title and (
+        #
+        # #2050 H1: NOT for a continuation of the pending open increment. The
+        # planner MUST resolve that increment first (ADR-035 rule 3), and a
+        # `keep` resumes it under its own cycle_id (`_resume_cycle_id`, set by
+        # _run_planning_session from the pending record) -- suppressing it
+        # here as a "recent failure" of itself deadlocked the loop for the
+        # whole 24h window (R2, 2026-09-28). The open increment has its own
+        # bounded keep/edit/delete contract; this gate is not its judge.
+        if _dup_check_title and not _continues_pending_open_increment(STATE_DIR, _resume_cycle_id) and (
             _recent_failure_title := _recent_failure_match(
                 _dup_check_title, STATE_DIR, target_path=_target_path,
             )
@@ -8059,6 +8067,36 @@ _SKIP_ROLLBACK_REASONS = frozenset({
 })
 
 
+#: #2050 H1: rollback reasons of an attempt that did NOT FINISH -- the
+#: session was interrupted (our own defect, a kill, a supplier outage) and
+#: its work is the pending open increment, resolved by the planner's
+#: keep/edit/delete. Not a verdict on the proposal, so never recent-failure
+#: history for :func:`_recent_failure_match` (same reasoning as the
+#: supplier-paused entry of :data:`_SKIP_ROLLBACK_REASONS`, and as
+#: ``interrupted_defect`` being inconclusive in :data:`_INCONCLUSIVE_REASONS`).
+_INTERRUPTED_ROLLBACK_REASONS = frozenset({
+    'interrupted_defect',
+    'interrupted_kill',
+    'interrupted_supply',
+})
+
+
+def _continues_pending_open_increment(state_dir: 'Path', resume_cycle_id: 'str | None') -> bool:
+    """#2050 H1: True when this request resumes the pending open increment
+    -- ``resume_cycle_id`` (a planner ``keep``) names the cycle the pending
+    record in ``state/planner/open_increment.json`` belongs to. Fail-closed
+    to False (the gate then applies as before) on any read problem."""
+    if not resume_cycle_id:
+        return False
+    try:
+        from nanobot.runtime import open_increment as _oi_continue
+
+        pending = _oi_continue.pending_open_increment(state_dir)
+    except Exception:
+        return False
+    return isinstance(pending, dict) and pending.get('cycle_id') == resume_cycle_id
+
+
 def _recent_failure_match(
     dup_check_title: str,
     state_dir: 'Path',
@@ -8191,6 +8229,10 @@ def _recent_failure_match(
             # rollback.reason naming the skip. Never let them seed the
             # failure history (see docstring: the decay cascade).
             if reason in _SKIP_ROLLBACK_REASONS:
+                continue
+            # #2050 H1: an interrupted attempt never finished -- not a
+            # failure of the proposal (see _INTERRUPTED_ROLLBACK_REASONS).
+            if reason in _INTERRUPTED_ROLLBACK_REASONS:
                 continue
             if str(status or '').lower().startswith('skipped'):
                 continue
