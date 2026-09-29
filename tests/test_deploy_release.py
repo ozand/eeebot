@@ -878,7 +878,7 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path, monkeypatch):
     root = tmp_path / "sandbox"
     release = root / "opt/eeepc-agent/runtimes/self-evolving-agent/current"
     release.mkdir(parents=True)
-    monkeypatch.setenv("VERIFY_ONLY_DIMENSION_COMPARE", "0")
+    monkeypatch.setenv("VERIFY_ONLY_DIMENSION_COMPARE", "1")
     sha = "a" * 40
     (release / "SOURCE_COMMIT").write_text(sha + "\n", encoding="utf-8")
     commands = root / "commands.log"
