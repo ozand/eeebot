@@ -7396,6 +7396,10 @@ async def _main_impl_body():
 from nanobot.runtime import gate as _gate
 from nanobot.runtime import mutation_policy as _mutation_policy
 from nanobot.runtime.gate import _git_cmd, _is_runtime_deny
+from nanobot.runtime.llm_error_classification import (
+    SUPPLIER_UNAVAILABLE_RX as _SUPPLIER_UNAVAILABLE_RX,
+    classify_llm_error as _classify_llm_error,
+)
 
 # Compatibility mirrors retained for AST/external callers. The mutation policy
 # itself is authoritative; these mirrors are projections only.
@@ -7742,90 +7746,6 @@ def _authoritative_subagent_task_id(
         if _subagent_own_status(state_dir, candidate) == 'ok':
             return candidate
     return primary_task_id
-
-
-from nanobot.runtime.llm_error_classification import (
-    SUPPLIER_UNAVAILABLE_RX as _SUPPLIER_UNAVAILABLE_RX,
-    classify_llm_error as _classify_llm_error,
-)
-# refused/reset, a timeout with no response, HTTP 429/500/502/503/504, "no
-# deployments available", or a route missing for a configured model. Matched
-# case-insensitively against the raw LLM-call error text. Deliberately an
-# ALLOWLIST, not a denylist: only these positive signals promote a cycle to
-# 'paused-supplier'; everything else (context length exceeded, malformed
-# tool-call payload, invalid model parameters, our own schema errors) stays
-# 'failed' by falling through to the default — the conservative direction
-# the issue asks for, and the only way this stays a real distinction instead
-# of a catch-all.
-_SUPPLIER_UNAVAILABLE_RX = re.compile(
-    r'connection (?:refused|reset|error)'
-    r'|notfounderror.{0,40}(?:model route|no route|not found)'
-    # HTTP status numbers need an HTTP/error-code anchor: an output ceiling
-    # such as "maximum output is 500 tokens" is client-request trouble, not an
-    # outage signal. Match error responses, never bare numeric payload data.
-    r'|(?:error\s+code|http(?:\s+status)?|status\s+code)\s*[:=]?\s*(?:429|500|502|503|504)\b'
-    r'|ratelimiterror'
-    r'|internalservererror'
-    r'|serviceunavailableerror'
-    r'|no deployments available'
-    r'|no healthy deployment'
-    r'|model.{0,20}not loaded'
-    r'|/inference/load\b'
-    r'|load first\b',
-    re.IGNORECASE,
-)
-
-
-def _classify_llm_error(error_text: str, *, model_call_failure: dict | None = None) -> str:
-    """Classify a model-call failure separately from proven supplier outages."
-
-    Positive-match only (see :data:`_SUPPLIER_UNAVAILABLE_RX`) — when the
-    text does not clearly say "supplier unavailable", this returns 'failed',
-    the conservative default the issue specifies. The raw text is recorded
-    alongside this decision on the ledger row (see
-    ``cycle_ledger.record_cycle_outcome``'s ``llm_error_classification``)
-    so a misclassification is auditable after the fact, never silently lost.
-    """
-    if not error_text:
-        return 'failed'
-    if _SUPPLIER_UNAVAILABLE_RX.search(error_text):
-        return 'paused-supplier'
-    if isinstance(model_call_failure, dict) and model_call_failure.get('stage') in {'model_call', 'response_handling'} and (
-        model_call_failure.get('stage') == 'model_call' or model_call_failure.get('call_stage') == 'model_call'
-    ):
-        error_type = str(model_call_failure.get('error_type') or '').rsplit('.', 1)[-1].lower()
-        call_stage = str(model_call_failure.get('call_stage') or model_call_failure.get('stage') or '')
-        message = str(model_call_failure.get('message') or error_text).lower()
-        # Provider client errors are affirmative evidence that the request was
-        # rejected, not that the call was incomplete. Unknown errors remain in
-        # the existing incomplete bucket, with raw evidence retained by caller.
-        supplier_error_types = {
-            'ratelimiterror', 'internalservererror', 'serviceunavailableerror',
-            'apiconnectionerror', 'timeout', 'timeouterror', 'connecttimeout',
-            'readtimeout', 'remoteprotocolerror',
-        }
-        if call_stage == 'model_call' and error_type in supplier_error_types:
-            return 'paused-supplier'
-        definitive_request_errors = {
-            'badrequesterror', 'contextwindowexceedederror',
-            'invalidrequesterror', 'unprocessableentityerror',
-            'authenticationerror', 'permissiondeniederror',
-        }
-        request_rejection_markers = (
-            'invalid parameter', 'invalid temperature', 'unsupported parameter',
-            'maximum context length', 'context length exceeded',
-            'invalid tool call arguments', 'malformed tool-call',
-            'invalid api key', 'incorrect api key', 'unauthorized',
-            'authentication failed', 'permission denied', 'deployment not found',
-            'model not found', 'invalid model',
-        )
-        has_client_http_status = bool(re.search(r"(?:api error|http(?: status)?|status code|error code)\s*[:=]?\s*(?:400|401|403|404|409|413|422)\b", message))
-        if (error_type in definitive_request_errors or has_client_http_status or any(
-            marker in message for marker in request_rejection_markers
-        )):
-            return 'failed'
-        return 'model_call_incomplete'
-    return 'failed'
 
 
 def _executor_llm_error(state_dir: Path, task_id: 'str | None') -> str:

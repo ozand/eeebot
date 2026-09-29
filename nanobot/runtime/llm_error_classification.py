@@ -28,12 +28,11 @@ import re
 # of a catch-all.
 SUPPLIER_UNAVAILABLE_RX = re.compile(
     r'connection (?:refused|reset|error)'
-    r'|connect(?:ion)? timed? ?out'
-    r'|\btimed? ?out\b'
-    r'|\btimeout\b'
-    r'|\bread timeout\b'
+    r'|connect(?:ion)? timed? ?out.{0,20}(?:\berror\b|\bfailed\b)'
     r'|\berror code:\s*(?:429|500|502|503|504)\b'
-    r'|\b(?:429|500|502|503|504)\b.{0,20}\berror\b'
+    r'|\b(?:429|500|502|503|504)\b.{0,30}\b(?:error|service unavailable|bad gateway)\b'
+    r'|http\s+(?:429|500|502|503|504)\b'
+    r'|status code\s+(?:429|500|502|503|504)\b.{0,30}\bupstream\b'
     r'|ratelimiterror'
     r'|internalservererror'
     r'|serviceunavailableerror'
@@ -55,7 +54,7 @@ SUPPLIER_UNAVAILABLE_RX = re.compile(
 )
 
 
-def classify_llm_error(error_text: str) -> str:
+def classify_llm_error(error_text: str, *, model_call_failure: dict | None = None) -> str:
     """#1765: 'paused-supplier' (the gateway/model provider could not serve
     us) or 'failed' (the supplier rejected OUR request — our own defect,
     must keep failing loudly), from the raw executor LLM-call error text.
@@ -69,6 +68,39 @@ def classify_llm_error(error_text: str) -> str:
     """
     if not error_text:
         return 'failed'
+    supplier_error_types = {
+        'ratelimiterror', 'internalservererror', 'serviceunavailableerror',
+        'apiconnectionerror', 'timeout', 'timeouterror', 'connecttimeout',
+        'readtimeout', 'remoteprotocolerror',
+    }
     if SUPPLIER_UNAVAILABLE_RX.search(error_text):
-        return 'paused-supplier'
+        if not model_call_failure:
+            return 'paused-supplier'
+    if isinstance(model_call_failure, dict) and model_call_failure.get('stage') in {'model_call', 'response_handling'} and (
+        model_call_failure.get('stage') == 'model_call' or model_call_failure.get('call_stage') == 'model_call'
+    ):
+        error_type = str(model_call_failure.get('error_type') or '').rsplit('.', 1)[-1].lower()
+        call_stage = str(model_call_failure.get('call_stage') or model_call_failure.get('stage') or '')
+        message = str(model_call_failure.get('message') or error_text).lower()
+        if call_stage == 'model_call' and error_type in supplier_error_types:
+            return 'paused-supplier'
+        if call_stage == 'model_call' and error_type == 'notfounderror' and 'model route' in message:
+            return 'paused-supplier'
+        definitive_request_errors = {
+            'badrequesterror', 'contextwindowexceedederror',
+            'invalidrequesterror', 'unprocessableentityerror',
+            'authenticationerror', 'permissiondeniederror',
+        }
+        request_rejection_markers = (
+            'invalid parameter', 'invalid temperature', 'unsupported parameter',
+            'maximum context length', 'context length exceeded',
+            'invalid tool call arguments', 'malformed tool-call',
+            'invalid api key', 'incorrect api key', 'unauthorized',
+            'authentication failed', 'permission denied', 'deployment not found',
+            'model not found', 'invalid model',
+        )
+        has_client_http_status = bool(re.search(r"(?:api error|http(?: status)?|status code|error code)\s*[:=]?\s*(?:400|401|403|404|409|413|422)\b", message))
+        if error_type in definitive_request_errors or has_client_http_status or any(marker in message for marker in request_rejection_markers):
+            return 'failed'
+        return 'model_call_incomplete'
     return 'failed'
