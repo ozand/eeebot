@@ -37,7 +37,8 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
     (live_release / "scripts").mkdir(parents=True)
     (live_release / "scripts/__init__.py").write_text("", encoding="utf-8")
     (live_release / "scripts/verify_release_health.py").write_text(
-        textwrap.dedent("""            def verify_release_health():
+        textwrap.dedent("""\
+            def verify_release_health():
                 return {"health": {"dimensions": {"disk": {"status": "OK"}}}}
         """),
         encoding="utf-8",
@@ -63,7 +64,7 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
     _git("commit", "-qm", "head gate", cwd=source, check=True, env=identity)
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
     gate_path.write_text(
-        textwrap.dedent('''
+        textwrap.dedent('''\
             import json
 
             def verify_release_health():
