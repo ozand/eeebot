@@ -911,6 +911,7 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path, monkeypatch):
     scripts_dir.mkdir(parents=True, exist_ok=True)
     verifier = scripts_dir / "verify_release_health.py"
     verifier.write_text("#!/usr/bin/env python3\nprint('mock health')\n", encoding="utf-8")
+    verifier.chmod(0o755)
     mock("sleep", f'''echo "sleep $*" >> {log}; exit 97''')
     mock("stat", f'''echo "stat $*" >> {log}; echo 0:0''')
     mock("install", f'''echo "install $*" >> {log}; exit 0''')
