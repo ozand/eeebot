@@ -802,3 +802,94 @@ def test_integrity_key_absent_in_legacy_report_tolerated(tmp_path, mod):
     report.pop("integrity", None)
     table = mod.render_table(report)  # must not crash
     assert "Fitness-input integrity" in table
+
+
+# ---------------------------------------------------------------------------
+# #1930 review A1(E): count_preservation_reads's real caller is this report,
+# not the runtime -- the counter is otherwise never actually surfaced.
+# ---------------------------------------------------------------------------
+
+def test_compaction_usage_counts_reads_against_real_action_index_row_format(tmp_path, mod):
+    now = datetime.now(timezone.utc)
+    day = now.strftime("%Y-%m-%d")
+
+    compaction_dir = tmp_path / "compaction"
+    compaction_dir.mkdir(parents=True)
+    with (compaction_dir / "journal.jsonl").open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "ts": f"{day}T10:00:00Z", "cycle_id": "c1", "reason": "compacted",
+            "preservation_path": str(compaction_dir / "c1" / "exec1" / "0.md"),
+        }) + "\n")
+        fh.write(json.dumps({
+            "ts": f"{day}T11:00:00Z", "cycle_id": "c1", "reason": "below_threshold",
+        }) + "\n")
+
+    index_dir = tmp_path / "action_index"
+    index_dir.mkdir(parents=True)
+    # Real action_index row shape: cycle_id, actions_detail (a read:<path>
+    # templated list, workspace-relative). One genuine preservation-file
+    # read, one decoy read of context_compaction.py itself (must NOT count
+    # -- #1930 review A3), and one unrelated read.
+    with (index_dir / f"{day}.jsonl").open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "cycle_id": "c1", "task_title": "x", "outcome": "success",
+            "actions": ["read:*.md", "read:*.py"],
+            "actions_detail": [
+                "read:compaction/c1/exec1/0.md",
+                "read:nanobot/runtime/context_compaction.py",
+            ],
+        }) + "\n")
+        fh.write(json.dumps({
+            "cycle_id": "c2", "task_title": "y", "outcome": "success",
+            "actions": ["read:*.py"], "actions_detail": ["read:some/other/file.py"],
+        }) + "\n")
+
+    report = mod.build_report(tmp_path, days=7)
+    usage = report["compaction_usage"]
+    assert usage["status"] == "present"
+    assert usage["cycles_compacted"] == 1
+    assert usage["reads_by_cycle"] == {"c1": 1}
+    assert usage["total_reads"] == 1
+
+    table = mod.render_table(report)
+    assert "Compaction preservation usage" in table
+    assert "preservation-file reads: 1" in table
+
+
+def test_compaction_usage_absent_when_no_compaction_journal(tmp_path, mod):
+    report = mod.build_report(tmp_path, days=7)
+    assert report["compaction_usage"]["status"] == "absent"
+    table = mod.render_table(report)  # must not crash
+    assert "Compaction preservation usage" in table
+
+
+def test_compaction_usage_d2_journal_read_itself_not_counted(tmp_path, mod):
+    """D2 (P3, E): a path-segment match alone also counted a read of
+    compaction/journal.jsonl (this counter's own instrument) as a
+    preservation-file read. Must require an actual preservation FILE shape
+    (>= 3 segments after "compaction", the last ending in .md)."""
+    now = datetime.now(timezone.utc)
+    day = now.strftime("%Y-%m-%d")
+
+    compaction_dir = tmp_path / "compaction"
+    compaction_dir.mkdir(parents=True)
+    with (compaction_dir / "journal.jsonl").open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "ts": f"{day}T10:00:00Z", "cycle_id": "c1", "reason": "compacted",
+            "preservation_path": str(compaction_dir / "c1" / "exec1" / "0.md"),
+        }) + "\n")
+
+    index_dir = tmp_path / "action_index"
+    index_dir.mkdir(parents=True)
+    with (index_dir / f"{day}.jsonl").open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "cycle_id": "c1", "task_title": "x", "outcome": "success",
+            "actions": ["read:*.jsonl", "read:*.md"],
+            "actions_detail": [
+                "read:compaction/journal.jsonl",
+                "read:compaction/c1/exec1/0.md",
+            ],
+        }) + "\n")
+
+    report = mod.build_report(tmp_path, days=7)
+    assert report["compaction_usage"]["reads_by_cycle"] == {"c1": 1}

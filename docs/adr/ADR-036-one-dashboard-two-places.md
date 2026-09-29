@@ -117,6 +117,12 @@ unexpected extension.
   contains request, answer, reasoning or tool-output text; the private renderer
   is the only code that reads `state/llm_calls/prompts/`. Private text cannot leak
   through a public page because the public renderer never holds it.
+  `state/compaction/` (#1930's I1 preservation files — the full pre-compaction
+  text of every message a compaction round drops) is the same private-only
+  class: contains full tool outputs and assistant reasoning, never published,
+  never included in any public dashboard or gh-pages artifact; if a private
+  page ever renders it, the private renderer's own sanitizer applies to it
+  exactly as it does to `state/llm_calls/prompts/`.
 - **An allowlist of published paths.** The publisher sends only paths on an
   explicit list and fails loudly on any other, whatever its name or origin.
 - **A scan of the built tree before it is sent.** The complete gh-pages tree is
