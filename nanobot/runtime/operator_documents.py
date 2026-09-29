@@ -318,6 +318,7 @@ def resolve_operator_priorities(
             completed_count=len(completed_prose), completed_entries=completed_prose,
         )
     section = raw_text[marker_idx + len(_PRIORITY_TARGETS_MARKER):]
+    section = re.split(r"(?m)^\s*#{1,6}\s+\S[^\n]*$", section, maxsplit=1)[0]
     completed_marker_idx = section.find("Completed (do not repeat):")
     if completed_marker_idx >= 0:
         next_entry = re.search(r"\n\([A-Za-z]\)\s*Priority\s+\d+", section[completed_marker_idx:])
@@ -344,6 +345,9 @@ def resolve_operator_priorities(
     filtered_section = (
         filtered[filtered_idx + len(_PRIORITY_TARGETS_MARKER):] if filtered_idx != -1 else ""
     )
+    filtered_section = re.split(
+        r"(?m)^\s*#{1,6}\s+\S[^\n]*$", filtered_section, maxsplit=1
+    )[0]
     completed_marker_idx = filtered_section.find("Completed (do not repeat):")
     if completed_marker_idx >= 0:
         next_entry = re.search(
@@ -355,10 +359,15 @@ def resolve_operator_priorities(
             if next_entry else filtered_section[:completed_marker_idx]
         )
     open_entries = _parse_entries(filtered_section)
+    explicit_completed_numbers = {entry.number for entry in completed_prose}
+    open_entries = [e for e in open_entries if e.number not in explicit_completed_numbers]
     open_numbers = {e.number for e in open_entries}
     completed_entries = tuple(
-        [e for e in original_entries if e.number not in open_numbers]
-        + [e for e in completed_prose if e.number not in {entry.number for entry in original_entries}]
+        [
+            e for e in original_entries
+            if e.number not in open_numbers and e.number not in explicit_completed_numbers
+        ]
+        + list(completed_prose)
     )
 
     if not open_entries:
@@ -606,7 +615,7 @@ _COMPLETED_EM_DASH_RE = re.compile(
     re.IGNORECASE,
 )
 _COMPLETED_PAREN_PRIORITY_RE = re.compile(
-    r"Priority\s+(\d+)\s*\(\s*([^,.;)\n]+)", re.IGNORECASE
+    r"Priority\s+(\d+)\s*\(\s*([^,)\n]+)", re.IGNORECASE
 )
 
 
@@ -620,6 +629,14 @@ def _completed_prose_entries(raw_text: str) -> tuple[PriorityEntry, ...]:
     # Completed prose ends at the next operator-document section, if any;
     # never scan Current priorities (or an unrelated section) for more items.
     section_end = len(tail)
+    next_open_entry = re.search(r"(?m)^\([A-Za-z]\)\s*Priority\s+\d+", tail)
+    if next_open_entry:
+        section_end = next_open_entry.start()
+    for match in re.finditer(
+        r"(?m)^\s*(?!\([A-Za-z]\)\s*Priority\s+\d+)(?:#{1,6}\s+\S|[^\n:]{1,100}:\s*$)",
+        tail,
+    ):
+        section_end = min(section_end, match.start())
     for section_marker in ("Current priority targets:",):
         marker_at = tail.find(section_marker)
         if marker_at >= 0:
