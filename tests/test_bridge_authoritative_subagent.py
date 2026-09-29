@@ -100,6 +100,27 @@ def _make_repair_manager(status: str, result: str):
     return _RepairManager
 
 
+def _witness(monkeypatch, manager_cls):
+    """Count ``manager_cls`` constructions and ``spawn()`` calls, so a test
+    proves which path the cycle actually took (a stubbed planner must not
+    let a different route record the same end state)."""
+    seen = {"init": 0, "spawn": 0}
+    orig_init = manager_cls.__init__
+    orig_spawn = manager_cls.spawn
+
+    def __init__(self, *args, **kwargs):
+        seen["init"] += 1
+        orig_init(self, *args, **kwargs)
+
+    async def spawn(self, *args, **kwargs):
+        seen["spawn"] += 1
+        return await orig_spawn(self, *args, **kwargs)
+
+    monkeypatch.setattr(manager_cls, "__init__", __init__)
+    monkeypatch.setattr(manager_cls, "spawn", spawn)
+    return seen
+
+
 def _fail_once_then_pass():
     calls = {"n": 0}
 
@@ -213,7 +234,11 @@ class TestAuthoritativeSpawnEndToEnd:
             "nanobot.runtime.session_clock.compute_cycle_max_call_gap",
             lambda *args, **kwargs: kwargs.get("fallback_gap"),
         )
+        primary = _witness(monkeypatch, _MeasuredPrimary)
+        repair = _witness(monkeypatch, _OneCallRepair)
         assert asyncio.run(bridge._main_impl()) == 0
+        assert primary["spawn"] == 1, primary
+        assert repair["init"] >= 1 and repair["spawn"] >= 1, repair  # the repair path really ran
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
         assert rows[-1]["max_call_gap_s"] == 17.5
 
@@ -234,25 +259,39 @@ class TestAuthoritativeSpawnEndToEnd:
         monkeypatch.setattr(bridge, "SubagentManager", _MeasuredPrimary)
         repair_base = _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)
 
+        repair_ran = {"value": False}
+
         class _OneCallRepair(repair_base):
             last_max_call_gap_s = 5.0
 
             async def spawn(self, **kwargs):
                 result = await super().spawn(**kwargs)
+                repair_ran["value"] = True
                 now[0] = 3801.0
                 return result
 
         import nanobot.agent.subagent as subagent_module
         monkeypatch.setattr(subagent_module, "SubagentManager", _OneCallRepair)
-        monkeypatch.setattr(
-            bridge, "_check_test_weakening",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("injected post-repair failure")),
-        )
+        # The bridge also calls _check_test_weakening BEFORE the smoke gate;
+        # failing there would end the cycle before any repair turn and make
+        # this test pass without the repair path. Inject only after repair.
+        real_weakening = bridge._check_test_weakening
+
+        def _post_repair_failure(*args, **kwargs):
+            if repair_ran["value"]:
+                raise RuntimeError("injected post-repair failure")
+            return real_weakening(*args, **kwargs)
+
+        monkeypatch.setattr(bridge, "_check_test_weakening", _post_repair_failure)
         monkeypatch.setattr(
             "nanobot.runtime.session_clock.compute_cycle_max_call_gap",
             lambda *args, **kwargs: kwargs.get("fallback_gap"),
         )
+        primary = _witness(monkeypatch, _MeasuredPrimary)
+        repair = _witness(monkeypatch, _OneCallRepair)
         assert asyncio.run(bridge._main_impl()) == 0
+        assert primary["spawn"] == 1, primary
+        assert repair["init"] >= 1 and repair["spawn"] >= 1, repair  # the repair path really ran
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
         assert rows[-1]["max_call_gap_s"] == 40.0
 
@@ -291,16 +330,27 @@ class TestAuthoritativeSpawnEndToEnd:
                 self.last_max_call_gap_s = 37.0
                 return await super().spawn(**kwargs)
 
-        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("cancelled", REPAIR_TEXT_CANCELLED))
+        repair_cls = _make_repair_manager("cancelled", REPAIR_TEXT_CANCELLED)
+        state_dir = _wire(tmp_path, monkeypatch, repair_cls)
         _seed_bridge_request(state_dir, "req-gap-unexpected", "cycle-gap-unexpected")
         _stub_planning_session(monkeypatch, "add feature")
         monkeypatch.setattr(bridge, "SubagentManager", _ExceptionPrimary)
-        monkeypatch.setattr(
-            bridge, "_changed_files_and_violations",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("injected post-executor failure")),
-        )
+        injected = {"raised": 0}
+
+        def _post_executor_failure(*_args, **_kwargs):
+            injected["raised"] += 1
+            raise RuntimeError("injected post-executor failure")
+
+        monkeypatch.setattr(bridge, "_changed_files_and_violations", _post_executor_failure)
+        primary = _witness(monkeypatch, _ExceptionPrimary)
+        repair = _witness(monkeypatch, repair_cls)
 
         assert asyncio.run(bridge._main_impl()) == 0
+        # the path under test: the executor ran, then the injected failure hit
+        # before the smoke gate -- so no repair turn exists on this path.
+        assert primary["spawn"] == 1, primary
+        assert injected["raised"] >= 1
+        assert repair["spawn"] == 0, repair
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
         assert rows[-1].get("max_call_gap_s") == 37.0
 
@@ -383,7 +433,11 @@ class TestAuthoritativeSpawnEndToEnd:
 
         monkeypatch.setattr(bridge, "SubagentManager", _PrimaryManager)
         monkeypatch.setattr(subagent_module, "SubagentManager", _PendingRepair)
+        primary = _witness(monkeypatch, _PrimaryManager)
+        repair = _witness(monkeypatch, _PendingRepair)
         assert asyncio.run(bridge._main_impl()) == 0
+        assert primary["spawn"] == 1, primary
+        assert repair["init"] >= 1 and repair["spawn"] >= 1, repair  # the repair path really ran
         assert repair_ids
         telemetry = json.loads((state_dir / "subagents" / f"{repair_ids[0]}.json").read_text())
         assert telemetry["status"] == "cancelled"
@@ -437,7 +491,11 @@ class TestAuthoritativeSpawnEndToEnd:
         monkeypatch.setattr(subagent_module, "SubagentManager", _PendingRepair)
         monkeypatch.setattr(bridge, "SubagentManager", _PrimaryManager)
         monkeypatch.setattr(session_clock, "repair_wait_budget_secs", _advance_after_first_budget)
+        primary = _witness(monkeypatch, _PrimaryManager)
+        repair = _witness(monkeypatch, _PendingRepair)
         assert asyncio.run(bridge._main_impl()) == 0
+        assert primary["spawn"] == 1, primary
+        assert repair["init"] >= 1 and repair["spawn"] >= 1, repair  # the repair path really ran
         assert budget_calls[0] == 1200.0
         assert len(budget_calls) >= 2, "repair wait must be recomputed immediately before await"
         assert budget_calls[-1] == 100.0, "stale 1200s wait must shrink after pre-await work"
