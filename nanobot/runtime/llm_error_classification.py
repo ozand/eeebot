@@ -74,9 +74,11 @@ def classify_llm_error(error_text: str, *, model_call_failure: dict | None = Non
         'apiconnectionerror', 'timeout', 'timeouterror', 'connecttimeout',
         'readtimeout', 'remoteprotocolerror',
     }
+    # Both parents' order: an affirmative supplier-outage match wins before
+    # the structured model_call_failure branch -- that branch's fallback is
+    # 'model_call_incomplete', and an outage must never spend that budget.
     if SUPPLIER_UNAVAILABLE_RX.search(error_text):
-        if not model_call_failure:
-            return 'paused-supplier'
+        return 'paused-supplier'
     if isinstance(model_call_failure, dict) and model_call_failure.get('stage') in {'model_call', 'response_handling'} and (
         model_call_failure.get('stage') == 'model_call' or model_call_failure.get('call_stage') == 'model_call'
     ):

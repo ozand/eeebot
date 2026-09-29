@@ -120,6 +120,22 @@ class TestClassifyLlmError:
     def test_our_own_defect_signals_stay_failed(self, text):
         assert bridge._classify_llm_error(text) == "failed"
 
+    @pytest.mark.parametrize("text", [
+        # the local gateway's own text during the 2026-09-29 incident, verbatim
+        "No deployments available for selected model, Try again in 8355 seconds",
+        "Error code: 503 - Service Unavailable",
+        "Connection error.",
+    ])
+    def test_supplier_outage_text_wins_over_generic_call_site_evidence(self, text):
+        """#1919 review P1: the executor records error_type="provider_error"
+        whenever a response carries none (subagent.py). An affirmative
+        outage match must still classify as paused-supplier, never fall
+        through to the structured branch's model_call_incomplete fallback --
+        that would spend the incomplete-retry budget on the supplier's
+        uptime, which #1765 exists to prevent."""
+        failure = {"stage": "model_call", "call_stage": "model_call", "error_type": "provider_error", "message": text}
+        assert bridge._classify_llm_error(text, model_call_failure=failure) == "paused-supplier"
+
     @pytest.mark.parametrize("text", ["socket timeout", "Request timed out after 60s", "litellm.Timeout: Read timeout"])
     def test_model_call_timeout_needs_call_site_evidence(self, text):
         assert bridge._classify_llm_error(text) == "failed"
