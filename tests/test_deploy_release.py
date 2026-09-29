@@ -932,10 +932,10 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path, monkeypatch):
         "def render_json(metrics): return json.dumps({'goal': '', 'active_task': '', 'approval_gate_state': '', 'reward_average': 'fresh', 'reward_source': {'status': 'fresh', 'age_hours': 0, 'authoritative': False, 'context_only': True}, 'goal_source': {'status': 'fresh', 'age_hours': 0, 'authoritative': False, 'context_only': True}, 'active_task_source': {'status': 'fresh', 'age_hours': 0, 'authoritative': False, 'context_only': True}, 'approval_gate_source': {'status': 'fresh', 'age_hours': 0, 'authoritative': False, 'context_only': True}})",
         "def render_html(metrics): return 'x' * 2048",
     ]) + "\n"
-    candidate_verifier = candidate_verifier.replace("from scripts.eeebot_dashboard import (", stubs + "\n# from scripts.eeebot_dashboard import (")
+    candidate_verifier = candidate_verifier.replace("from scripts.eeebot_dashboard import (", stubs + "\\n# from scripts.eeebot_dashboard import (")
     candidate_verifier = candidate_verifier.replace(
-        "        print('CANDIDATE_GATE_EXECUTED')\n",
-        "        print('CANDIDATE_GATE_EXECUTED', file=__import__('sys').stderr)\n",
+        "print('CANDIDATE_GATE_EXECUTED')",
+        "print('CANDIDATE_GATE_EXECUTED', file=__import__('sys').stderr)",
     )
     (gate_tmp / "scripts" / "verify_release_health.py").write_text(candidate_verifier, encoding="utf-8")
     (gate_tmp / "scripts" / "__init__.py").write_text("", encoding="utf-8")

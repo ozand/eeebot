@@ -82,7 +82,7 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
                         if {"OK": 0, "WARN": 1, "CRIT": 2}[after] > {"OK": 0, "WARN": 1, "CRIT": 2}[before]:
                             findings.append(f"{name}: {before} -> {after}")
                 return rows, findings
-        ''') + gate_source,
+        ''') + gate_source.replace("print('CANDIDATE_GATE_EXECUTED')", "print('CANDIDATE_GATE_EXECUTED', file=__import__('sys').stderr)"),
         encoding="utf-8",
     )
     _git("add", "scripts/verify_release_health.py", cwd=source, check=True)
