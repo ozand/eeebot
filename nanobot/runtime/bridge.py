@@ -4686,14 +4686,15 @@ async def _main_impl_body():
         # guard that does not affect [Done] bookkeeping — only prevents
         # re-spawning the same rejected work within the suppression window.
         #
-        # #2050 H1: NOT for a continuation of the pending open increment. The
-        # planner MUST resolve that increment first (ADR-035 rule 3), and a
-        # `keep` resumes it under its own cycle_id (`_resume_cycle_id`, set by
-        # _run_planning_session from the pending record) -- suppressing it
-        # here as a "recent failure" of itself deadlocked the loop for the
-        # whole 24h window (R2, 2026-09-28). The open increment has its own
-        # bounded keep/edit/delete contract; this gate is not its judge.
-        if _dup_check_title and not _continues_pending_open_increment(STATE_DIR, _resume_cycle_id) and (
+        # #2050 H1: the gate DOES apply to a continuation of the pending open
+        # increment. An interruption is not failure history (see
+        # _INTERRUPTED_ROLLBACK_REASONS), so a `keep` after an interruption
+        # passes; after a GENUINE failure of the continuation it is
+        # suppressed and recorded as rejected_duplicate, which the next
+        # planning session is guaranteed to see (H2) -- so it edits or
+        # deletes instead of re-running a failing increment every cycle
+        # (record_attempt_finished never clears `pending`).
+        if _dup_check_title and (
             _recent_failure_title := _recent_failure_match(
                 _dup_check_title, STATE_DIR, target_path=_target_path,
             )
@@ -8095,20 +8096,6 @@ _INTERRUPTED_ROLLBACK_REASONS = frozenset({
 })
 
 
-def _continues_pending_open_increment(state_dir: 'Path', resume_cycle_id: 'str | None') -> bool:
-    """#2050 H1: True when this request resumes the pending open increment
-    -- ``resume_cycle_id`` (a planner ``keep``) names the cycle the pending
-    record in ``state/planner/open_increment.json`` belongs to. Fail-closed
-    to False (the gate then applies as before) on any read problem."""
-    if not resume_cycle_id:
-        return False
-    try:
-        from nanobot.runtime import open_increment as _oi_continue
-
-        pending = _oi_continue.pending_open_increment(state_dir)
-    except Exception:
-        return False
-    return isinstance(pending, dict) and pending.get('cycle_id') == resume_cycle_id
 
 
 def _recent_failure_match(

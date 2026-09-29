@@ -156,42 +156,48 @@ def test_h1_keep_of_an_interrupted_increment_starts_the_executor(tmp_path: Path,
     )
 
 
-def test_h1_continuation_is_not_suppressed_by_another_recent_failure(tmp_path: Path, monkeypatch):
-    """The gate exemption itself (not the interrupted-row rule): cycle 0's
-    plan genuinely FAILS (executor_llm_error, budget spent). Cycle 1 plans an
-    unrelated increment that is interrupted (pending). Cycle 2 keeps it and
-    EDITS the plan so its title now overlaps cycle 0's failure -- still the
-    pending increment's continuation, so the executor must start."""
+def test_h1_a_genuinely_failed_continuation_is_suppressed_and_the_planner_is_told(tmp_path: Path, monkeypatch):
+    """Architect review of #2051: the gate must NOT be bypassed for a
+    continuation. record_attempt_finished never clears `pending`, so a
+    continuation that genuinely FAILS (here gate_failed: smoke red, no
+    repair budget) is still pending -- a second `keep` must be suppressed,
+    recorded as rejected_duplicate, and that evidence must wait for the
+    next planning session (H2), which then sees it. Without the gate the
+    same failing increment would be re-run by the executor every cycle."""
     state_dir = _harness(tmp_path, monkeypatch)
-    monkeypatch.setattr(bridge, "LLM_ERROR_MAX_RETRIES", 1)
-    failed_title = "Rotate archive retry counters nightly"
+    monkeypatch.setenv("SUBAGENT_BRIDGE_MAX_REVISIONS", "0")  # no repair turn
+    monkeypatch.setattr(bridge, "_run_smoke_tests_with_shrink_guard", lambda *a, **k: (False, "pytest failed"))
     log = {"planner": [], "executor": []}
     monkeypatch.setattr(bridge, "SubagentManager", _manager(
         state_dir,
         planner_answers=[
-            {"insight": "retry counters grow unbounded", "plan": failed_title, "iterations_planned": 1},
-            {"insight": "the backup schedule is undocumented", "plan": "Document the backup schedule format",
-             "iterations_planned": 1},
-            {"open_increment_decision": "keep", "plan_action": "edit",
-             "plan": "Rotate archive retry counters while documenting the backup schedule"},
+            {"insight": "archive rotation retries are uncounted", "plan": TITLE, "iterations_planned": 1},
+            {"open_increment_decision": "keep"},
+            {"open_increment_decision": "keep"},
+            "not a plan",  # the next session: sees the evidence, does not plan
         ],
-        executor_behaviours=["llm_error", "checkpoint_then_error", "finish_without_commit"],
+        executor_behaviours=["checkpoint_then_error", "finish_without_commit", "finish_without_commit"],
         log=log,
     ))
-    asyncio.run(bridge._main_impl())
-    assert _outcomes(state_dir)[-1]["reason"] == "executor_llm_error"
-    asyncio.run(bridge._main_impl())
+
+    asyncio.run(bridge._main_impl())  # interrupted -> pending
     pending = open_increment.pending_open_increment(state_dir)
     assert pending is not None and pending["reason"] == "interrupted_defect"
-    # precondition: the edited title really matches cycle 0's genuine failure
-    assert bridge._recent_failure_match(
-        "Rotate archive retry counters while documenting the backup schedule", state_dir,
-    ) == failed_title
 
-    asyncio.run(bridge._main_impl())
-    last = [row for row in _outcomes(state_dir) if row.get("cycle_id") == pending["cycle_id"]][-1]
-    assert last.get("reason") != "recent_duplicate_failure", last
-    assert len(log["executor"]) == 3, "the kept, edited open increment's executor must start"
+    asyncio.run(bridge._main_impl())  # keep -> the continuation runs and genuinely fails
+    assert len(log["executor"]) == 2, "a keep after an interruption must start the executor"
+    assert _outcomes(state_dir)[-1]["reason"] == "gate_failed", _outcomes(state_dir)[-1]
+    assert open_increment.pending_open_increment(state_dir) is not None, "a failed continuation stays pending"
+
+    asyncio.run(bridge._main_impl())  # keep again -> must be suppressed
+    assert len(log["executor"]) == 2, "a genuinely failed continuation must not be re-run by keep"
+    assert _outcomes(state_dir)[-1]["reason"] == "recent_duplicate_failure"
+    evidence = planner_dedup_evidence._state_path(state_dir)
+    assert evidence.is_file(), "the refusal is recorded for the next planning session"
+
+    asyncio.run(bridge._main_impl())  # the next session sees it (and, not planning, keeps it)
+    assert "Last increment rejected as a duplicate" in log["planner"][3]
+    assert evidence.is_file()
 
 
 def test_h1_an_interrupted_attempt_is_not_recent_failure_history(tmp_path: Path, monkeypatch):
