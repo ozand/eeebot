@@ -36,13 +36,8 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
     live_release = releases / "baseline"
     (live_release / "scripts").mkdir(parents=True)
     (live_release / "scripts/__init__.py").write_text("", encoding="utf-8")
-    (live_release / "scripts/verify_release_health.py").write_text(
-        textwrap.dedent("""\
-            def verify_release_health():
-                return {"health": {"dimensions": {"disk": {"status": "OK"}}}}
-        """),
-        encoding="utf-8",
-    )
+    live_release_health = "\n".join(['def verify_release_health():', '    return {"health": {"dimensions": {"disk": {"status": "OK"}}}}']) + "\n"
+    (live_release / "scripts/verify_release_health.py").write_text(live_release_health, encoding="utf-8")
     live = live_root / "current"
     live.symlink_to(live_release)
     baseline_health = {"health": {"dimensions": {"disk": {"status": "OK"}}}}
