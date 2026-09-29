@@ -3652,10 +3652,11 @@ async def _run_planning_session(
 
     # #2011/#2012: only now, with a real planner task_id confirmed (spawn
     # succeeded and the prompt above was actually delivered), commit the
-    # priority-seen-set and clear the dedup-evidence record that prompt
-    # rendered. A SubagentManager construction, prompt-fitting, or spawn
-    # failure above returns before this point, so both stay re-offerable
-    # on the next healthy cycle instead of being silently consumed.
+    # priority-seen-set. A SubagentManager construction, prompt-fitting, or
+    # spawn failure above returns before this point, so it stays
+    # re-offerable on the next healthy cycle instead of being silently
+    # consumed. (The dedup-evidence record is stricter: cleared only after
+    # an integrated plan, #2050 H2, below.)
     if _planner_seen_priority_ids_to_commit is not None:
         try:
             from nanobot.runtime import planner_candidates as _planner_candidates_commit_mod
