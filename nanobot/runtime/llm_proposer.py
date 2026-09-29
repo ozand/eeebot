@@ -2193,6 +2193,36 @@ def _dedup_exhausted(
         return False
 
 
+def _record_failed_proposer_call(
+    exc: Exception, requested_model: str, prompt: str = "", ts: str | None = None,
+) -> None:
+    try:
+        from nanobot.observability.llm_telemetry import call_context, record_llm_failure
+
+        status = getattr(exc, "status_code", None)
+        headers = getattr(exc, "headers", None)
+        if headers is None:
+            headers = getattr(getattr(exc, "response", None), "headers", None)
+        if headers is not None and not isinstance(headers, dict):
+            headers = dict(headers)
+        retry_after = None
+        if isinstance(headers, dict):
+            raw_retry = headers.get("Retry-After") or headers.get("retry-after")
+            try:
+                retry_after = float(raw_retry) if raw_retry is not None else None
+            except (TypeError, ValueError):
+                retry_after = None
+        component = "proposer"
+        with call_context(current_cycle_id("proposer"), component):
+            record_llm_failure(
+                component=component, requested_model=requested_model,
+                error_type=type(exc).__name__, http_status=status,
+                retry_after_s=retry_after, ts=ts,
+            )
+    except Exception:
+        pass
+
+
 def propose(
     context: str,
     *,
@@ -2216,11 +2246,13 @@ def propose(
         from openai import OpenAI
     except Exception as exc:
         _last_propose_failure = type(exc).__name__
+        _record_failed_proposer_call(exc, "", context)
         return None
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
     api_key = os.environ.get("LITELLM_API_KEY", "").strip()
     if not base_url or not api_key:
         _last_propose_failure = "MissingGatewayConfiguration"
+        _record_failed_proposer_call(RuntimeError(_last_propose_failure), _model_name(), context)
         return None
     user_content = context
     if rejection_reason:
@@ -2237,10 +2269,12 @@ def propose(
     system_content = _build_proposer_role_prompt(role_body)
     if system_content is None:
         return None
+    requested_model = _model_name()
+    call_start_utc = datetime.now(timezone.utc)
     try:
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         create_kwargs: dict[str, Any] = dict(
-            model=_model_name(),
+            model=requested_model,
             messages=[
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": user_content},
@@ -2285,6 +2319,10 @@ def propose(
         reply = content
     except Exception as exc:
         _last_propose_failure = f"{type(exc).__name__}: {exc}"
+        _record_failed_proposer_call(
+            exc, requested_model, context,
+            ts=call_start_utc.isoformat().replace("+00:00", "Z"),
+        )
         return None
     return _extract_json_object(reply)
 
@@ -2315,11 +2353,13 @@ def propose_multi(
         from openai import OpenAI
     except Exception as exc:
         _last_propose_failure = type(exc).__name__
+        _record_failed_proposer_call(exc, "", context)
         return None
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
     api_key = os.environ.get("LITELLM_API_KEY", "").strip()
     if not base_url or not api_key:
         _last_propose_failure = "MissingGatewayConfiguration"
+        _record_failed_proposer_call(RuntimeError(_last_propose_failure), _model_name(), context)
         return None
     user_content = (
         f"{context}\n\n"
@@ -2333,10 +2373,12 @@ def propose_multi(
     system_content = _build_proposer_role_prompt(role_body)
     if system_content is None:
         return None
+    requested_model = _model_name()
+    call_start_utc = datetime.now(timezone.utc)
     try:
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         create_kwargs: dict[str, Any] = dict(
-            model=_model_name(),
+            model=requested_model,
             messages=[
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": user_content},
@@ -2381,6 +2423,10 @@ def propose_multi(
         reply = content
     except Exception as exc:
         _last_propose_failure = f"{type(exc).__name__}: {exc}"
+        _record_failed_proposer_call(
+            exc, requested_model, context,
+            ts=call_start_utc.isoformat().replace("+00:00", "Z"),
+        )
         return None
     return _extract_json_array(reply)
 

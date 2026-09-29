@@ -90,6 +90,15 @@ def reset_call_context(token: tuple[Token, Token]) -> None:
         _CALL_SEQ.reset(seq_token)
 
 
+def current_component() -> str:
+    """Return the ambient bounded call component, or an empty string."""
+    try:
+        ctx = _CALL_CONTEXT.get() or {}
+        return str(ctx.get("component") or "")[:64]
+    except Exception:
+        return ""
+
+
 def current_cycle_id(component: str | None = None) -> str:
     """The ``cycle_id`` of the ambient call context, ``""`` when none is set.
 
@@ -130,6 +139,40 @@ def _llm_calls_dir() -> Path:
     if state_dir:
         return Path(state_dir) / "llm_calls"
     return Path.home() / ".nanobot" / "llm_calls"
+
+
+def record_llm_failure(
+    *, component: str, requested_model: str, error_type: str,
+    http_status: int | None = None, retry_after_s: float | None = None,
+    ts: str | None = None,
+) -> None:
+    """Append bounded metadata for one failed provider attempt to a private stream."""
+    try:
+        ctx = _CALL_CONTEXT.get() or {}
+        cycle_id = str(ctx.get("cycle_id") or "")
+        component = str(component or ctx.get("component") or "")[:64]
+        requested_model = str(requested_model or "")[:256]
+        safe_error_type = str(error_type or "UnknownError")[:96]
+        status = http_status if isinstance(http_status, int) and not isinstance(http_status, bool) else None
+        retry_after = retry_after_s if isinstance(retry_after_s, (int, float)) and not isinstance(retry_after_s, bool) and retry_after_s >= 0 else None
+        seq = _next_call_seq(cycle_id, component)
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        out_dir = _llm_calls_dir() / "failures"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with (out_dir / f"{day}.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "ok": False,
+                "ts": ts or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "component": component,
+                "requested_model": requested_model,
+                "error_type": safe_error_type,
+                "http_status": status,
+                "retry_after_s": retry_after,
+                "cycle_id": cycle_id,
+                "seq": seq,
+            }, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        logging.getLogger(__name__).warning("llm failure telemetry recording failed: %s", type(exc).__name__)
 
 
 def system_chars(messages: list[dict[str, Any]] | None) -> int | None:

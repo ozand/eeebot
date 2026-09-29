@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -253,6 +254,32 @@ async def test_chat_with_retry_records_telemetry_on_success(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_chat_with_retry_failure_telemetry_keeps_success_stream_unchanged(tmp_path, monkeypatch):
+    from pathlib import Path
+    from nanobot.observability.llm_telemetry import call_context
+
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "llm_calls"))
+    response = LLMResponse(
+        content="Error calling LLM: RateLimitError: No deployments available",
+        finish_reason="error",
+        usage={"_http_status": 429, "_retry_after_s": 108301},
+    )
+    provider = ScriptedProvider([response])
+    with call_context("cycle-test-fail", "proposer"):
+        await provider.chat_with_retry(messages=[{"role": "user", "content": "secret prompt"}])
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    root = tmp_path / "llm_calls"
+    failures = _read_jsonl(root / "failures" / f"{day}.jsonl")
+    assert len(failures) == 1
+    assert failures[0]["error_type"] == "RateLimitError"
+    assert failures[0]["http_status"] == 429
+    assert failures[0]["retry_after_s"] == 108301
+    assert failures[0]["component"] == "proposer"
+    assert failures[0]["cycle_id"] == "cycle-test-fail"
+    assert not (root / f"{day}.jsonl").exists()
+    assert "secret prompt" not in (root / "failures" / f"{day}.jsonl").read_text(encoding="utf-8")
+
+
 async def test_chat_with_retry_records_telemetry_with_retries(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
 

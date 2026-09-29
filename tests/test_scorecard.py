@@ -709,6 +709,18 @@ class TestCostSection:
         assert cost["calls_per_integration"] == 3.0
         assert cost["tokens_per_integration"] == 1000.0
 
+    def test_failure_stream_does_not_change_cost_numbers(self, tmp_path):
+        state_dir = tmp_path / "state"
+        _write_ledger(state_dir, [{"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": _iso(10)}])
+        today = NOW.strftime("%Y-%m-%d")
+        _write_telemetry(state_dir, today, [{"prompt_tokens": 11, "completion_tokens": 7}])
+        before = scorecard._cost_section(state_dir, NOW, integrations=1)
+        failures = state_dir / "llm_calls" / "failures"
+        failures.mkdir(parents=True)
+        (failures / f"{today}.jsonl").write_text(json.dumps({"ok": False, "prompt_tokens": 0}) + "\n")
+        after = scorecard._cost_section(state_dir, NOW, integrations=1)
+        assert after == before
+
     def test_zero_integrations_none_safe(self, tmp_path):
         """0 integrations → per-integration ratios are None, never a
         fabricated 0 (and never ZeroDivisionError)."""

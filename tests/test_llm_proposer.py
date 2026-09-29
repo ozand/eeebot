@@ -1927,6 +1927,75 @@ class TestProposeMockedClient:
             "target_path": "tests/test_x.py",
         }
 
+    def test_failed_proposer_call_writes_private_failure_telemetry_only(self, monkeypatch, tmp_path):
+        import httpx
+        import openai
+
+        self._patch_client(monkeypatch, "unused")
+        monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "llm_calls"))
+        canary = "PROMPT-CANARY-DO-NOT-LOG-2047"
+        response = httpx.Response(
+            429, headers={"Retry-After": "108301"},
+            request=httpx.Request("POST", "https://gateway.invalid/v1/chat/completions"),
+        )
+        error = openai.RateLimitError(
+            "No deployments available", response=response, body={"error": "No deployments available"},
+        )
+
+        class _FailingCompletions:
+            def create(self, **kwargs):
+                raise error
+
+        class _FailingClient:
+            def __init__(self, *args, **kwargs):
+                self.chat = type("Chat", (), {"completions": _FailingCompletions()})()
+
+        import openai as openai_module
+        monkeypatch.setattr(openai_module, "OpenAI", _FailingClient)
+        monkeypatch.setenv("STATE_DIR", str(tmp_path / "state"))
+        monkeypatch.setattr(llm_proposer, "current_cycle_id", lambda *_: "cycle-2047")
+        result = llm_proposer.propose(canary)
+        assert result is None
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        failures = tmp_path / "llm_calls" / "failures" / f"{today}.jsonl"
+        rows = [json.loads(line) for line in failures.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["ok"] is False
+        assert row["component"] == "proposer"
+        assert row["requested_model"] == llm_proposer._model_name()
+        assert row["error_type"] == "RateLimitError"
+        assert row["http_status"] == 429
+        assert row["retry_after_s"] == 108301
+        assert row["cycle_id"] == "cycle-2047"
+        assert row["seq"] == 1
+        assert set(row) == {
+            "ok", "ts", "component", "requested_model", "error_type",
+            "http_status", "retry_after_s", "cycle_id", "seq",
+        }
+        assert canary not in failures.read_text(encoding="utf-8")
+        main_file = tmp_path / "llm_calls" / f"{today}.jsonl"
+        assert not main_file.exists() or main_file.read_text(encoding="utf-8") == ""
+        from scripts import llm_calls_report
+        from nanobot.runtime.scorecard import _cost_section
+        from nanobot.runtime.session_clock import compute_cycle_max_call_gap
+
+        monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "fixture" / "llm_calls"))
+        today_rows = [{"ts": "2026-09-28T10:00:00Z", "component": "executor", "prompt_tokens": 4, "completion_tokens": 3, "total_tokens": 7, "cycle_id": "cycle-2047"}, {"ts": "2026-09-28T10:00:10Z", "component": "executor", "prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7, "cycle_id": "cycle-2047"}]
+        main_rows_path = tmp_path / "fixture" / "llm_calls"
+        main_rows_path.mkdir(parents=True)
+        day = "2026-09-28"
+        (main_rows_path / f"{day}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in today_rows), encoding="utf-8")
+        failures_dir = main_rows_path / "failures"
+        failures_dir.mkdir()
+        (failures_dir / f"{day}.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+        cost_before = _cost_section(main_rows_path.parent, datetime(2026, 9, 28, tzinfo=timezone.utc), integrations=1)
+        report_before = llm_calls_report.aggregate(llm_calls_report.load_records(main_rows_path))
+        gap_before = compute_cycle_max_call_gap(main_rows_path.parent, "cycle-2047")
+        assert cost_before == _cost_section(main_rows_path.parent, datetime(2026, 9, 28, tzinfo=timezone.utc), integrations=1)
+        assert report_before == llm_calls_report.aggregate(llm_calls_report.load_records(main_rows_path))
+        assert gap_before == compute_cycle_max_call_gap(main_rows_path.parent, "cycle-2047") == 10.0
+
     def test_proposer_records_call_and_prompt_telemetry(self, monkeypatch, tmp_path):
         self._patch_client(monkeypatch, json.dumps({"task_title": "x"}))
         monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
@@ -2129,7 +2198,8 @@ class TestWriteRequestSchemaEquality:
             "transcript_coverage": 0.3333,
             "partial_view": True,
         }
-        ref_file.write_text(json.dumps(ref_record) + "\n", encoding="utf-8")
+        ref_file.write_text(json.dumps(ref_record) + "
+", encoding="utf-8")
 
         # 2. Write proposal serving this reflection demand
         proposal = {
@@ -2167,7 +2237,8 @@ class TestWriteRequestSchemaEquality:
             "transcript_coverage": 1.0,
             "partial_view": False,
         }
-        ref_file.write_text(json.dumps(ref_record) + "\n", encoding="utf-8")
+        ref_file.write_text(json.dumps(ref_record) + "
+", encoding="utf-8")
 
         proposal = {
             "task_title": "Optimize step 2",
