@@ -491,6 +491,34 @@ def test_planning_session_records_declined_defects_in_diary(tmp_path: Path, monk
     assert escalations[0]["consecutive"] == 3
 
 
+def test_empty_declined_list_resets_previous_defect_streak(tmp_path: Path, monkeypatch):
+    from nanobot.runtime.planner_candidates import _load_declines
+
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    result_obj = {"insight": "x", "plan": "y", "iterations_planned": 5}
+    monkeypatch.setattr(bridge, "SubagentManager", _make_fake_mgr_factory(state, result_obj))
+    declined = [[{"defect_id": "defect-x", "reason": "not actionable"}], []]
+    import nanobot.runtime.planner_candidates as planner_candidates
+    calls = []
+    original = planner_candidates.record_defect_declines
+
+    def _record(state_dir, cycle_id, entries):
+        calls.append(dict(entries))
+        return original(state_dir, cycle_id, entries)
+
+    monkeypatch.setattr(planner_candidates, "record_defect_declines", _record)
+    for entries in declined:
+        monkeypatch.setattr(bridge, "_parse_planner_final_response", lambda _raw, entries=entries: (
+            {**result_obj, "declined": entries}, "strict", None, None,
+        ))
+        outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+        assert outcome["ran"] is True
+
+    assert calls == [{"defect-x": "not actionable"}, {}]
+    assert _load_declines(state) == {}
+
+
 def test_planning_session_ignores_a_decline_with_no_reason(tmp_path: Path, monkeypatch):
     repo = _init_repo_with_origin(tmp_path)
     state = tmp_path / "state"
