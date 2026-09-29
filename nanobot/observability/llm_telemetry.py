@@ -153,16 +153,23 @@ def record_llm_failure(
         component = str(component or ctx.get("component") or "")[:64]
         requested_model = str(requested_model or "")[:256]
         safe_error_type = str(error_type or "UnknownError")[:96]
+        if safe_error_type not in {
+            "RateLimitError", "APIConnectionError", "APITimeoutError", "InternalServerError",
+            "BadRequestError", "AuthenticationError", "PermissionDeniedError", "NotFoundError",
+            "TimeoutError", "ConnectionError", "MissingGatewayConfiguration",
+        }:
+            safe_error_type = "ProviderError"
         status = http_status if isinstance(http_status, int) and not isinstance(http_status, bool) else None
         retry_after = retry_after_s if isinstance(retry_after_s, (int, float)) and not isinstance(retry_after_s, bool) and retry_after_s >= 0 else None
         seq = _next_call_seq(cycle_id, component)
-        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        timestamp = ts or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        day = timestamp[:10] if len(timestamp) >= 10 else datetime.now(timezone.utc).strftime("%Y-%m-%d")
         out_dir = _llm_calls_dir() / "failures"
         out_dir.mkdir(parents=True, exist_ok=True)
         with (out_dir / f"{day}.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps({
                 "ok": False,
-                "ts": ts or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "ts": timestamp,
                 "component": component,
                 "requested_model": requested_model,
                 "error_type": safe_error_type,

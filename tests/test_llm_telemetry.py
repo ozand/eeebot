@@ -7,8 +7,8 @@ import pytest
 
 from nanobot.observability.llm_telemetry import (
     call_context,
-    record_llm_failure,
     record_llm_call,
+    record_llm_failure,
     record_llm_prompt,
     reset_call_context,
     set_call_context,
@@ -30,6 +30,12 @@ def test_failure_stream_is_outside_daily_rotation_globs(tmp_path, monkeypatch):
 
     from nanobot.observability.llm_telemetry import _rotate_and_prune
     _rotate_and_prune(tmp_path, today="2026-09-29", retention_days=1)
+    # The call and prompt retention routines only inspect direct-child daily
+    # files; failure stream has its own retention and is not treated as a day.
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    (prompts / "2020-01-01.jsonl").write_text("{}\n", encoding="utf-8")
+    _rotate_and_prune(prompts, today="2026-09-29", retention_days=1)
 
     assert failure_file.exists()
     assert failure_file.read_bytes() == before

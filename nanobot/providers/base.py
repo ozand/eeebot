@@ -4,9 +4,9 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from loguru import logger
@@ -278,7 +278,6 @@ class LLMProvider(ABC):
         call_start = time.monotonic()
         call_start_utc = datetime.now(timezone.utc)
         resolved_model = model or self.get_default_model()
-        failure_recorded = False
 
         def _record_failure(response: LLMResponse) -> None:
             status = response.usage.get("_http_status")
@@ -297,6 +296,7 @@ class LLMProvider(ABC):
             except (TypeError, ValueError):
                 retry_after = None
             from nanobot.observability.llm_telemetry import current_component
+
             record_llm_failure(
                 component=current_component() or "executor", requested_model=resolved_model,
                 error_type=error_type, http_status=status, retry_after_s=retry_after,
@@ -305,7 +305,6 @@ class LLMProvider(ABC):
 
         def _record(response: LLMResponse, retries: int, sent_messages: list[dict[str, Any]]) -> LLMResponse:
             if response.finish_reason == "error":
-                _record_failure(response)
                 return response
             # #1660: record BOTH the model this code requested (`model`, as
             # before #1678 -- every reader groups by it) and the one the
@@ -356,6 +355,8 @@ class LLMProvider(ABC):
         for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
             response = await self._safe_chat(**kw)
 
+            if response.finish_reason == "error":
+                _record_failure(response)
             if response.finish_reason != "error":
                 return _record(response, attempt - 1, messages)
 
@@ -375,6 +376,8 @@ class LLMProvider(ABC):
             await asyncio.sleep(delay)
 
         response = await self._safe_chat(**kw)
+        if response.finish_reason == "error":
+            _record_failure(response)
         return _record(response, len(self._CHAT_RETRY_DELAYS), messages)
 
     @abstractmethod
