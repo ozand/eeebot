@@ -690,9 +690,11 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
     if [ ! -f "$VERIFY_ONLY_LIVE_RELEASE/scripts/verify_release_health.py" ]; then
       die "could not find live baseline verifier under current release"
     fi
+    echo "VERIFY_ONLY DIMENSION_SOURCE live path=$VERIFY_ONLY_LIVE_DIMENSIONS writer=live verifier JSON stdout redirected from PYTHONPATH=$VERIFY_ONLY_LIVE_RELEASE" >&2
     if ! sudo -n -u eeepc-agent env PYTHONPATH="$VERIFY_ONLY_LIVE_RELEASE" PYTHONDONTWRITEBYTECODE=1 "$VERIFY_ONLY_LIVE_PYTHON" -c 'import json; from scripts.verify_release_health import verify_release_health; print(json.dumps(verify_release_health()["health"]["dimensions"], sort_keys=True))' > "$VERIFY_ONLY_LIVE_DIMENSIONS"; then
       die "could not collect live baseline health dimensions"
     fi
+    echo "VERIFY_ONLY DIMENSION_SOURCE candidate path=$VERIFY_ONLY_CANDIDATE_DIMENSIONS writer=candidate verifier JSON stdout redirected from PYTHONPATH=$GATE_TMP" >&2
     if ! sudo -n -u eeepc-agent env PYTHONPATH="$GATE_TMP" PYTHONDONTWRITEBYTECODE=1 "$HEALTH_GATE_PYTHON" -c 'import json; from scripts.verify_release_health import verify_release_health; print(json.dumps(verify_release_health()["health"]["dimensions"], sort_keys=True))' > "$VERIFY_ONLY_CANDIDATE_DIMENSIONS"; then
       die "could not collect candidate health dimensions"
     fi
@@ -705,11 +707,14 @@ def read(path):
     with open(path, "rb") as stream:
         raw = stream.read()
     if not raw.strip():
-        raise ValueError(f"empty dimension JSON input (bytes={len(raw)})")
+        raise ValueError(f"empty dimension JSON input (path={path!r}, bytes={len(raw)}, prefix={raw[:80]!r})")
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid dimension JSON (bytes={len(raw)}): {exc.msg} at line {exc.lineno} column {exc.colno}") from exc
+        raise ValueError(
+            f"invalid dimension JSON (path={path!r}, bytes={len(raw)}, prefix={raw[:80]!r}): "
+            f"{exc.msg} at line {exc.lineno} column {exc.colno}"
+        ) from exc
     dimensions = data
     if isinstance(dimensions, dict) and isinstance(dimensions.get("health"), dict):
         dimensions = dimensions["health"]
