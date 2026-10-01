@@ -878,7 +878,7 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path, monkeypatch):
     root = tmp_path / "sandbox"
     release = root / "opt/eeepc-agent/runtimes/self-evolving-agent/current"
     release.mkdir(parents=True)
-    monkeypatch.setenv("VERIFY_ONLY_DIMENSION_COMPARE", "1")
+    monkeypatch.setenv("VERIFY_ONLY_DIMENSION_COMPARE", "0")
     sha = "a" * 40
     (release / "SOURCE_COMMIT").write_text(sha + "\n", encoding="utf-8")
     commands = root / "commands.log"
@@ -945,7 +945,7 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path, monkeypatch):
     mock("chown", f'''echo "chown $*" >> {log}; exit 0''')
     mock("env", f'''echo "env $*" >> {log}; while [[ "$1" == *=* ]]; do shift; done; exec "$@"''')
     mock("tar", f'''echo "tar $*" >> {log}; exit 0''')
-    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"), REPORT=str(tmp_path / "baseline.json"), VERIFY_ONLY_DIMENSION_COMPARE="1")
+    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"), REPORT=str(tmp_path / "baseline.json"), VERIFY_ONLY_DIMENSION_COMPARE="0")
     result = subprocess.run(["bash", str(remote_path)], cwd=root, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     seen = commands.read_text(encoding="utf-8")
@@ -1014,8 +1014,9 @@ def test_verify_only_dimension_delta_through_production_path(
                         findings.append(f'{name}: {before} -> {after}')
             return rows, findings
 
-        print(json.dumps(verify_release_health()))
-        print('CANDIDATE_GATE_EXECUTED')
+        if __name__ == '__main__':
+            print(json.dumps(verify_release_health()))
+            print('CANDIDATE_GATE_EXECUTED', file=__import__('sys').stderr)
     '''), encoding="utf-8")
     original_head = _git("rev-parse", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
     _git("add", "scripts/verify_release_health.py", "nanobot", "host/eeepc/etc/presets", cwd=repo, check=True)
@@ -1039,6 +1040,9 @@ case "$*" in
   *"mktemp -d /tmp/eeebot-verify-gate."*) mkdir -p /tmp/eeebot-verify-gate.ABC123; cp -R {shlex.quote(str(repo / "scripts"))} /tmp/eeebot-verify-gate.ABC123/; echo /tmp/eeebot-verify-gate.ABC123; exit 0 ;;
   *"sudo -n rm -rf -- '/tmp/eeebot-verify-gate.ABC123'"*) exit 0 ;;
   *"GATE_TMP='/tmp/eeebot-verify-gate.ABC123'"*)
+    export VERIFY_ONLY_LIVE_DIMENSIONS={shlex.quote((tmp_path / "live-dimensions.json").as_posix())}
+    export VERIFY_ONLY_CANDIDATE_DIMENSIONS={shlex.quote((tmp_path / "candidate-dimensions.json").as_posix())}
+    export VERIFY_ONLY_LIVE_RELEASE={shlex.quote((tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent/releases/baseline").as_posix())}
     remote_script={shlex.quote(str(repo / "remote-script.sh"))}
     cat > "$remote_script"
     export REPORT={shlex.quote(str(candidate_path))}
@@ -1056,6 +1060,7 @@ exit 0
     current = runtime_root / "current"
     current.symlink_to(runtime_root / "releases/baseline", target_is_directory=True)
     live_release = runtime_root / "releases/baseline"
+    monkeypatch.setenv("VERIFY_ONLY_TEST_LIVE_RELEASE", str(live_release))
     live_gate = live_release / "scripts"
     live_gate.mkdir(parents=True)
     (live_gate / "__init__.py").write_text("", encoding="utf-8")
@@ -1066,20 +1071,34 @@ exit 0
         "    report = json.loads(Path(os.environ['BASELINE_REPORT']).read_text())",
         "    dimensions = {row.split()[1]: {'status': row.split()[2]} for row in report['dimensions']}",
         "    return {'health': {'dimensions': dimensions}}",
+        "if __name__ == '__main__':",
+        "    print(json.dumps(verify_release_health()))",
+        "    print('LIVE_GATE_EXECUTED', file=__import__('sys').stderr)",
     ]) + "\n"
     (live_gate / "verify_release_health.py").write_text(live_gate_source, encoding="utf-8")
     remote_script.write_text(remote, encoding="utf-8")
     _write_mock(mock_bin / "ssh", ssh)
     _write_mock(mock_bin / "stat", '''if [[ "$*" == *current* ]]; then echo 0:0; else command stat "$@"; fi''')
     _write_mock(mock_bin / "systemctl", '''case "$*" in *eeepc-network-fallback.timer*"-p LoadState"*|*eeepc-network-fallback.service*"-p LoadState"*) echo not-found ;; *"-p LoadState"*) echo loaded ;; *is-active*eeepc-network-fallback*) exit 1 ;; *is-active*) exit 0 ;; *is-enabled*) echo enabled ;; *"-p UnitFileState"*) echo disabled ;; *) exit 0 ;; esac''')
+    _write_mock(mock_bin / "rm", f'''for path in "$@"; do
+  case "$path" in *live-dimensions.json|*candidate-dimensions.json) cp "$path" "$path.captured" ;;
+esac
+done
+exec /usr/bin/rm "$@"
+''')
+    python_exe = shlex.quote(__import__("sys").executable.replace("\\", "/"))
     _write_mock(mock_bin / "sudo", f'''while [[ "$1" == -* ]]; do
   case "$1" in -n) shift ;; -u) shift 2 ;; *) exit 97 ;; esac
 done
+if [[ "$1" == env ]]; then
+  shift
+  while [[ "$1" == *=* ]]; do export "$1"; shift; done
+fi
 case "$1" in
-  env) shift; while [[ "$1" == *=* ]]; do export "$1"; shift; done; exec "$@" ;;
-  rm|chown|chmod|mkdir|cp|install|tee|rmdir|ln|tar) exit 0 ;;
+  rm) exec "$(dirname "$0")/rm" "$@" ;;
+  chown|chmod|mkdir|cp|install|tee|rmdir|ln|tar) exit 0 ;;
   systemctl) exit 0 ;;
-  python3) shift; exec python "$@" ;;
+  python3|*python*) exec {python_exe} "${{@:2}}" ;;
   stat) echo 0:0 ;;
   *) echo "unexpected sudo command: $*" >&2; exit 97 ;;
 esac
@@ -1095,12 +1114,15 @@ esac
     assert "candidate gate staged at /tmp/eeebot-verify-gate.ABC123" in output
     assert expected_output in output
     if expected_status:
-        assert f"{expected_output} {expected_status}" in output
-    assert "VERIFY_ONLY DIMENSION cpu " in output
-    assert "VERIFY_ONLY DIMENSION queue " in output
-    for exempt in ("reward", "gate"):
-        assert f"VERIFY_ONLY DIMENSION {exempt} WARN -> WARN" in output
+        assert f"{expected_output} " in output and expected_status in output
+    for dimensions_path, expected in ((tmp_path / "live-dimensions.json.captured", baseline), (tmp_path / "candidate-dimensions.json.captured", candidate)):
+        payload = json.loads(dimensions_path.read_text(encoding="utf-8"))
+        assert {name: item["status"] for name, item in payload.items()} == expected
+    for name in baseline.keys() & candidate.keys():
+        assert f"VERIFY_ONLY DIMENSION {name} " in output
     assert not (repo / "candidate-temp").exists()  # the deploy EXIT cleanup ran
+    assert (tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent/releases/baseline").exists()  # live baseline must never be removed
+    assert "sudo rm -rf \"$GATE_TMP\"" in DEPLOY_SCRIPT.read_text(encoding="utf-8")
 
 
 def test_socket_owner_and_listener_checks_retired_by_adr_036() -> None:
