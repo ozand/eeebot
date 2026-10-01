@@ -1034,12 +1034,13 @@ def test_verify_only_dimension_delta_through_production_path(
     monkeypatch.setenv("BASELINE_REPORT", str(baseline_path))
     commands = repo / "verify-only-commands.log"
     log = shlex.quote(str(commands))
+    gate_tmp = (tmp_path / "remote-candidate-gate").as_posix()
     ssh = f'''echo "$*" >> {log}
 case "$*" in
   *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/baseline; exit 0 ;;
-  *"mktemp -d /tmp/eeebot-verify-gate."*) mkdir -p /tmp/eeebot-verify-gate.ABC123; cp -R {shlex.quote(str(repo / "scripts"))} /tmp/eeebot-verify-gate.ABC123/; echo /tmp/eeebot-verify-gate.ABC123; exit 0 ;;
-  *"sudo -n rm -rf -- '/tmp/eeebot-verify-gate.ABC123'"*) exit 0 ;;
-  *"GATE_TMP='/tmp/eeebot-verify-gate.ABC123'"*)
+  *"mktemp -d /tmp/eeebot-verify-gate."*) mkdir {gate_tmp} || exit 1; cp -R {shlex.quote(str(repo / "scripts"))} {gate_tmp}/; echo {gate_tmp}; exit 0 ;;
+  *"sudo -n rm -rf -- '{gate_tmp}'"*) /usr/bin/rm -rf -- '{gate_tmp}'; exit $? ;;
+  *"GATE_TMP='{gate_tmp}'"*)
     export VERIFY_ONLY_LIVE_DIMENSIONS={shlex.quote((tmp_path / "live-dimensions.json").as_posix())}
     export VERIFY_ONLY_CANDIDATE_DIMENSIONS={shlex.quote((tmp_path / "candidate-dimensions.json").as_posix())}
     export VERIFY_ONLY_LIVE_RELEASE={shlex.quote((tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent/releases/baseline").as_posix())}
@@ -1111,7 +1112,7 @@ esac
         f"verify-only remote exit={result.returncode}, expected_pass={should_pass}; "
         f"full deploy stdout/stderr:\n{output}"
     )
-    assert "candidate gate staged at /tmp/eeebot-verify-gate.ABC123" in output
+    assert f"candidate gate staged at {gate_tmp}" in output
     assert expected_output in output
     if expected_status:
         assert f"{expected_output} " in output and expected_status in output
@@ -1121,6 +1122,7 @@ esac
     for name in baseline.keys() & candidate.keys():
         assert f"VERIFY_ONLY DIMENSION {name} " in output
     assert not (repo / "candidate-temp").exists()  # the deploy EXIT cleanup ran
+    assert not (tmp_path / "remote-candidate-gate").exists()  # remote staged-gate EXIT cleanup ran
     assert (tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent/releases/baseline").exists()  # live baseline must never be removed
     assert "sudo rm -rf \"$GATE_TMP\"" in DEPLOY_SCRIPT.read_text(encoding="utf-8")
 
