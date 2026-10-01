@@ -374,7 +374,13 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
   cycle ledger. Behind the `SELFEVO_EXISTENCE_INDEX_ENABLED` kill-switch
   (default ON); fail-open on any internal error (missing/corrupt index,
   missing source directories) — degrades to R32/R33-only behavior, never
-  blocks a proposal it failed to evaluate.
+  blocks a proposal it failed to evaluate. An authenticated continuation of a
+  pending interrupted cycle is exempt from this existence-index suppression
+  only when the planner's `keep` decision was verified as persisted and its
+  captured cycle/branch/reason/retry identity matches the pending record after
+  resolution; title similarity alone is never authority. Exact success-tag
+  replay and #716 genuine recent-failure suppression remain fail-closed and
+  take precedence. Fresh/non-continuation duplicate proposals remain suppressed.
 - R36 (issue #751). Every proposal SHALL name what goal it serves, and the
   proposer MAY honestly decline to propose when nothing serves a goal, so
   goal-alignment is queryable and a saturated theme space produces a
