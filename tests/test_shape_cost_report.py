@@ -6,12 +6,19 @@ iterations, wall-clock duration, integration/rollback shares, and estimate pairs
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from scripts.shape_cost_report import (
     analyze_shape_costs,
     format_report,
+    load_cycles,
+    load_executor_calls,
+    parse_ts,
 )
+
+FIXTURE_NOW = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)
 
 # 3-5 real host row shapes (sanitized, zero private fields)
 FIXTURE_PROPOSED = {
@@ -87,7 +94,7 @@ def test_shape_cost_report_from_fixtures(tmp_path: Path):
     state_dir = tmp_path / "state"
     _seed_state(state_dir, count=1)
 
-    report = analyze_shape_costs(state_dir, days=7)
+    report = analyze_shape_costs(state_dir, days=7, now=FIXTURE_NOW)
     assert report["provenance"] == "harness_measured_state"
 
     shape_info = report["shapes"]["extend_existing_script"]
@@ -101,7 +108,7 @@ def test_shape_cost_report_sufficient_history(tmp_path: Path):
     state_dir = tmp_path / "state"
     _seed_state(state_dir, count=6)
 
-    report = analyze_shape_costs(state_dir, days=7)
+    report = analyze_shape_costs(state_dir, days=7, now=FIXTURE_NOW)
     shape_info = report["shapes"]["extend_existing_script"]
     assert shape_info["n"] == 6
     assert shape_info["status"] == "достаточно истории"
@@ -151,13 +158,64 @@ def test_format_report_human_readable(tmp_path: Path):
     state_dir = tmp_path / "state"
     _seed_state(state_dir, count=5)
 
-    report = analyze_shape_costs(state_dir, days=7)
+    report = analyze_shape_costs(state_dir, days=7, now=FIXTURE_NOW)
     text = format_report(report, days=7)
     assert "Отчет о стоимости по формам задач" in text
     assert "extend_existing_script" in text
     assert "Executor-вызовы:" in text
     assert "Iterations used:" in text
     assert "Wall clock" in text
+
+
+def test_report_window_includes_edges_and_normalizes_timezones(tmp_path: Path):
+    now_utc = FIXTURE_NOW
+    cutoff_utc = now_utc - timedelta(days=7)
+    assert now_utc.tzinfo is not None and cutoff_utc.tzinfo is not None
+    assert FIXTURE_NOW - timedelta(days=7) < parse_ts(FIXTURE_PROPOSED["ts"]) <= FIXTURE_NOW
+    boundary_times = {
+        "at_cutoff": cutoff_utc,
+        "before_cutoff": cutoff_utc - timedelta(microseconds=1),
+        "at_end": now_utc,
+        "after_end": now_utc + timedelta(microseconds=1),
+    }
+    selected_by_timezone = {}
+
+    for label, zone in (("utc", timezone.utc), ("moscow", ZoneInfo("Europe/Moscow"))):
+        state_dir = tmp_path / label
+        ledger_dir = state_dir / "ledger"
+        ledger_dir.mkdir(parents=True)
+        llm_dir = state_dir / "llm_calls"
+        llm_dir.mkdir()
+        ledger_rows = []
+        call_rows = []
+        for cycle_id, timestamp in boundary_times.items():
+            stamp = timestamp.astimezone(zone).isoformat()
+            ledger_rows.append({
+                "phase": "proposed", "cycle_id": f"cycle-{cycle_id}",
+                "task_title": "Add result lookup to existing script", "ts": stamp,
+            })
+            call_rows.append({
+                "cycle_id": f"cycle-{cycle_id}", "component": "executor", "ts": stamp,
+            })
+        (ledger_dir / "cycles.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in ledger_rows), encoding="utf-8",
+        )
+        (llm_dir / "calls.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in call_rows), encoding="utf-8",
+        )
+
+        selected_cycles = load_cycles(
+            state_dir, cutoff_utc.astimezone(zone), now_utc.astimezone(zone),
+        )
+        selected_calls = load_executor_calls(
+            state_dir, cutoff_utc.astimezone(zone), now_utc.astimezone(zone),
+        )
+        expected = {"cycle-at_cutoff", "cycle-at_end"}
+        assert set(selected_cycles) == expected
+        assert set(selected_calls) == expected
+        selected_by_timezone[label] = (set(selected_cycles), set(selected_calls))
+
+    assert selected_by_timezone["utc"] == selected_by_timezone["moscow"]
 
 
 def test_unpaired_starts_and_multi_run_pairing(tmp_path: Path):
