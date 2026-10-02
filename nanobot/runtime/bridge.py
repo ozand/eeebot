@@ -3909,6 +3909,7 @@ async def _run_planning_session(
     _resume_branch: 'str | None' = None
     _resume_cycle_id: 'str | None' = None
     _resume_skip_opening_entry = False
+    _verified_continuation: dict[str, object] | None = None
     if _pending_open_increment:
         _oi_decision = str(parsed.get('open_increment_decision') or '').strip().lower()
         if _oi_decision in ('keep', 'edit', 'delete'):
@@ -3917,6 +3918,18 @@ async def _run_planning_session(
                     _resume_branch = _pending_open_increment.get('branch') or None
                     _resume_cycle_id = _pending_open_increment.get('cycle_id') or None
                     _resume_skip_opening_entry = bool(_pending_open_increment.get('opening_entry_written'))
+                    # Bind the continuation to the exact pending record read
+                    # before resolve(); only return it after resolve_saved verifies
+                    # this keep decision on disk. Never infer authority from title.
+                    _verified_continuation = {
+                        'cycle_id': str(_pending_open_increment.get('cycle_id') or ''),
+                        'branch': str(_pending_open_increment.get('branch') or ''),
+                        'reason': str(_pending_open_increment.get('reason') or ''),
+                        'retry_key': str(_pending_open_increment.get('retry_key') or ''),
+                        'pending_before_resolve': dict(_pending_open_increment),
+                        'deciding_cycle_id': str(cycle_id or ''),
+                        'decision': 'keep',
+                    }
                     # D11 (#1903 planning-cost measurement): the diary
                     # entry itself names which of the two `keep` paths this
                     # was -- confirm reused the previous plan verbatim
@@ -3980,6 +3993,12 @@ async def _run_planning_session(
                         'ran': True, 'iterations_used': iterations_used, 'iterations_planned': iterations_planned,
                         'tampered_files': [], 'plan': None,
                     }
+                if _oi_decision == 'keep' and _verified_continuation is not None:
+                    _verified_continuation['resolve_saved'] = _oi_resolve_state.resolve_saved is True
+                    if _verified_continuation['resolve_saved']:
+                        _verified_continuation['pending_after_resolve'] = (
+                            _open_increment_mod.pending_open_increment(state_dir)
+                        )
                 plan_lines.append(f'Open increment: {_oi_decision}')
             except Exception as _oi_resolve_exc:
                 # Codex review of 777ada1a (nanobot/runtime/bridge.py:3897),
@@ -4087,6 +4106,7 @@ async def _run_planning_session(
         'resume_branch': _resume_branch,
         'resume_cycle_id': _resume_cycle_id,
         'resume_skip_opening_entry': _resume_skip_opening_entry,
+        'verified_continuation': _verified_continuation,
     }
 
 
@@ -4624,8 +4644,42 @@ async def _main_impl_body():
         # cycle_id) — those are NOT caught here; the _recent_failure_match and
         # existence-index gates below are the remaining semantic-dup fallbacks.
         _cycle_success_tag = f'cycle-{_safe_ref_id(_cycle_id)}-success'
+        _tag_provenance = _planning_result.get('verified_continuation')
+        _tag_pending = None
+        if isinstance(_tag_provenance, dict):
+            try:
+                from nanobot.runtime import open_increment as _tag_open_increment
+                _tag_pending = _tag_open_increment.pending_open_increment(STATE_DIR)
+            except Exception:
+                _tag_pending = None
+        _tag_conflict_continuation = bool(
+            isinstance(_tag_provenance, dict)
+            and _tag_provenance.get('decision') == 'keep'
+            and _tag_provenance.get('resolve_saved') is True
+            and isinstance(_tag_provenance.get('pending_before_resolve'), dict)
+            and _tag_provenance.get('pending_before_resolve', {}).get('cycle_id') == _cycle_id
+            and _tag_provenance.get('pending_before_resolve', {}).get('branch') == _tag_provenance.get('branch')
+            and _tag_provenance.get('pending_before_resolve', {}).get('reason') == _tag_provenance.get('reason')
+            and _tag_provenance.get('pending_before_resolve', {}).get('retry_key') == _tag_provenance.get('retry_key')
+            and _tag_provenance.get('cycle_id') == _cycle_id
+            and _tag_provenance.get('branch') == _resume_branch
+            and _tag_provenance.get('pending_after_resolve') == _tag_pending
+            and isinstance(_tag_pending, dict)
+            and _tag_pending.get('cycle_id') == _tag_provenance.get('cycle_id')
+            and _tag_pending.get('branch') == _tag_provenance.get('branch')
+            and _tag_pending.get('reason') == _tag_provenance.get('reason')
+            and _tag_pending.get('retry_key') == _tag_provenance.get('retry_key')
+            and _tag_pending.get('resumed_by') == _tag_provenance.get('deciding_cycle_id')
+        )
         if _cycle_tag_exists(_selfevo_repo_check, _cycle_success_tag):
             print(f'bridge: cycle {_cycle_id} already tagged {_cycle_success_tag}; skipping subagent spawn')
+            if _tag_conflict_continuation:
+                from nanobot.runtime.cycle_ledger import append_event as _append_cycle_event
+                _append_cycle_event(STATE_DIR, {
+                    'phase': 'open_increment_continuation_conflict',
+                    'cycle_id': _cycle_id,
+                    'reason': 'success_tag_present',
+                })
             handled_marker.write_text(str(req_path), encoding='utf-8')
             _write_bridge_completed_result(
                 state_dir=STATE_DIR,
@@ -4694,11 +4748,12 @@ async def _main_impl_body():
         # planning session is guaranteed to see (H2) -- so it edits or
         # deletes instead of re-running a failing increment every cycle
         # (record_attempt_finished never clears `pending`).
-        if _dup_check_title and (
-            _recent_failure_title := _recent_failure_match(
+        _recent_failure_title = None
+        if _dup_check_title:
+            _recent_failure_title = _recent_failure_match(
                 _dup_check_title, STATE_DIR, target_path=_target_path,
             )
-        ):
+        if _recent_failure_title:
             print(
                 f'bridge: task "{_dup_check_title[:60]}" matches recent failure/rejection '
                 f'"{_recent_failure_title[:60]}" (within {FAILURE_SUPPRESS_HOURS}h); '
@@ -4747,6 +4802,46 @@ async def _main_impl_body():
                 f'recent_duplicate_failure:{_recent_failure_title}',
             )
             return 0
+        _continuation = _planning_result.get('verified_continuation')
+        _continuation_reason = (
+            _continuation.get('reason') if isinstance(_continuation, dict) else None
+        )
+        _pending_after_resolve = None
+        if isinstance(_continuation, dict):
+            try:
+                from nanobot.runtime import open_increment as _continuation_state
+                _pending_after_resolve = _continuation_state.pending_open_increment(STATE_DIR)
+            except Exception:
+                _pending_after_resolve = None
+        _is_verified_continuation = bool(
+            isinstance(_continuation, dict)
+            and _continuation.get('decision') == 'keep'
+            and _continuation.get('resolve_saved') is True
+            and isinstance(_continuation.get('pending_before_resolve'), dict)
+            and _continuation.get('pending_after_resolve') == _pending_after_resolve
+            and isinstance(_pending_after_resolve, dict)
+            and _continuation.get('deciding_cycle_id')
+            and _continuation.get('cycle_id')
+            and _continuation.get('branch')
+            and _continuation.get('cycle_id') == _cycle_id
+            and _resume_cycle_id == _cycle_id
+            and _resume_branch == _continuation.get('branch')
+            and _continuation_reason in _INTERRUPTED_ROLLBACK_REASONS
+            and _pending_after_resolve.get('cycle_id') == _cycle_id
+            and _continuation.get('pending_before_resolve', {}).get('cycle_id') == _cycle_id
+            and _continuation.get('pending_before_resolve', {}).get('branch') == _resume_branch
+            and _continuation.get('pending_before_resolve', {}).get('reason') == _continuation_reason
+            and _continuation.get('pending_before_resolve', {}).get('retry_key') == _continuation.get('retry_key')
+            and _pending_after_resolve.get('branch') == _resume_branch
+            and _pending_after_resolve.get('reason') == _continuation_reason
+            and _pending_after_resolve.get('resumed_by') == _continuation.get('deciding_cycle_id')
+        )
+
+        _existence_match = (
+            find_duplicate_script(STATE_DIR, _selfevo_repo_check, _dup_check_title, _target_path)
+            if _dup_check_title else None
+        )
+
         # #750: the two checks above are exact/keyword title matching — they
         # miss SEMANTIC near-duplicates whose title shares no literal words
         # with the past commit/failure (e.g. "monitor RAM and memory usage"
@@ -4758,11 +4853,7 @@ async def _main_impl_body():
         # nanobot.runtime.existence_index) — any internal error yields None,
         # so this branch is a pure ADDITION to the dedup gate, never a new
         # way to block a legitimately novel proposal.
-        elif _dup_check_title and (
-            _existence_match := find_duplicate_script(
-                STATE_DIR, _selfevo_repo_check, _dup_check_title, _target_path,
-            )
-        ):
+        if _existence_match and not _is_verified_continuation:
             print(
                 f'bridge: task "{_dup_check_title[:60]}" is a semantic near-duplicate of '
                 f'existing {_existence_match} (existence index); skipping subagent spawn'
@@ -4812,6 +4903,29 @@ async def _main_impl_body():
             )
             return 0
 
+        elif _is_verified_continuation:
+            if _existence_match:
+                from nanobot.runtime.cycle_ledger import append_event as _append_cycle_event
+                _append_cycle_event(STATE_DIR, {
+                    'phase': 'open_increment_continuation_exempt',
+                    'cycle_id': _cycle_id,
+                    'branch': _resume_branch,
+                    'matched_artifact': str(_existence_match),
+                })
+                # A keep-resumed increment is the same work whose partial
+                # artifact the index found. Log the real hit and its narrow
+                # identity-bound exemption; the lookup did run.
+                _record_guard_key_event(
+                    STATE_DIR, 'existence_index', 'continuation_exempt',
+                    _dup_check_title or '', str(_existence_match),
+                    lookup='bridge_dedup_gate', legacy_outcome='continuation_exempt',
+                )
+            else:
+                _record_guard_key_event(
+                    STATE_DIR, 'existence_index', 'miss', _dup_check_title or '', _target_path or '',
+                    lookup='bridge_dedup_gate', legacy_outcome='miss',
+                )
+            record_dedup_decision(STATE_DIR, _cycle_id, 'proceeded', None)
         else:
             _record_guard_key_event(
                 STATE_DIR, 'existence_index', 'miss', _dup_check_title or '', _target_path or '',

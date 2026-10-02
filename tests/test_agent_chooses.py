@@ -24,6 +24,7 @@ from nanobot.runtime import (
 )
 from nanobot.runtime.cycle_ledger import read_events
 from nanobot.runtime.demand import _make_item
+from tests.test_cycle_ledger import _read_ledger
 
 
 def _valid_hypothesis(**overrides) -> dict:
@@ -830,6 +831,7 @@ def _stub_planning_session(
     monkeypatch, plan_text: str, candidate_id: "str | None" = None,
     *, resume_branch: "str | None" = None, resume_cycle_id: "str | None" = None,
     resume_skip_opening_entry: bool = False,
+    verified_continuation: dict | None = None,
 ):
     from nanobot.runtime import bridge
 
@@ -845,6 +847,7 @@ def _stub_planning_session(
             'resume_branch': resume_branch,
             'resume_cycle_id': resume_cycle_id,
             'resume_skip_opening_entry': resume_skip_opening_entry,
+            'verified_continuation': verified_continuation,
         }
 
     monkeypatch.setattr(bridge, "_run_planning_session", _fake_planning_session)
@@ -1224,18 +1227,9 @@ def test_supply_hold_uses_rest_snapshot_with_backoff(tmp_path: Path, monkeypatch
 # (ADR-035, #1942 B2) ----------------------------------------------------------
 
 def test_kept_increment_resumes_branch_without_reset(tmp_path: Path, monkeypatch):
-    """"A retry resumes the branch. When the next session keeps an
-    interrupted open_increment, the executor continues on the existing
-    cycle branch with its checkpoints; the branch is never reset to main
-    for a kept increment." (ADR-035 keep-work). Drives a real
-    `bridge._main_impl()` run with `_run_planning_session` stubbed to
-    simulate an already-resolved `keep` decision (`resume_branch`/
-    `resume_cycle_id` set, mirroring what a real planning session's
-    `open_increment_decision: "keep"` produces) and asserts the resumed
-    branch's git history still contains the interrupted attempt's
-    checkpoint commit -- a `_setup_cycle_branch` that fell back to its
-    ordinary `-B origin/main` reset would have thrown it away.
-    """
+    """The #750 fix allows a resolved keep to resume when an unrelated
+    indexed helper script matches the continuation plan. The helper itself
+    is checked in on main, separate from the interrupted cycle artifact."""
     import asyncio
     import subprocess
 
@@ -1249,6 +1243,21 @@ def test_kept_increment_resumes_branch_without_reset(tmp_path: Path, monkeypatch
     state_dir = _setup_planner_chooses_harness(base, monkeypatch)
     _origin, work = _init_selfevo_repo(base)
 
+    # Model the corrected live evidence: the duplicate hit is an unrelated
+    # script already present on main, while the interrupted increment owns
+    # its separate checkpoint file on the cycle branch.
+    from nanobot.runtime import existence_index
+    monkeypatch.setenv(existence_index.ENABLED_ENV, "1")
+    indexed_script = work / "scripts" / "check_git_clean_branch.py"
+    indexed_script.parent.mkdir(parents=True, exist_ok=True)
+    indexed_script.write_text(
+        '"""check git clean branch before running a repair."""\n'
+        'def check_git_clean_branch():\n    return True\n', encoding="utf-8",
+    )
+    _run(work, "add", "scripts/check_git_clean_branch.py")
+    _run(work, "commit", "-m", "feat: add check_git_clean_branch helper")
+    _run(work, "push", "origin", "HEAD:main")
+
     old_cycle_id = "cycle-interrupted-01"
     old_branch = f"selfevo/cycle-{old_cycle_id}"
     _run(work, "checkout", "-b", old_branch)
@@ -1260,9 +1269,6 @@ def test_kept_increment_resumes_branch_without_reset(tmp_path: Path, monkeypatch
         capture_output=True, text=True,
     )
     assert commit.returncode == 0, commit.stderr
-    checkpoint_sha = subprocess.run(
-        ["git", "-C", str(work), "rev-parse", "HEAD"], capture_output=True, text=True,
-    ).stdout.strip()
     _run(work, "checkout", "main")
 
     open_increment.record_supply_interruption(
@@ -1278,33 +1284,298 @@ def test_kept_increment_resumes_branch_without_reset(tmp_path: Path, monkeypatch
     _oi_state.hold["deadline"] = "2000-01-01T00:00:00Z"
     open_increment._save_state(state_dir, _oi_state)
 
+    plan_title = "Finish a check git clean branch command and preserve the existing helper"
+    pending_before_keep = open_increment.pending_open_increment(state_dir)
+    open_increment.resolve(state_dir, "cycle-keep-decider", "keep")
+    verified_keep = {
+        "decision": "keep", "resolve_saved": True,
+        "cycle_id": old_cycle_id, "branch": old_branch,
+        "reason": "interrupted_supply", "retry_key": "self-resume-test",
+        "pending_before_resolve": pending_before_keep,
+        "deciding_cycle_id": "cycle-keep-decider",
+        "pending_after_resolve": open_increment.pending_open_increment(state_dir),
+    }
     planning_calls = _stub_planning_session(
-        monkeypatch, "finish the wip feature",
+        monkeypatch, plan_title,
         resume_branch=old_branch, resume_cycle_id=old_cycle_id, resume_skip_opening_entry=True,
+        verified_continuation=verified_keep,
     )
-    monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
+    existence_index.reindex(state_dir, work)
+    assert existence_index.find_duplicate_script(state_dir, work, plan_title) == "scripts/check_git_clean_branch.py"
+    _real_find_duplicate = existence_index.find_duplicate_script
+    duplicate_calls = []
+
+    def _spy_find_duplicate(sd, repo, title, target_path=None):
+        match = _real_find_duplicate(sd, repo, title, target_path)
+        duplicate_calls.append((title, target_path, match))
+        return match
+
+    monkeypatch.setattr(bridge, "find_duplicate_script", _spy_find_duplicate)
+    executor_spawns = []
+    registration_at_spawn = []
+
+    class _ObservedExecutor(_FakeSubagentManager):
+        async def spawn(self, **kwargs):
+            if self._telemetry_component != "planner":
+                executor_spawns.append(kwargs)
+                state_snapshot = open_increment.load_state(state_dir)
+                registration_at_spawn.append((state_snapshot.pending, state_snapshot.running))
+            return await super().spawn(**kwargs)
+
+        def _build_subagent_prompt(self):
+            self.last_prompt_fit = {"chars": 10, "cap": 100, "rung": 0, "sections": {}}
+            return "system prompt"
+
+    monkeypatch.setattr(bridge, "SubagentManager", _ObservedExecutor)
 
     rc = asyncio.run(bridge._main_impl())
     assert rc == 0
     assert len(planning_calls) == 1
+    assert duplicate_calls == [
+        (plan_title, None, "scripts/check_git_clean_branch.py"),
+    ]
+    assert len(executor_spawns) == 1
+    assert f"Task: {plan_title}" in executor_spawns[0]["task"]
+    assert registration_at_spawn
+    pending_at_spawn, running_at_spawn = registration_at_spawn[0]
+    assert pending_at_spawn["cycle_id"] == old_cycle_id
+    assert pending_at_spawn["branch"] == old_branch
+    assert pending_at_spawn["resumed_by"] == verified_keep["deciding_cycle_id"]
+    assert running_at_spawn["cycle_id"] == old_cycle_id
+    assert running_at_spawn["branch"] == old_branch
+    ledger = _read_ledger(state_dir)
+    assert len([row for row in ledger if row.get("phase") == "started" and row.get("cycle_id") == old_cycle_id]) == 1
+    assert any(
+        row.get("phase") == "open_increment_continuation_exempt"
+        and row.get("cycle_id") == old_cycle_id
+        and row.get("matched_artifact") == "scripts/check_git_clean_branch.py"
+        for row in ledger
+    )
+    assert any(
+        row.get("phase") == "guard_key_match"
+        and row.get("guard") == "existence_index"
+        and row.get("outcome") == "continuation_exempt"
+        and row.get("against") == "scripts/check_git_clean_branch.py"
+        for row in ledger
+    )
+    assert any(
+        row.get("phase") == "system_prompt" and row.get("cycle_id") == old_cycle_id
+        for row in ledger
+    )
 
-    # The cycle branch integrates and is deleted on success -- checking it
-    # by name after the run is not meaningful. Instead: the checkpoint
-    # commit must be an ancestor of the now-updated `main` (proof its work
-    # survived into the integration), and the full log must show both the
-    # checkpoint and the executor's own commit -- never a re-branched
-    # history that silently dropped the checkpoint and only kept the new one.
-    ancestor_check = subprocess.run(
-        ["git", "-C", str(work), "merge-base", "--is-ancestor", checkpoint_sha, "main"],
+
+def test_exact_success_tag_conflict_blocks_verified_keep(tmp_path: Path, monkeypatch):
+    import asyncio
+
+    from tests.test_cycle_ledger import _FakeSubagentManager, _init_selfevo_repo, _run
+    from nanobot.runtime import bridge, open_increment
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+    old_cycle_id = "cycle-tag-conflict-01"
+    old_branch = f"selfevo/cycle-{old_cycle_id}"
+    _run(work, "checkout", "-b", old_branch)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "wip.py").write_text("def wip(): return 1\\n", encoding="utf-8")
+    _run(work, "add", "scripts/wip.py")
+    _run(work, "commit", "-m", "checkpoint", "-m", "Selfevo-Checkpoint: true")
+    _run(work, "checkout", "main")
+    open_increment.record_supply_interruption(
+        state_dir, old_cycle_id, retry_key="tag-conflict", plan_text="continue WIP",
+        candidate_id=None, selfevo_repo=work, branch=old_branch,
     )
-    assert ancestor_check.returncode == 0, (
-        "resumed branch lost its checkpoint commit -- it never reached integrated main "
-        "(_setup_cycle_branch must have reset to origin/main instead of reusing the branch)"
+    open_increment.resolve(state_dir, "keep-decider", "keep")
+    verified = {
+        "decision": "keep", "resolve_saved": True, "cycle_id": old_cycle_id,
+        "branch": old_branch, "reason": "interrupted_supply", "retry_key": "tag-conflict",
+        "pending_before_resolve": {**open_increment.pending_open_increment(state_dir), "resumed_by": ""},
+        "deciding_cycle_id": "keep-decider",
+        "pending_after_resolve": open_increment.pending_open_increment(state_dir),
+    }
+    planning_calls = _stub_planning_session(
+        monkeypatch, "continue WIP", resume_branch=old_branch,
+        resume_cycle_id=old_cycle_id, resume_skip_opening_entry=True,
+        verified_continuation=verified,
     )
-    log = subprocess.run(
-        ["git", "-C", str(work), "log", "--oneline", "main"], capture_output=True, text=True,
-    ).stdout
-    assert "feat: add feature" in log
+    monkeypatch.setattr(bridge, "_cycle_tag_exists", lambda _repo, tag: tag == f"cycle-{old_cycle_id}-success")
+    spawned = []
+
+    class _TaggedSpawn(_FakeSubagentManager):
+        async def spawn(self, **kwargs):
+            if self._telemetry_component != "planner":
+                spawned.append(kwargs)
+            return await super().spawn(**kwargs)
+
+    monkeypatch.setattr(bridge, "SubagentManager", _TaggedSpawn)
+    assert asyncio.run(bridge._main_impl()) == 0
+    assert len(planning_calls) == 1
+    assert spawned == []
+    assert any(row.get("phase") == "open_increment_continuation_conflict" for row in _read_ledger(state_dir))
+
+
+def test_continuation_provenance_mismatch_does_not_exempt_existence_duplicate(tmp_path: Path, monkeypatch):
+    import asyncio
+
+    from tests.test_cycle_ledger import _FakeSubagentManager, _init_selfevo_repo, _run
+    from nanobot.runtime import bridge, existence_index, open_increment
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+    helper = work / "scripts" / "check_git_clean_branch.py"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_text('"""check git clean branch helper."""\\ndef run(): return True\\n', encoding="utf-8")
+    _run(work, "add", "scripts/check_git_clean_branch.py")
+    _run(work, "commit", "-m", "feat: add check_git_clean_branch helper")
+    _run(work, "push", "origin", "HEAD:main")
+    monkeypatch.setenv(existence_index.ENABLED_ENV, "1")
+    cycle_id = "cycle-identity-mismatch"
+    branch = f"selfevo/cycle-{cycle_id}"
+    _run(work, "checkout", "-b", branch)
+    _run(work, "checkout", "main")
+    open_increment.record_supply_interruption(
+        state_dir, cycle_id, retry_key="identity-mismatch", plan_text="continue WIP",
+        candidate_id=None, selfevo_repo=work, branch=branch,
+    )
+    open_increment.resolve(state_dir, "identity-decider", "keep")
+    persisted = open_increment.pending_open_increment(state_dir)
+    forged = {
+        "decision": "keep", "resolve_saved": False,
+        "cycle_id": cycle_id, "branch": f"selfevo/cycle-wrong",
+        "reason": persisted["reason"], "retry_key": persisted["retry_key"],
+        "deciding_cycle_id": "wrong-resolver-cycle",
+        "pending_after_resolve": persisted,
+    }
+    planning_calls = _stub_planning_session(
+        monkeypatch, "check git clean branch helper verify", resume_branch=branch,
+        resume_cycle_id=cycle_id, verified_continuation=forged,
+    )
+    index_hits = []
+    real_find = existence_index.find_duplicate_script
+
+    def _spy_find(*args, **kwargs):
+        result = real_find(*args, **kwargs)
+        index_hits.append(result)
+        return result
+
+    monkeypatch.setattr(bridge, "find_duplicate_script", _spy_find)
+    spawns = []
+
+    class _Observed(_FakeSubagentManager):
+        async def spawn(self, **kwargs):
+            if self._telemetry_component != "planner":
+                spawns.append(kwargs)
+            return await super().spawn(**kwargs)
+
+    monkeypatch.setattr(bridge, "SubagentManager", _Observed)
+    assert asyncio.run(bridge._main_impl()) == 0
+    assert len(planning_calls) == 1
+    assert index_hits == ["scripts/check_git_clean_branch.py"]
+    assert spawns == []
+    assert any(row.get("reason") == "existence_index_duplicate" for row in _read_ledger(state_dir) if row.get("phase") == "outcome")
+
+
+def test_keep_continuation_after_genuine_failure_is_suppressed(tmp_path: Path, monkeypatch):
+    import asyncio
+    import time
+
+    from tests.test_cycle_ledger import _FakeSubagentManager, _init_selfevo_repo, _run
+    from nanobot.runtime import bridge, open_increment
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+    cycle_id = "cycle-keep-genuine-failure"
+    branch = f"selfevo/cycle-{cycle_id}"
+    _run(work, "checkout", "-b", branch)
+    _run(work, "checkout", "main")
+    title = "Repair the persistent telemetry dashboard integration failure"
+    open_increment.record_supply_interruption(
+        state_dir, cycle_id, retry_key="keep-failure", plan_text=title,
+        candidate_id=None, selfevo_repo=work, branch=branch,
+    )
+    pending = open_increment.pending_open_increment(state_dir)
+    open_increment.resolve(state_dir, "keep-failure-decider", "keep")
+    verified = {
+        "decision": "keep", "resolve_saved": True, "cycle_id": cycle_id,
+        "branch": branch, "reason": "interrupted_supply", "retry_key": "keep-failure",
+        "pending_before_resolve": {**open_increment.pending_open_increment(state_dir), "resumed_by": ""},
+        "deciding_cycle_id": "keep-failure-decider",
+        "pending_after_resolve": open_increment.pending_open_increment(state_dir),
+    }
+    failure_dir = state_dir / "subagents" / "results"
+    failure_dir.mkdir(parents=True)
+    (failure_dir / "prior-failure.json").write_text(json.dumps({
+        "backlog_title": title, "result_status": "blocked",
+        "rollback": {"reason": "mutation_surface_violation"},
+    }), encoding="utf-8")
+    planning_calls = _stub_planning_session(
+        monkeypatch, title, resume_branch=branch, resume_cycle_id=cycle_id,
+        resume_skip_opening_entry=True, verified_continuation=verified,
+    )
+    _failure_hits = []
+    real_failure_match = bridge._recent_failure_match
+
+    def _spy_failure(*args, **kwargs):
+        result = real_failure_match(*args, **kwargs)
+        _failure_hits.append(result)
+        return result
+
+    monkeypatch.setattr(bridge, "_recent_failure_match", _spy_failure)
+    spawned = []
+
+    class _NoExecutor(_FakeSubagentManager):
+        async def spawn(self, **kwargs):
+            if self._telemetry_component != "planner":
+                spawned.append(kwargs)
+            return await super().spawn(**kwargs)
+
+    monkeypatch.setattr(bridge, "SubagentManager", _NoExecutor)
+    assert asyncio.run(bridge._main_impl()) == 0
+    assert len(planning_calls) == 1
+    assert _failure_hits == [title]
+    assert spawned == []
+    assert any(
+        row.get("decision") == "skipped_recent_failure"
+        for row in _read_ledger(state_dir) if row.get("phase") == "dedup"
+    )
+
+
+def test_non_continuation_duplicate_still_suppressed_by_existence_index(tmp_path: Path, monkeypatch):
+    import asyncio
+    from tests.test_cycle_ledger import _FakeSubagentManager, _init_selfevo_repo, _run
+    from nanobot.runtime import bridge, existence_index
+
+    base = tmp_path / "base"
+    base.mkdir()
+    state_dir = _setup_planner_chooses_harness(base, monkeypatch)
+    _origin, work = _init_selfevo_repo(base)
+    existing = work / "scripts" / "check_git_clean_branch.py"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text('"""check git clean branch helper."""\\ndef run(): return True\\n', encoding="utf-8")
+    _run(work, "add", "scripts/check_git_clean_branch.py")
+    _run(work, "commit", "-m", "feat: add helper")
+    _run(work, "push", "origin", "HEAD:main")
+    monkeypatch.setenv(existence_index.ENABLED_ENV, "1")
+    title = "Finish a check git clean branch command"
+    calls = _stub_planning_session(monkeypatch, title)
+    spawns = []
+
+    class _Observed(_FakeSubagentManager):
+        async def spawn(self, **kwargs):
+            if self._telemetry_component != "planner":
+                spawns.append(kwargs)
+            return await super().spawn(**kwargs)
+
+    monkeypatch.setattr(bridge, "SubagentManager", _Observed)
+    assert asyncio.run(bridge._main_impl()) == 0
+    assert len(calls) == 1
+    assert spawns == []
+    assert any(row.get("reason") == "existence_index_duplicate" for row in _read_ledger(state_dir) if row.get("phase") == "outcome")
 
 
 def test_failed_pending_clear_keeps_branch_for_retry(tmp_path: Path, monkeypatch):
@@ -4650,29 +4921,48 @@ def test_keep_confirm_prompt_and_task_reuse_previous_plan(tmp_path: Path, monkey
        text contains that SAME previous plan, not a freshly composed one.
     """
     import asyncio
+    import subprocess
 
     from tests.test_cycle_ledger import _init_selfevo_repo
-    from nanobot.runtime import bridge, no_plan_recovery, open_increment
+    from nanobot.runtime import bridge, existence_index, no_plan_recovery, open_increment
 
     base = tmp_path / "base"
     base.mkdir()
     state_dir = _setup_planner_chooses_harness(base, monkeypatch)
     _origin, work = _init_selfevo_repo(base)
+    planning_provenance = []
+    real_run_planning = bridge._run_planning_session
+
+    async def _capture_provenance(**kwargs):
+        result = await real_run_planning(**kwargs)
+        planning_provenance.append(result.get("verified_continuation"))
+        return result
+
+    monkeypatch.setattr(bridge, "_run_planning_session", _capture_provenance)
+    monkeypatch.setenv(existence_index.ENABLED_ENV, "1")
+    indexed = work / "scripts" / "check_git_clean_branch.py"
+    indexed.parent.mkdir(parents=True, exist_ok=True)
+    indexed.write_text('"""check git clean branch helper."""\\ndef run(): return True\\n', encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "scripts/check_git_clean_branch.py"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(work), "commit", "-m", "feat: add check git clean branch helper"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(work), "push", "origin", "HEAD:main"], check=True, capture_output=True)
 
     _task_writing_dir = bridge.RELEASE_ROOT / "nanobot" / "skills" / "task-writing"
     _task_writing_dir.mkdir(parents=True, exist_ok=True)
     (_task_writing_dir / "SKILL.md").write_text("task-writing contract (test stub)\n", encoding="utf-8")
-
-    import subprocess
 
     from nanobot.runtime.commit_markers import CHECKPOINT_TRAILER
 
     old_cycle_id = "cycle-keep-confirm-11"
     old_branch = f"selfevo/cycle-{old_cycle_id}"
     previous_plan_text = (
-        "Insight: the retained work needs one more verification pass.\n"
+        "Insight: check git clean branch helper before the final verification pass.\n"
         "Plan: finish verifying the wip feature and push it."
     )
+    existence_index.reindex(state_dir, work)
+    assert existence_index.find_duplicate_script(
+        state_dir, work, "check git clean branch helper before verification",
+    ) == "scripts/check_git_clean_branch.py"
     subprocess.run(["git", "-C", str(work), "checkout", "-b", old_branch], check=True, capture_output=True)
     (work / "scripts").mkdir(exist_ok=True)
     (work / "scripts" / "wip.py").write_text("def wip():\n    return 'partial'\n", encoding="utf-8")
@@ -4694,6 +4984,7 @@ def test_keep_confirm_prompt_and_task_reuse_previous_plan(tmp_path: Path, monkey
 
     captured_planner_tasks: list = []
     captured_executor_tasks: list = []
+    executor_registration = []
 
     class _KeepConfirmManager:
         def __init__(self, *, workspace, telemetry_component: str = "", **_kwargs):
@@ -4722,6 +5013,7 @@ def test_keep_confirm_prompt_and_task_reuse_previous_plan(tmp_path: Path, monkey
                 self._running_tasks[task_id] = asyncio.create_task(_noop_planner())
                 return "fake planner spawned"
             captured_executor_tasks.append(kwargs.get("task", ""))
+            executor_registration.append(open_increment.load_state(state_dir).running)
             return "fake subagent spawned"
 
     monkeypatch.setattr(bridge, "SubagentManager", _KeepConfirmManager)
@@ -4730,6 +5022,10 @@ def test_keep_confirm_prompt_and_task_reuse_previous_plan(tmp_path: Path, monkey
     assert rc == 0
 
     assert len(captured_planner_tasks) == 1
+    assert planning_provenance and planning_provenance[0]["resolve_saved"] is True
+    assert planning_provenance[0]["cycle_id"] == old_cycle_id
+    assert planning_provenance[0]["branch"] == old_branch
+    assert planning_provenance[0]["pending_after_resolve"]["resumed_by"] == planning_provenance[0]["deciding_cycle_id"]
     assert previous_plan_text in captured_planner_tasks[0], (
         "the planner's own prompt must contain the previous plan"
     )
@@ -4743,6 +5039,11 @@ def test_keep_confirm_prompt_and_task_reuse_previous_plan(tmp_path: Path, monkey
     )
 
     assert len(captured_executor_tasks) == 1
+    from tests.test_cycle_ledger import _read_ledger
+    ledger = _read_ledger(state_dir)
+    assert any(row.get("phase") == "guard_key_match" and row.get("guard") == "existence_index" and row.get("outcome") == "continuation_exempt" for row in ledger)
+    assert executor_registration[0]["cycle_id"] == old_cycle_id
+    assert executor_registration[0]["branch"] == old_branch
     # #1727 (unrelated to D11, pre-existing): build_task's rendered prompt
     # deliberately echoes only the task TITLE, never the full plan prose,
     # for every task regardless of keep/confirm -- so the observable
