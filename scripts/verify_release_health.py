@@ -162,6 +162,49 @@ def verify_release_health(state_dir: Path | None = None) -> dict[str, Any]:
     }
 
 
+def format_health_dimensions(result: dict[str, Any]) -> list[str]:
+    """Render one stable ``dim <name> <status>`` row for CLI/transport consumers."""
+    health = result.get("health")
+    dimensions = health.get("dimensions") if isinstance(health, dict) else None
+    if not isinstance(dimensions, dict):
+        raise ValueError("release health result has no dimensions mapping")
+    rows: list[str] = []
+    for name in sorted(dimensions):
+        entry = dimensions[name]
+        status = entry.get("status") if isinstance(entry, dict) else None
+        if not isinstance(name, str) or not name or status not in {"OK", "WARN", "CRIT"}:
+            raise ValueError(f"release health dimension is malformed: {name!r}")
+        rows.append(f"dim {name} {status}")
+    return rows
+
+
+def compare_health_dimensions(
+    baseline: dict[str, str], candidate: dict[str, str]
+) -> tuple[list[str], list[str]]:
+    """Return report rows and blocking deltas for verify-only dimension comparison."""
+    exempt_warn = {"reward", "gate"}
+    informational = {"cpu", "queue"}
+    severity = {"OK": 0, "WARN": 1, "CRIT": 2}
+    findings: list[str] = []
+    rows: list[str] = []
+    for name in sorted(baseline.keys() - candidate.keys()):
+        rows.append(f"VERIFY_ONLY DIMENSION_MISSING {name}")
+        findings.append(f"dimension missing: {name}")
+    for name in sorted(candidate.keys() - baseline.keys()):
+        status = candidate[name]
+        rows.append(f"VERIFY_ONLY DIMENSION_ADDED {name} {status}")
+        if name not in informational and status in {"WARN", "CRIT"}:
+            findings.append(f"new dimension {name}: {status}")
+    for name in sorted(baseline.keys() & candidate.keys()):
+        before, after = baseline[name], candidate[name]
+        rows.append(f"VERIFY_ONLY DIMENSION {name} {before} -> {after}")
+        if name in informational or (name in exempt_warn and after == "WARN"):
+            continue
+        if severity[after] > severity[before]:
+            findings.append(f"{name}: {before} -> {after}")
+    return rows, findings
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint for deploy release health gate."""
     args = argv if argv is not None else sys.argv[1:]
