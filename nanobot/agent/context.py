@@ -15,6 +15,19 @@ from nanobot.agent.block_loader import load_block, trim_lines
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 from nanobot.runtime import day_clock
+from nanobot.runtime.context_rules import (
+    MAX_SYSTEM_PROMPT_CHARS,
+    MEMORY_BLOCK_CAP,
+    POSITION_BLOCK_CAP,
+    RELEASE_BLOCK_FLOORS,
+    RELEASE_BLOCK_NAMES,
+    RELEASE_POOL_CHARS,
+    RUNTIME_BLOCK_CAP,
+    SCORECARD_BLOCK_CAP,
+    SYSTEM_PROMPT_CAP_ENV,
+    WORKSPACE_BLOCK_CAP,
+    bootstrap_files,
+)
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
 from nanobot.runtime.operator_documents import (
     PRIORITIES_BLOCK_CAP,
@@ -96,13 +109,7 @@ class ContextBuilder:
     # ``truncated`` list. "Nothing was truncated in 7 days" is a reading of
     # a fuse that is HOLDING, not evidence that it is harmless -- the error
     # I made closing #1783 by compression.
-    _RELEASE_BLOCK_NAMES: tuple[str, ...] = (
-        "IDENTITY.md",
-        "SOUL.md",
-        "goals.md",
-        "USER.md",
-        "OPERATING.md",
-    )
+    _RELEASE_BLOCK_NAMES = RELEASE_BLOCK_NAMES
     #: #1802: one pooled budget for the whole release ontology, replacing the
     #: five per-block caps. Derived, not chosen: it is the sum the five caps
     #: already added up to, so this change reallocates and does not widen.
@@ -115,7 +122,7 @@ class ContextBuilder:
     #: pool in assembly order -- is covered better by the truncation alarm
     #: (#1802 AC 4), which reports the actual event instead of pre-emptively
     #: rationing against it.
-    _RELEASE_POOL_CHARS = 15_500
+    _RELEASE_POOL_CHARS = RELEASE_POOL_CHARS
     #: #1802: a FLOOR, not a ceiling -- the distinction is the whole point.
     #:
     #: Blocks draw from the pool in assembly order, and the order ends
@@ -134,17 +141,17 @@ class ContextBuilder:
     #: Reserved for OPERATING.md only, at its pre-pool size. Every other
     #: file draws freely. If a second file ever needs a floor, that is a
     #: decision to take then, with the measurement that motivates it.
-    _RELEASE_BLOCK_FLOORS: dict[str, int] = {"OPERATING.md": 5_000}
+    _RELEASE_BLOCK_FLOORS = RELEASE_BLOCK_FLOORS
     #: Loop-owned, gate-bounded workspace files. Sourced from the read policy
     #: (not a literal) so this list and MUTATION_POLICY.read_paths cannot
     #: drift apart — see tests/test_mutation_policy.py.
-    _WORKSPACE_BLOCK_CAP = 4000
-    _MEMORY_BLOCK_CAP = 1000
-    _RUNTIME_BLOCK_CAP = 400
+    _WORKSPACE_BLOCK_CAP = WORKSPACE_BLOCK_CAP
+    _MEMORY_BLOCK_CAP = MEMORY_BLOCK_CAP
+    _RUNTIME_BLOCK_CAP = RUNTIME_BLOCK_CAP
     #: #1766 (ADR-023): the loop's own last-N-days scorecard, read only from
     #: the harness-owned ``state/scorecard/latest.json`` -- never the
     #: instance repo. Rendered by :meth:`_load_scorecard_block`.
-    _SCORECARD_BLOCK_CAP = 600
+    _SCORECARD_BLOCK_CAP = SCORECARD_BLOCK_CAP
     _SCORECARD_MISSING = "[missing: scorecard]"
     #: #1725: ordered ``(root_kind, filename, cap, required)`` blocks —
     #: "release" root files are operator-owned and immutable to the loop;
@@ -167,16 +174,7 @@ class ContextBuilder:
     # from its outermost iterable (the same real NameError the note above
     # warns about, which the old `for name, cap in _RELEASE_BLOCK_CAPS` form
     # happened to avoid by accident).
-    BOOTSTRAP_FILES: tuple[tuple[str, str, int, bool], ...] = tuple(
-        [
-            ("release", name, pool, True)
-            for name, pool in zip(
-                _RELEASE_BLOCK_NAMES,
-                [_RELEASE_POOL_CHARS] * len(_RELEASE_BLOCK_NAMES),
-            )
-        ]
-        + [("workspace", name, 4000, True) for name in MUTATION_POLICY.read_paths]
-    )
+    BOOTSTRAP_FILES = bootstrap_files(MUTATION_POLICY.read_paths)
     #: The one workspace block name, used as the strict-fit "declared
     #: droppable" target for the loop profile (interactive still targets the
     #: literal "bootstrap" section — see ``_fit_system_prompt``'s
@@ -216,11 +214,11 @@ class ContextBuilder:
     # ~3,900 tokens to the observed prompt+completion max: ~87,700 tokens
     # used, ~10,600 headroom against the 98,304 window — comfortable, not a
     # change to the worst case the loop already runs.
-    MAX_SYSTEM_PROMPT_CHARS = 35000
+    MAX_SYSTEM_PROMPT_CHARS = MAX_SYSTEM_PROMPT_CHARS
     #: Operator override of the cap (positive int). The cap is legitimate;
     #: the budget is the operator's to set, never the builder's to enforce by
     #: silently choosing which instructions survive.
-    SYSTEM_PROMPT_CAP_ENV = "NANOBOT_SYSTEM_PROMPT_MAX_CHARS"
+    SYSTEM_PROMPT_CAP_ENV = SYSTEM_PROMPT_CAP_ENV
     #: A bootstrap ``## `` section containing this marker (anywhere in its
     #: body) is one the operator allows the cap to drop, whole. Every other
     #: section is critical and is never dropped in the strict (loop) profile.
@@ -531,7 +529,7 @@ Skills with available="false" need dependencies installed first - you can try in
     #: fail if a second block matched it).
     _STEP_LINE_RE = re.compile(r"Step \d+ of \d+\.")
 
-    _POSITION_BLOCK_CAP = 1200
+    _POSITION_BLOCK_CAP = POSITION_BLOCK_CAP
 
     @classmethod
     def update_step_position(cls, system_prompt: str, iteration: int, max_iterations: int) -> str:
