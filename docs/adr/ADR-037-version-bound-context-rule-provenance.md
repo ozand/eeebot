@@ -9,7 +9,7 @@ tags: [context, provenance, release, dashboard]
 
 # Status
 
-Proposed under #2058. This is a decision proposal, not implementation authorization. #2058 acceptance requires review before code. Dashboard #386 remains its consumer; no host access or deployment is authorized here.
+**Proposed** under #2058. The parent architect approved the direction, but that review is advisory and is not formal ADR acceptance. Per `docs/adr/README.md`, only the operator may accept this record by a commit that flips its status after every test-contract item exists or is explicitly deferred. Until that operator commit, this ADR remains proposed and implementation remains blocked. Dashboard #386 remains its consumer; no host access or deployment is authorized here.
 
 # Context
 
@@ -27,7 +27,7 @@ Define a single-owner, bounded way to expose current builder-rule metadata for t
 
 1. **Canonical rule ownership.** Move only static declarative rule fields currently owned directly by `ContextBuilder` into a small standard-library-only runtime rules module. `ContextBuilder` and the metadata exporter consume those same definitions. Keep `PRIORITIES_BLOCK_CAP` owned by `nanobot.runtime.operator_documents`; the exporter imports it directly. Do not move that ownership, copy constants into a second table, or import `ContextBuilder` from the exporter. Preserve behavior with tests.
 2. **Exact-target export.** During deployment packaging, export a bounded deterministic artifact from the exact selected target commit (`COMMIT`), not ambient checkout `HEAD`. Supply the full resolved commit SHA explicitly to the exporter; the source archive has no `.git` metadata. Include the artifact in that same candidate release archive. No remote CLI execution is needed.
-3. **Pre-activation validation.** On the remote candidate, validate required schema/version and full embedded commit equality with the release `SOURCE_COMMIT` before switching `current`. Missing, malformed, unsupported, or mismatched artifact aborts activation and retains the prior release. The verify-only candidate path exercises the same validator but never activates or mutates the live release.
+3. **Pre-activation validation.** On the remote candidate, validate required schema/version and full embedded commit equality with the release `SOURCE_COMMIT` before switching `current`. Require bounded, typed allowlisted fields: known rule IDs, enums, booleans, and non-negative integer values within declared bounds; reject unknown fields, arbitrary paths, malformed, oversized, unsupported, or mismatched artifacts. This is provenance/schema validation within the trusted release archive and host deployment boundary; `SOURCE_COMMIT` alone does NOT cryptographically authenticate a modified artifact, and this ADR adds no signature/digest trust system. Any rejected artifact aborts candidate activation and retains the prior release. A candidate lacking the new exporter (for example, an older `--ref`) is unsupported and fails before activation; never generate from ambient HEAD or fall back to stale metadata. The verify-only candidate path exercises the same validator but never activates or mutates the live release.
 4. **Bounded descriptor contract.** Export only approved rule identifiers, order, owner/root category, safe inclusion/conditional labels, and static builder values with clear classification. Include the exact full source commit. Do not export prompt/source content, secrets, raw environment values, per-cycle results, or current file contents.
 5. **Dynamic facts remain distinct.** An immutable artifact may state the default total cap and override variable name, but not claim the effective cap when `NANOBOT_SYSTEM_PROMPT_MAX_CHARS` may override it. State release pool/order/floor, not content-dependent per-file effective capacities. Current approved input presence/readability is a separate read result. Eligibility/rule descriptions do not claim that current content was actually included. `system_prompt` ledger data stays a cycle/time-labeled observation; historical payloads remain exact-cycle #316 evidence.
 6. **Unprovenanced compatibility paths fail closed.** A missing `SOURCE_COMMIT` (including legacy/install paths) or unavailable/invalid metadata means current rule provenance is unavailable. Never infer identity from dashboard SHA, repository HEAD, ledger rows, or historical prompt payloads. No host mutation or deployment is part of this ADR.
@@ -45,7 +45,7 @@ It is not runtime telemetry, an effective environment-config dump, a source/prom
 - Runtime builder and exporter use the same canonical static definitions; no duplicated rule values.
 - Export from any selected commit is deterministic and reports that exact full SHA.
 - The artifact is included in the archive for the selected target ref even when target differs from local HEAD.
-- Both deployment and verify-only candidate paths reject missing/invalid/mismatched artifacts before any current-symlink flip; verify-only never activates.
+- Both deployment and verify-only candidate paths reject missing/invalid/mismatched artifacts before any current-symlink flip; verify-only never activates. A rejected candidate leaves the prior `current` release untouched and available for normal rollback.
 - Legacy/install releases without verifiable source identity render rule provenance unavailable.
 - No prompt/source content or secrets enter the artifact; current input status, effective env overrides, observations, and historical payloads are not misrepresented as static rules.
 - Existing prompt assembly behavior remains unchanged.
@@ -98,16 +98,16 @@ Rejected: leaves #386's current builder-rules acceptance criterion without an au
 
 | Claim | Test | Status |
 |---|---|---|
-| Builder and exporter share the same canonical static rule definitions without changing build behavior | `tests/test_context_rules.py` and existing `tests/test_context_builder.py` (ADR citation added with implementation) | deferred (#2058 implementation) |
-| Export is deterministic and bound to supplied full target SHA | `tests/test_context_metadata_export.py` | deferred (#2058 implementation) |
-| Deployment packages metadata from selected `COMMIT`, not ambient HEAD, and rejects SHA/schema mismatch before symlink activation | `tests/test_deploy_release.py` | deferred (#2058 implementation) |
-| Verify-only validates candidate metadata without changing current release | `tests/test_deploy_verify_only_remote_execution.py` | deferred (#2058 implementation) |
-| Artifact is bounded and contains no prompt/source text, secrets, mutable input content, or cycle observations | `tests/test_context_metadata_export.py` | deferred (#2058 implementation) |
-| Missing provenance/metadata fails closed for legacy/install path | `tests/test_context_metadata_export.py` and dashboard #386 unavailable-state test | deferred (#2058 implementation) |
+| Builder and exporter share the same canonical static rule definitions without changing build behavior | `tests/test_context_rules.py` and existing `tests/test_context_builder.py` (ADR citation added with implementation) | deferred (#2058) |
+| Export is deterministic and bound to supplied full target SHA | `tests/test_context_metadata_export.py` | deferred (#2058) |
+| Deployment packages metadata from selected `COMMIT`, not ambient HEAD, and rejects SHA/schema mismatch before symlink activation | `tests/test_deploy_release.py` | deferred (#2058) |
+| Verify-only validates candidate metadata without changing current release | `tests/test_deploy_verify_only_remote_execution.py` | deferred (#2058) |
+| Artifact is bounded and contains no prompt/source text, secrets, mutable input content, or cycle observations | `tests/test_context_metadata_export.py` | deferred (#2058) |
+| Missing provenance/metadata fails closed for legacy/install path | `tests/test_context_metadata_export.py` and dashboard #386 unavailable-state test | deferred (#2058) |
 
 # Rollback and compatibility
 
-The artifact is additive and release-local. If invalid or absent, candidate activation stops before the atomic `current` symlink change; existing deploy rollback remains authoritative. To roll back a landed producer, revert the rules/export/deploy changes and release the prior runtime, then revert the consumer. No historical records are written or migrated. Releases produced by legacy `install.sh` without a trustworthy `SOURCE_COMMIT` remain compatible with runtime operation but report provenance unavailable; no identity is synthesized. Any host deployment requires separate explicit rollout authorization.
+The artifact is additive and release-local. If invalid, absent, unsupported by the selected source revision, or mismatched, candidate activation stops before the atomic `current` symlink change; the prior release remains current and available to the existing rollback mechanism. To roll back a landed producer, revert the rules/export/deploy changes and release the prior runtime, then revert the consumer. No historical records are written or migrated. Releases produced by legacy `install.sh` without a trustworthy `SOURCE_COMMIT` remain compatible with runtime operation but report provenance unavailable; no identity is synthesized. Any host deployment requires separate explicit rollout authorization.
 
 # References
 
