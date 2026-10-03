@@ -681,6 +681,81 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
     echo "VERIFY_ONLY HEALTH_FETCH_FAILED" >&2
     die "could not verify candidate release health"
   fi
+  if [ "${VERIFY_ONLY_DIMENSION_COMPARE:-1}" != "0" ]; then
+    VERIFY_ONLY_LIVE_DIMENSIONS="${VERIFY_ONLY_LIVE_DIMENSIONS:-$(mktemp)}"
+    VERIFY_ONLY_CANDIDATE_DIMENSIONS="${VERIFY_ONLY_CANDIDATE_DIMENSIONS:-$(mktemp)}"
+    VERIFY_ONLY_LIVE_RELEASE="${VERIFY_ONLY_LIVE_RELEASE:-$(readlink -f "$CURRENT_SYMLINK")}"
+    VERIFY_ONLY_LIVE_PYTHON="${VERIFY_ONLY_LIVE_PYTHON:-$HEALTH_GATE_PYTHON}"
+    trap 'sudo rm -rf "$GATE_TMP"; rm -f "${VERIFY_ONLY_LIVE_DIMENSIONS:-}" "${VERIFY_ONLY_CANDIDATE_DIMENSIONS:-}"' EXIT
+    if [ ! -f "$VERIFY_ONLY_LIVE_RELEASE/scripts/verify_release_health.py" ]; then
+      die "could not find live baseline verifier under current release"
+    fi
+    echo "VERIFY_ONLY DIMENSION_SOURCE live path=$VERIFY_ONLY_LIVE_DIMENSIONS writer=live verifier JSON stdout redirected from PYTHONPATH=$VERIFY_ONLY_LIVE_RELEASE" >&2
+    if ! sudo -n -u eeepc-agent env PYTHONPATH="$VERIFY_ONLY_LIVE_RELEASE" PYTHONDONTWRITEBYTECODE=1 "$VERIFY_ONLY_LIVE_PYTHON" -c 'import json; from scripts.verify_release_health import verify_release_health; print(json.dumps(verify_release_health()["health"]["dimensions"], sort_keys=True))' > "$VERIFY_ONLY_LIVE_DIMENSIONS"; then
+      die "could not collect live baseline health dimensions"
+    fi
+    echo "VERIFY_ONLY DIMENSION_SOURCE candidate path=$VERIFY_ONLY_CANDIDATE_DIMENSIONS writer=candidate verifier JSON stdout redirected from PYTHONPATH=$GATE_TMP" >&2
+    if ! sudo -n -u eeepc-agent env PYTHONPATH="$GATE_TMP" PYTHONDONTWRITEBYTECODE=1 "$HEALTH_GATE_PYTHON" -c 'import json; from scripts.verify_release_health import verify_release_health; print(json.dumps(verify_release_health()["health"]["dimensions"], sort_keys=True))' > "$VERIFY_ONLY_CANDIDATE_DIMENSIONS"; then
+      die "could not collect candidate health dimensions"
+    fi
+    if ! PYTHONPATH="$GATE_TMP" "$HEALTH_GATE_PYTHON" - "$VERIFY_ONLY_LIVE_DIMENSIONS" "$VERIFY_ONLY_CANDIDATE_DIMENSIONS" <<'VERIFY_DIMENSIONS'
+import json
+import sys
+from scripts.verify_release_health import compare_health_dimensions
+
+def read(path):
+    with open(path, "rb") as stream:
+        raw = stream.read()
+    if not raw.strip():
+        raise ValueError(f"empty dimension JSON input (path={path!r}, bytes={len(raw)}, prefix={raw[:80]!r})")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"invalid dimension JSON (path={path!r}, bytes={len(raw)}, prefix={raw[:80]!r}): "
+            f"{exc.msg} at line {exc.lineno} column {exc.colno}"
+        ) from exc
+    dimensions = data
+    if isinstance(dimensions, dict) and isinstance(dimensions.get("health"), dict):
+        dimensions = dimensions["health"]
+    dimensions = dimensions.get("dimensions") if isinstance(dimensions, dict) and "dimensions" in dimensions else dimensions
+    if isinstance(dimensions, dict):
+        result = {}
+        for name, value in dimensions.items():
+            status = value.get("status") if isinstance(value, dict) else value
+            if not isinstance(name, str) or not name or status not in {"OK", "WARN", "CRIT"}:
+                raise ValueError(f"malformed dimension: {name!r}={value!r}")
+            result[name] = status
+        return result
+    if not isinstance(dimensions, list):
+        raise ValueError("dimension report must contain a list or mapping")
+    result = {}
+    for row in dimensions:
+        fields = row.split()
+        if len(fields) != 3 or fields[0] != "dim" or fields[2] not in {"OK", "WARN", "CRIT"}:
+            raise ValueError(f"malformed dimension row: {row!r}")
+        name, status = fields[1], fields[2]
+        if name in result:
+            raise ValueError(f"duplicate dimension: {name}")
+        result[name] = status
+    return result
+try:
+    baseline = read(sys.argv[1])
+    candidate = read(sys.argv[2])
+    rows, findings = compare_health_dimensions(baseline, candidate)
+    for row in rows:
+        print(row)
+    for finding in findings:
+        print(f"VERIFY_ONLY DIMENSION_STOP {finding}", file=sys.stderr)
+    raise SystemExit(1 if findings else 0)
+except (OSError, ValueError, json.JSONDecodeError) as exc:
+    print(f"VERIFY_ONLY DIMENSION_STOP comparison failed: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+VERIFY_DIMENSIONS
+    then
+      die "candidate health dimensions are worse than the live baseline"
+    fi
+  fi
 else
   if ! sudo -u eeepc-agent env PYTHONPATH="$RELEASE_DIR" PYTHONDONTWRITEBYTECODE=1 "$HEALTH_GATE_PYTHON" "$RELEASE_DIR/scripts/verify_release_health.py"; then
     die "could not verify release health"

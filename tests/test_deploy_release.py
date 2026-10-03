@@ -871,13 +871,14 @@ def test_verify_only_has_no_mutation_or_health_wait_path() -> None:
     assert 'VERIFY_ONLY HEALTH_FETCH_FAILED' in remote
 
 
-def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
+def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path, monkeypatch):
     """Execute the remote heredoc in a sandbox and record all mock commands."""
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     remote = script.split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
     root = tmp_path / "sandbox"
     release = root / "opt/eeepc-agent/runtimes/self-evolving-agent/current"
     release.mkdir(parents=True)
+    monkeypatch.setenv("VERIFY_ONLY_DIMENSION_COMPARE", "0")
     sha = "a" * 40
     (release / "SOURCE_COMMIT").write_text(sha + "\n", encoding="utf-8")
     commands = root / "commands.log"
@@ -890,15 +891,27 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
     log = shlex.quote(str(commands))
     gate_tmp = root / "candidate-gate"
     mock("systemctl", f'''echo "systemctl $*" >> {log}
-    case "$*" in *eeepc-network-fallback.*"-p LoadState"*) echo not-found;; *"-p LoadState"*) echo loaded;; *"-p MainPID"*) echo 4242;; *"-p ExecMainStartTimestamp"*) echo now;; *"is-enabled"*) echo enabled;; *"is-active"*eeepc-network-fallback.*) exit 1;; *"is-active"*) exit 0;; *) exit 0;; esac''')
+    case "$*" in
+      *eeepc-network-fallback.timer*"-p LoadState"*|*eeepc-network-fallback.service*"-p LoadState"*) echo not-found ;;
+      *eeepc-promotion-verifier.timer*"-p LoadState"*|*eeebot-host-metrics.timer*"-p LoadState"*|*eeebot-host-capabilities.timer*"-p LoadState"*|*eeebot-*.timer*"-p LoadState"*|*eeebot-dashboard.service*"-p LoadState"*) echo loaded ;;
+      *"-p LoadState"*) echo not-found ;;
+      *"-p MainPID"*) echo 4242 ;;
+      *"-p ExecMainStartTimestamp"*) echo now ;;
+      *is-enabled*) echo enabled ;;
+      *"is-active --quiet eeepc-network-fallback.timer"*) exit 1 ;;
+      *"is-active --quiet eeepc-network-fallback.service"*) exit 1 ;;
+      *is-active*) exit 0 ;;
+      *) exit 0 ;;
+    esac''')
     mock("sudo", f'''echo "sudo $*" >> {log}
     case "$1" in -u) shift 2; "$@";; readlink) if [[ "$2" == */cwd ]]; then echo {shlex.quote(str(gate_tmp))}; else echo {shlex.quote(str(release))}; fi;; cat) if [[ "$2" == *SOURCE_COMMIT ]]; then echo {sha}; else printf "python3 /opt/eeepc-agent/runtimes/self-evolving-agent/current/scripts/eeebot_dashboard.py --serve --port 8080 --host 0.0.0.0\\0"; fi;; ss) echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("python3",pid=4242,fd=3))';; chown|rm) exit 0;; *) exit 97;; esac''')
     mock("ss", f'''echo "ss $*" >> {log}; echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:(("python3",pid=4242,fd=3))' ''')
     mock("curl", f'''echo "curl $*" >> {log}; case "$*" in *--write-out*) out=""; prev=""; for a in "$@"; do [ "$prev" = "--output" ] && out="$a"; prev="$a"; done; head -c 2048 /dev/zero | tr "\\0" x > "$out"; echo 200;; *health*) echo '{{"overall":"WARN","dimensions":{{"reward":{{"status":"WARN","detail":"source=stale"}},"gate":{{"status":"WARN","detail":"source=stale"}}}},"goal":"stale","active_task":"stale","reward_average":"stale; age=100.0h (context-only artifact)"}}';; *) echo '{{"goal":"stale; age=100.0h (context-only artifact)","active_task":"stale; age=100.0h (context-only artifact)","approval_gate_state":"stale; age=100.0h (context-only artifact)","reward_average":"stale; age=100.0h (context-only artifact)","reward_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"goal_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"active_task_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"approval_gate_source":{{"status":"stale","age_hours":100.0,"authoritative":false,"context_only":true}},"latest_report_path":null,"materialized_path":null}}';; esac''')
     scripts_dir = release / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
-    (scripts_dir / "verify_release_health.py").write_text("#!/usr/bin/env python3\nprint('mock health')\n", encoding="utf-8")
-    mock("python3", f'''echo "python3 $*" >> {log}; exit 0''')
+    verifier = scripts_dir / "verify_release_health.py"
+    verifier.write_text("#!/usr/bin/env python3\nprint('mock health')\n", encoding="utf-8")
+    verifier.chmod(0o755)
     mock("sleep", f'''echo "sleep $*" >> {log}; exit 97''')
     mock("stat", f'''echo "stat $*" >> {log}; echo 0:0''')
     mock("install", f'''echo "install $*" >> {log}; exit 0''')
@@ -906,17 +919,34 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
     mock("mkdir", f'''echo "mkdir $*" >> {log}; exit 0''')
     mock("tee", f'''echo "tee $*" >> {log}; cat >/dev/null; exit 0''')
     mock("rmdir", f'''echo "rmdir $*" >> {log}; exit 0''')
+    mock("python3", f'''echo "python3 $*" >> {log}; case "$*" in *verify_release_health.py*) exit 0 ;; *"import json; from scripts.verify_release_health"*) exec python "$@" ;; *) exit 1 ;; esac''')
 
     remote_path = root / "remote.sh"
     remote_path.write_text(remote.replace("/opt/eeepc-agent", str(root / "opt/eeepc-agent")), encoding="utf-8")
     (gate_tmp / "scripts").mkdir(parents=True)
-    (gate_tmp / "scripts" / "verify_release_health.py").write_text("print('candidate')\\n", encoding="utf-8")
+    candidate_verifier = (Path(__file__).resolve().parents[1] / "scripts/verify_release_health.py").read_text(encoding="utf-8")
+    stubs = "\n".join([
+        "from types import SimpleNamespace",
+        "ed = SimpleNamespace(STATE_DIR=Path(os.environ['REPORT']).parent, _METRICS_CACHE={}, _SUBAGENT_TREE_CACHE={}, _HOST_CAPS_CACHE={}, _REPORT_SCAN_CACHE={}, _MATERIALIZED_CACHE={})",
+        "def collect_metrics(): return {}",
+        "def render_health_json(metrics): return json.dumps({'overall': 'OK', 'dimensions': {name: {'status': status} for name, status in json.loads(Path(os.environ['REPORT']).read_text())['dimensions'].items()}})",
+        "def render_json(metrics): return json.dumps({'goal': '', 'active_task': '', 'approval_gate_state': '', 'reward_average': 'fresh', 'reward_source': {'status': 'fresh', 'age_hours': 0, 'authoritative': False, 'context_only': True}, 'goal_source': {'status': 'fresh', 'age_hours': 0, 'authoritative': False, 'context_only': True}, 'active_task_source': {'status': 'fresh', 'age_hours': 0, 'authoritative': False, 'context_only': True}, 'approval_gate_source': {'status': 'fresh', 'age_hours': 0, 'authoritative': False, 'context_only': True}})",
+        "def render_html(metrics): return 'x' * 2048",
+    ]) + "\n"
+    candidate_verifier = candidate_verifier.replace("from scripts.eeebot_dashboard import (", stubs + "\\n# from scripts.eeebot_dashboard import (")
+    candidate_verifier = candidate_verifier.replace(
+        "print('CANDIDATE_GATE_EXECUTED')",
+        "print('CANDIDATE_GATE_EXECUTED', file=__import__('sys').stderr)",
+    )
+    (gate_tmp / "scripts" / "verify_release_health.py").write_text(candidate_verifier, encoding="utf-8")
+    (gate_tmp / "scripts" / "__init__.py").write_text("", encoding="utf-8")
     mock("rm", f'''echo "rm $*" >> {log}; exit 0''')
+    mock("head", "/usr/bin/head \"$@\"")
     mock("chown", f'''echo "chown $*" >> {log}; exit 0''')
     mock("env", f'''echo "env $*" >> {log}; while [[ "$1" == *=* ]]; do shift; done; exec "$@"''')
     mock("tar", f'''echo "tar $*" >> {log}; exit 0''')
-    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"))
-    result = subprocess.run(["bash", str(remote_path)], cwd=root, env=env, capture_output=True, text=True)
+    env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1", CURRENT_SYMLINK=str(release), PREV_RELEASE_PATH=str(release), FULL_COMMIT=sha, RELEASE_DIR=str(release), GATE_TMP=str(gate_tmp), HEALTH_GATE_PYTHON=str(bindir / "python3"), REPORT=str(tmp_path / "baseline.json"), VERIFY_ONLY_DIMENSION_COMPARE="0")
+    result = subprocess.run(["bash", str(remote_path)], cwd=root, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     seen = commands.read_text(encoding="utf-8")
     for token in ("tar xzf", "scp ", "ln -sfn", "chmod", "daemon-reload", "restart", "stop ", "disable ", "sleep "):
@@ -924,6 +954,177 @@ def test_verify_only_no_mutation_end_to_end_sandbox(tmp_path):
     assert f"chown -R eeepc-agent:eeepc-agent {gate_tmp}" in seen
     assert "verify_release_health.py" in seen
     assert "curl" not in seen
+
+
+@pytest.mark.parametrize(("baseline", "candidate", "expected_status", "expected_output", "should_pass"), [
+    ({"disk": "OK", "reward": "WARN", "gate": "WARN", "cpu": "OK", "queue": "OK"},
+     {"disk": "CRIT", "reward": "WARN", "gate": "WARN", "cpu": "OK", "queue": "OK"},
+     "CRIT", "disk", False),
+    ({"disk": "OK", "reward": "WARN", "gate": "WARN", "cpu": "OK", "queue": "OK"},
+     {"disk": "OK", "reward": "WARN", "gate": "WARN", "cpu": "CRIT", "queue": "OK"},
+     "CRIT", "cpu", True),
+    ({"disk": "OK", "reward": "WARN", "gate": "WARN", "memory": "OK", "cycle_progress": "OK"},
+     {"disk": "OK", "reward": "WARN", "gate": "WARN"},
+     None, "cycle_progress", False),
+    ({"disk": "OK", "reward": "WARN", "gate": "WARN"},
+     {"disk": "OK", "reward": "WARN", "gate": "WARN", "new_check": "CRIT"},
+     None, "new_check", False),
+])
+def test_verify_only_dimension_delta_through_production_path(
+    tmp_path, repo, mock_bin, monkeypatch,
+    baseline, candidate, expected_status, expected_output, should_pass,
+):
+    import json
+    import textwrap
+
+    baseline_path = tmp_path / "baseline.json"
+    candidate_path = tmp_path / "candidate.json"
+    baseline_path.write_text(json.dumps({"dimensions": [f"dim {k} {v}" for k, v in baseline.items()]}), encoding="utf-8")
+    candidate_path.write_text(json.dumps({"dimensions": [f"dim {k} {v}" for k, v in candidate.items()]}), encoding="utf-8")
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    (repo / "nanobot").mkdir()
+    (repo / "nanobot/__init__.py").write_text("# test runtime package\\n", encoding="utf-8")
+    (repo / "host/eeepc/etc/presets").mkdir(parents=True)
+    (repo / "host/eeepc/etc/presets/test.env").write_text("TEST=1\\n", encoding="utf-8")
+    (scripts / "verify_release_health.py").write_text(textwrap.dedent('''\
+        import json
+        import os
+        from pathlib import Path
+
+        def verify_release_health():
+            report = json.loads(Path(os.environ['REPORT']).read_text())
+            dimensions = {row.split()[1]: {'status': row.split()[2]} for row in report['dimensions']}
+            return {'health': {'dimensions': dimensions}}
+
+        def compare_health_dimensions(baseline, candidate):
+            rows, findings = [], []
+            for name in sorted(baseline.keys() - candidate.keys()):
+                rows.append(f'VERIFY_ONLY DIMENSION_MISSING {name}')
+                findings.append(f'dimension missing: {name}')
+            for name in sorted(candidate.keys() - baseline.keys()):
+                rows.append(f'VERIFY_ONLY DIMENSION_ADDED {name} {candidate[name]}')
+                if name not in {'cpu', 'queue'} and candidate[name] in {'WARN', 'CRIT'}:
+                    findings.append(f'new dimension {name}: {candidate[name]}')
+            for name in sorted(baseline.keys() & candidate.keys()):
+                before, after = baseline[name], candidate[name]
+                rows.append(f'VERIFY_ONLY DIMENSION {name} {before} -> {after}')
+                if name not in {'cpu', 'queue'} and not (name in {'reward', 'gate'} and after == 'WARN'):
+                    if {'OK': 0, 'WARN': 1, 'CRIT': 2}[after] > {'OK': 0, 'WARN': 1, 'CRIT': 2}[before]:
+                        findings.append(f'{name}: {before} -> {after}')
+            return rows, findings
+
+        if __name__ == '__main__':
+            print(json.dumps(verify_release_health()))
+            print('CANDIDATE_GATE_EXECUTED', file=__import__('sys').stderr)
+    '''), encoding="utf-8")
+    original_head = _git("rev-parse", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    _git("add", "scripts/verify_release_health.py", "nanobot", "host/eeepc/etc/presets", cwd=repo, check=True)
+    _git("commit", "-m", "candidate dimension gate", cwd=repo, check=True, env={
+        **os.environ,
+        "GIT_AUTHOR_NAME": "eeebot tests",
+        "GIT_AUTHOR_EMAIL": "tests@eeebot.invalid",
+        "GIT_COMMITTER_NAME": "eeebot tests",
+        "GIT_COMMITTER_EMAIL": "tests@eeebot.invalid",
+    })
+    candidate_commit = _git("rev-parse", "--short", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    assert candidate_commit != original_head
+    monkeypatch.setenv("REPO_ROOT", str(repo))
+    monkeypatch.setenv("REPORT", str(candidate_path))
+    monkeypatch.setenv("BASELINE_REPORT", str(baseline_path))
+    commands = repo / "verify-only-commands.log"
+    log = shlex.quote(str(commands))
+    gate_tmp = (tmp_path / "remote-candidate-gate").as_posix()
+    ssh = f'''echo "$*" >> {log}
+case "$*" in
+  *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/baseline; exit 0 ;;
+  *"mktemp -d /tmp/eeebot-verify-gate."*) mkdir {gate_tmp} || exit 1; cp -R {shlex.quote(str(repo / "scripts"))} {gate_tmp}/; echo {gate_tmp}; exit 0 ;;
+  *"sudo -n rm -rf -- '{gate_tmp}'"*) /usr/bin/rm -rf -- '{gate_tmp}'; exit $? ;;
+  *"GATE_TMP='{gate_tmp}'"*)
+    export VERIFY_ONLY_LIVE_DIMENSIONS={shlex.quote((tmp_path / "live-dimensions.json").as_posix())}
+    export VERIFY_ONLY_CANDIDATE_DIMENSIONS={shlex.quote((tmp_path / "candidate-dimensions.json").as_posix())}
+    export VERIFY_ONLY_LIVE_RELEASE={shlex.quote((tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent/releases/baseline").as_posix())}
+    remote_script={shlex.quote(str(repo / "remote-script.sh"))}
+    cat > "$remote_script"
+    export REPORT={shlex.quote(str(candidate_path))}
+    PS4='+ $(date +%s) ' bash -x -c "$2" < "$remote_script"
+    exit $? ;;
+esac
+exit 0
+'''
+    remote_script = repo / "remote-script.sh"
+    remote = DEPLOY_SCRIPT.read_text(encoding="utf-8").split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
+    remote = remote.replace("/opt/eeepc-agent", str(tmp_path / "opt/eeepc-agent").replace("\\", "/"))
+    monkeypatch.setenv("VERIFY_ONLY_DIMENSION_COMPARE", "1")
+    runtime_root = tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent"
+    runtime_root.mkdir(parents=True)
+    current = runtime_root / "current"
+    current.symlink_to(runtime_root / "releases/baseline", target_is_directory=True)
+    live_release = runtime_root / "releases/baseline"
+    monkeypatch.setenv("VERIFY_ONLY_TEST_LIVE_RELEASE", str(live_release))
+    live_gate = live_release / "scripts"
+    live_gate.mkdir(parents=True)
+    (live_gate / "__init__.py").write_text("", encoding="utf-8")
+    live_gate_source = "\n".join([
+        "import json, os",
+        "from pathlib import Path",
+        "def verify_release_health():",
+        "    report = json.loads(Path(os.environ['BASELINE_REPORT']).read_text())",
+        "    dimensions = {row.split()[1]: {'status': row.split()[2]} for row in report['dimensions']}",
+        "    return {'health': {'dimensions': dimensions}}",
+        "if __name__ == '__main__':",
+        "    print(json.dumps(verify_release_health()))",
+        "    print('LIVE_GATE_EXECUTED', file=__import__('sys').stderr)",
+    ]) + "\n"
+    (live_gate / "verify_release_health.py").write_text(live_gate_source, encoding="utf-8")
+    remote_script.write_text(remote, encoding="utf-8")
+    _write_mock(mock_bin / "ssh", ssh)
+    _write_mock(mock_bin / "stat", '''if [[ "$*" == *current* ]]; then echo 0:0; else command stat "$@"; fi''')
+    _write_mock(mock_bin / "systemctl", '''case "$*" in *eeepc-network-fallback.timer*"-p LoadState"*|*eeepc-network-fallback.service*"-p LoadState"*) echo not-found ;; *"-p LoadState"*) echo loaded ;; *is-active*eeepc-network-fallback*) exit 1 ;; *is-active*) exit 0 ;; *is-enabled*) echo enabled ;; *"-p UnitFileState"*) echo disabled ;; *) exit 0 ;; esac''')
+    _write_mock(mock_bin / "rm", f'''for path in "$@"; do
+  case "$path" in *live-dimensions.json|*candidate-dimensions.json) cp "$path" "$path.captured" ;;
+esac
+done
+exec /usr/bin/rm "$@"
+''')
+    python_exe = shlex.quote(__import__("sys").executable.replace("\\", "/"))
+    _write_mock(mock_bin / "sudo", f'''while [[ "$1" == -* ]]; do
+  case "$1" in -n) shift ;; -u) shift 2 ;; *) exit 97 ;; esac
+done
+if [[ "$1" == env ]]; then
+  shift
+  while [[ "$1" == *=* ]]; do export "$1"; shift; done
+fi
+case "$1" in
+  rm) exec "$(dirname "$0")/rm" "$@" ;;
+  chown|chmod|mkdir|cp|install|tee|rmdir|ln|tar) exit 0 ;;
+  systemctl) exit 0 ;;
+  python3|*python*) exec {python_exe} "${{@:2}}" ;;
+  stat) echo 0:0 ;;
+  *) echo "unexpected sudo command: $*" >&2; exit 97 ;;
+esac
+''')
+    env = {"REPORT": str(candidate_path), "BASELINE_REPORT": str(baseline_path), "VERIFY_ONLY_DIMENSION_COMPARE": "1"}
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", candidate_commit], env_overrides=env)
+    output = result.stdout + result.stderr
+    print(output)
+    assert (result.returncode == 0) is should_pass, (
+        f"verify-only remote exit={result.returncode}, expected_pass={should_pass}; "
+        f"full deploy stdout/stderr:\n{output}"
+    )
+    assert f"candidate gate staged at {gate_tmp}" in output
+    assert expected_output in output
+    if expected_status:
+        assert f"{expected_output} " in output and expected_status in output
+    for dimensions_path, expected in ((tmp_path / "live-dimensions.json.captured", baseline), (tmp_path / "candidate-dimensions.json.captured", candidate)):
+        payload = json.loads(dimensions_path.read_text(encoding="utf-8"))
+        assert {name: item["status"] for name, item in payload.items()} == expected
+    for name in baseline.keys() & candidate.keys():
+        assert f"VERIFY_ONLY DIMENSION {name} " in output
+    assert not (repo / "candidate-temp").exists()  # the deploy EXIT cleanup ran
+    assert not (tmp_path / "remote-candidate-gate").exists()  # remote staged-gate EXIT cleanup ran
+    assert (tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent/releases/baseline").exists()  # live baseline must never be removed
+    assert "sudo rm -rf \"$GATE_TMP\"" in DEPLOY_SCRIPT.read_text(encoding="utf-8")
 
 
 def test_socket_owner_and_listener_checks_retired_by_adr_036() -> None:
