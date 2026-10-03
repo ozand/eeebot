@@ -984,42 +984,48 @@ def test_verify_only_dimension_delta_through_production_path(
     scripts = repo / "scripts"
     scripts.mkdir()
     (repo / "nanobot").mkdir()
+    dashboard_stub = textwrap.dedent("""        from pathlib import Path
+        import json, os
+        STATE_DIR = Path(os.environ['REPORT']).parent
+        _METRICS_CACHE = {}
+        _SUBAGENT_TREE_CACHE = {}
+        _HOST_CAPS_CACHE = {}
+        _REPORT_SCAN_CACHE = {}
+        _MATERIALIZED_CACHE = {}
+        def collect_metrics(): return {}
+        def _dimensions():
+            rows = json.loads(Path(os.environ['REPORT']).read_text())['dimensions']
+            return {row.split()[1]: {'status': row.split()[2]} for row in rows}
+        def render_health_json(metrics):
+            dimensions = _dimensions()
+            for name in ('reward', 'gate'):
+                if name in dimensions and dimensions[name]['status'] == 'WARN':
+                    dimensions[name]['detail'] = 'source=stale'
+            return json.dumps({'overall': 'WARN', 'goal': '', 'active_task': '', 'reward_average': 'stale (context-only artifact)', 'dimensions': dimensions})
+        def render_json(metrics):
+            dimensions = _dimensions()
+            return json.dumps({
+                'goal': '', 'active_task': '', 'approval_gate_state': '', 'reward_average': 'stale (context-only artifact)',
+                **{f'{name}_source': {
+                    'status': 'stale' if name in ('reward', 'approval_gate') and dimensions.get('reward' if name == 'reward' else 'gate', {}).get('status') == 'WARN' else 'fresh',
+                    'age_hours': None if name in ('reward', 'approval_gate') and dimensions.get('reward' if name == 'reward' else 'gate', {}).get('status') == 'WARN' else 0,
+                    'authoritative': False, 'context_only': True,
+                } for name in ('reward', 'goal', 'active_task', 'approval_gate')},
+                'latest_report_path': None, 'materialized_path': None,
+            })
+        def render_html(metrics): return 'x' * 2048
+    """)
+    verifier_source = (Path(__file__).resolve().parents[1] / "scripts/verify_release_health.py").read_text(encoding="utf-8")
+    # Keep production format_health_dimensions and compare_health_dimensions intact;
+    # only satisfy verifier imports with a deterministic dashboard module.
+    verifier_source += chr(10) + "if __name__ == '__main__': print('CANDIDATE_GATE_EXECUTED', file=sys.stderr)" + chr(10)
+    (scripts / "verify_release_health.py").write_text(verifier_source, encoding="utf-8")
+    (repo / "scripts/eeebot_dashboard.py").write_text(dashboard_stub, encoding="utf-8")
     (repo / "nanobot/__init__.py").write_text("# test runtime package\\n", encoding="utf-8")
     (repo / "host/eeepc/etc/presets").mkdir(parents=True)
     (repo / "host/eeepc/etc/presets/test.env").write_text("TEST=1\\n", encoding="utf-8")
-    (scripts / "verify_release_health.py").write_text(textwrap.dedent('''\
-        import json
-        import os
-        from pathlib import Path
-
-        def verify_release_health():
-            report = json.loads(Path(os.environ['REPORT']).read_text())
-            dimensions = {row.split()[1]: {'status': row.split()[2]} for row in report['dimensions']}
-            return {'health': {'dimensions': dimensions}}
-
-        def compare_health_dimensions(baseline, candidate):
-            rows, findings = [], []
-            for name in sorted(baseline.keys() - candidate.keys()):
-                rows.append(f'VERIFY_ONLY DIMENSION_MISSING {name}')
-                findings.append(f'dimension missing: {name}')
-            for name in sorted(candidate.keys() - baseline.keys()):
-                rows.append(f'VERIFY_ONLY DIMENSION_ADDED {name} {candidate[name]}')
-                if name not in {'cpu', 'queue'} and candidate[name] in {'WARN', 'CRIT'}:
-                    findings.append(f'new dimension {name}: {candidate[name]}')
-            for name in sorted(baseline.keys() & candidate.keys()):
-                before, after = baseline[name], candidate[name]
-                rows.append(f'VERIFY_ONLY DIMENSION {name} {before} -> {after}')
-                if name not in {'cpu', 'queue'} and not (name in {'reward', 'gate'} and after == 'WARN'):
-                    if {'OK': 0, 'WARN': 1, 'CRIT': 2}[after] > {'OK': 0, 'WARN': 1, 'CRIT': 2}[before]:
-                        findings.append(f'{name}: {before} -> {after}')
-            return rows, findings
-
-        if __name__ == '__main__':
-            print(json.dumps(verify_release_health()))
-            print('CANDIDATE_GATE_EXECUTED', file=__import__('sys').stderr)
-    '''), encoding="utf-8")
     original_head = _git("rev-parse", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
-    _git("add", "scripts/verify_release_health.py", "nanobot", "host/eeepc/etc/presets", cwd=repo, check=True)
+    _git("add", "scripts", "nanobot", "host/eeepc/etc/presets", cwd=repo, check=True)
     _git("commit", "-m", "candidate dimension gate", cwd=repo, check=True, env={
         **os.environ,
         "GIT_AUTHOR_NAME": "eeebot tests",
@@ -1081,7 +1087,7 @@ exit 0
     _write_mock(mock_bin / "ssh", ssh)
     _write_mock(mock_bin / "stat", '''if [[ "$*" == *current* ]]; then echo 0:0; else command stat "$@"; fi''')
     _write_mock(mock_bin / "systemctl", '''case "$*" in *eeepc-network-fallback.timer*"-p LoadState"*|*eeepc-network-fallback.service*"-p LoadState"*) echo not-found ;; *"-p LoadState"*) echo loaded ;; *is-active*eeepc-network-fallback*) exit 1 ;; *is-active*) exit 0 ;; *is-enabled*) echo enabled ;; *"-p UnitFileState"*) echo disabled ;; *) exit 0 ;; esac''')
-    _write_mock(mock_bin / "rm", f'''for path in "$@"; do
+    _write_mock(mock_bin / "rm", '''for path in "$@"; do
   case "$path" in *live-dimensions.json|*candidate-dimensions.json) cp "$path" "$path.captured" ;;
 esac
 done
@@ -1119,6 +1125,12 @@ esac
     for dimensions_path, expected in ((tmp_path / "live-dimensions.json.captured", baseline), (tmp_path / "candidate-dimensions.json.captured", candidate)):
         payload = json.loads(dimensions_path.read_text(encoding="utf-8"))
         assert {name: item["status"] for name, item in payload.items()} == expected
+    assert not (tmp_path / "live-dimensions.json").exists()
+    assert not (tmp_path / "candidate-dimensions.json").exists()
+    if not should_pass:
+        assert "VERIFY_ONLY DIMENSION_STOP" in output
+        assert not (tmp_path / "live-dimensions.json").exists()
+        assert not (tmp_path / "candidate-dimensions.json").exists()
     for name in baseline.keys() & candidate.keys():
         assert f"VERIFY_ONLY DIMENSION {name} " in output
     assert not (repo / "candidate-temp").exists()  # the deploy EXIT cleanup ran
