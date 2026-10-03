@@ -1,6 +1,6 @@
 ---
 title: Bind current context rule metadata to the exact runtime release
-status: proposed
+status: accepted
 date: 2026-10-03
 authors: [eeebot maintainers]
 related: ["#2058", "ozand/eeebot-ops-dashboard#386", "ADR-022", "ADR-034", "ADR-036"]
@@ -9,7 +9,7 @@ tags: [context, provenance, release, dashboard]
 
 # Status
 
-**Proposed** under #2058. The parent architect approved the direction, but that review is advisory and is not formal ADR acceptance. Per `docs/adr/README.md`, only the operator may accept this record by a commit that flips its status after every test-contract item exists or is explicitly deferred. Until that operator commit, this ADR remains proposed and implementation remains blocked. Dashboard #386 remains its consumer; no host access or deployment is authorized here.
+**Accepted 2026-10-03 by operator-authorized acceptance; accepting change: PR #2059.** This accepts the architecture and test contract, with implementation verification explicitly deferred to #2058 as marked in every Test Contract row. It does not authorize dashboard work, host access, or deployment. Dashboard #386 remains the consumer.
 
 # Context
 
@@ -98,7 +98,7 @@ Rejected: leaves #386's current builder-rules acceptance criterion without an au
 
 | Claim | Test | Status |
 |---|---|---|
-| Builder and exporter share the same canonical static rule definitions without changing build behavior | `tests/test_context_rules.py` and existing `tests/test_context_builder.py` (ADR citation added with implementation) | deferred (#2058) |
+| Builder and exporter share the same canonical static rule definitions without changing build behavior | `tests/test_context_rules.py` and `tests/test_context_builder.py` (ADR citation added with implementation) | deferred (#2058) |
 | Export is deterministic and bound to supplied full target SHA | `tests/test_context_metadata_export.py` | deferred (#2058) |
 | Deployment packages metadata from selected `COMMIT`, not ambient HEAD, and rejects SHA/schema mismatch before symlink activation | `tests/test_deploy_release.py` | deferred (#2058) |
 | Verify-only validates candidate metadata without changing current release | `tests/test_deploy_verify_only_remote_execution.py` | deferred (#2058) |
