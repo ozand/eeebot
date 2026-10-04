@@ -27,6 +27,7 @@ from nanobot.runtime.context_rules import (
     SYSTEM_PROMPT_CAP_ENV,
     WORKSPACE_BLOCK_CAP,
     bootstrap_files,
+    loop_context_section_order,
 )
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
 from nanobot.runtime.operator_documents import (
@@ -175,6 +176,7 @@ class ContextBuilder:
     # warns about, which the old `for name, cap in _RELEASE_BLOCK_CAPS` form
     # happened to avoid by accident).
     BOOTSTRAP_FILES = bootstrap_files(MUTATION_POLICY.read_paths)
+    LOOP_CONTEXT_SECTION_ORDER = loop_context_section_order(MUTATION_POLICY.read_paths)
     #: The one workspace block name, used as the strict-fit "declared
     #: droppable" target for the loop profile (interactive still targets the
     #: literal "bootstrap" section — see ``_fit_system_prompt``'s

@@ -5,6 +5,8 @@ exporter. Dynamic allocation and input reads remain in their existing owners.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 RELEASE_BLOCK_NAMES: tuple[str, ...] = (
     "IDENTITY.md",
     "SOUL.md",
@@ -21,6 +23,16 @@ SCORECARD_BLOCK_CAP = 600
 POSITION_BLOCK_CAP = 1_200
 MAX_SYSTEM_PROMPT_CHARS = 35_000
 SYSTEM_PROMPT_CAP_ENV = "NANOBOT_SYSTEM_PROMPT_MAX_CHARS"
+LOOP_GENERATED_SECTION_ORDER: tuple[str, ...] = (
+    "priorities", "skills_catalogue", "memory", "runtime", "scorecard", "position",
+)
+
+
+def loop_context_section_order(workspace_paths: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the exact loop assembly order for declared context sections."""
+    return tuple(Path(name).stem.lower() for name in RELEASE_BLOCK_NAMES) + tuple(
+        Path(name).stem.lower() for name in workspace_paths
+    ) + LOOP_GENERATED_SECTION_ORDER
 
 
 def bootstrap_files(workspace_paths: tuple[str, ...]) -> tuple[tuple[str, str, int, bool], ...]:
