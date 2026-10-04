@@ -708,6 +708,14 @@ def test_verify_only_streams_candidate_gate_without_requiring_live_gate_file(rep
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     remote = _remote_block(script)
     assert 'VERIFY_ONLY' in script and 'git -C "$REPO_ROOT" archive --format=tar "$COMMIT" | \\' in script
+    assert 'if git -C "$REPO_ROOT" cat-file -e "$COMMIT:scripts/export_context_metadata.py"' in script
+    assert 'chmod 0644 "$CONTEXT_METADATA"' in script
+    assert 'CONTEXT_SOURCE="$CONTEXT_WORKDIR"' in script
+    assert 'mkdir "$CONTEXT_SOURCE"' not in script
+    assert 'CONTEXT_WORKDIR="$(mktemp -d /tmp/eeebot-context-${COMMIT}.XXXXXX)"' in script
+    assert 'CONTEXT_WORKDIR="$(mktemp -d /tmp/eeebot-context-verify.XXXXXX)"' in script
+    assert 'if git -C "$REPO_ROOT" cat-file -e "$COMMIT:scripts/export_context_metadata.py"' in script
+    assert 'trap cleanup_context_workdir EXIT' in script
     assert 'context-metadata.json' in script
     assert "VERIFY_ONLY" in remote
     assert "verify_release_health.py" in remote
@@ -716,6 +724,8 @@ def test_verify_only_streams_candidate_gate_without_requiring_live_gate_file(rep
     assert '"$GATE_TMP/scripts/verify_release_health.py"' in remote
     assert '"$RELEASE_DIR/scripts/verify_release_health.py"' in remote
     assert 'test -f "$RELEASE_DIR/scripts/verify_release_health.py"' not in remote
+    assert 'exporter is not a regular file' in script
+    assert '"$HEALTH_GATE_PYTHON" "$RELEASE_DIR/scripts/export_context_metadata.py"' in remote
     usage = script.splitlines()[5]
     assert "--ref <sha>" in usage and "--verify-only" in usage
     assert "candidate" in script.lower() and "empty state" in script.lower()
@@ -814,6 +824,37 @@ esac
     assert result.returncode == 0, output
     assert "CANDIDATE_GATE_ONLY" in output
     assert "ADVANCED_HEAD_ONLY" not in output
+
+
+def test_verify_only_preserves_legacy_historical_ref_diagnostics_without_exporter(repo, mock_bin, monkeypatch) -> None:
+    for relative in ("scripts/verify_release_health.py", "nanobot/__init__.py", "host/eeepc/etc/presets/test.env"):
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("legacy diagnostic fixture\\n", encoding="utf-8")
+    _git("add", ".", cwd=repo, check=True)
+    _git("rm", "scripts/export_context_metadata.py", cwd=repo, check=True)
+    _git("commit", "-m", "legacy candidate without exporter", cwd=repo, check=True)
+    legacy = _git("rev-parse", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    monkeypatch.setenv("REPO_ROOT", str(repo))
+    staged = (repo / "legacy-remote-stage").as_posix()
+    ssh_body = f'''#!/usr/bin/env bash
+set -e
+case "$*" in
+  *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/old; exit 0 ;;
+  *"mktemp -d /tmp/eeebot-verify-gate."*) mkdir -p {staged}; tar -x -C {staged}; echo {staged}; exit 0 ;;
+  *"GATE_TMP='"*) exit 0 ;;
+  *"VERIFY_ONLY=1"*) exit 0 ;;
+esac
+exit 0
+'''
+    _write_mock(mock_bin / "ssh", ssh_body)
+    _write_mock(mock_bin / "sudo", 'exit 0')
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", legacy])
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "selected historical ref has no metadata exporter" in output
+    assert "candidate gate staged" in output
+    assert "cannot export context metadata" not in output
 
 
 def test_verify_only_passes_when_live_release_has_no_gate_file(repo, mock_bin, monkeypatch) -> None:

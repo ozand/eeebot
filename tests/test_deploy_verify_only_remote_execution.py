@@ -347,6 +347,18 @@ exit 0
 
 
 
+def test_verify_only_metadata_staging_uses_unique_private_roots_and_cleans(tmp_path: Path) -> None:
+    deploy = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    verify_setup = deploy.split('else\n  if [ -n "$REF" ]', 1)[1].split('\nfi\n\n# Resolve PREV_RELEASE_PATH', 1)[0]
+    assert 'CONTEXT_WORKDIR="$(mktemp -d /tmp/eeebot-context-verify.XXXXXX)"' in deploy
+    assert 'CONTEXT_SOURCE="$CONTEXT_WORKDIR"' in deploy
+    assert 'trap cleanup_context_workdir EXIT' in deploy
+    assert 'trap \'cleanup_candidate_gate; cleanup_context_workdir\' EXIT' in deploy
+    assert 'mkdir -p "$CONTEXT_SOURCE"' not in deploy
+    assert verify_setup.count('CONTEXT_SOURCE=""') == 1
+    assert 'CONTEXT_METADATA=""' in verify_setup
+
+
 def test_sudo_n_rm_stub_parses_options_before_dispatch(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()

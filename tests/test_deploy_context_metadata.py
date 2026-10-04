@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -60,6 +61,50 @@ def test_deploy_source_contains_preflip_metadata_validation_in_both_paths() -> N
     assert 'git -C "$REPO_ROOT" archive --format=tar "$COMMIT"' in script
     assert '--validate --source-commit "$FULL_COMMIT" --output "$GATE_TMP/context-metadata.json"' in script
     assert '--validate --source-commit "$FULL_COMMIT" --output "$RELEASE_DIR/context-metadata.json"' in script
+    assert '"$HEALTH_GATE_PYTHON" "$RELEASE_DIR/scripts/export_context_metadata.py"' in script
+    assert 'CONTEXT_WORKDIR="$(mktemp -d /tmp/eeebot-context-${COMMIT}.XXXXXX)"' in script
+    assert 'CONTEXT_WORKDIR="$(mktemp -d /tmp/eeebot-context-verify.XXXXXX)"' in script
+    assert 'trap cleanup_context_workdir EXIT' in script
+    exporter = EXPORTER.read_text(encoding="utf-8")
+    assert "os.O_EXCL" in exporter and "os.O_NOFOLLOW" in exporter
+    assert 'chmod 0644 "$RELEASE_STAGE/context-metadata.json"' in script
+    assert 'chmod 0644 "$CONTEXT_METADATA"' in script
+    assert 'CONTEXT_SOURCE="$CONTEXT_WORKDIR"' in script
+    assert 'CONTEXT_WORKDIR="$(mktemp -d /tmp/eeebot-context-verify.XXXXXX)"' in script
+    assert 'if git -C "$REPO_ROOT" cat-file -e "$COMMIT:scripts/export_context_metadata.py"' in script
+    assert '"$HEALTH_GATE_PYTHON" "$RELEASE_DIR/scripts/export_context_metadata.py"' in script
+
+
+def test_metadata_exporter_refuses_symlink_output(tmp_path: Path) -> None:
+    destination = tmp_path / "metadata.json"
+    protected = tmp_path / "protected.txt"
+    protected.write_text("keep", encoding="utf-8")
+    destination.symlink_to(protected)
+    result = subprocess.run([
+        sys.executable, str(EXPORTER), "--source-commit", SHA, "--output", str(destination),
+    ], cwd=REPO, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert protected.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX umask and mode-bit regression")
+def test_metadata_exporter_creates_private_metadata_readable_under_umask_077(tmp_path: Path) -> None:
+    out = tmp_path / "metadata.json"
+    code = "import os,runpy,sys; os.umask(0o077); script,sha,out=sys.argv[1:]; sys.argv=[script,'--source-commit',sha,'--output',out]; runpy.run_path(script,run_name='__main__')"
+    result = subprocess.run([sys.executable, "-c", code, str(EXPORTER), SHA, str(out)], cwd=REPO, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert out.stat().st_mode & 0o777 == 0o644
+    assert load_context_metadata(out, SHA)["source_commit"] == SHA
+
+
+def test_metadata_exporter_does_not_clobber_existing_output(tmp_path: Path) -> None:
+    out = tmp_path / "metadata.json"
+    out.write_text("keep", encoding="utf-8")
+    result = subprocess.run([
+        sys.executable, str(EXPORTER), "--source-commit", SHA, "--output", str(out),
+    ], cwd=REPO, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert out.read_text(encoding="utf-8") == "keep"
 
 
 def test_invalid_artifact_is_rejected_before_current_switch(tmp_path: Path) -> None:

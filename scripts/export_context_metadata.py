@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -59,10 +60,18 @@ def main() -> int:
     else:
         metadata = build(args.source_commit)
         validate(metadata, args.source_commit)
-        args.output.write_text(
-            json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n",
-            encoding="utf-8",
-        )
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(args.output, flags, 0o644)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(metadata, stream, sort_keys=True, separators=(",", ":"))
+                stream.write("\n")
+        except BaseException:
+            args.output.unlink(missing_ok=True)
+            raise
     return 0
 
 

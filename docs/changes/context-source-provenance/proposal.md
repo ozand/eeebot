@@ -2,7 +2,7 @@
 
 **Issue:** [#2058](https://github.com/ozand/eeebot/issues/2058)
 **Consumer:** [eeebot-ops-dashboard#386](https://github.com/ozand/eeebot-ops-dashboard/issues/386)
-**Status:** ADR-037 was operator-accepted via PR #2059. Runtime implementation is present on the #2058 branch; acceptance remains subject to the PR's exact-SHA review and CI gates. No host deployment is authorized.
+**Decision:** The architecture is accepted in ADR-037 (PR #2059). This document records the design scope; implementation verification and issue lifecycle remain governed by #2058. No host deployment is authorized.
 
 ## Problem
 
