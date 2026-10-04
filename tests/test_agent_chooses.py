@@ -555,6 +555,13 @@ def test_precheck_holds_on_unchanged_proposer_candidate(tmp_path: Path):
     request_path.write_text(json.dumps(request), encoding="utf-8")
     assert planner_rest.precheck(state, None) == (True, "input_changed")
 
+    from nanobot.runtime.llm_proposer import _bridge_state_dir
+
+    bridge_state = _bridge_state_dir(state)
+    bridge_state.mkdir(parents=True, exist_ok=True)
+    (bridge_state / "handled_llm-proposer-rest-test.txt").write_text("handled", encoding="utf-8")
+    assert planner_rest.precheck(state, None) == (True, "input_unreadable")
+
 
 def test_precheck_runs_on_unreadable_input(tmp_path: Path):
     state = tmp_path / "state"
