@@ -2,7 +2,7 @@
 
 **Issue:** [#2058](https://github.com/ozand/eeebot/issues/2058)
 **Consumer:** [eeebot-ops-dashboard#386](https://github.com/ozand/eeebot-ops-dashboard/issues/386)
-**Decision:** The architecture is accepted in ADR-037 (PR #2059). This document records the design scope; implementation verification and issue lifecycle remain governed by #2058. No host deployment is authorized.
+**Decision:** The metadata contract is accepted in ADR-037 (PR #2059); the exporter trust boundary is proposed separately in ADR-038 and remains unaccepted. This document records design scope; implementation verification and issue lifecycle remain governed by #2058. No host deployment is authorized.
 
 ## Problem
 
@@ -10,7 +10,7 @@ The runtime owns its context builder rules, but consumers can currently see only
 
 ## Proposal
 
-Implement the accepted ADR-037 bounded, versioned provenance contract. The proposal is the implementation plan; ADR-037 is the architectural decision. Move only the static declarative rule fields currently owned by `ContextBuilder` into a small standard-library-only runtime module consumed by both the builder and exporter. Keep `PRIORITIES_BLOCK_CAP` owned by `nanobot.runtime.operator_documents` and imported by the exporter; do not relocate or duplicate it. Keep dynamic allocation and input reads in the builder.
+Implement the bounded, versioned provenance contract in accepted ADR-037, subject to the exporter trust prerequisite in proposed ADR-038. Do not implement or merge exporter execution until ADR-038 is explicitly accepted by the operator. ADR-038 proposes use of a pinned trusted exporter and exact authority-closure comparison; its anchor SHA/bootstrap/rotation remain undecided. Move only the static declarative rule fields currently owned by `ContextBuilder` into a small standard-library-only runtime module consumed by both the builder and trusted exporter. Keep `PRIORITIES_BLOCK_CAP` owned by `nanobot.runtime.operator_documents` and imported by the exporter; do not relocate or duplicate it. Keep dynamic allocation and input reads in the builder.
 
 The exporter serializes a descriptor-only artifact from the **exact selected target commit** used by `host/eeepc/scripts/deploy_release.sh`, with the full commit SHA supplied explicitly. It must not import from the developer checkout's unrelated `HEAD`. Add the artifact to that candidate release archive. Before activation, the remote deployment path validates the artifact schema/version and its embedded full SHA against that release's `SOURCE_COMMIT`; any absence, malformed contract, or mismatch aborts before switching `current`. The verify-only candidate path exercises the same validation without activation. Legacy/install paths without trustworthy commit provenance expose the rules as unavailable rather than guessing.
 
