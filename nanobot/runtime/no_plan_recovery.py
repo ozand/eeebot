@@ -169,6 +169,7 @@ def record_outcome(state_dir: "Path", cycle_id: str, outcome: str) -> RecoverySt
         return state
 
     if family == "supply":
+        state.consecutive_planner = 0
         state.consecutive_supply += 1
         if state.consecutive_supply >= SUPPLY_DEGRADED_THRESHOLD and not state.model_supply_degraded:
             state.model_supply_degraded = True
@@ -176,6 +177,7 @@ def record_outcome(state_dir: "Path", cycle_id: str, outcome: str) -> RecoverySt
                 state_dir, cycle_id, "supply", state.consecutive_supply, "model_supply_degraded",
             )
     else:
+        state.consecutive_supply = 0
         state.consecutive_planner += 1
         if state.consecutive_planner >= PLANNER_STOP_THRESHOLD and not state.stopped:
             state.stopped = True
