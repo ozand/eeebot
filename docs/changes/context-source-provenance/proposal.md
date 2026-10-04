@@ -2,7 +2,7 @@
 
 **Issue:** [#2058](https://github.com/ozand/eeebot/issues/2058)
 **Consumer:** [eeebot-ops-dashboard#386](https://github.com/ozand/eeebot-ops-dashboard/issues/386)
-**Decision:** The metadata contract is accepted in ADR-037 (PR #2059); the exporter trust boundary is proposed separately in ADR-038 and remains unaccepted. This document records design scope; implementation verification and issue lifecycle remain governed by #2058. No host deployment is authorized.
+**Decision:** The metadata contract is accepted in ADR-037 (PR #2059); the exporter trust boundary is proposed separately in ADR-038 and remains unaccepted. The bounded implementation/test plan is in `trusted-exporter-implementation-plan.md`; it is design only until ADR-038 acceptance. Implementation verification and issue lifecycle remain governed by #2058. No host deployment is authorized.
 
 ## Problem
 
