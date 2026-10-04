@@ -115,3 +115,42 @@ for name in ('loguru', 'nanobot.agent.memory', 'nanobot.agent.skills'):
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     subprocess.run([sys.executable, "-c", code], check=True, env=env)
+
+
+def test_exporter_cli_import_closure_uses_only_staged_metadata_modules(tmp_path: Path) -> None:
+    import shutil
+
+    repo = Path(__file__).resolve().parents[1]
+    staged = tmp_path / "candidate"
+    for relative in (
+        "scripts/export_context_metadata.py",
+        "nanobot/runtime/context_metadata.py",
+        "nanobot/runtime/context_rules.py",
+        "nanobot/runtime/mutation_policy.py",
+        "nanobot/runtime/operator_documents.py",
+    ):
+        target = staged / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(repo / relative, target)
+    # A conflicting ambient package must not satisfy imports for the staged tree.
+    ambient = tmp_path / "ambient"
+    sentinel = ambient / "nanobot/runtime/context_metadata.py"
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_text("raise AssertionError('ambient metadata imported')\n", encoding="utf-8")
+    output = tmp_path / "context-metadata.json"
+    source_sha = "a" * 40
+    wrapper = f"""
+import runpy, sys
+sys.argv = [{str(staged / 'scripts/export_context_metadata.py')!r}, '--source-commit', {source_sha!r}, '--output', {str(output)!r}]
+runpy.run_path(sys.argv[0], run_name='__main__')
+expected = {{'nanobot.runtime.context_rules', 'nanobot.runtime.mutation_policy', 'nanobot.runtime.operator_documents', 'nanobot.runtime.context_metadata'}}
+loaded = {{name for name in sys.modules if name.startswith('nanobot.runtime.')}}
+assert loaded == expected, loaded
+for name in ('nanobot.runtime.local_ci', 'nanobot.runtime.state', 'nanobot.runtime.state_access', 'nanobot.runtime.day_key', 'loguru'):
+    assert name not in sys.modules, name
+for name in expected:
+    assert sys.modules[name].__file__.startswith({str(staged)!r}), (name, sys.modules[name].__file__)
+"""
+    env = dict(os.environ, PYTHONPATH=str(ambient), PYTHONDONTWRITEBYTECODE="1")
+    subprocess.run([sys.executable, "-c", wrapper], cwd=tmp_path, env=env, check=True)
+    assert json.loads(output.read_text(encoding="utf-8"))["source_commit"] == source_sha

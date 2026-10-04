@@ -283,9 +283,9 @@ def test_staging_failure_after_mktemp_cleans_remote_directory(tmp_path: Path, re
     # Create a second commit with the candidate gate. It differs from the
     # initial HEAD and gives the real archive pipeline a requested path, while
     # the mocked remote tar fails after mktemp has created its directory.
-    (repo / "scripts").mkdir()
+    (repo / "scripts").mkdir(exist_ok=True)
     (repo / "scripts/verify_release_health.py").write_text("print('candidate')\\n", encoding="utf-8")
-    (repo / "nanobot").mkdir()
+    (repo / "nanobot").mkdir(exist_ok=True)
     (repo / "nanobot/__init__.py").write_text("# candidate package\\n", encoding="utf-8")
     (repo / "host/eeepc/etc/presets").mkdir(parents=True)
     (repo / "host/eeepc/etc/presets/test.env").write_text("FIXTURE=1\\n", encoding="utf-8")
