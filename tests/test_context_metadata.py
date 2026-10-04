@@ -142,7 +142,10 @@ def test_exporter_cli_import_closure_uses_only_staged_metadata_modules(tmp_path:
     wrapper = f"""
 import runpy, sys
 sys.argv = [{str(staged / 'scripts/export_context_metadata.py')!r}, '--source-commit', {source_sha!r}, '--output', {str(output)!r}]
-runpy.run_path(sys.argv[0], run_name='__main__')
+try:
+    runpy.run_path(sys.argv[0], run_name='__main__')
+except SystemExit as exc:
+    assert exc.code == 0, exc.code
 expected = {{'nanobot.runtime.context_rules', 'nanobot.runtime.mutation_policy', 'nanobot.runtime.operator_documents', 'nanobot.runtime.context_metadata'}}
 loaded = {{name for name in sys.modules if name.startswith('nanobot.runtime.')}}
 assert loaded == expected, loaded
@@ -150,6 +153,7 @@ for name in ('nanobot.runtime.local_ci', 'nanobot.runtime.state', 'nanobot.runti
     assert name not in sys.modules, name
 for name in expected:
     assert sys.modules[name].__file__.startswith({str(staged)!r}), (name, sys.modules[name].__file__)
+assert all(sys.modules[name].__file__.startswith({str(staged)!r}) for name in expected)
 """
     env = dict(os.environ, PYTHONPATH=str(ambient), PYTHONDONTWRITEBYTECODE="1")
     subprocess.run([sys.executable, "-c", wrapper], cwd=tmp_path, env=env, check=True)
