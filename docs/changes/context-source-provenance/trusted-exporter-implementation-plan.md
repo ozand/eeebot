@@ -4,7 +4,7 @@
 
 ## Boundary and bootstrap
 
-- Implementation/test mode takes an explicitly supplied fixture anchor SHA. It is marked non-authoritative in tests and cannot enter deployment code paths. Missing production approval must fail closed.
+- Implementation/test mode takes an explicitly supplied fixture anchor SHA. It is marked non-authoritative in tests and cannot enter production deployment code paths. Keep fixture selection out of production CLI/environment switches; test harnesses must invoke a separate test-only API or inject the fixture directly. Missing production approval must fail closed.
 - Production mode reads an operator-owned immutable full SHA and approval reference from configuration outside the selected target/archive. It must reject absent/malformed SHA, mutable refs, or unrecorded approval. Enable production only after implementation, independent security review, and explicit operator approval of the chosen SHA.
 - Target ref supplies only target commit identity and Git objects for comparison. Never execute/import target Python, use its `PYTHONPATH`, or accept its manifest/config as trust policy.
 
@@ -33,9 +33,9 @@ This is intentionally not the entire operational ContextBuilder dependency graph
 1. Resolve target to full commit SHA; resolve approved anchor only from operator-owned config.
 2. Validate mode and approval record; test-fixture mode is impossible to select in production invocation.
 3. Read anchor-pinned manifest; query target and anchor Git tree entries; compare type, mode, blob IDs. Exit before subprocess creation on any difference.
-4. Extract only the approved anchor tree to a private temporary directory. Do not extract or import target files. Set no target-derived import paths.
-5. Execute the trusted exporter from that extraction with the target full SHA as a data argument; output remains descriptor-only and protected by existing schema/size/permissions checks.
-6. Package metadata in release artifact; remote deployment/verify-only validators remain responsible for source-SHA/schema checks and activation barrier. Failure must preserve prior current release. Legacy no-exporter targets remain unavailable/diagnostic without local Python execution.
+4. Extract only the approved anchor tree to a private trusted-execution temporary directory. Never import or execute target files, and never add target paths to Python import paths. If selected-target source must be staged for the release archive or remote candidate gate, stage it separately as inert packaging data; no scripts/modules from that staging tree may run locally.
+5. Execute the trusted exporter from the anchor-only extraction with the target full SHA as a data argument; output remains descriptor-only and protected by existing schema/size/permissions checks.
+6. Package the selected-target release source and generated metadata in the release artifact as separate inputs; remote deployment/verify-only validators remain responsible for source-SHA/schema checks and activation barrier. Failure must preserve prior current release. Legacy no-exporter targets remain unavailable/diagnostic without local Python execution.
 7. Clean the private extraction on all exits. No host access/deploy is part of this plan.
 
 ## Required adversarial tests
