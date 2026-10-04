@@ -120,6 +120,9 @@ if [ "$VERIFY_ONLY" -eq 0 ]; then
   if [ "$DRY_RUN" -eq 0 ]; then
     # Export from the exact selected source tree, never ambient checkout HEAD.
     git -C "$REPO_ROOT" archive --format=tar --prefix="${RELEASE_NAME}/" "$COMMIT" | tar -x -C "$CONTEXT_SOURCE"
+    # tar honors the caller's umask; make the staged source readable/traversable
+    # to the least-privilege remote validator, without adding write permissions.
+    chmod -R a+rX "$CONTEXT_SOURCE"
     RELEASE_STAGE="$CONTEXT_SOURCE/$RELEASE_NAME"
     if ! test -f "$RELEASE_STAGE/scripts/export_context_metadata.py" || test -L "$RELEASE_STAGE/scripts/export_context_metadata.py"; then
       echo "CRITICAL: selected metadata exporter is not a regular file" >&2
@@ -214,6 +217,9 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
       echo "CRITICAL: could not stage selected source for metadata export" >&2
       exit 1
     fi
+    # Ensure the unprivileged validator can traverse/read staged files under
+    # restrictive caller umasks; this grants no write access.
+    chmod -R a+rX "$CONTEXT_SOURCE"
     if ! test -f "$CONTEXT_SOURCE/scripts/export_context_metadata.py" || test -L "$CONTEXT_SOURCE/scripts/export_context_metadata.py"; then
       echo "CRITICAL: selected metadata exporter is not a regular file" >&2
       exit 1

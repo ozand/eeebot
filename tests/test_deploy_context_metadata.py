@@ -67,9 +67,11 @@ def test_deploy_source_contains_preflip_metadata_validation_in_both_paths() -> N
     assert 'trap cleanup_context_workdir EXIT' in script
     exporter = EXPORTER.read_text(encoding="utf-8")
     assert "os.O_EXCL" in exporter and "os.O_NOFOLLOW" in exporter
+    assert 'chmod -R a+rX "$CONTEXT_SOURCE"' in script
     assert 'chmod 0644 "$RELEASE_STAGE/context-metadata.json"' in script
     assert 'chmod 0644 "$CONTEXT_METADATA"' in script
     assert 'CONTEXT_SOURCE="$CONTEXT_WORKDIR"' in script
+    assert script.count('chmod -R a+rX "$CONTEXT_SOURCE"') == 2
     assert 'CONTEXT_WORKDIR="$(mktemp -d /tmp/eeebot-context-verify.XXXXXX)"' in script
     assert 'if git -C "$REPO_ROOT" cat-file -e "$COMMIT:scripts/export_context_metadata.py"' in script
     assert '"$HEALTH_GATE_PYTHON" "$RELEASE_DIR/scripts/export_context_metadata.py"' in script
