@@ -535,6 +535,27 @@ def test_precheck_tests_change_not_value(tmp_path: Path):
     assert reason2 == "input_changed"
 
 
+def test_precheck_holds_on_unchanged_proposer_candidate(tmp_path: Path):
+    from nanobot.runtime.demand import item_id
+
+    state = tmp_path / "state"
+    title = "fix the bounded retry guard"
+    _write_proposer_request(state, "llm-proposer-rest-test", title)
+    candidate_id = item_id("proposer", title)
+    wc = planner_rest.WakeCondition(kind="candidate", ref=candidate_id)
+    deadline = "2099-01-01T00:00:00Z"
+
+    recorded = planner_rest.record_rest(state, "cycle-rest-proposer", wc, deadline, selfevo_repo=None)
+    assert recorded.active_rest["snapshot"] is not None
+    assert planner_rest.precheck(state, None) == (False, "unchanged")
+
+    request_path = state / "subagents" / "requests" / "llm-proposer-rest-test.json"
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    request["task"] = "changed acceptance input"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    assert planner_rest.precheck(state, None) == (True, "input_changed")
+
+
 def test_precheck_runs_on_unreadable_input(tmp_path: Path):
     state = tmp_path / "state"
     missing = tmp_path / "does_not_exist.txt"
