@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -107,6 +108,46 @@ def test_metadata_exporter_does_not_clobber_existing_output(tmp_path: Path) -> N
     ], cwd=REPO, capture_output=True, text=True)
     assert result.returncode != 0
     assert out.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX umask and mode-bit regression")
+def test_release_source_archive_is_readable_after_restrictive_umask_extraction(tmp_path: Path) -> None:
+    import tarfile
+
+    source = tmp_path / "source"
+    (source / "scripts").mkdir(parents=True)
+    (source / "nanobot/runtime").mkdir(parents=True)
+    (source / "scripts/export_context_metadata.py").write_text("print('exporter')\\n", encoding="utf-8")
+    (source / "nanobot/runtime/context_metadata.py").write_text("VALUE = 1\\n", encoding="utf-8")
+    for path in (source, source / "scripts", source / "nanobot", source / "nanobot/runtime"):
+        path.chmod(0o700)
+    for path in (source / "scripts/export_context_metadata.py", source / "nanobot/runtime/context_metadata.py"):
+        path.chmod(0o600)
+    archive = tmp_path / "source.tar"
+    with tarfile.open(archive, "w") as tar:
+        tar.add(source, arcname="candidate")
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    deploy_script = DEPLOY.read_text(encoding="utf-8")
+    normalize_commands = [
+        line.strip() for line in deploy_script.splitlines()
+        if line.strip() == 'chmod -R a+rX "$CONTEXT_SOURCE"'
+    ]
+    assert len(normalize_commands) == 2  # normal release and verify-only paths
+    normalize_command = normalize_commands[0].replace(
+        '"$CONTEXT_SOURCE"', shlex.quote(str(staged / "candidate")),
+    )
+    script = f'''umask 077
+    tar -xf {str(archive)!r} -C {str(staged)!r}
+    {normalize_command}
+    '''
+    subprocess.run(["bash", "-c", script], check=True)
+    exporter = staged / "candidate/scripts/export_context_metadata.py"
+    runtime = staged / "candidate/nanobot/runtime/context_metadata.py"
+    assert exporter.stat().st_mode & 0o777 == 0o644
+    assert runtime.stat().st_mode & 0o777 == 0o644
+    assert (staged / "candidate/nanobot/runtime").stat().st_mode & 0o111
+    assert exporter.read_text(encoding="utf-8").startswith("print")
 
 
 def test_invalid_artifact_is_rejected_before_current_switch(tmp_path: Path) -> None:
