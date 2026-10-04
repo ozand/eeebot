@@ -35,13 +35,16 @@ def test_builder_consumes_shared_definitions_without_changing_policy() -> None:
     assert ContextBuilder.BOOTSTRAP_FILES == bootstrap_files(("AGENTS.md",))
 
 
-def test_builder_order_and_metadata_follow_shared_loop_sequence() -> None:
+def test_builder_order_and_metadata_follow_shared_loop_sequence(tmp_path: Path) -> None:
     order = loop_context_section_order(("AGENTS.md",))
     assert order == (
         "identity", "soul", "goals", "user", "operating", "agents",
         *LOOP_GENERATED_SECTION_ORDER,
     )
     assert ContextBuilder.LOOP_CONTEXT_SECTION_ORDER == order
+    builder = ContextBuilder(tmp_path)
+    builder.build_system_prompt(loop_profile=True)
+    assert list(builder.last_fit["sections"]) == list(order)
     expected_rule_suffixes = [
         "identity", "soul", "charter", "user", "operating", "agents",
         "priorities", "memory", "runtime", "scorecard", "position",

@@ -69,6 +69,8 @@ def test_deploy_source_contains_preflip_metadata_validation_in_both_paths() -> N
     exporter = EXPORTER.read_text(encoding="utf-8")
     assert "os.O_EXCL" in exporter and "os.O_NOFOLLOW" in exporter
     assert 'chmod -R a+rX "$CONTEXT_SOURCE"' in script
+    assert 'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE_STAGE" python "$RELEASE_STAGE/scripts/export_context_metadata.py"' in script
+    assert 'tar -C "$CONTEXT_SOURCE" -czf "$ARCHIVE" "$RELEASE_NAME"' in script
     assert 'chmod 0644 "$RELEASE_STAGE/context-metadata.json"' in script
     assert 'chmod 0644 "$CONTEXT_METADATA"' in script
     assert 'CONTEXT_SOURCE="$CONTEXT_WORKDIR"' in script
@@ -76,6 +78,59 @@ def test_deploy_source_contains_preflip_metadata_validation_in_both_paths() -> N
     assert 'CONTEXT_WORKDIR="$(mktemp -d /tmp/eeebot-context-verify.XXXXXX)"' in script
     assert 'if git -C "$REPO_ROOT" cat-file -e "$COMMIT:scripts/export_context_metadata.py"' in script
     assert '"$HEALTH_GATE_PYTHON" "$RELEASE_DIR/scripts/export_context_metadata.py"' in script
+
+
+def test_normal_packaging_suppresses_bytecode_and_rearchives_selected_tree(tmp_path: Path) -> None:
+    import io
+    import tarfile
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "scripts").mkdir()
+    (repo / "scripts/export_context_metadata.py").write_bytes(EXPORTER.read_bytes())
+    (repo / "nanobot/runtime").mkdir(parents=True)
+    for relative in (
+        "nanobot/runtime/context_metadata.py",
+        "nanobot/runtime/context_rules.py",
+        "nanobot/runtime/mutation_policy.py",
+        "nanobot/runtime/operator_documents.py",
+    ):
+        target = repo / relative
+        target.write_bytes((REPO / relative).read_bytes())
+    (repo / "nanobot/__init__.py").write_text("# package\\n", encoding="utf-8")
+    (repo / "nanobot/runtime/__init__.py").write_text("# package\\n", encoding="utf-8")
+    source_sha = "a" * 40
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "staged exporter"], check=True)
+    # Exercise the same extraction/export/rearchive commands as deploy_release.sh.
+    context_source = tmp_path / "stage"
+    stage_prefix = "candidate"
+    context_source.mkdir()
+    first = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", "--prefix=candidate/", "HEAD"], capture_output=True, check=True)
+    with tarfile.open(fileobj=io.BytesIO(first.stdout), mode="r:") as tar:
+        tar.extractall(context_source, filter="data")
+    release_stage = context_source / stage_prefix
+    output = release_stage / "context-metadata.json"
+    body = DEPLOY.read_text(encoding="utf-8")
+    invocation = next(line.strip() for line in body.splitlines() if line.strip().startswith("if ! PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=\"$RELEASE_STAGE\""))
+    assert "PYTHONDONTWRITEBYTECODE=1" in invocation
+    env = dict(os.environ)
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+    subprocess.run([
+        sys.executable, str(release_stage / "scripts/export_context_metadata.py"),
+        "--source-commit", source_sha, "--output", str(output),
+    ], cwd=repo, env=dict(env, PYTHONDONTWRITEBYTECODE="1"), check=True)
+    output.chmod(0o644)
+    archive_path = tmp_path / "release.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as tar:
+        tar.add(release_stage, arcname=stage_prefix)
+    with tarfile.open(archive_path, "r:gz") as tar:
+        names = tar.getnames()
+    assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
+    assert "candidate/context-metadata.json" in names
 
 
 def test_metadata_exporter_refuses_symlink_output(tmp_path: Path) -> None:

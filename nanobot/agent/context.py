@@ -760,6 +760,13 @@ Skills with available="false" need dependencies installed first - you can try in
         sections.append(("runtime", runtime_section))
         sections.append(("scorecard", scorecard_section))
         sections.append(("position", position_section))
+        expected_order = list(self.LOOP_CONTEXT_SECTION_ORDER)
+        actual_order = [name for name, _content in sections]
+        if actual_order != expected_order:
+            raise ValueError(
+                "loop context section order diverged from shared provenance rules: "
+                f"expected {expected_order!r}, got {actual_order!r}"
+            )
         return self._fit_system_prompt(
             sections, strict=strict, degrade_on_overflow=degrade_on_overflow,
             memory_fit=self.memory.last_index_fit,

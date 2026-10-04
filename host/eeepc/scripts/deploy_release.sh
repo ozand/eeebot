@@ -129,7 +129,7 @@ if [ "$VERIFY_ONLY" -eq 0 ]; then
       exit 1
     fi
     CONTEXT_FILE="$RELEASE_STAGE/context-metadata.json"
-    if ! PYTHONPATH="$RELEASE_STAGE" python "$RELEASE_STAGE/scripts/export_context_metadata.py" \
+    if ! PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE_STAGE" python "$RELEASE_STAGE/scripts/export_context_metadata.py" \
         --source-commit "$FULL_COMMIT" --output "$CONTEXT_FILE"; then
       echo "CRITICAL: selected source cannot export context metadata" >&2
       exit 1
@@ -224,7 +224,7 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
       echo "CRITICAL: selected metadata exporter is not a regular file" >&2
       exit 1
     fi
-    if ! PYTHONPATH="$CONTEXT_SOURCE" python "$CONTEXT_SOURCE/scripts/export_context_metadata.py" \
+    if ! PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$CONTEXT_SOURCE" python "$CONTEXT_SOURCE/scripts/export_context_metadata.py" \
         --source-commit "$FULL_COMMIT" --output "$CONTEXT_METADATA"; then
       echo "CRITICAL: selected verify-only source cannot export context metadata" >&2
       exit 1
