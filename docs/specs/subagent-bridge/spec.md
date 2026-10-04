@@ -1011,12 +1011,15 @@ the gate), `skills_catalogue`, `memory`, `runtime` — replacing the old five
 `active_skills` is gone (it was always empty under this profile) and the
 five release-root files (`IDENTITY.md`/`SOUL.md`/`goals.md`/`USER.md`/
 `OPERATING.md`) are loaded by `ContextBuilder.load_block` under their own
-per-block char cap (15 500 shared release pool with a 5 000 `OPERATING.md`
-floor; the workspace `AGENTS.md` block is capped at 4 000, memory at 1 000,
-runtime at 400, scorecard at 600, position at 1 200; priorities remain owned
-by `operator_documents.py`; skills catalogue takes its remainder) instead of arriving as a post-fit `system_context`
-tail outside the cap and outside this ledger row. Current context-rule
-provenance is also exported as bounded `context-metadata.json` in supported
+shared release-pool budget of 15 500 chars, drawn in assembly order with a
+5 000-char floor for `OPERATING.md` (there are no per-release-file ceilings);
+workspace `AGENTS.md` remains separately capped at 4 000 chars, memory at
+1 000, runtime at 400, scorecard at 600, and position at 1 200. The 3 000-char
+priorities block is outside the release pool and retains ownership in
+`operator_documents.py`. The retired skills-catalogue slot is empty in the
+actual assembled prompt. These sections are assembled inside the cap rather
+than arriving as a post-fit `system_context` tail outside this ledger row.
+Current context-rule provenance is also exported as bounded `context-metadata.json` in supported
 deployment releases. The artifact is generated from the exact selected commit
 and bound to its full SHA. It contains only approved rule IDs/order/owners,
 inclusion labels, and static values; it does not claim an effective
