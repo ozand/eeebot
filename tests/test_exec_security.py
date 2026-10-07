@@ -244,6 +244,25 @@ async def test_watchdog_repeated_cancellation_finishes_real_process_cleanup(tmp_
 
 @pytest.mark.skipif(__import__("os").name != "nt", reason="Windows process-tree cleanup follow-up #2027")
 @pytest.mark.asyncio
+async def test_windows_job_setup_failure_does_not_run_command(tmp_path, monkeypatch):
+    import os
+
+    if os.name != "nt":
+        pytest.skip("Windows Job Object failure-path test")
+    marker = tmp_path / "must-not-exist.txt"
+    def fail_job_assignment(process):
+        assert process.returncode is None, "command process exited before ownership succeeded"
+        raise OSError("injected Job Object failure")
+
+    monkeypatch.setattr("nanobot.agent.tools.shell._assign_to_kill_on_close_job",
+                        fail_job_assignment)
+    result = await ExecTool(timeout=5).execute(f'echo ran > "{marker}"')
+    assert result.startswith("Error executing command:")
+    assert not marker.exists(), "untrusted command ran before Job Object ownership succeeded"
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="Windows process-tree cleanup follow-up #2027")
+@pytest.mark.asyncio
 async def test_watchdog_cancellation_kills_windows_descendant_after_shell_exits(tmp_path, monkeypatch):
     """Use a saved shell PID to verify tree cleanup after the shell exits."""
     import asyncio

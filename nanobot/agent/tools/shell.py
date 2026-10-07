@@ -4,6 +4,7 @@ import asyncio
 import ctypes
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -54,7 +55,7 @@ def _assign_to_kill_on_close_job(process: asyncio.subprocess.Process):
     kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
     job = kernel32.CreateJobObjectW(None, None)
     if not job:
-        return None
+        raise ctypes.WinError(ctypes.get_last_error())
     info = _JobObjectExtendedLimitInformation()
     info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
     kernel32.SetInformationJobObject.argtypes = [
@@ -63,13 +64,15 @@ def _assign_to_kill_on_close_job(process: asyncio.subprocess.Process):
     if not kernel32.SetInformationJobObject(
         job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(info), ctypes.sizeof(info)
     ):
+        error = ctypes.get_last_error()
         kernel32.CloseHandle(job)
-        return None
+        raise ctypes.WinError(error)
     process_handle = process._transport.get_extra_info("subprocess")._handle
     kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     if not kernel32.AssignProcessToJobObject(job, int(process_handle)):
+        error = ctypes.get_last_error()
         kernel32.CloseHandle(job)
-        return None
+        raise ctypes.WinError(error)
     return job
 
 
@@ -187,19 +190,34 @@ class ExecTool(Tool):
             env["PATH"] = env.get("PATH", "") + os.pathsep + self.path_append
 
         try:
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env,
-                start_new_session=(os.name != "nt"),
-                creationflags=(0x00000200 if os.name == "nt" else 0),
-            )
-            if os.name != "nt":
-                process_group_id = process.pid
-            else:
+            if os.name == "nt":
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable, "-c",
+                    "import subprocess,sys; gate=sys.stdin.buffer.read(1); "
+                    "sys.exit(subprocess.call(sys.argv[1], shell=True) if gate else 125)",
+                    command,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                    creationflags=0,
+                )
                 job_handle[0] = _assign_to_kill_on_close_job(process)
+                assert process.stdin is not None
+                process.stdin.write(b"\0")
+                await process.stdin.drain()
+                process.stdin.close()
+            else:
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                    start_new_session=True,
+                )
+                process_group_id = process.pid
 
             try:
                 stdout, stderr = await asyncio.wait_for(
@@ -253,6 +271,9 @@ class ExecTool(Tool):
                 await cleanup
             raise
         except Exception as e:
+            if process is not None and process.returncode is None:
+                await self._terminate_and_reap(process, process_group_id, job_handle[0])
+                job_handle[0] = None
             return f"Error executing command: {str(e)}"
         finally:
             if job_handle[0] is not None:
