@@ -6,6 +6,15 @@
 
 - Implementation/test mode takes an explicitly supplied fixture anchor SHA. It is marked non-authoritative in tests and cannot enter production deployment code paths. Keep fixture selection out of production CLI/environment switches; test harnesses must invoke a separate test-only API or inject the fixture directly. Missing production approval must fail closed.
 - Production mode reads an operator-owned immutable full SHA and approval reference from configuration outside the selected target/archive. It must reject absent/malformed SHA, mutable refs, or unrecorded approval. Enable production only after implementation, independent security review, and explicit operator approval of the chosen SHA.
+
+## Unresolved production bootstrap delivery decision
+
+ADR-038's policy requires the bootstrap verifier, authority manifest, and approved pin to be independent of the selected target. The repository has no approved production provisioning path for those operator-owned artifacts, and this implementation plan does not authorize choosing an anchor or installing host/operator state. Before production enablement, the owner must choose and approve how the verifier and pin are delivered outside the target tree:
+
+1. **Recommended:** an operator-managed local configuration directory outside the checkout supplies a read-only pin/approval record and manifest; a separately installed, independently reviewed verifier reads target Git objects as data, compares the closure, then launches only anchor code. This requires an explicit owner decision naming the provisioning/installation mechanism and access controls; none is implied here.
+2. **Alternative:** keep production export disabled until a separately governed operator tool/release installs that checker and pin. #2058 can deliver the testable checker implementation and remain fail-closed in production meanwhile.
+
+Until that decision and provisioning exist, production invocations with an exporter must fail closed before executing selected-ref code. This is a deployment/provisioning blocker, not permission to trust the checkout's current helper or a branch name. This bounded implementation may still deliver and unit-test the Git-object comparison logic against explicitly injected non-authoritative fixture pins; that test seam must be impossible to select through production CLI/environment inputs and cannot bypass production bootstrap validation.
 - Target ref supplies only target commit identity and Git objects for comparison. Never execute/import target Python, use its `PYTHONPATH`, or accept its manifest/config as trust policy.
 
 ## Bounded authority manifest (to finalize in implementation review)
