@@ -32,3 +32,11 @@ lessons:
       - agents
       - tooling
       - harness
+  - id: PROJECT-0006
+    title: Verify the tool control plane before orchestration recovery
+    path: kb/lessons/PROJECT-0006-verify-tool-control-plane-before-recovery.md
+    tags:
+      - herdr
+      - shell
+      - verification
+      - orchestration
