@@ -747,6 +747,10 @@ class SubagentManager:
                             state_root=self._state_root,
                             prompt_tokens=prompt_tokens,
                             prompt_token_delta=_appended_delta,
+                            # #1930/I1: namespaces the preservation file --
+                            # `cycle_id` alone is not unique across concurrent
+                            # or repeated executions sharing a state root.
+                            execution_id=task_id,
                         )
                     except Exception as _compact_exc:
                         logger.warning(
