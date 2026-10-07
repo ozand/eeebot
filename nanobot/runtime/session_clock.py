@@ -112,9 +112,10 @@ def repair_wait_budget_secs(
     current = (clock or time.monotonic)() if now is None else now
     reserve = get_final_budget_secs() if final_reserve_secs is None else max(0.0, final_reserve_secs)
     remaining_for_repair = wall_deadline - current - reserve
-    # A repair manager enforces the same p99 + final reserve before starting
-    # its first model call. Avoid spawning a no-op repair that cannot reach it.
-    if remaining_for_repair < get_wall_safety_margin_secs():
+    # The finalization reserve was already subtracted above; only the p99
+    # call budget remains to prove that the repair can begin an LLM call.
+    # Comparing against p99 + final here would reserve finalization twice.
+    if min(max(0.0, max_wait_secs), remaining_for_repair) < get_call_p99_secs():
         return None
     return min(max(0.0, max_wait_secs), remaining_for_repair)
 

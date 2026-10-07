@@ -854,6 +854,7 @@ class SubagentManager:
 
         except asyncio.CancelledError:
             cancelled_at = self._utc_now()
+            _error_call_gap = getattr(locals().get("_watchdog"), "max_call_gap_s", None)
             self._write_subagent_telemetry(
                 task_id,
                 self._build_subagent_telemetry_payload(
@@ -869,13 +870,16 @@ class SubagentManager:
                     session_key=session_key,
                     correlation_context=correlation_context,
                     context_usage=context_usage,
+                    max_call_gap_s=_error_call_gap,
                 ),
             )
+            self.last_max_call_gap_s = _error_call_gap
             logger.info("Subagent [{}] cancelled", task_id)
             raise
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             finished_at = self._utc_now()
+            _error_call_gap = getattr(locals().get("_watchdog"), "max_call_gap_s", None)
             self._write_subagent_telemetry(
                 task_id,
                 self._build_subagent_telemetry_payload(
@@ -891,8 +895,10 @@ class SubagentManager:
                     session_key=session_key,
                     correlation_context=correlation_context,
                     context_usage=context_usage,
+                    max_call_gap_s=_error_call_gap,
                 ),
             )
+            self.last_max_call_gap_s = _error_call_gap
             logger.error("Subagent [{}] failed: {}", task_id, e)
             await self._announce_result(task_id, label, task, error_msg, origin, "error")
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -97,6 +98,27 @@ def _make_repair_manager(status: str, result: str):
             return "fake repair spawned"
 
     return _RepairManager
+
+
+def _witness(monkeypatch, manager_cls):
+    """Count ``manager_cls`` constructions and ``spawn()`` calls, so a test
+    proves which path the cycle actually took (a stubbed planner must not
+    let a different route record the same end state)."""
+    seen = {"init": 0, "spawn": 0}
+    orig_init = manager_cls.__init__
+    orig_spawn = manager_cls.spawn
+
+    def witnessed_init(self, *args, **kwargs):
+        seen["init"] += 1
+        orig_init(self, *args, **kwargs)
+
+    async def spawn(self, *args, **kwargs):
+        seen["spawn"] += 1
+        return await orig_spawn(self, *args, **kwargs)
+
+    monkeypatch.setattr(manager_cls, "__init__", witnessed_init)
+    monkeypatch.setattr(manager_cls, "spawn", spawn)
+    return seen
 
 
 def _fail_once_then_pass():
@@ -192,6 +214,122 @@ class TestAuthoritativeSpawnEndToEnd:
         assert budget_rows, "repair should be durably recorded as skipped when reserve cannot fit"
         assert not repair_spawned["value"]
 
+    def test_primary_call_gap_survives_repair_manager_without_gap(self, tmp_path, monkeypatch):
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
+        _seed_bridge_request(state_dir, "req-primary-gap-repair-none", "cycle-primary-gap-repair-none")
+        _stub_planning_session(monkeypatch, "add feature")
+
+        class _MeasuredPrimary(_PrimaryManager):
+            last_max_call_gap_s = 17.5
+
+        monkeypatch.setattr(bridge, "SubagentManager", _MeasuredPrimary)
+        repair_base = _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)
+
+        class _OneCallRepair(repair_base):
+            last_max_call_gap_s = None
+
+        import nanobot.agent.subagent as subagent_module
+        monkeypatch.setattr(subagent_module, "SubagentManager", _OneCallRepair)
+        monkeypatch.setattr(
+            "nanobot.runtime.session_clock.compute_cycle_max_call_gap",
+            lambda *args, **kwargs: kwargs.get("fallback_gap"),
+        )
+        primary = _witness(monkeypatch, _MeasuredPrimary)
+        repair = _witness(monkeypatch, _OneCallRepair)
+        assert asyncio.run(bridge._main_impl()) == 0
+        assert primary["spawn"] == 1, primary
+        assert repair["init"] >= 1 and repair["spawn"] >= 1, repair  # the repair path really ran
+        rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
+        assert rows[-1]["max_call_gap_s"] == 17.5
+
+    def test_repair_manager_larger_call_gap_is_recorded(self, tmp_path, monkeypatch):
+        """The repair turn's own gap reaches the outcome row when it is the
+        largest -- only true while the bridge points _last_call_gap_manager
+        at the repair manager before its spawn (the #2009 line the other
+        call-gap tests cannot see: there the primary's gap is the max)."""
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
+        _seed_bridge_request(state_dir, "req-repair-gap-larger", "cycle-repair-gap-larger")
+        _stub_planning_session(monkeypatch, "add feature")
+
+        class _MeasuredPrimary(_PrimaryManager):
+            last_max_call_gap_s = 17.5
+
+        monkeypatch.setattr(bridge, "SubagentManager", _MeasuredPrimary)
+        repair_base = _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)
+
+        class _SlowRepair(repair_base):
+            async def spawn(self, **kwargs):
+                result = await super().spawn(**kwargs)
+                self.last_max_call_gap_s = 60.0  # measured during the repair turn
+                return result
+
+        import nanobot.agent.subagent as subagent_module
+        monkeypatch.setattr(subagent_module, "SubagentManager", _SlowRepair)
+        monkeypatch.setattr(
+            "nanobot.runtime.session_clock.compute_cycle_max_call_gap",
+            lambda *args, **kwargs: kwargs.get("fallback_gap"),
+        )
+        primary = _witness(monkeypatch, _MeasuredPrimary)
+        repair = _witness(monkeypatch, _SlowRepair)
+        assert asyncio.run(bridge._main_impl()) == 0
+        assert primary["spawn"] == 1, primary
+        assert repair["init"] >= 1 and repair["spawn"] >= 1, repair  # the repair path really ran
+        rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
+        assert rows[-1]["max_call_gap_s"] == 60.0
+
+    def test_primary_max_call_gap_survives_smaller_repair_gap_on_exception(self, tmp_path, monkeypatch):
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
+        _seed_bridge_request(state_dir, "req-primary-gap-repair-exception", "cycle-primary-gap-repair-exception")
+        _stub_planning_session(monkeypatch, "add feature")
+        monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "4000")
+        monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "100")
+        monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "100")
+        monkeypatch.setattr(bridge, "_BRIDGE_PROCESS_START_MONO", 0.0)
+        now = [0.0]
+        monkeypatch.setattr(bridge.time, "monotonic", lambda: now[0])
+
+        class _MeasuredPrimary(_PrimaryManager):
+            last_max_call_gap_s = 40.0
+
+        monkeypatch.setattr(bridge, "SubagentManager", _MeasuredPrimary)
+        repair_base = _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)
+
+        repair_ran = {"value": False}
+
+        class _OneCallRepair(repair_base):
+            last_max_call_gap_s = 5.0
+
+            async def spawn(self, **kwargs):
+                result = await super().spawn(**kwargs)
+                repair_ran["value"] = True
+                now[0] = 3801.0
+                return result
+
+        import nanobot.agent.subagent as subagent_module
+        monkeypatch.setattr(subagent_module, "SubagentManager", _OneCallRepair)
+        # The bridge also calls _check_test_weakening BEFORE the smoke gate;
+        # failing there would end the cycle before any repair turn and make
+        # this test pass without the repair path. Inject only after repair.
+        real_weakening = bridge._check_test_weakening
+
+        def _post_repair_failure(*args, **kwargs):
+            if repair_ran["value"]:
+                raise RuntimeError("injected post-repair failure")
+            return real_weakening(*args, **kwargs)
+
+        monkeypatch.setattr(bridge, "_check_test_weakening", _post_repair_failure)
+        monkeypatch.setattr(
+            "nanobot.runtime.session_clock.compute_cycle_max_call_gap",
+            lambda *args, **kwargs: kwargs.get("fallback_gap"),
+        )
+        primary = _witness(monkeypatch, _MeasuredPrimary)
+        repair = _witness(monkeypatch, _OneCallRepair)
+        assert asyncio.run(bridge._main_impl()) == 0
+        assert primary["spawn"] == 1, primary
+        assert repair["init"] >= 1 and repair["spawn"] >= 1, repair  # the repair path really ran
+        rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
+        assert rows[-1]["max_call_gap_s"] == 40.0
+
     def test_success_outcome_records_executor_call_gap(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-call-gap", "cycle-call-gap")
@@ -221,6 +359,36 @@ class TestAuthoritativeSpawnEndToEnd:
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
         assert rows[-1]["max_call_gap_s"] == 42.0
 
+    def test_executor_exception_path_records_observed_call_gap(self, tmp_path, monkeypatch):
+        class _ExceptionPrimary(_PrimaryManager):
+            async def spawn(self, **kwargs):
+                self.last_max_call_gap_s = 37.0
+                return await super().spawn(**kwargs)
+
+        repair_cls = _make_repair_manager("cancelled", REPAIR_TEXT_CANCELLED)
+        state_dir = _wire(tmp_path, monkeypatch, repair_cls)
+        _seed_bridge_request(state_dir, "req-gap-unexpected", "cycle-gap-unexpected")
+        _stub_planning_session(monkeypatch, "add feature")
+        monkeypatch.setattr(bridge, "SubagentManager", _ExceptionPrimary)
+        injected = {"raised": 0}
+
+        def _post_executor_failure(*_args, **_kwargs):
+            injected["raised"] += 1
+            raise RuntimeError("injected post-executor failure")
+
+        monkeypatch.setattr(bridge, "_changed_files_and_violations", _post_executor_failure)
+        primary = _witness(monkeypatch, _ExceptionPrimary)
+        repair = _witness(monkeypatch, repair_cls)
+
+        assert asyncio.run(bridge._main_impl()) == 0
+        # the path under test: the executor ran, then the injected failure hit
+        # before the smoke gate -- so no repair turn exists on this path.
+        assert primary["spawn"] == 1, primary
+        assert injected["raised"] >= 1
+        assert repair["spawn"] == 0, repair
+        rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
+        assert rows[-1].get("max_call_gap_s") == 37.0
+
     def test_executor_error_records_observed_call_gap(self, tmp_path, monkeypatch):
         class _ErrorPrimary(_PrimaryManager):
             last_max_call_gap_s = 31.0
@@ -239,6 +407,134 @@ class TestAuthoritativeSpawnEndToEnd:
         assert asyncio.run(bridge._main_impl()) == bridge.EXIT_EXECUTOR_LLM_ERROR
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
         assert rows[-1]["max_call_gap_s"] == 31.0
+
+    def test_repair_cancelled_before_first_step_finalizes_telemetry_and_preserves_metadata(self, tmp_path, monkeypatch):
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
+        _seed_bridge_request(state_dir, "req-repair-cancel-telemetry", "cycle-repair-cancel-telemetry")
+        _stub_planning_session(monkeypatch, "add feature")
+        monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "4000")
+        monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "100")
+        monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "100")
+        monkeypatch.setattr(bridge, "_BRIDGE_PROCESS_START_MONO", 0.0)
+        now = [0.0]
+        monkeypatch.setattr(bridge.time, "monotonic", lambda: now[0])
+        repair_ids = []
+        finalized = []
+        captured_spawn = []
+        import nanobot.agent.subagent as subagent_module
+        repair_base = _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)
+
+        class _PendingRepair(repair_base):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self._telemetry_dir = Path(bridge.STATE_DIR) / "subagents"
+
+            def _subagent_path(self, task_id):
+                return self._telemetry_dir / f"{task_id}.json"
+
+            def _read_subagent_started_at(self, _task_id):
+                return "2026-09-27T12:00:00Z"
+
+            def _utc_now(self):
+                return "2026-09-27T12:01:00Z"
+
+            def _write_subagent_telemetry(self, task_id, payload):
+                path = self._subagent_path(task_id)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                if payload.get("stop_reason"):
+                    finalized.append(payload)
+
+            async def spawn(self, **kwargs):
+                captured_spawn.append(kwargs.copy())
+                origin = {
+                    "channel": kwargs.get("origin_channel", "cli"),
+                    "chat_id": kwargs.get("origin_chat_id", "direct"),
+                    "session_key": kwargs.get("session_key"),
+                }
+                self._write_subagent_telemetry(self.task_id, {
+                    "task": kwargs["task"], "origin": origin,
+                    "parent_context": {"origin": origin},
+                    "correlation_context": {"cycle_id": "cycle-repair-cancel-telemetry"},
+                    "status": "running", "result": None,
+                    "started_at": self._utc_now(),
+                })
+                async def _pending():
+                    await asyncio.Event().wait()
+                self._running_tasks[self.task_id] = asyncio.create_task(_pending())
+                repair_ids.extend(self._running_tasks)
+                now[0] = 3801.0
+                return "pending repair spawned"
+
+        monkeypatch.setattr(bridge, "SubagentManager", _PrimaryManager)
+        monkeypatch.setattr(subagent_module, "SubagentManager", _PendingRepair)
+        primary = _witness(monkeypatch, _PrimaryManager)
+        repair = _witness(monkeypatch, _PendingRepair)
+        assert asyncio.run(bridge._main_impl()) == 0
+        assert primary["spawn"] == 1, primary
+        assert repair["init"] >= 1 and repair["spawn"] >= 1, repair  # the repair path really ran
+        assert repair_ids
+        telemetry = json.loads((state_dir / "subagents" / f"{repair_ids[0]}.json").read_text())
+        assert telemetry["status"] == "cancelled"
+        assert finalized[0]["stop_reason"] == "repair_skipped_no_budget"
+        assert finalized[0]["finished_at"]
+        assert finalized[0]["task"] == captured_spawn[0]["task"]
+        assert finalized[0]["origin"] == {
+            "channel": "cli",
+            "chat_id": "direct",
+            "session_key": None,
+        }
+        assert finalized[0]["parent_context"] == {"origin": finalized[0]["origin"]}
+        assert finalized[0]["correlation_context"] == {
+            "cycle_id": "cycle-repair-cancel-telemetry",
+        }
+
+    def test_repair_wait_is_recomputed_immediately_before_wait(self, tmp_path, monkeypatch):
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
+        _seed_bridge_request(state_dir, "req-repair-recompute", "cycle-repair-recompute")
+        _stub_planning_session(monkeypatch, "add feature")
+        now = [0.0]
+        monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "4000")
+        monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "100")
+        monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "100")
+        monkeypatch.setattr(bridge, "_BRIDGE_PROCESS_START_MONO", 0.0)
+        monkeypatch.setattr(bridge.time, "monotonic", lambda: now[0])
+        import nanobot.runtime.session_clock as session_clock
+        real_budget = session_clock.repair_wait_budget_secs
+        budget_calls = []
+
+        def _advance_after_first_budget(*args, **kwargs):
+            budget = real_budget(*args, **kwargs)
+            budget_calls.append(budget)
+            return budget
+
+        _repair_spawn_state = {"spawned": False}
+        import nanobot.agent.subagent as subagent_module
+        base_repair_cls = _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER)
+
+        # The bridge performs immediate cancellation on the pre-await skip;
+        # use an unresolved task so this verifies cleanup rather than a no-op.
+        class _PendingRepair(base_repair_cls):
+            async def spawn(self, **kwargs):
+                _repair_spawn_state["spawned"] = True
+                async def _finished():
+                    return None
+                self._running_tasks[self.task_id] = asyncio.create_task(_finished())
+                now[0] = 3800.0
+                return "pending repair"
+
+        monkeypatch.setattr(subagent_module, "SubagentManager", _PendingRepair)
+        monkeypatch.setattr(bridge, "SubagentManager", _PrimaryManager)
+        monkeypatch.setattr(session_clock, "repair_wait_budget_secs", _advance_after_first_budget)
+        primary = _witness(monkeypatch, _PrimaryManager)
+        repair = _witness(monkeypatch, _PendingRepair)
+        assert asyncio.run(bridge._main_impl()) == 0
+        assert primary["spawn"] == 1, primary
+        assert repair["init"] >= 1 and repair["spawn"] >= 1, repair  # the repair path really ran
+        assert budget_calls[0] == 1200.0
+        assert len(budget_calls) >= 2, "repair wait must be recomputed immediately before await"
+        assert budget_calls[-1] == 100.0, "stale 1200s wait must shrink after pre-await work"
+        assert _repair_spawn_state["spawned"] is True
 
     def test_repair_manager_receives_shared_deadline(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
