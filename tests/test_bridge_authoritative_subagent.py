@@ -330,6 +330,78 @@ class TestAuthoritativeSpawnEndToEnd:
         rows = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
         assert rows[-1]["max_call_gap_s"] == 40.0
 
+    def test_max_call_gap_across_primary_and_multiple_repairs_survives_exception(self, tmp_path, monkeypatch):
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
+        _seed_bridge_request(state_dir, "req-gap-multiple-repairs", "cycle-gap-multiple-repairs")
+        _stub_planning_session(monkeypatch, "add feature")
+        monkeypatch.setattr(bridge, "SubagentManager", _PrimaryManager)
+        repair_classes = iter((
+            (_make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER), 40.0),
+            (_make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER), 5.0),
+        ))
+        installed_repair_gaps = []
+        manager_instances = []
+        import nanobot.agent.subagent as subagent_module
+
+        class _SequencedRepairFactory:
+            def __new__(cls, **kwargs):
+                manager_cls, gap = next(repair_classes)
+                manager = manager_cls(**kwargs)
+                # like production: nothing measured until the manager runs
+                # (SubagentManager.__init__ sets None; _spawn below sets it).
+                original_spawn = manager.spawn
+
+                async def _spawn(**spawn_kwargs):
+                    result = await original_spawn(**spawn_kwargs)
+                    manager.last_max_call_gap_s = gap
+                    return result
+
+                manager.spawn = _spawn
+                installed_repair_gaps.append(gap)
+                manager_instances.append(manager)
+                return manager
+
+        monkeypatch.setattr(subagent_module, "SubagentManager", _SequencedRepairFactory)
+
+        class _PrimaryWithGap(_PrimaryManager):
+            last_max_call_gap_s = 10.0
+
+            async def spawn(self, **kwargs):
+                result = await super().spawn(**kwargs)
+                self.last_max_call_gap_s = 10.0
+                return result
+
+        monkeypatch.setattr(bridge, "SubagentManager", _PrimaryWithGap)
+        monkeypatch.setattr(bridge, "_changed_files_and_violations", lambda *_args, **_kwargs: ([], [], [], ""))
+        monkeypatch.setattr(bridge, "_check_test_weakening", lambda *_args, **_kwargs: ([], [], []))
+        monkeypatch.setattr(bridge, "_try_repair", lambda *_args, **_kwargs: None, raising=False)
+        # Force two repair-manager installations, then fail after the second so
+        # the outcome exercises the exception finalization path.
+        smoke_calls = {"count": 0}
+
+        def _smoke_then_exception(*args, **kwargs):
+            smoke_calls["count"] += 1
+            if smoke_calls["count"] >= 3:
+                raise RuntimeError("injected after second repair")
+            return (False, "pytest failed")
+
+        monkeypatch.setattr(bridge, "_run_smoke_tests_with_shrink_guard", _smoke_then_exception)
+        monkeypatch.setattr(bridge.time, "monotonic", lambda: 0.0)
+        monkeypatch.setattr(
+            "nanobot.runtime.session_clock.compute_cycle_max_call_gap",
+            lambda *args, **kwargs: kwargs.get("fallback_gap"),
+        )
+        monkeypatch.setattr(bridge, "_BRIDGE_PROCESS_START_MONO", 0.0)
+        monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "4000")
+        monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "100")
+        monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "100")
+        assert asyncio.run(bridge._main_impl()) == 0
+        outcomes = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
+        assert installed_repair_gaps == [40.0, 5.0]
+        assert [manager.last_max_call_gap_s for manager in manager_instances] == [40.0, 5.0]
+        assert outcomes[-1]["max_call_gap_s"] == 40.0
+
+
     def test_success_outcome_records_executor_call_gap(self, tmp_path, monkeypatch):
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
         _seed_bridge_request(state_dir, "req-call-gap", "cycle-call-gap")
