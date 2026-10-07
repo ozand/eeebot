@@ -62,6 +62,19 @@ done
 log()  { echo "[deploy] $*"; }
 run()  { if [[ $DRY_RUN -eq 1 ]]; then echo "[DRY] $*"; else "$@"; fi; }
 
+CONTEXT_WORKDIR=""
+CONTEXT_FILE=""
+cleanup_context_workdir() {
+  if [[ -n "$CONTEXT_FILE" && -f "$CONTEXT_FILE" && ! -L "$CONTEXT_FILE" ]]; then
+    rm -f -- "$CONTEXT_FILE"
+  fi
+  if [[ -n "$CONTEXT_WORKDIR" && -d "$CONTEXT_WORKDIR" && ! -L "$CONTEXT_WORKDIR" ]]; then
+    rm -rf -- "$CONTEXT_WORKDIR"
+  fi
+  CONTEXT_FILE=""
+}
+trap cleanup_context_workdir EXIT
+
 if [ "$VERIFY_ONLY" -eq 0 ]; then
   # Ref verification
   if [ -z "$REF" ]; then
@@ -90,6 +103,9 @@ if [ "$VERIFY_ONLY" -eq 0 ]; then
   RELEASE_NAME="${TIMESTAMP}-canonical-${COMMIT}"
   FULL_COMMIT="$(git -C "$REPO_ROOT" rev-parse "$COMMIT^{commit}")"
   ARCHIVE="/tmp/eeebot-release-${RELEASE_NAME}.tar.gz"
+  CONTEXT_WORKDIR="$(mktemp -d /tmp/eeebot-context-${COMMIT}.XXXXXX)"
+  CONTEXT_SOURCE="$CONTEXT_WORKDIR"
+  CONTEXT_METADATA="$CONTEXT_WORKDIR/context-metadata.json"
 
   log "repo:    $REPO_ROOT"
   log "commit:  $COMMIT ($SUBJECT) ($BRANCH)"
@@ -101,6 +117,36 @@ if [ "$VERIFY_ONLY" -eq 0 ]; then
   log "creating archive..."
   run git -C "$REPO_ROOT" archive --format=tar.gz --prefix="${RELEASE_NAME}/" "$COMMIT" \
     -o "$ARCHIVE"
+  if [ "$DRY_RUN" -eq 0 ]; then
+    # Export from the exact selected source tree, never ambient checkout HEAD.
+    git -C "$REPO_ROOT" archive --format=tar --prefix="${RELEASE_NAME}/" "$COMMIT" | tar -x -C "$CONTEXT_SOURCE"
+    # tar honors the caller's umask; make the staged source readable/traversable
+    # to the least-privilege remote validator, without adding write permissions.
+    chmod -R a+rX "$CONTEXT_SOURCE"
+    RELEASE_STAGE="$CONTEXT_SOURCE/$RELEASE_NAME"
+    if ! test -f "$RELEASE_STAGE/scripts/export_context_metadata.py" || test -L "$RELEASE_STAGE/scripts/export_context_metadata.py"; then
+      echo "CRITICAL: selected metadata exporter is not a regular file" >&2
+      exit 1
+    fi
+    CONTEXT_FILE="$RELEASE_STAGE/context-metadata.json"
+    if ! PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$RELEASE_STAGE" python "$RELEASE_STAGE/scripts/export_context_metadata.py" \
+        --source-commit "$FULL_COMMIT" --output "$CONTEXT_FILE"; then
+      echo "CRITICAL: selected source cannot export context metadata" >&2
+      exit 1
+    fi
+    if ! test -f "$RELEASE_STAGE/context-metadata.json" || test -L "$RELEASE_STAGE/context-metadata.json"; then
+      echo "CRITICAL: generated context metadata is not a regular file" >&2
+      exit 1
+    fi
+    chmod 0644 "$RELEASE_STAGE/context-metadata.json"
+    if ! test -r "$RELEASE_STAGE/scripts/export_context_metadata.py" || test -L "$RELEASE_STAGE/scripts/export_context_metadata.py"; then
+      echo "CRITICAL: selected metadata exporter is not a regular file" >&2
+      exit 1
+    fi
+    tar -C "$CONTEXT_SOURCE" -czf "$ARCHIVE" "$RELEASE_NAME"
+    cleanup_context_workdir
+    CONTEXT_WORKDIR=""
+  fi
   log "archive: $ARCHIVE ($(du -sh "$ARCHIVE" | cut -f1))"
 
   # 2. Copy to host
@@ -126,6 +172,9 @@ else
   fi
   REMOTE_ARCHIVE=""
   RELEASE_NAME=""
+  CONTEXT_WORKDIR=""
+  CONTEXT_METADATA=""
+  CONTEXT_SOURCE=""
 fi
 
 # Resolve PREV_RELEASE so we can roll back if needed
@@ -145,7 +194,7 @@ rollback_release() {
 log "installing on $HOST..."
 REMOTE_ENV="REMOTE_ARCHIVE='${REMOTE_ARCHIVE:-}' RELEASE_NAME='${RELEASE_NAME:-}' FULL_COMMIT='${FULL_COMMIT:-}' PREV_RELEASE_PATH='${PREV_RELEASE_PATH:-}' VERIFY_ONLY='$VERIFY_ONLY'"
 if [ "$VERIFY_ONLY" -eq 1 ]; then
-  GATE_TMP="$(git -C "$REPO_ROOT" archive --format=tar "$COMMIT" scripts nanobot host/eeepc/etc | \
+  GATE_TMP="$(git -C "$REPO_ROOT" archive --format=tar "$COMMIT" | \
     ssh "ozand@${HOST}" 'set -e; d=$(mktemp -d /tmp/eeebot-verify-gate.XXXXXX); trap '\''sudo -n rm -rf -- "$d"'\'' EXIT; tar -x -C "$d"; chmod -R a+rX "$d"; printf "%s" "$d"; trap - EXIT')"
   cleanup_candidate_gate() {
     if [[ "$GATE_TMP" =~ ^/tmp/eeebot-verify-gate\.[A-Za-z0-9]{6}$ ]]; then
@@ -154,10 +203,43 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
       log "WARNING: refusing unsafe candidate gate temp cleanup path: $GATE_TMP"
     fi
   }
-  trap cleanup_candidate_gate EXIT
+  trap 'cleanup_candidate_gate; cleanup_context_workdir' EXIT
   if [ -z "$GATE_TMP" ]; then
     echo "CRITICAL: could not stage candidate gate on $HOST" >&2
     exit 1
+  fi
+  if git -C "$REPO_ROOT" cat-file -e "$COMMIT:scripts/export_context_metadata.py" 2>/dev/null; then
+    CONTEXT_WORKDIR="$(mktemp -d /tmp/eeebot-context-verify.XXXXXX)"
+    CONTEXT_SOURCE="$CONTEXT_WORKDIR"
+    CONTEXT_METADATA="$CONTEXT_WORKDIR/context-metadata.json"
+    CONTEXT_FILE="$CONTEXT_METADATA"
+    if ! git -C "$REPO_ROOT" archive --format=tar "$COMMIT" | tar -x -C "$CONTEXT_SOURCE"; then
+      echo "CRITICAL: could not stage selected source for metadata export" >&2
+      exit 1
+    fi
+    # Ensure the unprivileged validator can traverse/read staged files under
+    # restrictive caller umasks; this grants no write access.
+    chmod -R a+rX "$CONTEXT_SOURCE"
+    if ! test -f "$CONTEXT_SOURCE/scripts/export_context_metadata.py" || test -L "$CONTEXT_SOURCE/scripts/export_context_metadata.py"; then
+      echo "CRITICAL: selected metadata exporter is not a regular file" >&2
+      exit 1
+    fi
+    if ! PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$CONTEXT_SOURCE" python "$CONTEXT_SOURCE/scripts/export_context_metadata.py" \
+        --source-commit "$FULL_COMMIT" --output "$CONTEXT_METADATA"; then
+      echo "CRITICAL: selected verify-only source cannot export context metadata" >&2
+      exit 1
+    fi
+    chmod 0644 "$CONTEXT_METADATA"
+    if ! scp "$CONTEXT_METADATA" "ozand@${HOST}:$GATE_TMP/context-metadata.json"; then
+      echo "CRITICAL: could not transfer candidate context metadata" >&2
+      exit 1
+    fi
+    ssh "ozand@${HOST}" "sudo test -f '$GATE_TMP/context-metadata.json'"
+    ssh "ozand@${HOST}" "sudo chmod a+r '$GATE_TMP/context-metadata.json'"
+    cleanup_context_workdir
+    CONTEXT_WORKDIR=""
+  else
+    log "selected historical ref has no metadata exporter; preserving diagnostic-only verify"
   fi
   log "candidate gate staged at $GATE_TMP"
   REMOTE_ENV="GATE_TMP='$GATE_TMP' REMOTE_ARCHIVE='' RELEASE_NAME='' FULL_COMMIT='${FULL_COMMIT}' PREV_RELEASE_PATH='${PREV_RELEASE_PATH:-}' VERIFY_ONLY=1"
@@ -210,6 +292,10 @@ RELEASE_NAME="${RELEASE_NAME:-}"
 FULL_COMMIT="${FULL_COMMIT:-}"
 PREV_RELEASE_PATH="${PREV_RELEASE_PATH:-}"
 VERIFY_ONLY="${VERIFY_ONLY:-0}"
+HEALTH_GATE_PYTHON="${HEALTH_GATE_PYTHON:-/opt/eeepc-agent/venv/bin/python}"
+if [ ! -x "$HEALTH_GATE_PYTHON" ]; then
+  HEALTH_GATE_PYTHON=python3
+fi
 
 RELEASES_DIR=/opt/eeepc-agent/runtimes/self-evolving-agent/releases
 CURRENT_SYMLINK=/opt/eeepc-agent/runtimes/self-evolving-agent/current
@@ -222,6 +308,21 @@ if [ "$VERIFY_ONLY" -eq 1 ]; then
   trap 'sudo rm -rf "$GATE_TMP"' EXIT
   sudo chown -R eeepc-agent:eeepc-agent "$GATE_TMP"
   echo "[remote] candidate $FULL_COMMIT gate temp=$GATE_TMP"
+  if [ -f "$GATE_TMP/context-metadata.json" ]; then
+    if ! sudo -u eeepc-agent env PYTHONPATH="$GATE_TMP" PYTHONDONTWRITEBYTECODE=1 \
+        "$HEALTH_GATE_PYTHON" "$GATE_TMP/scripts/export_context_metadata.py" \
+        --validate --source-commit "$FULL_COMMIT" --output "$GATE_TMP/context-metadata.json"; then
+      die "verify-only candidate context metadata malformed or source commit mismatch"
+    fi
+  elif [ -f "$GATE_TMP/scripts/export_context_metadata.py" ]; then
+    die "verify-only candidate metadata artifact is missing"
+  elif [ -f "$GATE_TMP/scripts/verify_release_health.py" ]; then
+    # Verify-only can inspect historical refs for diagnostics. Deployment
+    # activation separately requires metadata and rejects these old refs.
+    echo "[remote] candidate lacks context metadata exporter; diagnostic-only legacy verify"
+  else
+    die "verify-only candidate has neither context metadata nor health verifier"
+  fi
 else
   RELEASE_DIR="$RELEASES_DIR/$RELEASE_NAME"
 
@@ -232,6 +333,15 @@ else
   echo "$FULL_COMMIT" | sudo tee "$RELEASE_DIR/SOURCE_COMMIT" > /dev/null
   if [ "$(cat "$RELEASE_DIR/SOURCE_COMMIT")" != "$FULL_COMMIT" ]; then
     die "SOURCE_COMMIT does not match full deployed commit"
+  fi
+  if [ ! -f "$RELEASE_DIR/scripts/export_context_metadata.py" ] || [ -L "$RELEASE_DIR/scripts/export_context_metadata.py" ] || \
+      [ ! -f "$RELEASE_DIR/context-metadata.json" ] || [ -L "$RELEASE_DIR/context-metadata.json" ]; then
+    die "context metadata or exporter is not a regular release file"
+  fi
+  if ! sudo -u eeepc-agent env PYTHONPATH="$RELEASE_DIR" PYTHONDONTWRITEBYTECODE=1 \
+      "$HEALTH_GATE_PYTHON" "$RELEASE_DIR/scripts/export_context_metadata.py" \
+      --validate --source-commit "$FULL_COMMIT" --output "$RELEASE_DIR/context-metadata.json"; then
+    die "context metadata missing, unsupported, malformed, or source commit mismatch"
   fi
 
   echo "[remote] linking venv into release"
@@ -672,11 +782,10 @@ fi
 # This verifies imports/rendering and bounded fields, not state health; an empty state can pass.
 # Vocabulary allowlist matching dashboard.ARTIFACT_SOURCE_STATUSES:
 # source["status"] not in {"fresh", "stale", "missing", "permission", "unreadable", "malformed", "valid-empty", "retired", "unavailable"}
-HEALTH_GATE_PYTHON="${HEALTH_GATE_PYTHON:-/opt/eeepc-agent/venv/bin/python}"
-if [ ! -x "$HEALTH_GATE_PYTHON" ]; then
-  HEALTH_GATE_PYTHON=python3
-fi
 if [ "$VERIFY_ONLY" -eq 1 ]; then
+  if [ ! -f "$GATE_TMP/context-metadata.json" ] && [ ! -f "$GATE_TMP/scripts/export_context_metadata.py" ]; then
+    echo "[remote] historical verify-only candidate has no context metadata; runtime activation remains unsupported" >&2
+  fi
   if ! sudo -u eeepc-agent env PYTHONPATH="$GATE_TMP" PYTHONDONTWRITEBYTECODE=1 "$HEALTH_GATE_PYTHON" "$GATE_TMP/scripts/verify_release_health.py"; then
     echo "VERIFY_ONLY HEALTH_FETCH_FAILED" >&2
     die "could not verify candidate release health"

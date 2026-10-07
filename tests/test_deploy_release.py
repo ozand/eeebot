@@ -132,6 +132,20 @@ def repo(tmp_path):
     shutil.copy(DEPLOY_SCRIPT, test_script)
     # #1303: the script sources its exit-class lib from its own directory.
     shutil.copy(DEPLOY_SCRIPT.with_name("lib_bridge_exit.sh"), script_dir / "lib_bridge_exit.sh")
+    # Production releases require the same metadata exporter/definition modules.
+    for relative in (
+        "scripts/export_context_metadata.py",
+        "nanobot/runtime/context_metadata.py",
+        "nanobot/runtime/context_rules.py",
+        "nanobot/runtime/mutation_policy.py",
+        "nanobot/runtime/operator_documents.py",
+        "nanobot/runtime/__init__.py",
+        "nanobot/__init__.py",
+    ):
+        source = REPO_ROOT / relative
+        target = repo_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source, target)
 
     _git("init", cwd=repo_root, check=True)
     hooks_dir = repo_root / ".test-hooks"
@@ -693,7 +707,16 @@ def test_verify_only_streams_candidate_gate_without_requiring_live_gate_file(rep
     """Regression: verify the candidate gate, not code installed in current."""
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     remote = _remote_block(script)
-    assert 'VERIFY_ONLY' in script and 'git -C "$REPO_ROOT" archive --format=tar "$COMMIT" scripts nanobot host/eeepc/etc' in script
+    assert 'VERIFY_ONLY' in script and 'git -C "$REPO_ROOT" archive --format=tar "$COMMIT" | \\' in script
+    assert 'if git -C "$REPO_ROOT" cat-file -e "$COMMIT:scripts/export_context_metadata.py"' in script
+    assert 'chmod 0644 "$CONTEXT_METADATA"' in script
+    assert 'CONTEXT_SOURCE="$CONTEXT_WORKDIR"' in script
+    assert 'mkdir "$CONTEXT_SOURCE"' not in script
+    assert 'CONTEXT_WORKDIR="$(mktemp -d /tmp/eeebot-context-${COMMIT}.XXXXXX)"' in script
+    assert 'CONTEXT_WORKDIR="$(mktemp -d /tmp/eeebot-context-verify.XXXXXX)"' in script
+    assert 'if git -C "$REPO_ROOT" cat-file -e "$COMMIT:scripts/export_context_metadata.py"' in script
+    assert 'trap cleanup_context_workdir EXIT' in script
+    assert 'context-metadata.json' in script
     assert "VERIFY_ONLY" in remote
     assert "verify_release_health.py" in remote
     assert "GATE_TMP=" in remote
@@ -701,6 +724,8 @@ def test_verify_only_streams_candidate_gate_without_requiring_live_gate_file(rep
     assert '"$GATE_TMP/scripts/verify_release_health.py"' in remote
     assert '"$RELEASE_DIR/scripts/verify_release_health.py"' in remote
     assert 'test -f "$RELEASE_DIR/scripts/verify_release_health.py"' not in remote
+    assert 'exporter is not a regular file' in script
+    assert '"$HEALTH_GATE_PYTHON" "$RELEASE_DIR/scripts/export_context_metadata.py"' in remote
     usage = script.splitlines()[5]
     assert "--ref <sha>" in usage and "--verify-only" in usage
     assert "candidate" in script.lower() and "empty state" in script.lower()
@@ -716,8 +741,7 @@ def test_verify_only_streams_candidate_gate_without_requiring_live_gate_file(rep
     monkeypatch.setenv("REPO_ROOT", str(repo))
     commands = repo / "commands.log"
     mock_log = shlex.quote(str(commands))
-    candidate_tmp = shlex.quote(str(repo / "candidate-gate-temp"))
-    candidate_py = shlex.quote(str(candidate_gate))
+    candidate_tmp = str(repo / "candidate-gate-temp").replace("\\", "/")
     ssh_body = f'''#!/usr/bin/env bash
 set -e
 if [[ "$*" == *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"* ]]; then
@@ -725,9 +749,9 @@ if [[ "$*" == *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*
   exit 0
 fi
 if [[ "$*" == *"mktemp -d /tmp/eeebot-verify-gate."* ]]; then
-  mkdir -p {candidate_tmp}/scripts
-  cp {candidate_py} {candidate_tmp}/scripts/verify_release_health.py
-  echo {candidate_tmp}
+  mkdir -p {candidate_tmp.replace("'", "")}
+  tar -x -C {candidate_tmp.replace("'", "")}
+  echo {candidate_tmp.replace("'", "")}
   exit 0
 fi
 case "$*" in
@@ -752,9 +776,9 @@ exit 0
 def test_verify_only_runs_gate_from_requested_commit_not_checkout_head(repo, mock_bin, monkeypatch, tmp_path) -> None:
     """The production archive selection must deliver and run the requested gate."""
     gate = repo / "scripts/verify_release_health.py"
-    gate.parent.mkdir(parents=True)
+    gate.parent.mkdir(parents=True, exist_ok=True)
     gate.write_text("print('CANDIDATE_GATE_ONLY')\n", encoding="utf-8")
-    (repo / "nanobot").mkdir()
+    (repo / "nanobot").mkdir(exist_ok=True)
     (repo / "nanobot/__init__.py").write_text("# fixture\n", encoding="utf-8")
     (repo / "host/eeepc/etc/presets").mkdir(parents=True)
     (repo / "host/eeepc/etc/presets/test.env").write_text("FIXTURE=1\n", encoding="utf-8")
@@ -771,6 +795,12 @@ def test_verify_only_runs_gate_from_requested_commit_not_checkout_head(repo, moc
     stage_arg = shlex.quote(str(stage).replace("\\", "/"))
     _write_mock(mock_bin / "mktemp", f'mkdir -p {stage_arg}; printf "%s\\n" {stage_arg}')
     _write_mock(mock_bin / "sudo", 'exit 0')
+    _write_mock(mock_bin / "scp", '''if [[ "$2" == *context-metadata* ]]; then
+  dest=${2#*:}
+  mkdir -p "$(dirname "$dest")"
+  cp "$1" "$dest"
+fi
+exit 0''')
     ssh_log = shlex.quote(str(tmp_path / "ssh.log").replace("\\", "/"))
     _write_mock(mock_bin / "ssh", f'''echo "$*" >> {ssh_log}
 case "$*" in
@@ -783,6 +813,7 @@ case "$*" in
     python3 "$staged/scripts/verify_release_health.py" >&2 || exit $?
     printf '%s\\n' "$staged"
     ;;
+  *"sudo test -f"*|*"sudo chmod a+r"*) exit 0 ;;
   *"GATE_TMP="*) cat >/dev/null; exit 0 ;;
   *) exit 0 ;;
 esac
@@ -795,6 +826,37 @@ esac
     assert "ADVANCED_HEAD_ONLY" not in output
 
 
+def test_verify_only_preserves_legacy_historical_ref_diagnostics_without_exporter(repo, mock_bin, monkeypatch) -> None:
+    for relative in ("scripts/verify_release_health.py", "nanobot/__init__.py", "host/eeepc/etc/presets/test.env"):
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("legacy diagnostic fixture\\n", encoding="utf-8")
+    _git("add", ".", cwd=repo, check=True)
+    _git("rm", "scripts/export_context_metadata.py", cwd=repo, check=True)
+    _git("commit", "-m", "legacy candidate without exporter", cwd=repo, check=True)
+    legacy = _git("rev-parse", "HEAD", cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    monkeypatch.setenv("REPO_ROOT", str(repo))
+    staged = (repo / "legacy-remote-stage").as_posix()
+    ssh_body = f'''#!/usr/bin/env bash
+set -e
+case "$*" in
+  *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/old; exit 0 ;;
+  *"mktemp -d /tmp/eeebot-verify-gate."*) mkdir -p {staged}; tar -x -C {staged}; echo {staged}; exit 0 ;;
+  *"GATE_TMP='"*) exit 0 ;;
+  *"VERIFY_ONLY=1"*) exit 0 ;;
+esac
+exit 0
+'''
+    _write_mock(mock_bin / "ssh", ssh_body)
+    _write_mock(mock_bin / "sudo", 'exit 0')
+    result = run_deploy(repo, mock_bin, ["--verify-only", "--ref", legacy])
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "selected historical ref has no metadata exporter" in output
+    assert "candidate gate staged" in output
+    assert "cannot export context metadata" not in output
+
+
 def test_verify_only_passes_when_live_release_has_no_gate_file(repo, mock_bin, monkeypatch) -> None:
     """The live release must not supply or be required to contain the candidate gate."""
     for relative in ("scripts/verify_release_health.py", "nanobot/__init__.py", "host/eeepc/etc/presets/test.env"):
@@ -805,15 +867,16 @@ def test_verify_only_passes_when_live_release_has_no_gate_file(repo, mock_bin, m
     gate.write_text("print('candidate-gate-v2')\\n", encoding="utf-8")
     _git("add", ".", cwd=repo, check=True)
     _git("commit", "-m", "candidate with gate", cwd=repo, check=True)
+    # Legacy diagnostic-only verify remains allowed for refs without exporter;
+    # activation paths separately reject missing metadata.
     monkeypatch.setenv("REPO_ROOT", str(repo))
     candidate_tmp = shlex.quote(str(repo / "candidate-gate-temp"))
-    candidate_py = shlex.quote(str(gate))
     mock_log = shlex.quote(str(repo / "commands.log"))
     _write_mock(mock_bin / "ssh", f'''#!/usr/bin/env bash
 set -e
 case "$*" in
   *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/old; exit 0 ;;
-  *"mktemp -d /tmp/eeebot-verify-gate."*) mkdir -p {candidate_tmp}/scripts; cp {candidate_py} {candidate_tmp}/scripts/verify_release_health.py; echo {candidate_tmp}; exit 0 ;;
+  *"mktemp -d /tmp/eeebot-verify-gate."*) mkdir -p {candidate_tmp.replace("'", "")}; tar -x -C {candidate_tmp.replace("'", "")}; echo {candidate_tmp.replace("'", "")}; exit 0 ;;
   *"rm -rf '{candidate_tmp}'"*) rm -rf {candidate_tmp}; exit 0 ;;
   *"rm -rf /tmp/eeebot-verify-gate."*) exit 0 ;;
   *"GATE_TMP="*) echo candidate-gate-v2 >> {mock_log}; exit 0 ;;
@@ -982,8 +1045,8 @@ def test_verify_only_dimension_delta_through_production_path(
     baseline_path.write_text(json.dumps({"dimensions": [f"dim {k} {v}" for k, v in baseline.items()]}), encoding="utf-8")
     candidate_path.write_text(json.dumps({"dimensions": [f"dim {k} {v}" for k, v in candidate.items()]}), encoding="utf-8")
     scripts = repo / "scripts"
-    scripts.mkdir()
-    (repo / "nanobot").mkdir()
+    scripts.mkdir(exist_ok=True)
+    (repo / "nanobot").mkdir(exist_ok=True)
     dashboard_stub = textwrap.dedent("""        from pathlib import Path
         import json, os
         STATE_DIR = Path(os.environ['REPORT']).parent
@@ -1021,6 +1084,21 @@ def test_verify_only_dimension_delta_through_production_path(
     verifier_source += chr(10) + "if __name__ == '__main__': print('CANDIDATE_GATE_EXECUTED', file=sys.stderr)" + chr(10)
     (scripts / "verify_release_health.py").write_text(verifier_source, encoding="utf-8")
     (repo / "scripts/eeebot_dashboard.py").write_text(dashboard_stub, encoding="utf-8")
+    # Package the production metadata exporter and its static dependencies so
+    # verify-only exercises the same exact-source artifact checks as release.
+    for relative in (
+        "scripts/export_context_metadata.py",
+        "nanobot/runtime/context_metadata.py",
+        "nanobot/runtime/context_rules.py",
+        "nanobot/runtime/mutation_policy.py",
+        "nanobot/runtime/operator_documents.py",
+        "nanobot/runtime/__init__.py",
+        "nanobot/__init__.py",
+    ):
+        source = Path(__file__).resolve().parents[1] / relative
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
     (repo / "nanobot/__init__.py").write_text("# test runtime package\\n", encoding="utf-8")
     (repo / "host/eeepc/etc/presets").mkdir(parents=True)
     (repo / "host/eeepc/etc/presets/test.env").write_text("TEST=1\\n", encoding="utf-8")
@@ -1041,10 +1119,17 @@ def test_verify_only_dimension_delta_through_production_path(
     commands = repo / "verify-only-commands.log"
     log = shlex.quote(str(commands))
     gate_tmp = (tmp_path / "remote-candidate-gate").as_posix()
+    _write_mock(mock_bin / "scp", f'''set -e
+    dest=${{2#*:}}
+    case "$dest" in *context-metadata.json) dest={shlex.quote(gate_tmp + "/context-metadata.json")} ;; esac
+    mkdir -p "$(dirname "$dest")"
+    cp "$1" "$dest"
+    test -s "$dest"
+    ''')
     ssh = f'''echo "$*" >> {log}
 case "$*" in
   *"readlink /opt/eeepc-agent/runtimes/self-evolving-agent/current"*) echo /opt/eeepc-agent/runtimes/self-evolving-agent/releases/baseline; exit 0 ;;
-  *"mktemp -d /tmp/eeebot-verify-gate."*) mkdir {gate_tmp} || exit 1; cp -R {shlex.quote(str(repo / "scripts"))} {gate_tmp}/; echo {gate_tmp}; exit 0 ;;
+  *"mktemp -d /tmp/eeebot-verify-gate."*) mkdir -p {gate_tmp} || exit 1; tar -x -C {gate_tmp} || exit $?; echo {gate_tmp}; exit 0 ;;
   *"sudo -n rm -rf -- '{gate_tmp}'"*) /usr/bin/rm -rf -- '{gate_tmp}'; exit $? ;;
   *"GATE_TMP='{gate_tmp}'"*)
     export VERIFY_ONLY_LIVE_DIMENSIONS={shlex.quote((tmp_path / "live-dimensions.json").as_posix())}
@@ -1061,6 +1146,10 @@ exit 0
     remote_script = repo / "remote-script.sh"
     remote = DEPLOY_SCRIPT.read_text(encoding="utf-8").split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
     remote = remote.replace("/opt/eeepc-agent", str(tmp_path / "opt/eeepc-agent").replace("\\", "/"))
+    remote = remote.replace("HEALTH_GATE_PYTHON=\"${HEALTH_GATE_PYTHON:-/", "HEALTH_GATE_PYTHON=\"${HEALTH_GATE_PYTHON:-/")
+    remote = remote.replace('/opt/eeepc-agent/venv/bin/python', 'python3')
+    remote = remote.replace('HEALTH_GATE_PYTHON="${HEALTH_GATE_PYTHON:-python3}"', 'HEALTH_GATE_PYTHON=python3')
+    remote = remote.replace('if [ ! -x "$HEALTH_GATE_PYTHON" ]; then', 'if false; then')
     monkeypatch.setenv("VERIFY_ONLY_DIMENSION_COMPARE", "1")
     runtime_root = tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent"
     runtime_root.mkdir(parents=True)

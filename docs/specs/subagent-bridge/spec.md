@@ -1,5 +1,7 @@
 # Subagent Bridge — spec
 
+> ADR-037 / issue #2058: the static context-rule provenance contract is defined in the accepted ADR and implemented by the #2058 producer. This spec's prompt-builder section below remains the assembly/telemetry contract; see `docs/adr/ADR-037-version-bound-context-rule-provenance.md` and `docs/changes/context-source-provenance/proposal.md` for exact-release metadata, validation, compatibility, privacy, and rollout boundaries.
+
 _Status: current. Last updated: 2026-07-18 (#768: added R45 — the periodic
 goal-review: `nanobot/runtime/goal_review.py`, behind
 `SELFEVO_GOAL_REVIEW_ENABLED` (default OFF) + a daily watermark, formulates
@@ -1009,10 +1011,32 @@ the gate), `skills_catalogue`, `memory`, `runtime` — replacing the old five
 `active_skills` is gone (it was always empty under this profile) and the
 five release-root files (`IDENTITY.md`/`SOUL.md`/`goals.md`/`USER.md`/
 `OPERATING.md`) are loaded by `ContextBuilder.load_block` under their own
-per-block char cap (1 500/1 800/3 200/4 000/5 000; the workspace `AGENTS.md`
-block is capped at 4 000, memory at 1 000, runtime at 400, skills catalogue
-takes the remainder) instead of arriving as a post-fit `system_context`
-tail outside the cap and outside this ledger row. The row gains two new
+shared release-pool budget of 15 500 chars, drawn in assembly order with a
+5 000-char floor for `OPERATING.md` (there are no per-release-file ceilings);
+workspace `AGENTS.md` remains separately capped at 4 000 chars, memory at
+1 000, runtime at 400, scorecard at 600, and position at 1 200. The 3 000-char
+priorities block is outside the release pool and retains ownership in
+`operator_documents.py`. The retired skills-catalogue slot is empty in the
+actual assembled prompt. These sections are assembled inside the cap rather
+than arriving as a post-fit `system_context` tail outside this ledger row.
+Current context-rule provenance is also exported as bounded `context-metadata.json` in supported
+deployment releases. The artifact is generated from the exact selected commit
+and bound to its full SHA. It contains only approved rule IDs/order/owners,
+inclusion labels, and static values; it does not claim an effective
+`NANOBOT_SYSTEM_PROMPT_MAX_CHARS` override, content-dependent per-file
+allocations, current input presence, or historical inclusion. The remote
+candidate validates the schema and source SHA against `SOURCE_COMMIT` before
+activation; missing, malformed, unsupported, or mismatched metadata blocks
+activation. Verify-only validates the selected candidate metadata without
+changing the active release. Legacy/install paths without trustworthy source
+identity report provenance unavailable rather than inferring it from checkout
+state or cycle telemetry. The artifact contains no prompt/source text, secret
+values, or cycle payloads; `system_prompt` rows remain per-cycle observations
+and exact historical payloads remain governed by #316. This does not claim a
+host has received or activated a particular release; rollout is separately
+authorized.
+
+The row gains two new
 keys, `missing` and `truncated` — filenames (not section keys) whose
 required release/workspace file was absent (rendered as `[missing:
 <name>]`) or cut at its per-block cap (rendered with a built-in
