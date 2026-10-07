@@ -78,12 +78,9 @@ def record_rejected_duplicate(
 def peek_pending_evidence(state_dir: "Path") -> "dict[str, Any] | None":
     """Read the pending rejection, if any, WITHOUT clearing it.
 
-    #2050 H2: the planning session's prompt needs the evidence before the
-    session has produced anything; clearing must wait until that session
-    actually PRODUCED A PLAN (:func:`clear_pending_evidence`). A session
-    that times out or returns a malformed/no-plan answer never acted on the
-    evidence, so it stays for the next session.
-    """
+    The planning session preserves the evidence through startup and any
+    planning failure; it clears only after producing an integrated plan
+    (#2011, #2050 H2)."""
     path = _state_path(state_dir)
     try:
         raw = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
@@ -100,8 +97,8 @@ def peek_pending_evidence(state_dir: "Path") -> "dict[str, Any] | None":
 
 
 def clear_pending_evidence(state_dir: "Path") -> None:
-    """Delete the pending rejection record. #2050 H2: call only after a
-    planning session that produced a plan."""
+    """Delete the pending rejection record only after a planning session
+    produces an integrated plan (#2011, #2050 H2)."""
     path = _state_path(state_dir)
     try:
         path.unlink(missing_ok=True)
@@ -110,9 +107,10 @@ def clear_pending_evidence(state_dir: "Path") -> None:
 
 
 def consume_pending_evidence(state_dir: "Path") -> "dict[str, Any] | None":
-    """Read and clear the pending rejection in one call, for callers that do
-    not gate clearing on a later outcome. The planning session does NOT use
-    this (#2050 H2): it peeks, and clears only once it produced a plan."""
+    """Read and clear pending rejection evidence in one call.
+
+    Callers needing to preserve delivery through planning should use peek and
+    clear only after an integrated result (#2011, #2050 H2)."""
     evidence = peek_pending_evidence(state_dir)
     if evidence is not None:
         clear_pending_evidence(state_dir)

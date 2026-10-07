@@ -3500,8 +3500,13 @@ async def _run_planning_session(
         _planner_candidate_items = _planner_candidates_mod.merge_proposer_candidates(
             _planner_candidate_items, _planner_proposer_items,
         )
-        _planner_new_priority_ids = _planner_candidates_mod.mark_new_priority_items(
-            state_dir, _planner_candidate_items,
+        # #2012: peek only here -- the "seen" set is not persisted until
+        # planner startup is confirmed, below, after SubagentManager
+        # construction/prompt-fitting/spawn have all succeeded. A failure
+        # before that point must leave every priority shown here still
+        # markable as "(new)" on the next healthy session.
+        _planner_new_priority_ids, _planner_seen_priority_ids_to_commit = (
+            _planner_candidates_mod.peek_new_priority_items(state_dir, _planner_candidate_items)
         )
         _candidates_block = _planner_candidates_mod.render_candidates_block(
             _planner_candidate_items, _planner_new_priority_ids,
@@ -3509,18 +3514,19 @@ async def _run_planning_session(
         )
     except Exception:
         _candidates_block = ''
+        _planner_seen_priority_ids_to_commit = None
 
     _dedup_evidence_shown = False
+    _dedup_evidence_to_clear = False  # retained for the legacy acknowledgement path
     if _minimal_mode_active:
         _dedup_evidence_block = ''
+        _dedup_evidence_to_clear = False
     else:
         # ADR-035 rest amendment (#1964): "the sha and the reason are an
         # input to the next session, or it would choose the same increment
-        # again." #2050 H2: only PEEKED here -- it is cleared below, once
-        # this session has produced a plan with it in view. A session that
-        # times out or ends malformed/no_plan never acted on it, so the
-        # next session still gets it. Fail-open, same as the candidates
-        # block above.
+        # again." #2011/#2050 H2: only peeked here; clear only after this
+        # session produces an integrated plan. Spawn or planning failure
+        # leaves evidence available to the next session.
         try:
             from nanobot.runtime import planner_dedup_evidence as _dedup_evidence_mod
 
@@ -3529,6 +3535,7 @@ async def _run_planning_session(
             _dedup_evidence_shown = _dedup_evidence is not None
         except Exception:
             _dedup_evidence_block = ''
+            _dedup_evidence_to_clear = False
 
     # Architect resolution 2026-09-25 (ADR-035 rule 3 / ADR-031 rule 2): a
     # plan interrupted by a supplier-side executor failure is this
@@ -3643,6 +3650,30 @@ async def _run_planning_session(
         return _fail('timed_out', 'planner subagent exceeded its 600s wall-clock allowance')
     if not planner_task_id:
         return _fail('spawn_failed', 'no subagent task_id produced')
+
+    # #2011/#2012: only now, with a real planner task_id confirmed (spawn
+    # succeeded and the prompt above was actually delivered), commit the
+    # priority-seen-set. A SubagentManager construction, prompt-fitting, or
+    # spawn failure above returns before this point, so it stays
+    # re-offerable on the next healthy cycle instead of being silently
+    # consumed. (The dedup-evidence record is stricter: cleared only after
+    # an integrated plan, #2050 H2, below.)
+    if _planner_seen_priority_ids_to_commit is not None:
+        try:
+            from nanobot.runtime import planner_candidates as _planner_candidates_commit_mod
+
+            _planner_candidates_commit_mod.commit_seen_priority_ids(
+                state_dir, _planner_seen_priority_ids_to_commit,
+            )
+        except Exception:
+            pass
+    if _dedup_evidence_to_clear:
+        try:
+            from nanobot.runtime import planner_dedup_evidence as _dedup_evidence_commit_mod
+
+            _dedup_evidence_commit_mod.clear_pending_evidence(state_dir)
+        except Exception:
+            pass
 
     try:
         telem_path = state_dir / 'subagents' / f'{planner_task_id}.json'
@@ -5109,22 +5140,11 @@ async def _main_impl_body():
             _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
             return {'status': 0}
 
-        # Codex review of 777ada1a (nanobot/runtime/llm_proposer.py:558), P1
-        # (architect resolution 2026-09-26): the attempt registration just
-        # above just persisted -- this candidate is actually about to run.
-        # A proposer-authored candidate must be retired here (the same
-        # handled_<rid>.txt marker the old rotation path wrote), or
-        # proposer_candidate_items keeps offering it forever, re-running
-        # the SAME proposal every cycle. Fail-open: retiring is
-        # bookkeeping on top of an already-registered attempt, never a
-        # reason to abort a cycle that is otherwise ready to execute.
-        if _matched_candidate and _matched_candidate.get('provenance') == 'proposer':
-            try:
-                from nanobot.runtime import llm_proposer as _llm_proposer_retire
-
-                _llm_proposer_retire.retire_proposer_request_for_candidate(STATE_DIR, _candidate_id)
-            except Exception:
-                pass
+        # #2010: proposer-request retirement moved past mgr.spawn() and the
+        # confirmed _subagent_task_id below -- see the block right after
+        # that check. Retiring here (right after registration, before
+        # SubagentManager construction/spawn) meant a prompt-build or spawn
+        # failure still retired the request with no executor ever having run.
 
         # #718: the subagent must write into the git checkout the bridge branches,
         # commits, gates, and integrates (_selfevo_repo) — not TARGET_WORKSPACE
@@ -5397,6 +5417,26 @@ async def _main_impl_body():
                     _open_increment_taskid.record_attempt_task_id(STATE_DIR, _cycle_id, _subagent_task_id)
                 except Exception:
                     pass
+
+                # #2010 (Codex review of 777ada1a, P1): a proposer-authored
+                # candidate is retired here, not right after attempt
+                # registration -- a live task_id in mgr._running_tasks is
+                # the same "the candidate runs" moment as the planner path's
+                # (#2011/#2012), confirmed AFTER prompt construction and
+                # mgr.spawn() both succeeded. A prompt-build or spawn
+                # failure (SystemPromptOverflowError, spawn raising) never
+                # reaches this point, so the request stays live for
+                # proposer_candidate_items to re-offer on a later healthy
+                # tick. Fail-open: retiring is bookkeeping on top of an
+                # attempt that has now genuinely started, never a reason to
+                # abort a cycle that already spawned.
+                if _matched_candidate and _matched_candidate.get('provenance') == 'proposer':
+                    try:
+                        from nanobot.runtime import llm_proposer as _llm_proposer_retire
+
+                        _llm_proposer_retire.retire_proposer_request_for_candidate(STATE_DIR, _candidate_id)
+                    except Exception:
+                        pass
             if mgr._running_tasks:
                 try:
                     # Limit subagent execution time to remaining bridge wall allocation.
