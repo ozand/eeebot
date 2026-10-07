@@ -108,7 +108,7 @@ def _witness(monkeypatch, manager_cls):
     orig_init = manager_cls.__init__
     orig_spawn = manager_cls.spawn
 
-    def __init__(self, *args, **kwargs):
+    def witnessed_init(self, *args, **kwargs):
         seen["init"] += 1
         orig_init(self, *args, **kwargs)
 
@@ -116,7 +116,7 @@ def _witness(monkeypatch, manager_cls):
         seen["spawn"] += 1
         return await orig_spawn(self, *args, **kwargs)
 
-    monkeypatch.setattr(manager_cls, "__init__", __init__)
+    monkeypatch.setattr(manager_cls, "__init__", witnessed_init)
     monkeypatch.setattr(manager_cls, "spawn", spawn)
     return seen
 
