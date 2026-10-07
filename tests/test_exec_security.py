@@ -184,6 +184,125 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
         assert not fields or fields[21] != child_start_time, f"grandchild PID {child_pid} still exists"
 
 
+@pytest.mark.asyncio
+async def test_watchdog_repeated_cancellation_finishes_real_process_cleanup(tmp_path, monkeypatch):
+    """A second cancellation must not interrupt cleanup of a live process tree."""
+    import asyncio
+    import os
+    import sys
+    import time
+
+    if os.name == "nt":
+        pytest.skip("POSIX process-group semantics")
+    if sys.platform != "linux":
+        pytest.skip("/proc process-state inspection requires Linux")
+
+    child_pid_file = tmp_path / "child.pid"
+    shell_pid_file = tmp_path / "shell.pid"
+    child_script = tmp_path / "child.py"
+    child_script.write_text("\n".join((
+        "import os, signal, sys, time",
+        "open(sys.argv[1], 'w').write(str(os.getpid()))",
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+        "time.sleep(60)",
+        "",
+    )), encoding="utf-8")
+    command = f'echo $$ > "{shell_pid_file}"; python3 "{child_script}" "{child_pid_file}"'
+    cleanup_started = asyncio.Event()
+    original_cleanup = ExecTool._terminate_and_reap
+
+    async def _observe_cleanup(process, process_group_id=None):
+        cleanup_started.set()
+        return await original_cleanup(process, process_group_id)
+
+    monkeypatch.setattr(ExecTool, "_terminate_and_reap", staticmethod(_observe_cleanup))
+    execution = asyncio.create_task(ExecTool(timeout=60).execute(command))
+    deadline = time.monotonic() + 10
+    while (not child_pid_file.exists() or not shell_pid_file.exists()) and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    assert child_pid_file.exists() and shell_pid_file.exists(), "real shell/child did not start"
+    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+    shell_pid = int(shell_pid_file.read_text(encoding="utf-8"))
+    execution.cancel()
+    await asyncio.wait_for(cleanup_started.wait(), timeout=5)
+    execution.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(execution, timeout=8)
+
+    for pid in (shell_pid, child_pid):
+        proc_stat = Path(f"/proc/{pid}/stat")
+        deadline = time.monotonic() + 5
+        while proc_stat.exists() and time.monotonic() < deadline:
+            fields = proc_stat.read_text(encoding="utf-8").split()
+            if len(fields) > 2 and fields[2] == "Z":
+                break
+            await asyncio.sleep(0.01)
+        if proc_stat.exists():
+            fields = proc_stat.read_text(encoding="utf-8").split()
+            assert len(fields) > 2 and fields[2] == "Z", f"PID {pid} remains running"
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="Windows process-tree cleanup follow-up #2027")
+@pytest.mark.xfail(reason="Windows Job Object ownership follow-up #2027", strict=True)
+@pytest.mark.asyncio
+async def test_watchdog_cancellation_kills_windows_descendant_after_shell_exits(tmp_path, monkeypatch):
+    """Use a saved shell PID to verify tree cleanup after the shell exits."""
+    import asyncio
+    import ctypes
+    import sys
+    import time
+
+    child_pid_file = tmp_path / "windows-child.pid"
+    child_script = tmp_path / "windows_child.py"
+    child_script.write_text("\n".join((
+        "import os, sys, time",
+        "open(sys.argv[1], 'w').write(str(os.getpid()))",
+        "time.sleep(60)",
+        "",
+    )), encoding="utf-8")
+    command = f'"{sys.executable}" "{child_script}" "{child_pid_file}"'
+    execution = asyncio.create_task(ExecTool(timeout=60).execute(command))
+    deadline = time.monotonic() + 10
+    while not child_pid_file.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    assert child_pid_file.exists(), "Windows descendant did not start"
+    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+    shell_process = execution.get_coro().cr_frame.f_locals["process"]
+    assert shell_process is not None
+    # Make execute's shell complete while the separate child still holds its
+    # inherited stdout/stderr pipe handles; cleanup must use the saved PID.
+    killer = await asyncio.create_subprocess_exec(
+        "taskkill.exe", "/PID", str(shell_process.pid), "/F",
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    await killer.wait()
+    for _ in range(100):
+        if shell_process.returncode is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert shell_process.returncode is not None, "test did not terminate the parent shell"
+    await asyncio.sleep(0.1)
+    assert execution.done() is False, "descendant should retain inherited output pipes"
+    execution.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(execution, timeout=10)
+
+    kernel32 = ctypes.windll.kernel32
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        process = kernel32.OpenProcess(0x00100000 | 0x1000, False, child_pid)
+        if not process:
+            break
+        try:
+            if kernel32.WaitForSingleObject(process, 0) == 0:
+                break
+        finally:
+            kernel32.CloseHandle(process)
+        await asyncio.sleep(0.02)
+    else:
+        pytest.fail(f"Windows descendant PID {child_pid} survived process-tree cleanup")
+
+
 def _fake_resolve_private(hostname, port, family=0, type_=0):
     return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("169.254.169.254", 0))]
 

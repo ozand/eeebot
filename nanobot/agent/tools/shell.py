@@ -162,7 +162,16 @@ class ExecTool(Tool):
 
         except asyncio.CancelledError:
             if process is not None:
-                await self._terminate_and_reap(process, process_group_id)
+                cleanup = asyncio.create_task(self._terminate_and_reap(process, process_group_id))
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        # A later cancel must not interrupt termination, wait/reap,
+                        # or pipe draining. The original cancellation is re-raised
+                        # after this independently-owned cleanup task completes.
+                        continue
+                await cleanup
             raise
         except Exception as e:
             return f"Error executing command: {str(e)}"
@@ -176,13 +185,12 @@ class ExecTool(Tool):
         if os.name != "nt" and process_group_id is None:
             process_group_id = process.pid
         if os.name == "nt":
+            # The shell may already have exited while descendants still hold
+            # inherited pipes. Use its saved PID even when returncode is set;
+            # when it is still alive, also try to terminate the full tree.
+            await ExecTool._taskkill_tree(process.pid)
             if process.returncode is None:
-                cleanup = await asyncio.create_subprocess_exec(
-                    "taskkill.exe", "/PID", str(process.pid), "/T", "/F",
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await cleanup.wait()
+                process.kill()
         else:
             import signal
 
@@ -225,12 +233,7 @@ class ExecTool(Tool):
             await asyncio.wait_for(process.communicate(), timeout=1.0)
         except asyncio.TimeoutError:
             if os.name == "nt":
-                cleanup = await asyncio.create_subprocess_exec(
-                    "taskkill.exe", "/PID", str(process.pid), "/T", "/F",
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await cleanup.wait()
+                await ExecTool._taskkill_tree(process.pid)
             else:
                 import signal
 
@@ -244,6 +247,20 @@ class ExecTool(Tool):
                 # A detached descendant may retain inherited pipes; forcibly
                 # close our transports rather than wait for its lifetime.
                 process._transport.close()
+
+    @staticmethod
+    async def _taskkill_tree(root_pid: int) -> None:
+        """Best-effort terminate a Windows process tree by its saved root PID."""
+        cleanup = await asyncio.create_subprocess_exec(
+            "taskkill.exe", "/PID", str(root_pid), "/T", "/F",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            await asyncio.wait_for(cleanup.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            cleanup.kill()
+            await cleanup.wait()
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
         """Best-effort safety guard for potentially destructive commands."""
