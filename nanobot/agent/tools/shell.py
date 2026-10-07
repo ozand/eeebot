@@ -1,12 +1,88 @@
 """Shell execution tool."""
 
 import asyncio
+import ctypes
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
 from nanobot.agent.tools.base import Tool
+
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+
+
+class _JobObjectBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _IoCounters(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint64) for name in (
+        "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+        "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+    )]
+
+
+class _JobObjectExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JobObjectBasicLimitInformation),
+        ("IoInfo", _IoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+def _assign_to_kill_on_close_job(process: asyncio.subprocess.Process):
+    """Assign a process to a private Windows Job Object; no-op elsewhere."""
+    if os.name != "nt":
+        return None
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise ctypes.WinError(ctypes.get_last_error())
+    info = _JobObjectExtendedLimitInformation()
+    info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    kernel32.SetInformationJobObject.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32,
+    ]
+    if not kernel32.SetInformationJobObject(
+        job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(info), ctypes.sizeof(info)
+    ):
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(job)
+        raise ctypes.WinError(error)
+    process_handle = process._transport.get_extra_info("subprocess")._handle
+    kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    if not kernel32.AssignProcessToJobObject(job, int(process_handle)):
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(job)
+        raise ctypes.WinError(error)
+    return job
+
+
+def _close_windows_handle(handle) -> None:
+    if os.name == "nt" and handle:
+        close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        close_handle(handle)
+
 
 # Runtime-state location env vars that must never leak into child processes
 # spawned by this tool. Incident #594: a qwen subagent ran `pytest` via exec,
@@ -105,6 +181,7 @@ class ExecTool(Tool):
         effective_timeout = min(timeout or self.timeout, self._MAX_TIMEOUT)
         process: asyncio.subprocess.Process | None = None
         process_group_id: int | None = None
+        job_handle = [None]
 
         env = os.environ.copy()
         for var in SCRUBBED_STATE_ENV_VARS:
@@ -113,16 +190,33 @@ class ExecTool(Tool):
             env["PATH"] = env.get("PATH", "") + os.pathsep + self.path_append
 
         try:
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env,
-                start_new_session=(os.name != "nt"),
-                creationflags=(0x00000200 if os.name == "nt" else 0),
-            )
-            if os.name != "nt":
+            if os.name == "nt":
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable, "-c",
+                    "import subprocess,sys; gate=sys.stdin.buffer.read(1); "
+                    "sys.exit(subprocess.call(sys.argv[1], shell=True) if gate else 125)",
+                    command,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                    creationflags=0,
+                )
+                job_handle[0] = _assign_to_kill_on_close_job(process)
+                assert process.stdin is not None
+                process.stdin.write(b"\0")
+                await process.stdin.drain()
+                process.stdin.close()
+            else:
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                    start_new_session=True,
+                )
                 process_group_id = process.pid
 
             try:
@@ -162,7 +256,10 @@ class ExecTool(Tool):
 
         except asyncio.CancelledError:
             if process is not None:
-                cleanup = asyncio.create_task(self._terminate_and_reap(process, process_group_id))
+                cleanup = asyncio.create_task(
+                    self._terminate_and_reap(process, process_group_id, job_handle[0])
+                )
+                job_handle[0] = None  # cleanup owns and closes the handle
                 while not cleanup.done():
                     try:
                         await asyncio.shield(cleanup)
@@ -174,17 +271,29 @@ class ExecTool(Tool):
                 await cleanup
             raise
         except Exception as e:
+            if process is not None and process.returncode is None:
+                await self._terminate_and_reap(process, process_group_id, job_handle[0])
+                job_handle[0] = None
             return f"Error executing command: {str(e)}"
+        finally:
+            if job_handle[0] is not None:
+                _close_windows_handle(job_handle[0])
+                job_handle[0] = None
 
     @staticmethod
     async def _terminate_and_reap(
         process: asyncio.subprocess.Process,
         process_group_id: int | None = None,
+        job_handle=None,
     ) -> None:
         """Terminate the command tree and reap the shell process."""
         if os.name != "nt" and process_group_id is None:
             process_group_id = process.pid
         if os.name == "nt":
+            # Closing this invocation's job kills descendants even after the
+            # root shell has exited. The job handle is transferred to cleanup.
+            if job_handle is not None:
+                _close_windows_handle(job_handle)
             # The shell may already have exited while descendants still hold
             # inherited pipes. Use its saved PID even when returncode is set;
             # when it is still alive, also try to terminate the full tree.

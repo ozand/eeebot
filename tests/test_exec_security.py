@@ -140,11 +140,18 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
     )
     execution = asyncio.create_task(ExecTool(timeout=60).execute(command))
     deadline = time.monotonic() + 10
-    while not child_pid_file.exists() and time.monotonic() < deadline:
+    child_pid = None
+    while time.monotonic() < deadline:
+        try:
+            content = child_pid_file.read_text(encoding="utf-8").strip()
+            child_pid = int(content) if content else None
+        except (FileNotFoundError, ValueError):
+            child_pid = None
+        if child_pid is not None and shell_pid_file.exists():
+            break
         await asyncio.sleep(0.01)
-    assert child_pid_file.exists(), "background grandchild did not start"
-    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
-    shell_pid_file.read_text(encoding="utf-8")
+    assert child_pid is not None, "background grandchild did not write a valid PID before startup deadline"
+    assert shell_pid_file.exists(), "background shell did not write its PID before startup deadline"
     child_stat = Path(f"/proc/{child_pid}/stat")
 
     # The background child confirms its parent shell exited while the child
@@ -211,9 +218,9 @@ async def test_watchdog_repeated_cancellation_finishes_real_process_cleanup(tmp_
     cleanup_started = asyncio.Event()
     original_cleanup = ExecTool._terminate_and_reap
 
-    async def _observe_cleanup(process, process_group_id=None):
+    async def _observe_cleanup(process, process_group_id=None, job_handle=None):
         cleanup_started.set()
-        return await original_cleanup(process, process_group_id)
+        return await original_cleanup(process, process_group_id, job_handle)
 
     monkeypatch.setattr(ExecTool, "_terminate_and_reap", staticmethod(_observe_cleanup))
     execution = asyncio.create_task(ExecTool(timeout=60).execute(command))
@@ -243,7 +250,25 @@ async def test_watchdog_repeated_cancellation_finishes_real_process_cleanup(tmp_
 
 
 @pytest.mark.skipif(__import__("os").name != "nt", reason="Windows process-tree cleanup follow-up #2027")
-@pytest.mark.xfail(reason="Windows Job Object ownership follow-up #2027", strict=True)
+@pytest.mark.asyncio
+async def test_windows_job_setup_failure_does_not_run_command(tmp_path, monkeypatch):
+    import os
+
+    if os.name != "nt":
+        pytest.skip("Windows Job Object failure-path test")
+    marker = tmp_path / "must-not-exist.txt"
+    def fail_job_assignment(process):
+        assert process.returncode is None, "command process exited before ownership succeeded"
+        raise OSError("injected Job Object failure")
+
+    monkeypatch.setattr("nanobot.agent.tools.shell._assign_to_kill_on_close_job",
+                        fail_job_assignment)
+    result = await ExecTool(timeout=5).execute(f'echo ran > "{marker}"')
+    assert result.startswith("Error executing command:")
+    assert not marker.exists(), "untrusted command ran before Job Object ownership succeeded"
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="Windows process-tree cleanup follow-up #2027")
 @pytest.mark.asyncio
 async def test_watchdog_cancellation_kills_windows_descendant_after_shell_exits(tmp_path, monkeypatch):
     """Use a saved shell PID to verify tree cleanup after the shell exits."""
