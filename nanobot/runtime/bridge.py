@@ -3590,6 +3590,7 @@ async def _run_planning_session(
             release_root=RELEASE_ROOT,
             role_system_prompt=role_text,
             telemetry_component='planner',
+            telemetry_cycle_id=cycle_id,
         )
         await planner_manager.spawn(
             task=_planner_task,
