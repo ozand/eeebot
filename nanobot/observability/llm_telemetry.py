@@ -31,6 +31,7 @@ import copy
 import gzip
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -152,15 +153,30 @@ def record_llm_failure(
         cycle_id = str(ctx.get("cycle_id") or "")
         component = str(component or ctx.get("component") or "")[:64]
         requested_model = str(requested_model or "")[:256]
-        safe_error_type = str(error_type or "UnknownError")[:96]
-        if safe_error_type not in {
+        raw_error_type = str(error_type or "UnknownError")[:96]
+        if raw_error_type not in {
             "RateLimitError", "APIConnectionError", "APITimeoutError", "InternalServerError",
             "BadRequestError", "AuthenticationError", "PermissionDeniedError", "NotFoundError",
             "TimeoutError", "ConnectionError", "MissingGatewayConfiguration",
         }:
             safe_error_type = "ProviderError"
-        status = http_status if isinstance(http_status, int) and not isinstance(http_status, bool) else None
-        retry_after = retry_after_s if isinstance(retry_after_s, (int, float)) and not isinstance(retry_after_s, bool) and retry_after_s >= 0 else None
+        else:
+            safe_error_type = raw_error_type
+        status = (
+            http_status
+            if isinstance(http_status, int)
+            and not isinstance(http_status, bool)
+            and 100 <= http_status <= 599
+            else None
+        )
+        retry_after = (
+            float(retry_after_s)
+            if isinstance(retry_after_s, (int, float))
+            and not isinstance(retry_after_s, bool)
+            and math.isfinite(retry_after_s)
+            and retry_after_s >= 0
+            else None
+        )
         seq = _next_call_seq(cycle_id, component)
         timestamp = ts or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         day = timestamp[:10] if len(timestamp) >= 10 else datetime.now(timezone.utc).strftime("%Y-%m-%d")

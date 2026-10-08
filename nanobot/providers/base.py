@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -284,11 +285,13 @@ class LLMProvider(ABC):
             retry_after = response.usage.get("_retry_after_s")
             # _safe_chat keeps a bounded exception class prefix and the body,
             # but only this bounded metadata is persisted to failures/.
-            error_text = response.content or ""
-            if error_text.startswith("Error calling LLM:"):
-                error_type = error_text.split(":", 2)[1].strip().split(".")[-1]
-            else:
-                error_type = "ProviderError"
+            # Only extract the exception class marker emitted by _safe_chat;
+            # never persist or otherwise inspect a provider error body here.
+            match = re.match(
+                r"^Error calling LLM: ([A-Za-z_][A-Za-z0-9_]*)\s*:",
+                response.content or "",
+            )
+            error_type = match.group(1) if match else "ProviderError"
             if not isinstance(status, int) or isinstance(status, bool):
                 status = None
             try:
