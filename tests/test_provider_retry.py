@@ -197,6 +197,34 @@ async def test_image_fallback_returns_error_on_second_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_image_fallback_records_each_failed_attempt(tmp_path, monkeypatch) -> None:
+    """Both the original and image-stripped calls are failed attempts."""
+    from datetime import datetime, timezone
+
+    from nanobot.observability.llm_telemetry import call_context
+
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "llm_calls"))
+    provider = ScriptedProvider([
+        LLMResponse(content="Error calling LLM: BadRequestError: sanitized", finish_reason="error",
+                    usage={"_http_status": 400}),
+        LLMResponse(content="Error calling LLM: BadRequestError: sanitized", finish_reason="error",
+                    usage={"_http_status": 400}),
+    ])
+    with call_context("cycle-image-fail", "executor"):
+        response = await provider.chat_with_retry(messages=_IMAGE_MSG)
+
+    assert response.finish_reason == "error"
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    rows = _read_jsonl(tmp_path / "llm_calls" / "failures" / f"{day}.jsonl")
+    assert len(rows) == 2
+    assert [row["seq"] for row in rows] == [1, 2]
+    assert all(row["error_type"] == "BadRequestError" for row in rows)
+    assert all(row["http_status"] == 400 for row in rows)
+    assert all(row["cycle_id"] == "cycle-image-fail" for row in rows)
+    assert all(row["component"] == "executor" for row in rows)
+
+
+@pytest.mark.asyncio
 async def test_image_fallback_without_meta_uses_default_placeholder() -> None:
     """When _meta is absent, fallback placeholder is '[image omitted]'."""
     provider = ScriptedProvider([
@@ -255,7 +283,6 @@ async def test_chat_with_retry_records_telemetry_on_success(tmp_path, monkeypatc
 
 @pytest.mark.asyncio
 async def test_chat_with_retry_failure_telemetry_keeps_success_stream_unchanged(tmp_path, monkeypatch):
-    from pathlib import Path
     from nanobot.observability.llm_telemetry import call_context
 
     monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "llm_calls"))

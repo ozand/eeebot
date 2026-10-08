@@ -368,6 +368,8 @@ class LLMProvider(ABC):
                 if stripped is not None:
                     logger.warning("Non-transient LLM error with image content, retrying without images")
                     response = await self._safe_chat(**{**kw, "messages": stripped})
+                    if response.finish_reason == "error":
+                        _record_failure(response)
                     return _record(response, attempt - 1, stripped)
                 return _record(response, attempt - 1, messages)
 

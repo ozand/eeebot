@@ -2220,7 +2220,7 @@ def _dedup_exhausted(
 
 
 def _record_failed_proposer_call(
-    exc: Exception, requested_model: str, prompt: str = "", ts: str | None = None,
+    exc: Exception, requested_model: str, component: str = "proposer", ts: str | None = None,
 ) -> None:
     try:
         from nanobot.observability.llm_telemetry import call_context, record_llm_failure
@@ -2238,8 +2238,8 @@ def _record_failed_proposer_call(
                 retry_after = float(raw_retry) if raw_retry is not None else None
             except (TypeError, ValueError):
                 retry_after = None
-        component = "proposer"
-        with call_context(current_cycle_id("proposer"), component):
+        component = str(component or "proposer")[:64]
+        with call_context(current_cycle_id(component), component):
             record_llm_failure(
                 component=component, requested_model=requested_model,
                 error_type=type(exc).__name__, http_status=status,
@@ -2275,13 +2275,13 @@ def propose(
         from openai import OpenAI
     except Exception as exc:
         _last_propose_failure = type(exc).__name__
-        _record_failed_proposer_call(exc, "", context)
+        _record_failed_proposer_call(exc, "", "proposer")
         return None
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
     api_key = os.environ.get("LITELLM_API_KEY", "").strip()
     if not base_url or not api_key:
         _last_propose_failure = "MissingGatewayConfiguration"
-        _record_failed_proposer_call(RuntimeError(_last_propose_failure), _model_name(), context)
+        _record_failed_proposer_call(RuntimeError(_last_propose_failure), _model_name(), "proposer")
         return None
     user_content = context
     if rejection_reason:
@@ -2349,7 +2349,7 @@ def propose(
     except Exception as exc:
         _last_propose_failure = f"{type(exc).__name__}: {exc}"
         _record_failed_proposer_call(
-            exc, requested_model, context,
+            exc, requested_model, "proposer",
             ts=call_start_utc.isoformat().replace("+00:00", "Z"),
         )
         return None
@@ -2382,13 +2382,13 @@ def propose_multi(
         from openai import OpenAI
     except Exception as exc:
         _last_propose_failure = type(exc).__name__
-        _record_failed_proposer_call(exc, "", context)
+        _record_failed_proposer_call(exc, "", "proposer")
         return None
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
     api_key = os.environ.get("LITELLM_API_KEY", "").strip()
     if not base_url or not api_key:
         _last_propose_failure = "MissingGatewayConfiguration"
-        _record_failed_proposer_call(RuntimeError(_last_propose_failure), _model_name(), context)
+        _record_failed_proposer_call(RuntimeError(_last_propose_failure), _model_name(), "proposer")
         return None
     user_content = (
         f"{context}\n\n"
@@ -2453,7 +2453,7 @@ def propose_multi(
     except Exception as exc:
         _last_propose_failure = f"{type(exc).__name__}: {exc}"
         _record_failed_proposer_call(
-            exc, requested_model, context,
+            exc, requested_model, "proposer",
             ts=call_start_utc.isoformat().replace("+00:00", "Z"),
         )
         return None

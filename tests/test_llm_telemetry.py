@@ -57,6 +57,22 @@ def test_record_llm_failure_writes_only_bounded_metadata(tmp_path, monkeypatch):
     assert "prompt" not in row and "response" not in row
 
 
+def test_record_llm_failure_invalid_timestamp_cannot_escape_failures_dir(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "llm_calls"))
+    record_llm_failure(
+        component="proposer", requested_model="model-a", error_type="RateLimitError",
+        ts="../../evil-2026-01-01T00:00:00Z",
+    )
+
+    failures_root = tmp_path / "llm_calls" / "failures"
+    rows = list(failures_root.glob("*.jsonl"))
+    assert len(rows) == 1
+    assert rows[0].name == datetime.now(timezone.utc).strftime("%Y-%m-%d.jsonl")
+    assert not (tmp_path / "evil-2026-01-01T00:00:00Z.jsonl").exists()
+
+
 def test_record_llm_call_writes_well_formed_line(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
 

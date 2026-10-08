@@ -179,7 +179,14 @@ def record_llm_failure(
         )
         seq = _next_call_seq(cycle_id, component)
         timestamp = ts or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        day = timestamp[:10] if len(timestamp) >= 10 else datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        candidate_day = timestamp[:10]
+        if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", candidate_day):
+            try:
+                datetime.strptime(candidate_day, "%Y-%m-%d")
+                day = candidate_day
+            except ValueError:
+                pass
         out_dir = _llm_calls_dir() / "failures"
         out_dir.mkdir(parents=True, exist_ok=True)
         with (out_dir / f"{day}.jsonl").open("a", encoding="utf-8") as fh:
