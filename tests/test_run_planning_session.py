@@ -74,6 +74,7 @@ def _make_fake_mgr_factory(
 
     class _FakeSubagentManager:
         last_task: str | None = None
+        last_instance: "_FakeSubagentManager | None" = None
 
         def __init__(self, **kwargs):
             if raise_on_init:
@@ -82,6 +83,8 @@ def _make_fake_mgr_factory(
             self.role_system_prompt = kwargs.get("role_system_prompt")
             self.max_iterations = kwargs.get("max_iterations")
             self._telemetry_component = kwargs.get("telemetry_component", "")
+            self._telemetry_cycle_id = kwargs.get("telemetry_cycle_id")
+            type(self).last_instance = self
             self._running_tasks: dict[str, asyncio.Task] = {}
             self._planner_release_skill_reads = (
                 ["nanobot/skills/task-writing/SKILL.md"] if task_writing_read else []
@@ -144,6 +147,19 @@ async def _run(**overrides):
     )
     kwargs.update(overrides)
     return await bridge._run_planning_session(**kwargs)
+
+
+def test_planning_session_passes_explicit_cycle_id_to_subagent_manager(tmp_path: Path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    monkeypatch.setattr(bridge, "SubagentManager", _make_fake_mgr_factory(state, {
+        "insight": "x", "plan": "y", "iterations_planned": 5,
+    }))
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["ran"] is True
+    assert bridge.SubagentManager.last_instance._telemetry_cycle_id == "cycle-1"
 
 
 def test_happy_path_writes_the_diary_and_journals_success(tmp_path: Path, monkeypatch):

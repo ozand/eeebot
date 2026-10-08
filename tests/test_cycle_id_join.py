@@ -21,10 +21,11 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from nanobot.observability.llm_telemetry import call_context, current_cycle_id
+from nanobot.observability.llm_telemetry import call_context, current_cycle_id, record_llm_call
 from nanobot.runtime import cycle_ledger, demand, llm_proposer
 
 ENV_VAR = llm_proposer.ENABLED_ENV
@@ -165,6 +166,77 @@ class TestCurrentCycleId:
         with call_context("cycle-x", "bridge"):
             pass
         assert current_cycle_id() == ""
+
+
+def test_explicit_subagent_telemetry_cycle_overrides_recent_context(monkeypatch, tmp_path):
+    """A planner's supplied cycle must beat the correlation-ledger fallback."""
+    from nanobot.agent.subagent import SubagentManager, _subagent_telemetry_context
+
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        SubagentManager, "_build_subagent_correlation_context",
+        lambda self: {"cycle_id": "misleading-most-recent-cycle"},
+    )
+    manager = SubagentManager(
+        provider=SimpleNamespace(get_default_model=lambda: "test-model"),
+        workspace=tmp_path, bus=object(),
+        telemetry_component="planner", telemetry_cycle_id="cycle-planner-current",
+    )
+    assert manager._build_subagent_correlation_context()["cycle_id"] == "misleading-most-recent-cycle"
+
+    with call_context("executor-cycle", "bridge"):
+        with _subagent_telemetry_context(manager._telemetry_cycle_id, "planner"):
+            record_llm_call(
+                model="test-model", duration_ms=1, usage={}, finish_reason="stop", retries=0,
+            )
+        assert current_cycle_id("bridge") == "executor-cycle"
+
+    rows = _read_jsonl(tmp_path / f"{datetime.now(timezone.utc):%Y-%m-%d}.jsonl")
+    assert rows[-1]["cycle_id"] == "cycle-planner-current"
+    assert rows[-1]["component"] == "planner"
+
+
+def test_concurrent_explicit_subagent_contexts_keep_cycle_ids_isolated(tmp_path):
+    import asyncio
+
+    from nanobot.agent.subagent import _subagent_telemetry_context
+
+    events = asyncio.Event()
+    rows = []
+
+    async def _record(cycle):
+        with _subagent_telemetry_context(cycle, "planner"):
+            await events.wait()
+            record_llm_call(
+                model="test-model", duration_ms=1, usage={}, finish_reason="stop", retries=0,
+            )
+            rows.append(current_cycle_id("planner"))
+
+    async def _run():
+        first = asyncio.create_task(_record("cycle-one"))
+        second = asyncio.create_task(_record("cycle-two"))
+        await asyncio.sleep(0)
+        events.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(_run())
+    assert sorted(rows) == ["cycle-one", "cycle-two"]
+
+
+def test_subagent_without_explicit_cycle_keeps_ambient_correlation(monkeypatch, tmp_path):
+    from nanobot.agent.subagent import _subagent_telemetry_context
+
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+    with call_context("cycle-ambient", "bridge"):
+        with _subagent_telemetry_context("", "executor"):
+            record_llm_call(
+                model="test-model", duration_ms=1, usage={}, finish_reason="stop", retries=0,
+            )
+        assert current_cycle_id("bridge") == "cycle-ambient"
+
+    rows = _read_jsonl(tmp_path / f"{datetime.now(timezone.utc):%Y-%m-%d}.jsonl")
+    assert rows[-1]["cycle_id"] == "cycle-ambient"
+    assert rows[-1]["component"] == "executor"
 
 
 # ─── 2. propose() stamps telemetry with the ambient cycle_id ───────────────
