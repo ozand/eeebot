@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -196,6 +197,34 @@ async def test_image_fallback_returns_error_on_second_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_image_fallback_records_each_failed_attempt(tmp_path, monkeypatch) -> None:
+    """Both the original and image-stripped calls are failed attempts."""
+    from datetime import datetime, timezone
+
+    from nanobot.observability.llm_telemetry import call_context
+
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "llm_calls"))
+    provider = ScriptedProvider([
+        LLMResponse(content="Error calling LLM: BadRequestError: sanitized", finish_reason="error",
+                    usage={"_http_status": 400}),
+        LLMResponse(content="Error calling LLM: BadRequestError: sanitized", finish_reason="error",
+                    usage={"_http_status": 400}),
+    ])
+    with call_context("cycle-image-fail", "executor"):
+        response = await provider.chat_with_retry(messages=_IMAGE_MSG)
+
+    assert response.finish_reason == "error"
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    rows = _read_jsonl(tmp_path / "llm_calls" / "failures" / f"{day}.jsonl")
+    assert len(rows) == 2
+    assert [row["seq"] for row in rows] == [1, 2]
+    assert all(row["error_type"] == "BadRequestError" for row in rows)
+    assert all(row["http_status"] == 400 for row in rows)
+    assert all(row["cycle_id"] == "cycle-image-fail" for row in rows)
+    assert all(row["component"] == "executor" for row in rows)
+
+
+@pytest.mark.asyncio
 async def test_image_fallback_without_meta_uses_default_placeholder() -> None:
     """When _meta is absent, fallback placeholder is '[image omitted]'."""
     provider = ScriptedProvider([
@@ -253,6 +282,31 @@ async def test_chat_with_retry_records_telemetry_on_success(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_chat_with_retry_failure_telemetry_keeps_success_stream_unchanged(tmp_path, monkeypatch):
+    from nanobot.observability.llm_telemetry import call_context
+
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "llm_calls"))
+    response = LLMResponse(
+        content="Error calling LLM: RateLimitError: No deployments available",
+        finish_reason="error",
+        usage={"_http_status": 429, "_retry_after_s": 108301},
+    )
+    provider = ScriptedProvider([response])
+    with call_context("cycle-test-fail", "proposer"):
+        await provider.chat_with_retry(messages=[{"role": "user", "content": "secret prompt"}])
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    root = tmp_path / "llm_calls"
+    failures = _read_jsonl(root / "failures" / f"{day}.jsonl")
+    assert len(failures) == 1
+    assert failures[0]["error_type"] == "RateLimitError"
+    assert failures[0]["http_status"] == 429
+    assert failures[0]["retry_after_s"] == 108301
+    assert failures[0]["component"] == "proposer"
+    assert failures[0]["cycle_id"] == "cycle-test-fail"
+    assert not (root / f"{day}.jsonl").exists()
+    assert "secret prompt" not in (root / "failures" / f"{day}.jsonl").read_text(encoding="utf-8")
+
+
 async def test_chat_with_retry_records_telemetry_with_retries(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
 

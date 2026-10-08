@@ -8,6 +8,7 @@ import pytest
 from nanobot.observability.llm_telemetry import (
     call_context,
     record_llm_call,
+    record_llm_failure,
     record_llm_prompt,
     reset_call_context,
     set_call_context,
@@ -17,6 +18,59 @@ from nanobot.observability.llm_telemetry import (
 def _read_jsonl(path):
     with open(path, encoding="utf-8") as fh:
         return [json.loads(line) for line in fh if line.strip()]
+
+
+def test_failure_stream_is_outside_daily_rotation_globs(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+    failure_dir = tmp_path / "failures"
+    failure_dir.mkdir()
+    failure_file = failure_dir / "2020-01-01.jsonl"
+    failure_file.write_text('{"error_type":"RateLimitError"}\n', encoding="utf-8")
+    before = failure_file.read_bytes()
+
+    from nanobot.observability.llm_telemetry import _rotate_and_prune
+    _rotate_and_prune(tmp_path, today="2026-09-29", retention_days=1)
+    # The call and prompt retention routines only inspect direct-child daily
+    # files; failure stream has its own retention and is not treated as a day.
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    (prompts / "2020-01-01.jsonl").write_text("{}\n", encoding="utf-8")
+    _rotate_and_prune(prompts, today="2026-09-29", retention_days=1)
+
+    assert failure_file.exists()
+    assert failure_file.read_bytes() == before
+    assert not list(failure_dir.glob("*.jsonl.gz"))
+
+
+def test_record_llm_failure_writes_only_bounded_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+    with call_context("cycle-fail", "proposer"):
+        record_llm_failure(
+            component="proposer", requested_model="model-a", error_type="RateLimitError",
+            http_status=429, retry_after_s=10,
+        )
+    file = next((tmp_path / "failures").glob("*.jsonl"))
+    row = _read_jsonl(file)[0]
+    assert row["ok"] is False
+    assert row["cycle_id"] == "cycle-fail"
+    assert row["seq"] == 1
+    assert "prompt" not in row and "response" not in row
+
+
+def test_record_llm_failure_invalid_timestamp_cannot_escape_failures_dir(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "llm_calls"))
+    record_llm_failure(
+        component="proposer", requested_model="model-a", error_type="RateLimitError",
+        ts="../../evil-2026-01-01T00:00:00Z",
+    )
+
+    failures_root = tmp_path / "llm_calls" / "failures"
+    rows = list(failures_root.glob("*.jsonl"))
+    assert len(rows) == 1
+    assert rows[0].name == datetime.now(timezone.utc).strftime("%Y-%m-%d.jsonl")
+    assert not (tmp_path / "evil-2026-01-01T00:00:00Z.jsonl").exists()
 
 
 def test_record_llm_call_writes_well_formed_line(tmp_path, monkeypatch):

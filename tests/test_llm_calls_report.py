@@ -81,6 +81,17 @@ def test_aggregate_per_model_and_per_cycle(report_module):
     assert summary["per_cycle_duration_ms"]["c2"] == pytest.approx(50.0)
 
 
+def test_aggregate_failure_stream_is_separate_from_call_totals(tmp_path, report_module):
+    _write_jsonl(tmp_path / "2026-07-01.jsonl", [
+        {"model": "m1", "duration_ms": 10.0, "total_tokens": 1, "cycle_id": "c1"},
+    ])
+    failures = tmp_path / "failures"
+    failures.mkdir()
+    _write_jsonl(failures / "2026-07-01.jsonl", [{"ok": False, "requested_model": "m1", "http_status": 429}])
+    records = report_module.load_records(tmp_path)
+    assert report_module.aggregate(records)["totals"] == {"calls": 1, "duration_ms": 10.0, "tokens": 1}
+
+
 def test_aggregate_handles_missing_cycle_id(report_module):
     records = [{"model": "m1", "duration_ms": 10.0, "total_tokens": 1}]
     summary = report_module.aggregate(records)
