@@ -11,6 +11,26 @@ import pytest
 from nanobot.agent.tools.shell import ExecTool
 
 
+def _read_proc_stat(path: Path) -> list[str] | None:
+    """Read process state; disappearance while reading means it was reaped."""
+    try:
+        return path.read_text(encoding="utf-8").split()
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+
+
+def test_proc_stat_read_tolerates_process_disappearing_after_exists(monkeypatch):
+    """A process can be reaped between Path.exists() and reading /proc."""
+    proc_stat = Path("/proc/12345/stat")
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+
+    def _vanished_read_text(self, *args, **kwargs):
+        raise ProcessLookupError("process exited after exists check")
+
+    monkeypatch.setattr(Path, "read_text", _vanished_read_text)
+    assert _read_proc_stat(proc_stat) is None
+
+
 @pytest.mark.asyncio
 async def test_watchdog_cancellation_kills_and_reaps_real_exec_subprocess(tmp_path):
     """Cancelling ExecTool.execute must not leave its real child process alive."""
@@ -93,13 +113,17 @@ async def test_watchdog_cancellation_kills_and_reaps_real_exec_subprocess(tmp_pa
             assert pid is not None
             proc_stat = Path(f"/proc/{pid}/stat")
             deadline = time.monotonic() + 5
-            while proc_stat.exists() and time.monotonic() < deadline:
-                stat_fields = proc_stat.read_text(encoding="utf-8").split()
+            stat_fields = None
+            while time.monotonic() < deadline:
+                stat_fields = _read_proc_stat(proc_stat)
+                if stat_fields is None:
+                    # The process may be reaped between cleanup and this
+                    # observation; disappearance means it is no longer live.
+                    break
                 if len(stat_fields) > 2 and stat_fields[2] == "Z":
                     break
                 await asyncio.sleep(0.01)
-            if proc_stat.exists():
-                stat_fields = proc_stat.read_text(encoding="utf-8").split()
+            if stat_fields is not None:
                 assert len(stat_fields) > 2 and stat_fields[2] == "Z", (
                     f"PID {pid} remains running (state={stat_fields[2] if len(stat_fields) > 2 else 'unknown'})"
                 )
@@ -239,13 +263,16 @@ async def test_watchdog_repeated_cancellation_finishes_real_process_cleanup(tmp_
     for pid in (shell_pid, child_pid):
         proc_stat = Path(f"/proc/{pid}/stat")
         deadline = time.monotonic() + 5
-        while proc_stat.exists() and time.monotonic() < deadline:
-            fields = proc_stat.read_text(encoding="utf-8").split()
+        fields = None
+        while time.monotonic() < deadline:
+            fields = _read_proc_stat(proc_stat)
+            if fields is None:
+                # The process may be reaped between cleanup and observation.
+                break
             if len(fields) > 2 and fields[2] == "Z":
                 break
             await asyncio.sleep(0.01)
-        if proc_stat.exists():
-            fields = proc_stat.read_text(encoding="utf-8").split()
+        if fields is not None:
             assert len(fields) > 2 and fields[2] == "Z", f"PID {pid} remains running"
 
 
