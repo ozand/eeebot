@@ -1989,7 +1989,7 @@ class TestProposeMockedClient:
         monkeypatch.setattr(openai_module, "OpenAI", _FailingClient)
         monkeypatch.setenv("STATE_DIR", str(tmp_path / "state"))
         monkeypatch.setattr(llm_proposer, "current_cycle_id", lambda *_: "cycle-2047")
-        result = llm_proposer.propose(canary)
+        result = llm_proposer.propose(canary, component="goal_review")
         assert result is None
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         failures = tmp_path / "llm_calls" / "failures" / f"{today}.jsonl"
@@ -1997,7 +1997,7 @@ class TestProposeMockedClient:
         assert len(rows) == 1
         row = rows[0]
         assert row["ok"] is False
-        assert row["component"] == "proposer"
+        assert row["component"] == "goal_review"
         assert row["requested_model"] == llm_proposer._model_name()
         assert row["error_type"] == "RateLimitError"
         assert row["http_status"] == 429
