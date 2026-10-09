@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import socket
 from pathlib import Path
 from unittest.mock import patch
@@ -387,6 +388,48 @@ async def test_exec_blocks_wget_localhost():
 
 
 @pytest.mark.asyncio
+async def test_exec_streams_output_in_bounded_reads(monkeypatch):
+    class _Stream:
+        def __init__(self, chunks):
+            self.chunks = iter(chunks)
+            self.read_sizes = []
+
+        async def read(self, size=-1):
+            self.read_sizes.append(size)
+            return next(self.chunks, b"")
+
+    class _Process:
+        pid = 123
+        returncode = 0
+        stdin = None
+
+        def __init__(self):
+            self.stdout = _Stream([b"hello\n"])
+            self.stderr = _Stream([b"warning\n"])
+
+        async def wait(self):
+            return self.returncode
+
+        async def communicate(self):
+            stdout = await self.stdout.read(-1)
+            stderr = await self.stderr.read(-1)
+            return stdout, stderr
+
+    process = _Process()
+
+    async def _create(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", _create)
+    monkeypatch.setattr("nanobot.agent.tools.shell.os.name", "posix")
+
+    result = await ExecTool(timeout=5).execute("echo test")
+
+    assert result == "hello\n\nSTDERR:\nwarning\n\n\nExit code: 0"
+    assert process.stdout.read_sizes and all(size > 0 for size in process.stdout.read_sizes)
+    assert process.stderr.read_sizes and all(size > 0 for size in process.stderr.read_sizes)
+
+
 async def test_exec_allows_normal_commands():
     tool = ExecTool(timeout=5)
     result = await tool.execute(command="echo hello")
