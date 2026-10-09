@@ -19,6 +19,7 @@ from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.runtime import cycle_ledger
 from nanobot.runtime.session_clock import (
     DEFAULT_CALL_P99_SECS,
+    DEFAULT_WALL_SECS,
     DEFAULT_FINAL_BUDGET_SECS,
     DEFAULT_PROGRESS_TIMEOUT_SECS,
     ProgressWatchdog,
@@ -49,6 +50,14 @@ class _MockProvider(LLMProvider):
         if self.responses:
             return self.responses.pop(0)
         return LLMResponse(content="done", tool_calls=[])
+
+
+def test_default_bridge_wall_budget_is_3600_seconds(monkeypatch):
+    monkeypatch.delenv("NANOBOT_SUBAGENT_WALL_SECS", raising=False)
+
+    from nanobot.runtime.session_clock import get_bridge_wall_secs
+
+    assert get_bridge_wall_secs() == 3600.0
 
 
 class TestWallClockSafetyMargin:

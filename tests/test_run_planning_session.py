@@ -149,6 +149,27 @@ async def _run(**overrides):
     return await bridge._run_planning_session(**kwargs)
 
 
+def test_planning_session_uses_1200_second_timeout(tmp_path: Path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    manager_factory = _make_fake_mgr_factory(state, {
+        "insight": "x", "plan": "y", "iterations_planned": 5,
+    })
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+    observed_timeouts = []
+    real_wait_for = asyncio.wait_for
+
+    async def _capture_timeout(awaitable, *, timeout):
+        observed_timeouts.append(timeout)
+        return await real_wait_for(awaitable, timeout=timeout)
+
+    monkeypatch.setattr(bridge.asyncio, "wait_for", _capture_timeout)
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["ran"] is True
+    assert observed_timeouts == [1200.0]
+
+
 def test_planning_session_passes_explicit_cycle_id_to_subagent_manager(tmp_path: Path, monkeypatch):
     repo = _init_repo_with_origin(tmp_path)
     state = tmp_path / "state"
