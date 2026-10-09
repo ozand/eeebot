@@ -9,7 +9,7 @@ tags: [runtime, observability, ledger, privacy]
 
 # Status
 
-Proposed for discovery/design review under #2068. Not accepted; no implementation authorized. Owner: ozand; design writer: pX. Design target: source control and CI; any host rollout needs separate authorization.
+Proposed for discovery/design review under #2068. Not accepted; no implementation authorized. Owner: ozand; design writer: pX. Design target: repository source control and CI only. Evidence required before any future implementation PR is considered: exact-base/source tests for each disposition and compatibility case, fresh independent review of the exact commit, and passing CI on that exact SHA. Host rollout is excluded and unauthorized here; it requires a separate issue and explicit owner authorization.
 
 # Context
 
@@ -86,9 +86,25 @@ Proposed/planned only; these tests are not claimed to exist or pass. On acceptan
 | Only enum is added; no raw/free-form field | `tests/test_cycle_ledger.py::<new_handled_disposition_privacy_test>` | not yet written |
 | Existing marker/retry behavior unchanged | `tests/test_bridge_executor_llm_error.py::<existing_and_new_retry_regressions>` | not yet verified |
 
+# Verification and rollout boundary
+
+This discovery/design proposal is verified only by source review against the
+referenced immutable SHA and review of this Proposed ADR. No implementation,
+runtime test, host validation, or rollout is claimed. If a separate implementation
+is later authorized, its evidence gate is: focused source tests for every legal
+return and missing/unknown compatibility, exact-base diff review, fresh
+independent review of the final SHA, and CI passing on that same SHA. The target
+for that future verification is repository source and CI. Host rollout is
+explicitly excluded; it requires a separate issue, target/environment statement,
+and explicit owner authorization before any host action.
+
 # Rollback
 
-Before implementation, withdraw/revise this Proposed ADR and linked change proposal. After future implementation, stop writing the optional field; old rows need no migration. Writer rollback is compatible if consumers tolerate absence.
+Before implementation, withdraw/revise this Proposed ADR. If a future authorized
+implementation lands, rollback is to stop writing the optional field and revert
+the writer; old rows need no migration, and readers must tolerate absence. No
+host rollback plan is applicable because host rollout is out of scope and
+unauthorized.
 
 # References
 
