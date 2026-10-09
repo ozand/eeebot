@@ -332,7 +332,7 @@ class ExecTool(Tool):
                 ]
                 if any(error is not None for error in errors):
                     raise next(error for error in errors if error is not None)
-                if not wait_task.done():
+                if not wait_task.done() or len(done) != 1 + len(drain_tasks):
                     raise asyncio.TimeoutError
                 await asyncio.gather(*drain_tasks)
                 if stdout_capture.had_text:
@@ -343,35 +343,31 @@ class ExecTool(Tool):
                     output.add("STDERR:\n")
                     output.add_segment(stderr_segment)
             except asyncio.TimeoutError:
-                wait_task.cancel()
-                for task in drain_tasks:
-                    task.cancel()
-                await asyncio.gather(wait_task, *drain_tasks, return_exceptions=True)
-                await self._terminate_and_reap(process, process_group_id)
+                cleanup = asyncio.create_task(
+                    self._cancel_readers_and_terminate(
+                        process, process_group_id, wait_task, drain_tasks, job_handle[0]
+                    )
+                )
+                job_handle[0] = None
+                await self._await_cleanup_despite_cancellation(cleanup)
                 return f"Error: Command timed out after {effective_timeout} seconds"
 
-            output.add("\n\nExit code: " + str(process.returncode))
+            output.add("\nExit code: " + str(process.returncode))
             return output.render()
 
         except asyncio.CancelledError:
-            for task in drain_tasks if "drain_tasks" in locals() else ():
-                task.cancel()
-            if "drain_tasks" in locals():
-                await asyncio.gather(*drain_tasks, return_exceptions=True)
             if process is not None:
                 cleanup = asyncio.create_task(
-                    self._terminate_and_reap(process, process_group_id, job_handle[0])
+                    self._cancel_readers_and_terminate(
+                        process,
+                        process_group_id,
+                        wait_task if "wait_task" in locals() else None,
+                        drain_tasks if "drain_tasks" in locals() else (),
+                        job_handle[0],
+                    )
                 )
-                job_handle[0] = None  # cleanup owns and closes the handle
-                while not cleanup.done():
-                    try:
-                        await asyncio.shield(cleanup)
-                    except asyncio.CancelledError:
-                        # A later cancel must not interrupt termination, wait/reap,
-                        # or pipe draining. The original cancellation is re-raised
-                        # after this independently-owned cleanup task completes.
-                        continue
-                await cleanup
+                job_handle[0] = None
+                await self._await_cleanup_despite_cancellation(cleanup)
             raise
         except Exception as e:
             for task in drain_tasks if "drain_tasks" in locals() else ():
@@ -392,10 +388,61 @@ class ExecTool(Tool):
                 job_handle[0] = None
 
     @staticmethod
+    async def _await_cleanup_despite_cancellation(cleanup: asyncio.Task) -> None:
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                continue
+        await cleanup
+
+    @staticmethod
+    async def _cancel_readers_and_terminate(
+        process: asyncio.subprocess.Process,
+        process_group_id: int | None,
+        wait_task: asyncio.Task | None,
+        reader_tasks: tuple[asyncio.Task, ...],
+        job_handle,
+    ) -> None:
+        # This independently-owned task performs the entire handoff before
+        # any await in execute can be interrupted by repeated cancellation.
+        if wait_task is not None and not wait_task.done():
+            wait_task.cancel()
+        readers_stopped = await ExecTool._stop_readers(process, reader_tasks)
+        await ExecTool._terminate_and_reap(
+            process, process_group_id, job_handle, drain_pipes=readers_stopped
+        )
+
+    @staticmethod
+    async def _stop_readers(
+        process: asyncio.subprocess.Process, tasks: tuple[asyncio.Task, ...] | list[asyncio.Task]
+    ) -> bool:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if not tasks:
+            return True
+
+        async def settle() -> None:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        settled = asyncio.create_task(settle())
+        try:
+            await asyncio.wait_for(asyncio.shield(settled), timeout=0.25)
+        except asyncio.TimeoutError:
+            process._transport.close()
+            try:
+                await asyncio.wait_for(asyncio.shield(settled), timeout=0.25)
+            except asyncio.TimeoutError:
+                return False
+        return settled.done()
+
+    @staticmethod
     async def _terminate_and_reap(
         process: asyncio.subprocess.Process,
         process_group_id: int | None = None,
         job_handle=None,
+        drain_pipes: bool = True,
     ) -> None:
         """Terminate the command tree and reap the shell process."""
         if os.name != "nt" and process_group_id is None:
@@ -446,6 +493,10 @@ class ExecTool(Tool):
                 process.kill()
             await process.wait()
 
+        if not drain_pipes:
+            process._transport.close()
+            return
+
         # The shell can exit while a background descendant keeps inherited
         # stdout/stderr open. Drain with a grace period, then kill the saved
         # process group regardless of the shell's return code.
@@ -456,8 +507,7 @@ class ExecTool(Tool):
         try:
             await asyncio.wait_for(asyncio.gather(*drain_tasks), timeout=1.0)
         except asyncio.TimeoutError:
-            for task in drain_tasks:
-                task.cancel()
+            readers_stopped = await ExecTool._stop_readers(process, drain_tasks)
             if os.name == "nt":
                 await ExecTool._taskkill_tree(process.pid)
             else:
@@ -467,6 +517,9 @@ class ExecTool(Tool):
                     os.killpg(process_group_id, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+            if not readers_stopped:
+                process._transport.close()
+                return
             drain_tasks = [
                 asyncio.create_task(ExecTool._discard_output_stream(process.stdout)),
                 asyncio.create_task(ExecTool._discard_output_stream(process.stderr)),
@@ -474,10 +527,10 @@ class ExecTool(Tool):
             try:
                 await asyncio.wait_for(asyncio.gather(*drain_tasks), timeout=1.0)
             except asyncio.TimeoutError:
-                for task in drain_tasks:
-                    task.cancel()
-                # A detached descendant may retain inherited pipes; forcibly
-                # close our transports rather than wait for its lifetime.
+                # A detached descendant may retain inherited pipes. Settle the
+                # existing readers before closing transports; never overlap
+                # reads on the same StreamReader.
+                await ExecTool._stop_readers(process, drain_tasks)
                 process._transport.close()
 
     @staticmethod
