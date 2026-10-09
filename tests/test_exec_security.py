@@ -243,9 +243,13 @@ async def test_watchdog_repeated_cancellation_finishes_real_process_cleanup(tmp_
     cleanup_started = asyncio.Event()
     original_cleanup = ExecTool._terminate_and_reap
 
-    async def _observe_cleanup(process, process_group_id=None, job_handle=None):
+    async def _observe_cleanup(
+        process, process_group_id=None, job_handle=None, *, drain_pipes=True
+    ):
         cleanup_started.set()
-        return await original_cleanup(process, process_group_id, job_handle)
+        return await original_cleanup(
+            process, process_group_id, job_handle, drain_pipes=drain_pipes
+        )
 
     monkeypatch.setattr(ExecTool, "_terminate_and_reap", staticmethod(_observe_cleanup))
     execution = asyncio.create_task(ExecTool(timeout=60).execute(command))
@@ -405,6 +409,8 @@ async def test_exec_streams_output_in_bounded_reads(monkeypatch):
     class _Process:
         pid = 123
         returncode = 0
+        _transport = None
+
         class _Stdin:
             def write(self, data):
                 pass
@@ -445,6 +451,7 @@ async def test_exec_streams_output_in_bounded_reads(monkeypatch):
         await original_drain(stream, capture)
 
     monkeypatch.setattr(ExecTool, "_drain_output_stream", staticmethod(_observe_drain))
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", _create)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
     monkeypatch.setattr("nanobot.agent.tools.shell._assign_to_kill_on_close_job", lambda process: None)
 
@@ -547,6 +554,7 @@ async def test_exec_waited_process_with_open_pipe_times_out_and_cleans_up(monkey
     async def _terminate(*args, **kwargs):
         terminated.set()
 
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", _create)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
     monkeypatch.setattr(ExecTool, "_drain_output_stream", staticmethod(_blocking_reader))
     monkeypatch.setattr("nanobot.agent.tools.shell._assign_to_kill_on_close_job", lambda process: None)
@@ -613,6 +621,8 @@ async def test_exec_reader_failure_after_root_exit_still_owns_cleanup(monkeypatc
         await allow_cleanup.wait()
         process.returncode = -9
 
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", _create)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", _create)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
     monkeypatch.setattr("nanobot.agent.tools.shell._assign_to_kill_on_close_job", lambda process: None)
     monkeypatch.setattr(ExecTool, "_terminate_and_reap", staticmethod(_cleanup))
