@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import socket
 from pathlib import Path
 from unittest.mock import patch
@@ -242,9 +243,13 @@ async def test_watchdog_repeated_cancellation_finishes_real_process_cleanup(tmp_
     cleanup_started = asyncio.Event()
     original_cleanup = ExecTool._terminate_and_reap
 
-    async def _observe_cleanup(process, process_group_id=None, job_handle=None):
+    async def _observe_cleanup(
+        process, process_group_id=None, job_handle=None, *, drain_pipes=True
+    ):
         cleanup_started.set()
-        return await original_cleanup(process, process_group_id, job_handle)
+        return await original_cleanup(
+            process, process_group_id, job_handle, drain_pipes=drain_pipes
+        )
 
     monkeypatch.setattr(ExecTool, "_terminate_and_reap", staticmethod(_observe_cleanup))
     execution = asyncio.create_task(ExecTool(timeout=60).execute(command))
@@ -387,6 +392,398 @@ async def test_exec_blocks_wget_localhost():
 
 
 @pytest.mark.asyncio
+async def test_exec_streams_output_in_bounded_reads(monkeypatch):
+    class _Stream:
+        def __init__(self, chunks):
+            self.chunks = iter(chunks)
+            self.read_sizes = []
+            self.eof_count = 0
+
+        async def read(self, size=-1):
+            self.read_sizes.append(size)
+            chunk = next(self.chunks, b"")
+            if not chunk:
+                self.eof_count += 1
+            return chunk
+
+    class _Process:
+        pid = 123
+        returncode = 0
+        _transport = None
+
+        class _Stdin:
+            def write(self, data):
+                pass
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+        stdin = _Stdin()
+
+        def __init__(self):
+            self.stdout = _Stream([b"a" * 20_000, b"z\n"])
+            self.stderr = _Stream([b"b" * 20_000, b"w\n"])
+
+        async def wait(self):
+            while self.stdout.eof_count < 1 or self.stderr.eof_count < 1:
+                await asyncio.sleep(0)
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+        async def communicate(self):
+            stdout = await self.stdout.read(-1)
+            stderr = await self.stderr.read(-1)
+            return stdout, stderr
+
+    process = _Process()
+
+    async def _create(*args, **kwargs):
+        return process
+
+    original_drain = ExecTool._drain_output_stream
+
+    async def _observe_drain(stream, capture):
+        await original_drain(stream, capture)
+
+    monkeypatch.setattr(ExecTool, "_drain_output_stream", staticmethod(_observe_drain))
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", _create)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
+    monkeypatch.setattr("nanobot.agent.tools.shell._assign_to_kill_on_close_job", lambda process: None)
+
+    result = await ExecTool(timeout=5).execute("echo test")
+
+    assert result.startswith("a" * 5_000)
+    assert "... (30," in result and " chars truncated) ..." in result
+    assert result.endswith("Exit code: 0")
+    assert process.stdout.read_sizes and all(size == 65_536 for size in process.stdout.read_sizes)
+    assert process.stderr.read_sizes and all(size == 65_536 for size in process.stderr.read_sizes)
+
+
+async def test_exec_bounded_head_tail_matches_legacy_output_format():
+    from nanobot.agent.tools.shell import _BoundedOutput, _BoundedSegment
+
+    output = _BoundedOutput(ExecTool._MAX_OUTPUT)
+    stdout = "o" * 12_000
+    stderr = "e" * 12_000
+    stdout_segment = _BoundedSegment(ExecTool._MAX_OUTPUT)
+    stdout_segment.add(stdout)
+    output.add_segment(stdout_segment)
+    output.add("\n")
+    output.add("STDERR:\n")
+    stderr_segment = _BoundedSegment(ExecTool._MAX_OUTPUT)
+    stderr_segment.add(stderr)
+    output.add_segment(stderr_segment)
+    output.add("\n\nExit code: 0")
+
+    legacy = "\n".join((stdout, f"STDERR:\n{stderr}", "\nExit code: 0"))
+    half = ExecTool._MAX_OUTPUT // 2
+    expected = (
+        legacy[:half]
+        + f"\n\n... ({len(legacy) - ExecTool._MAX_OUTPUT:,} chars truncated) ...\n\n"
+        + legacy[-half:]
+    )
+    assert output.render() == expected
+
+    # Multibyte UTF-8 split across byte chunks must decode as one character;
+    # malformed bytes retain the legacy errors="replace" behavior.
+    import codecs
+
+    segment = _BoundedSegment(ExecTool._MAX_OUTPUT)
+    capture = __import__("nanobot.agent.tools.shell", fromlist=["_BoundedTextCapture"])._BoundedTextCapture(segment)
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    capture.add(decoder.decode(b"A\xe2"))
+    capture.add(decoder.decode(b"\x82\xacB\xff"))
+    capture.finish(decoder.decode(b"", final=True))
+    assert segment.full() == "A€B�"
+
+
+@pytest.mark.asyncio
+async def test_exec_waited_process_with_open_pipe_times_out_and_cleans_up(monkeypatch):
+    class _Stream:
+        async def read(self, size):
+            await asyncio.Event().wait()
+
+    class _Process:
+        pid = 123
+        returncode = 0
+        stdout = _Stream()
+        stderr = _Stream()
+        _transport = None
+
+        class _Stdin:
+            def write(self, data):
+                pass
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+        stdin = _Stdin()
+
+        async def wait(self):
+            return self.returncode
+
+    process = _Process()
+
+    class _Transport:
+        def close(self):
+            pass
+
+    process._transport = _Transport()
+    terminated = asyncio.Event()
+
+    async def _create(*args, **kwargs):
+        return process
+
+    reader_count = 0
+
+    async def _blocking_reader(stream, capture):
+        nonlocal reader_count
+        reader_count += 1
+        if reader_count == 1:
+            raise asyncio.CancelledError
+        await asyncio.Event().wait()
+
+    async def _terminate(*args, **kwargs):
+        terminated.set()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", _create)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
+    monkeypatch.setattr(ExecTool, "_drain_output_stream", staticmethod(_blocking_reader))
+    monkeypatch.setattr("nanobot.agent.tools.shell._assign_to_kill_on_close_job", lambda process: None)
+    monkeypatch.setattr(ExecTool, "_terminate_and_reap", staticmethod(_terminate))
+
+    result = await ExecTool(timeout=0.05).execute("fake command")
+    assert result == "Error: Command timed out after 0.05 seconds"
+    assert terminated.is_set()
+
+
+@pytest.mark.asyncio
+async def test_exec_reader_failure_after_root_exit_still_owns_cleanup(monkeypatch):
+    class _Stream:
+        def __init__(self, *, fail=False):
+            self.fail = fail
+            self.reads = 0
+
+        async def read(self, size):
+            self.reads += 1
+            if self.fail:
+                raise OSError("injected pipe read error")
+            return b""
+
+    class _Process:
+        pid = 123
+        returncode = 0
+        stdout = _Stream(fail=True)
+        stderr = _Stream()
+
+        class _Stdin:
+            def write(self, data):
+                pass
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+        stdin = _Stdin()
+
+        async def wait(self):
+            return self.returncode
+
+        async def communicate(self):
+            return b"", b""
+
+        class _Transport:
+            def close(self):
+                pass
+
+        _transport = _Transport()
+
+    process = _Process()
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    assert isinstance(process.stdout, _Stream)
+
+    async def _create(*args, **kwargs):
+        return process
+
+    async def _cleanup(*args, **kwargs):
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        process.returncode = -9
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", _create)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
+    monkeypatch.setattr("nanobot.agent.tools.shell._assign_to_kill_on_close_job", lambda process: None)
+    monkeypatch.setattr(ExecTool, "_terminate_and_reap", staticmethod(_cleanup))
+
+    execution = asyncio.create_task(ExecTool(timeout=5).execute("synthetic command"))
+    await asyncio.wait_for(cleanup_started.wait(), timeout=2)
+    execution.cancel()
+    await asyncio.sleep(0)
+    allow_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(execution, timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_exec_exit_separator_matches_legacy_output_segments():
+    from nanobot.agent.tools.shell import _BoundedOutput, _BoundedSegment
+
+    cases = (
+        ("", "", 0),
+        ("out", "", 0),
+        ("", "err", 1),
+        ("out", "err", 7),
+        ("   ", "", 0),
+        ("out", "   ", 0),
+    )
+    for stdout, stderr, code in cases:
+        parts = []
+        if stdout:
+            parts.append(stdout)
+        if stderr and stderr.strip():
+            parts.append("STDERR:\n" + stderr)
+        parts.append(f"\nExit code: {code}")
+        legacy = "\n".join(parts)
+
+        output = _BoundedOutput(ExecTool._MAX_OUTPUT)
+        if stdout:
+            output.add_segment(_BoundedSegment(ExecTool._MAX_OUTPUT))
+            output.segments[-1].add(stdout)
+            output.total += len(stdout)
+        if stderr and stderr.strip():
+            if stdout:
+                output.add("\n")
+            output.add("STDERR:\n")
+            segment = _BoundedSegment(ExecTool._MAX_OUTPUT)
+            segment.add(stderr)
+            output.add_segment(segment)
+        if stdout or (stderr and stderr.strip()):
+            output.add("\n")
+        output.add("\nExit code: " + str(code))
+        assert output.render() == legacy
+
+
+@pytest.mark.asyncio
+async def test_exec_empty_output_keeps_legacy_exit_format():
+    from nanobot.agent.tools.shell import _BoundedOutput
+
+    for code in (0, 7):
+        output = _BoundedOutput(ExecTool._MAX_OUTPUT)
+        output.add("\nExit code: " + str(code))
+        legacy = "\n".join(("\nExit code: " + str(code),))
+        assert output.render() == legacy
+
+
+@pytest.mark.asyncio
+async def test_exec_timeout_terminates_streaming_process():
+    import sys
+
+    command = (
+        f'"{sys.executable}" -c '
+        '"import sys,time; sys.stdout.write(\'started\'); sys.stdout.flush(); time.sleep(5)"'
+    )
+    result = await ExecTool(timeout=0.2).execute(command)
+    assert result == "Error: Command timed out after 0.2 seconds"
+
+
+@pytest.mark.asyncio
+async def test_exec_repeated_cancellation_during_reader_handoff_cleans_process(monkeypatch):
+    class _Stream:
+        async def read(self, size):
+            await asyncio.Event().wait()
+
+    class _Process:
+        pid = 123
+        returncode = None
+        stdout = _Stream()
+        stderr = _Stream()
+
+        class _Stdin:
+            def write(self, data):
+                pass
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+        stdin = _Stdin()
+
+        async def wait(self):
+            await asyncio.Event().wait()
+
+        class _Transport:
+            def close(self):
+                pass
+
+        _transport = _Transport()
+
+    process = _Process()
+    reader_started = asyncio.Event()
+    handoff_started = asyncio.Event()
+    release_handoff = asyncio.Event()
+    terminated = asyncio.Event()
+    async def _create(*args, **kwargs):
+        return process
+
+    async def blocked_reader(stream, capture):
+        reader_started.set()
+        await asyncio.Event().wait()
+
+    original_stop = ExecTool._stop_readers
+
+    async def paused_handoff(process_arg, tasks):
+        handoff_started.set()
+        await release_handoff.wait()
+        return await original_stop(process_arg, tasks)
+
+    async def terminate(*args, **kwargs):
+        terminated.set()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", _create)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
+    monkeypatch.setattr("nanobot.agent.tools.shell._assign_to_kill_on_close_job", lambda process: None)
+    monkeypatch.setattr(ExecTool, "_drain_output_stream", staticmethod(blocked_reader))
+    monkeypatch.setattr(ExecTool, "_stop_readers", staticmethod(paused_handoff))
+    monkeypatch.setattr(ExecTool, "_terminate_and_reap", staticmethod(terminate))
+    execution = asyncio.create_task(ExecTool(timeout=60).execute("fake command"))
+    await asyncio.wait_for(reader_started.wait(), timeout=5)
+    execution.cancel()
+    await asyncio.wait_for(handoff_started.wait(), timeout=5)
+    execution.cancel()
+    release_handoff.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(execution, timeout=5)
+    assert terminated.is_set()
+
+
+async def test_exec_large_stdout_and_stderr_are_drained_with_bounded_result():
+    import sys
+
+    command = (
+        f'"{sys.executable}" -c '
+        '"import sys; sys.stdout.write(\'o\'*50000); sys.stderr.write(\'e\'*50000)"'
+    )
+    result = await ExecTool(timeout=10).execute(command)
+
+    assert len(result) <= ExecTool._MAX_OUTPUT + 100
+    assert result.startswith("o" * (ExecTool._MAX_OUTPUT // 2))
+    assert "truncated)" in result
+    assert result.endswith("e" * (ExecTool._MAX_OUTPUT // 2 - len("\n\nExit code: 0")) + "\n\nExit code: 0")
+
+
 async def test_exec_allows_normal_commands():
     tool = ExecTool(timeout=5)
     result = await tool.execute(command="echo hello")
