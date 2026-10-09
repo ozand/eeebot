@@ -21,7 +21,7 @@ The outcome ledger is append-only. At the same immutable source, `nanobot/runtim
 
 # Decision
 
-If approved, terminal outcome telemetry may record the exact `_decide_handled_marker` return as optional additive `handled_disposition`, carried from its existing call to the terminal ledger row. Values are restricted to existing returns:
+If approved, terminal outcome telemetry may record the exact `_decide_handled_marker` return as optional additive string field `handled_disposition`, carried from its existing call to the terminal ledger row. The field name and type are proposed, pending owner approval. Values are restricted to existing returns:
 - `supplier_paused`
 - `handled`
 - `retired_state_lost`
@@ -86,25 +86,51 @@ Proposed/planned only; these tests are not claimed to exist or pass. On acceptan
 | Only enum is added; no raw/free-form field | `tests/test_cycle_ledger.py::<new_handled_disposition_privacy_test>` | not yet written |
 | Existing marker/retry behavior unchanged | `tests/test_bridge_executor_llm_error.py::<existing_and_new_retry_regressions>` | not yet verified |
 
-# Verification and rollout boundary
+# Verification and staged delivery boundary
 
-This discovery/design proposal is verified only by source review against the
-referenced immutable SHA and review of this Proposed ADR. No implementation,
-runtime test, host validation, or rollout is claimed. If a separate implementation
-is later authorized, its evidence gate is: focused source tests for every legal
-return and missing/unknown compatibility, exact-base diff review, fresh
-independent review of the final SHA, and CI passing on that same SHA. The target
-for that future verification is repository source and CI. Host rollout is
-explicitly excluded; it requires a separate issue, target/environment statement,
-and explicit owner authorization before any host action.
+This discovery/design proposal is verified only by exact-source review and
+ADR/document checks. No runtime implementation, runtime test, host validation,
+or rollout is claimed. The target for the current design stage is this
+repository's source documentation and CI. The proposed staged sequence is:
+
+1. **Design review (current stage):** validate this ADR against source SHA
+   `b3031531ff179728700db74f630c0cf6a042ba90`; run the ADR/document checks; obtain
+   fresh independent review of the exact PR head and passing CI on that same SHA.
+   Evidence is the immutable source comparison, named ADR/document test output,
+   independent review of the exact commit, and exact-SHA CI result. If anchors do
+   not match, a blocking review finding remains, or CI fails, stop and revise or
+   withdraw this Proposed PR; do not proceed to code.
+2. **Proposed-doc delivery only:** merge the ADR/index documentation only after
+   stage 1 passes. Evidence is the merged proposed ADR and its exact reviewed
+   commit. This records a proposal, not owner acceptance or implementation
+   authorization. Stop here until the owner explicitly decides the field type,
+   enum/missing/unknown semantics and separately authorizes a source-and-CI
+   implementation issue.
+3. **Future source/CI implementation (not authorized by #2068):** only under a
+   separate governed issue and explicit owner approval. Evidence must include
+   focused tests for all five legal returns and missing/unknown compatibility,
+   exact-base diff review, fresh independent review of the final SHA, and CI
+   passing on that same SHA. Target is repository source and CI. Stop/revert that
+   implementation PR if source mapping, compatibility, privacy, review, or CI
+   gates fail; do not deploy.
+4. **Host rollout:** excluded and unauthorized. It requires a separate issue,
+   named target/environment, rollout evidence, rollback criteria, and explicit
+   owner authorization before any host action. No host rollout is part of the
+   current design or future source/CI stage.
+
+This sequence is a design plan, not evidence that any later stage has occurred.
 
 # Rollback
 
-Before implementation, withdraw/revise this Proposed ADR. If a future authorized
-implementation lands, rollback is to stop writing the optional field and revert
-the writer; old rows need no migration, and readers must tolerate absence. No
-host rollback plan is applicable because host rollout is out of scope and
-unauthorized.
+For the current documentation stage, stop before stage 2 and revise or withdraw
+this Proposed PR if exact-source review, ADR/document checks, independent review,
+or exact-head CI fails. The current delivery is a Proposed ADR and index only;
+reverting those docs has no runtime effect. In a future, separately authorized
+source/CI implementation, stop writing the optional field and revert the writer
+if its mapping, compatibility, privacy, review, or CI gate fails; old rows need
+no migration and readers must tolerate absence. Host rollout remains excluded;
+its target and rollback criteria must be decided in its separate issue before
+authorization.
 
 # References
 
