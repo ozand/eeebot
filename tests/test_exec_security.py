@@ -622,7 +622,6 @@ async def test_exec_reader_failure_after_root_exit_still_owns_cleanup(monkeypatc
         process.returncode = -9
 
     monkeypatch.setattr(asyncio, "create_subprocess_shell", _create)
-    monkeypatch.setattr(asyncio, "create_subprocess_shell", _create)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
     monkeypatch.setattr("nanobot.agent.tools.shell._assign_to_kill_on_close_job", lambda process: None)
     monkeypatch.setattr(ExecTool, "_terminate_and_reap", staticmethod(_cleanup))
