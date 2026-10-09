@@ -52,6 +52,7 @@ Conventions:
 | [ADR-034](ADR-034-two-operator-documents-one-root-each.md) | Two operator documents, one root each, one resolver per document, and the agent that chooses reads both | proposed |
 | [ADR-035](ADR-035-the-planning-session-chooses-and-closes-hadi.md) | The agent's planning session chooses the work and closes the HADI loop; the outer contour diagnoses and never assigns | proposed |
 | [ADR-036](ADR-036-one-dashboard-two-places.md) | One dashboard, two places — the published generator also serves the LAN, and only the LAN sees what the agents said | proposed |
+| [ADR-037](ADR-037-record-handled-disposition-without-implying-cause.md) | Record handled-marker disposition without implying interruption cause | proposed |
 
 ## Acceptance
 
