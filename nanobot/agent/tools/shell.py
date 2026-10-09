@@ -370,13 +370,18 @@ class ExecTool(Tool):
                 await self._await_cleanup_despite_cancellation(cleanup)
             raise
         except Exception as e:
-            for task in drain_tasks if "drain_tasks" in locals() else ():
-                task.cancel()
-            if "drain_tasks" in locals():
-                await asyncio.gather(*drain_tasks, return_exceptions=True)
-            if process is not None and process.returncode is None:
-                await self._terminate_and_reap(process, process_group_id, job_handle[0])
+            if process is not None:
+                cleanup = asyncio.create_task(
+                    self._cancel_readers_and_terminate(
+                        process,
+                        process_group_id,
+                        wait_task if "wait_task" in locals() else None,
+                        drain_tasks if "drain_tasks" in locals() else (),
+                        job_handle[0],
+                    )
+                )
                 job_handle[0] = None
+                await self._await_cleanup_despite_cancellation(cleanup)
             return f"Error executing command: {str(e)}"
         finally:
             if "drain_tasks" in locals():
