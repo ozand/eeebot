@@ -393,22 +393,41 @@ async def test_exec_streams_output_in_bounded_reads(monkeypatch):
         def __init__(self, chunks):
             self.chunks = iter(chunks)
             self.read_sizes = []
+            self.eof_count = 0
 
         async def read(self, size=-1):
             self.read_sizes.append(size)
-            return next(self.chunks, b"")
+            chunk = next(self.chunks, b"")
+            if not chunk:
+                self.eof_count += 1
+            return chunk
 
     class _Process:
         pid = 123
         returncode = 0
-        stdin = None
+        class _Stdin:
+            def write(self, data):
+                pass
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+        stdin = _Stdin()
 
         def __init__(self):
-            self.stdout = _Stream([b"hello\n"])
-            self.stderr = _Stream([b"warning\n"])
+            self.stdout = _Stream([b"a" * 20_000, b"z\n"])
+            self.stderr = _Stream([b"b" * 20_000, b"w\n"])
 
         async def wait(self):
+            while self.stdout.eof_count < 1 or self.stderr.eof_count < 1:
+                await asyncio.sleep(0)
             return self.returncode
+
+        def kill(self):
+            self.returncode = -9
 
         async def communicate(self):
             stdout = await self.stdout.read(-1)
@@ -420,14 +439,87 @@ async def test_exec_streams_output_in_bounded_reads(monkeypatch):
     async def _create(*args, **kwargs):
         return process
 
-    monkeypatch.setattr(asyncio, "create_subprocess_shell", _create)
-    monkeypatch.setattr("nanobot.agent.tools.shell.os.name", "posix")
+    original_drain = ExecTool._drain_output_stream
+
+    async def _observe_drain(stream, capture):
+        await original_drain(stream, capture)
+
+    monkeypatch.setattr(ExecTool, "_drain_output_stream", staticmethod(_observe_drain))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
+    monkeypatch.setattr("nanobot.agent.tools.shell._assign_to_kill_on_close_job", lambda process: None)
 
     result = await ExecTool(timeout=5).execute("echo test")
 
-    assert result == "hello\n\nSTDERR:\nwarning\n\n\nExit code: 0"
-    assert process.stdout.read_sizes and all(size > 0 for size in process.stdout.read_sizes)
-    assert process.stderr.read_sizes and all(size > 0 for size in process.stderr.read_sizes)
+    assert result.startswith("a" * 5_000)
+    assert "... (30," in result and " chars truncated) ..." in result
+    assert result.endswith("Exit code: 0")
+    assert process.stdout.read_sizes and all(size == 65_536 for size in process.stdout.read_sizes)
+    assert process.stderr.read_sizes and all(size == 65_536 for size in process.stderr.read_sizes)
+
+
+async def test_exec_bounded_head_tail_matches_legacy_output_format():
+    from nanobot.agent.tools.shell import _BoundedOutput, _BoundedSegment
+
+    output = _BoundedOutput(ExecTool._MAX_OUTPUT)
+    stdout = "o" * 12_000
+    stderr = "e" * 12_000
+    stdout_segment = _BoundedSegment(ExecTool._MAX_OUTPUT)
+    stdout_segment.add(stdout)
+    output.add_segment(stdout_segment)
+    output.add("\n")
+    output.add("STDERR:\n")
+    stderr_segment = _BoundedSegment(ExecTool._MAX_OUTPUT)
+    stderr_segment.add(stderr)
+    output.add_segment(stderr_segment)
+    output.add("\n\nExit code: 0")
+
+    legacy = "\n".join((stdout, f"STDERR:\n{stderr}", "\nExit code: 0"))
+    half = ExecTool._MAX_OUTPUT // 2
+    expected = (
+        legacy[:half]
+        + f"\n\n... ({len(legacy) - ExecTool._MAX_OUTPUT:,} chars truncated) ...\n\n"
+        + legacy[-half:]
+    )
+    assert output.render() == expected
+
+    # Multibyte UTF-8 split across byte chunks must decode as one character;
+    # malformed bytes retain the legacy errors="replace" behavior.
+    import codecs
+
+    segment = _BoundedSegment(ExecTool._MAX_OUTPUT)
+    capture = __import__("nanobot.agent.tools.shell", fromlist=["_BoundedTextCapture"])._BoundedTextCapture(segment)
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    capture.add(decoder.decode(b"A\xe2"))
+    capture.add(decoder.decode(b"\x82\xacB\xff"))
+    capture.finish(decoder.decode(b"", final=True))
+    assert segment.full() == "A€B�"
+
+
+@pytest.mark.asyncio
+async def test_exec_timeout_terminates_streaming_process():
+    import sys
+
+    command = (
+        f'"{sys.executable}" -c '
+        '"import sys,time; sys.stdout.write(\'started\'); sys.stdout.flush(); time.sleep(5)"'
+    )
+    result = await ExecTool(timeout=0.2).execute(command)
+    assert result == "Error: Command timed out after 0.2 seconds"
+
+
+async def test_exec_large_stdout_and_stderr_are_drained_with_bounded_result():
+    import sys
+
+    command = (
+        f'"{sys.executable}" -c '
+        '"import sys; sys.stdout.write(\'o\'*50000); sys.stderr.write(\'e\'*50000)"'
+    )
+    result = await ExecTool(timeout=10).execute(command)
+
+    assert len(result) <= ExecTool._MAX_OUTPUT + 100
+    assert result.startswith("o" * (ExecTool._MAX_OUTPUT // 2))
+    assert "truncated)" in result
+    assert result.endswith("e" * (ExecTool._MAX_OUTPUT // 2 - len("\n\nExit code: 0")) + "\n\nExit code: 0")
 
 
 async def test_exec_allows_normal_commands():

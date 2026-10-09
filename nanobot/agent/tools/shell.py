@@ -1,6 +1,7 @@
 """Shell execution tool."""
 
 import asyncio
+import codecs
 import ctypes
 import os
 import re
@@ -11,6 +12,7 @@ from typing import Any, Callable
 from nanobot.agent.tools.base import Tool
 
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_STREAM_CHUNK_SIZE = 65_536
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 
 
@@ -99,6 +101,82 @@ SCRUBBED_STATE_ENV_VARS = (
 )
 
 
+class _BoundedSegment:
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.half = limit // 2
+        self.prefix = ""
+        self.tail = ""
+        self.total = 0
+
+    def add(self, text: str) -> None:
+        if not text:
+            return
+        self.total += len(text)
+        if len(self.prefix) < self.limit:
+            self.prefix += text[: self.limit - len(self.prefix)]
+        self.tail = (self.tail + text)[-self.limit:]
+
+    def full(self) -> str | None:
+        if self.total <= self.limit:
+            return self.prefix
+        return None
+
+    def head(self) -> str:
+        return self.prefix[: self.half]
+
+    def suffix(self) -> str:
+        return self.tail[-self.half:]
+
+
+class _BoundedOutput:
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.half = limit // 2
+        self.segments: list[_BoundedSegment] = []
+        self.total = 0
+
+    def add(self, text: str) -> None:
+        segment = _BoundedSegment(self.limit)
+        segment.add(text)
+        self.add_segment(segment)
+
+    def add_segment(self, segment: _BoundedSegment) -> None:
+        self.segments.append(segment)
+        self.total += segment.total
+
+    def render(self) -> str:
+        if self.total <= self.limit:
+            return "".join(segment.full() or "" for segment in self.segments)
+        head = "".join(segment.head() for segment in self.segments)[: self.half]
+        suffix_parts: list[str] = []
+        remaining = self.half
+        for segment in reversed(self.segments):
+            piece = segment.suffix()[-remaining:]
+            suffix_parts.append(piece)
+            remaining -= len(piece)
+            if remaining <= 0:
+                break
+        tail = "".join(reversed(suffix_parts))
+        omitted = self.total - len(head) - len(tail)
+        return f"{head}\n\n... ({omitted:,} chars truncated) ...\n\n{tail}"
+
+
+class _BoundedTextCapture:
+    def __init__(self, segment: _BoundedSegment):
+        self.segment = segment
+        self.had_text = False
+        self.non_whitespace = False
+
+    def add(self, text: str) -> None:
+        self.had_text = self.had_text or bool(text)
+        self.non_whitespace = self.non_whitespace or bool(text.strip())
+        self.segment.add(text)
+
+    def finish(self, final_text: str = "") -> None:
+        self.add(final_text)
+
+
 class ExecTool(Tool):
     """Tool to execute shell commands."""
 
@@ -138,6 +216,18 @@ class ExecTool(Tool):
 
     _MAX_TIMEOUT = 600
     _MAX_OUTPUT = 10_000
+
+    @staticmethod
+    async def _drain_output_stream(stream, capture) -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        while chunk := await stream.read(_STREAM_CHUNK_SIZE):
+            capture.add(decoder.decode(chunk))
+        capture.finish(decoder.decode(b"", final=True))
+
+    @staticmethod
+    async def _discard_output_stream(stream) -> None:
+        while await stream.read(_STREAM_CHUNK_SIZE):
+            pass
 
     @property
     def description(self) -> str:
@@ -219,42 +309,55 @@ class ExecTool(Tool):
                 )
                 process_group_id = process.pid
 
+            output = _BoundedOutput(self._MAX_OUTPUT)
+            stdout_segment = _BoundedSegment(self._MAX_OUTPUT)
+            stderr_segment = _BoundedSegment(self._MAX_OUTPUT)
+            stdout_capture = _BoundedTextCapture(stdout_segment)
+            stderr_capture = _BoundedTextCapture(stderr_segment)
+            stdout_task = asyncio.create_task(self._drain_output_stream(process.stdout, stdout_capture))
+            stderr_task = asyncio.create_task(self._drain_output_stream(process.stderr, stderr_capture))
+            drain_tasks = (stdout_task, stderr_task)
+            wait_task = asyncio.create_task(process.wait())
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
+                done, _ = await asyncio.wait(
+                    (wait_task, *drain_tasks),
                     timeout=effective_timeout,
+                    return_when=asyncio.ALL_COMPLETED,
                 )
+                if not done:
+                    raise asyncio.TimeoutError
+                errors = [
+                    task.exception() for task in done
+                    if task.done() and not task.cancelled()
+                ]
+                if any(error is not None for error in errors):
+                    raise next(error for error in errors if error is not None)
+                if not wait_task.done():
+                    raise asyncio.TimeoutError
+                await asyncio.gather(*drain_tasks)
+                if stdout_capture.had_text:
+                    output.add_segment(stdout_segment)
+                if stderr_capture.non_whitespace:
+                    if stdout_capture.had_text:
+                        output.add("\n")
+                    output.add("STDERR:\n")
+                    output.add_segment(stderr_segment)
             except asyncio.TimeoutError:
+                wait_task.cancel()
+                for task in drain_tasks:
+                    task.cancel()
+                await asyncio.gather(wait_task, *drain_tasks, return_exceptions=True)
                 await self._terminate_and_reap(process, process_group_id)
                 return f"Error: Command timed out after {effective_timeout} seconds"
 
-            output_parts = []
-
-            if stdout:
-                output_parts.append(stdout.decode("utf-8", errors="replace"))
-
-            if stderr:
-                stderr_text = stderr.decode("utf-8", errors="replace")
-                if stderr_text.strip():
-                    output_parts.append(f"STDERR:\n{stderr_text}")
-
-            output_parts.append(f"\nExit code: {process.returncode}")
-
-            result = "\n".join(output_parts) if output_parts else "(no output)"
-
-            # Head + tail truncation to preserve both start and end of output
-            max_len = self._MAX_OUTPUT
-            if len(result) > max_len:
-                half = max_len // 2
-                result = (
-                    result[:half]
-                    + f"\n\n... ({len(result) - max_len:,} chars truncated) ...\n\n"
-                    + result[-half:]
-                )
-
-            return result
+            output.add("\n\nExit code: " + str(process.returncode))
+            return output.render()
 
         except asyncio.CancelledError:
+            for task in drain_tasks if "drain_tasks" in locals() else ():
+                task.cancel()
+            if "drain_tasks" in locals():
+                await asyncio.gather(*drain_tasks, return_exceptions=True)
             if process is not None:
                 cleanup = asyncio.create_task(
                     self._terminate_and_reap(process, process_group_id, job_handle[0])
@@ -271,11 +374,19 @@ class ExecTool(Tool):
                 await cleanup
             raise
         except Exception as e:
+            for task in drain_tasks if "drain_tasks" in locals() else ():
+                task.cancel()
+            if "drain_tasks" in locals():
+                await asyncio.gather(*drain_tasks, return_exceptions=True)
             if process is not None and process.returncode is None:
                 await self._terminate_and_reap(process, process_group_id, job_handle[0])
                 job_handle[0] = None
             return f"Error executing command: {str(e)}"
         finally:
+            if "drain_tasks" in locals():
+                for task in drain_tasks:
+                    if not task.done():
+                        task.cancel()
             if job_handle[0] is not None:
                 _close_windows_handle(job_handle[0])
                 job_handle[0] = None
@@ -338,9 +449,15 @@ class ExecTool(Tool):
         # The shell can exit while a background descendant keeps inherited
         # stdout/stderr open. Drain with a grace period, then kill the saved
         # process group regardless of the shell's return code.
+        drain_tasks = [
+            asyncio.create_task(ExecTool._discard_output_stream(process.stdout)),
+            asyncio.create_task(ExecTool._discard_output_stream(process.stderr)),
+        ]
         try:
-            await asyncio.wait_for(process.communicate(), timeout=1.0)
+            await asyncio.wait_for(asyncio.gather(*drain_tasks), timeout=1.0)
         except asyncio.TimeoutError:
+            for task in drain_tasks:
+                task.cancel()
             if os.name == "nt":
                 await ExecTool._taskkill_tree(process.pid)
             else:
@@ -350,9 +467,15 @@ class ExecTool(Tool):
                     os.killpg(process_group_id, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+            drain_tasks = [
+                asyncio.create_task(ExecTool._discard_output_stream(process.stdout)),
+                asyncio.create_task(ExecTool._discard_output_stream(process.stderr)),
+            ]
             try:
-                await asyncio.wait_for(process.communicate(), timeout=1.0)
+                await asyncio.wait_for(asyncio.gather(*drain_tasks), timeout=1.0)
             except asyncio.TimeoutError:
+                for task in drain_tasks:
+                    task.cancel()
                 # A detached descendant may retain inherited pipes; forcibly
                 # close our transports rather than wait for its lifetime.
                 process._transport.close()
