@@ -349,9 +349,13 @@ class ExecTool(Tool):
                     )
                 )
                 job_handle[0] = None
-                await self._await_cleanup_despite_cancellation(cleanup)
+                cancellation = await self._await_cleanup_despite_cancellation(cleanup)
+                if cancellation is not None:
+                    raise cancellation
                 return f"Error: Command timed out after {effective_timeout} seconds"
 
+            if stdout_capture.had_text or stderr_capture.non_whitespace:
+                output.add("\n")
             output.add("\nExit code: " + str(process.returncode))
             return output.render()
 
@@ -364,6 +368,7 @@ class ExecTool(Tool):
                         wait_task if "wait_task" in locals() else None,
                         drain_tasks if "drain_tasks" in locals() else (),
                         job_handle[0],
+                        outer_cancellation=True,
                     )
                 )
                 job_handle[0] = None
@@ -381,7 +386,9 @@ class ExecTool(Tool):
                     )
                 )
                 job_handle[0] = None
-                await self._await_cleanup_despite_cancellation(cleanup)
+                cancellation = await self._await_cleanup_despite_cancellation(cleanup)
+                if cancellation is not None:
+                    raise cancellation from e
             return f"Error executing command: {str(e)}"
         finally:
             if "drain_tasks" in locals():
@@ -393,13 +400,17 @@ class ExecTool(Tool):
                 job_handle[0] = None
 
     @staticmethod
-    async def _await_cleanup_despite_cancellation(cleanup: asyncio.Task) -> None:
+    async def _await_cleanup_despite_cancellation(
+        cleanup: asyncio.Task,
+    ) -> asyncio.CancelledError | None:
+        cancellation = None
         while not cleanup.done():
             try:
                 await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                continue
+            except asyncio.CancelledError as error:
+                cancellation = error
         await cleanup
+        return cancellation
 
     @staticmethod
     async def _cancel_readers_and_terminate(
@@ -408,25 +419,37 @@ class ExecTool(Tool):
         wait_task: asyncio.Task | None,
         reader_tasks: tuple[asyncio.Task, ...],
         job_handle,
+        outer_cancellation: bool = False,
     ) -> None:
         # This independently-owned task performs the entire handoff before
         # any await in execute can be interrupted by repeated cancellation.
         if wait_task is not None and not wait_task.done():
             wait_task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(wait_task), timeout=0.25)
+            except asyncio.TimeoutError:
+                pass
+            except asyncio.CancelledError:
+                pass
         readers_stopped = await ExecTool._stop_readers(process, reader_tasks)
         await ExecTool._terminate_and_reap(
             process, process_group_id, job_handle, drain_pipes=readers_stopped
         )
+        if outer_cancellation:
+            raise asyncio.CancelledError
 
     @staticmethod
     async def _stop_readers(
         process: asyncio.subprocess.Process, tasks: tuple[asyncio.Task, ...] | list[asyncio.Task]
     ) -> bool:
+        if not tasks:
+            return True
+        if all(task.done() for task in tasks):
+            await asyncio.gather(*tasks, return_exceptions=True)
+            return True
         for task in tasks:
             if not task.done():
                 task.cancel()
-        if not tasks:
-            return True
 
         async def settle() -> None:
             await asyncio.gather(*tasks, return_exceptions=True)

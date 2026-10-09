@@ -558,6 +558,114 @@ async def test_exec_waited_process_with_open_pipe_times_out_and_cleans_up(monkey
 
 
 @pytest.mark.asyncio
+async def test_exec_reader_failure_after_root_exit_still_owns_cleanup(monkeypatch):
+    class _Stream:
+        def __init__(self, *, fail=False):
+            self.fail = fail
+            self.reads = 0
+
+        async def read(self, size):
+            self.reads += 1
+            if self.fail:
+                raise OSError("injected pipe read error")
+            return b""
+
+    class _Process:
+        pid = 123
+        returncode = 0
+        stdout = _Stream(fail=True)
+        stderr = _Stream()
+
+        class _Stdin:
+            def write(self, data):
+                pass
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+        stdin = _Stdin()
+
+        async def wait(self):
+            return self.returncode
+
+        async def communicate(self):
+            return b"", b""
+
+        class _Transport:
+            def close(self):
+                pass
+
+        _transport = _Transport()
+
+    process = _Process()
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    assert isinstance(process.stdout, _Stream)
+
+    async def _create(*args, **kwargs):
+        return process
+
+    async def _cleanup(*args, **kwargs):
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        process.returncode = -9
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
+    monkeypatch.setattr("nanobot.agent.tools.shell._assign_to_kill_on_close_job", lambda process: None)
+    monkeypatch.setattr(ExecTool, "_terminate_and_reap", staticmethod(_cleanup))
+
+    execution = asyncio.create_task(ExecTool(timeout=5).execute("synthetic command"))
+    await asyncio.wait_for(cleanup_started.wait(), timeout=2)
+    execution.cancel()
+    await asyncio.sleep(0)
+    allow_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(execution, timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_exec_exit_separator_matches_legacy_output_segments():
+    from nanobot.agent.tools.shell import _BoundedOutput, _BoundedSegment
+
+    cases = (
+        ("", "", 0),
+        ("out", "", 0),
+        ("", "err", 1),
+        ("out", "err", 7),
+        ("   ", "", 0),
+        ("out", "   ", 0),
+    )
+    for stdout, stderr, code in cases:
+        parts = []
+        if stdout:
+            parts.append(stdout)
+        if stderr and stderr.strip():
+            parts.append("STDERR:\n" + stderr)
+        parts.append(f"\nExit code: {code}")
+        legacy = "\n".join(parts)
+
+        output = _BoundedOutput(ExecTool._MAX_OUTPUT)
+        if stdout:
+            output.add_segment(_BoundedSegment(ExecTool._MAX_OUTPUT))
+            output.segments[-1].add(stdout)
+            output.total += len(stdout)
+        if stderr and stderr.strip():
+            if stdout:
+                output.add("\n")
+            output.add("STDERR:\n")
+            segment = _BoundedSegment(ExecTool._MAX_OUTPUT)
+            segment.add(stderr)
+            output.add_segment(segment)
+        if stdout or (stderr and stderr.strip()):
+            output.add("\n")
+        output.add("\nExit code: " + str(code))
+        assert output.render() == legacy
+
+
+@pytest.mark.asyncio
 async def test_exec_empty_output_keeps_legacy_exit_format():
     from nanobot.agent.tools.shell import _BoundedOutput
 
@@ -664,7 +772,7 @@ async def test_exec_large_stdout_and_stderr_are_drained_with_bounded_result():
     assert len(result) <= ExecTool._MAX_OUTPUT + 100
     assert result.startswith("o" * (ExecTool._MAX_OUTPUT // 2))
     assert "truncated)" in result
-    assert result.endswith("e" * (ExecTool._MAX_OUTPUT // 2 - len("\nExit code: 0")) + "\nExit code: 0")
+    assert result.endswith("e" * (ExecTool._MAX_OUTPUT // 2 - len("\n\nExit code: 0")) + "\n\nExit code: 0")
 
 
 async def test_exec_allows_normal_commands():
