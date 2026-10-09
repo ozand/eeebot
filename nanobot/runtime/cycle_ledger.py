@@ -107,6 +107,12 @@ VALID_DEDUP_DECISIONS = frozenset({"proceeded", "skipped_duplicate", "skipped_re
 # never a new LLM call); this module only validates and stores the result.
 VALID_VERDICTS = frozenset({"accept", "reject", "inconclusive"})
 
+# ADR-037 (#2076): existing _decide_handled_marker return values only.
+VALID_HANDLED_DISPOSITIONS = frozenset({
+    "supplier_paused", "handled", "retired_state_lost",
+    "retired_after_retries", "retry",
+})
+
 
 def _ledger_dir(state_dir: Path) -> Path:
     return Path(state_dir) / _LEDGER_SUBDIR
@@ -571,6 +577,7 @@ def record_cycle_outcome(
     max_call_gap_s: float | None = None,
     delivered: bool | None = None,
     delivery_state: str | None = None,
+    handled_disposition: str | None = None,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
 
@@ -656,6 +663,8 @@ def record_cycle_outcome(
         row["verdict"] = verdict
         if verdict_reason:
             row["verdict_reason"] = str(verdict_reason)[:200]
+    if handled_disposition in VALID_HANDLED_DISPOSITIONS:
+        row["handled_disposition"] = handled_disposition
     if delivered is not None:
         row["delivered"] = bool(delivered)
     if delivery_state in {"known", "unknown"}:

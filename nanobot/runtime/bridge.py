@@ -5007,6 +5007,7 @@ async def _main_impl_body():
     # after the smoke gate passes (R12-R15).
     async def _evaluate_candidate(cand_cycle_id: str, do_integration: bool, meas_metric: str = "") -> dict:
         _cycle_id = cand_cycle_id
+        _handled_disposition: str | None = None
         _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
         # A second, targeted _restore_to_main -- NOT a full
         # _prepare_repository_for_cycle repeat (#1942 follow-up on the ADR-035
@@ -5645,7 +5646,7 @@ async def _main_impl_body():
                     LLM_SUPPLIER_PAUSED_REASON if _llm_error_class == 'paused-supplier'
                     else 'executor_llm_error'
                 )
-            _decide_handled_marker(
+            _handled_disposition = _decide_handled_marker(
                 handled_marker, req_path,
                 llm_error=bool(_executor_llm_error_text and cycle_commit_count == 0),
                 supplier_paused=(_llm_error_class == 'paused-supplier'),
@@ -6930,6 +6931,7 @@ async def _main_impl_body():
             'executor_llm_error': locals().get('_executor_llm_error_text', ''),
             'system_prompt_overflow': locals().get('_system_prompt_overflow_text', ''),
             'run_stop_reason': locals().get('_run_stop_reason', ''),
+            'handled_disposition': _handled_disposition,
             'prompt_fit_rung': locals().get('_prompt_fit_rung'),
             'origin_main_observed': locals().get('_origin_main_observed', locals().get('main_sha_before', '')),
         }
@@ -7409,6 +7411,7 @@ async def _main_impl_body():
             }
             if _executor_llm_error_text else None
         ),
+        handled_disposition=_res.get('handled_disposition'),
     )
     # #721: post-cycle tag at the terminal HEAD, same outcome value as the
     # ledger row above. Integrated -> main_sha_after (shared checkout stayed on

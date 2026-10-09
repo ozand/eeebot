@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 import pytest
 
 from nanobot import crash_record
-from nanobot.runtime import bridge
+from nanobot.runtime import bridge, cycle_ledger
 from tests.test_cycle_ledger import (
     _FakeSubagentManager,
     _init_selfevo_repo,
@@ -92,6 +92,36 @@ class _LLMDeadSubagentManager:
         # bridge captures next(iter(mgr._running_tasks)) right after spawn.
         self._running_tasks[self.task_id] = asyncio.ensure_future(_done())
         return "fake subagent spawned (LLM dead)"
+
+
+class _LLMRetiredAfterRetriesManager(_LLMDeadSubagentManager):
+    task_id = "retired-after-retries"
+    error_text = CLIENT_DEFECT_ERROR
+
+    def __init__(self, *, workspace, **kwargs):
+        super().__init__(workspace=workspace, **kwargs)
+        retry_key = bridge._retry_key_for(None, "ADR-037 disposition case: retired_after_retries")
+        retry_path = bridge.BRIDGE_STATE_DIR / f"retry_{retry_key}.json"
+        retry_path.parent.mkdir(parents=True, exist_ok=True)
+        retry_path.write_text(json.dumps({"count": bridge.LLM_ERROR_MAX_RETRIES}), encoding="utf-8")
+
+
+class _LLMRetiredStateLostManager(_LLMDeadSubagentManager):
+    task_id = "retired-state-lost"
+    error_text = CLIENT_DEFECT_ERROR
+
+    async def spawn(self, **_kwargs):
+        telemetry_dir = bridge.STATE_DIR / "subagents"
+        telemetry_dir.mkdir(parents=True, exist_ok=True)
+        (telemetry_dir / f"{self.task_id}.json").write_text(json.dumps({
+            "task_id": self.task_id,
+            "status": "error",
+            "summary": self.error_text,
+            "result": self.error_text,
+            "started_at": "2026-09-04T04:01:31Z",
+            "finished_at": "2026-09-04T04:04:45Z",
+        }), encoding="utf-8")
+        return await super().spawn(**_kwargs)
 
 
 class _LLMBadRequestSubagentManager(_LLMDeadSubagentManager):
@@ -240,6 +270,8 @@ class TestExecutorLLMErrorIsAFailure:
         outcome = [r for r in rows if r["phase"] == "outcome"][-1]
         assert outcome["outcome"] == "failed"
         assert outcome["reason"] == "executor_llm_error"
+        # ADR-037: carry the helper's exact retry disposition to this cycle row.
+        assert outcome["handled_disposition"] == "retry"
 
         # (2) the streak: the process exits non-zero, and the __main__ guard's
         # own expression turns that into a `failure` row.
@@ -388,7 +420,43 @@ class TestExecutorLLMErrorIsAFailure:
         assert res["rollback"]["reason"] in ("", None)
         assert (state_dir / "subagent_bridge" / f"handled_{key}.txt").exists()
         assert not (state_dir / "subagent_bridge" / f"retry_{key}.json").exists()
-        assert [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"][-1]["outcome"] == "success"
+        outcome = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"][-1]
+        assert outcome["outcome"] == "success"
+        assert outcome["handled_disposition"] == "handled"
+
+
+class TestHandledDispositionLedger:
+    """ADR-037 (#2076): carry each existing helper return to its cycle row."""
+
+    @pytest.mark.parametrize(
+        ("manager_cls", "expected"),
+        [
+            (_FakeSubagentManager, "handled"),
+            (_LLMBadRequestSubagentManager, "retry"),
+            (_LLMDeadSubagentManager, "supplier_paused"),
+            (_LLMRetiredAfterRetriesManager, "retired_after_retries"),
+            (_LLMRetiredStateLostManager, "retired_state_lost"),
+        ],
+    )
+    def test_helper_returns_are_written_on_the_same_cycle_outcome(
+        self, tmp_path, monkeypatch, manager_cls, expected,
+    ):
+        state_dir = _wire(tmp_path, monkeypatch, manager_cls)
+        title = f"ADR-037 disposition case: {expected}"
+        if expected == "retired_state_lost":
+            cycle_ledger.record_cycle_outcome(
+                state_dir, "prior-cycle", "failed", "executor_llm_error", [], None,
+                retry_key=bridge._retry_key_for(None, title),
+            )
+        _seed_bridge_request(state_dir, f"req-{expected}", f"cycle-{expected}", task_title=title)
+        _stub_planning_session(monkeypatch, title)
+
+        asyncio.run(bridge._main_impl())
+
+        outcomes = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
+        outcome = outcomes[-1]
+        assert outcome["cycle_id"]
+        assert outcome["handled_disposition"] == expected
 
 
 class TestHelpers:
