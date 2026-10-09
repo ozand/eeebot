@@ -1,5 +1,7 @@
 """Tests for enhanced filesystem tools: ReadFileTool, EditFileTool, ListDirTool."""
 
+from pathlib import Path
+
 import pytest
 
 from nanobot.agent.tools.filesystem import (
@@ -8,7 +10,6 @@ from nanobot.agent.tools.filesystem import (
     ReadFileTool,
     _find_match,
 )
-
 
 # ---------------------------------------------------------------------------
 # ReadFileTool
@@ -63,6 +64,73 @@ class TestReadFileTool:
         result = await tool.execute(path=str(tmp_path / "nope.txt"))
         assert "Error" in result
         assert "not found" in result
+
+    @pytest.mark.asyncio
+    async def test_streaming_preserves_all_splitlines_boundaries(self, tool, tmp_path):
+        f = tmp_path / "separators.txt"
+        f.write_bytes("a\r\nb\rc\n\v\f\x1c\x1d\x1e\x85\u2028\u2029z".encode("utf-8"))
+
+        result = await tool.execute(path=str(f))
+
+        assert "12 lines total" in result
+        assert "1| a" in result
+        assert "12| z" in result
+
+    @pytest.mark.asyncio
+    async def test_trailing_separator_does_not_add_line(self, tool, tmp_path):
+        f = tmp_path / "trailing.txt"
+        f.write_bytes(b"a\n")
+
+        result = await tool.execute(path=str(f))
+
+        assert "1| a" in result
+        assert "1 lines total" in result
+
+    @pytest.mark.asyncio
+    async def test_large_single_line_remains_bounded_and_has_exact_count(self, tool, tmp_path):
+        f = tmp_path / "long-line.txt"
+        f.write_bytes(b"x" * (ReadFileTool._MAX_CHARS * 4))
+
+        result = await tool.execute(path=str(f))
+
+        assert len(result) <= ReadFileTool._MAX_CHARS + 500
+        assert "Showing lines 1-" in result
+        assert "of 1" in result
+
+    @pytest.mark.asyncio
+    async def test_read_file_never_performs_unbounded_read(self, tool, tmp_path, monkeypatch):
+        f = tmp_path / "large.txt"
+        f.write_bytes("first\r\nsecond\u2028third\n".encode("utf-8"))
+        real_open = Path.open
+        read_sizes = []
+
+        class _ObservedReader:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+                self.readline_sizes = []
+
+            def __enter__(self):
+                self.wrapped.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.wrapped.__exit__(*args)
+
+            def read(self, size=-1):
+                read_sizes.append(size)
+                return self.wrapped.read(size)
+
+            def readline(self, size=-1):
+                self.readline_sizes.append(size)
+                return self.wrapped.readline(size)
+
+        monkeypatch.setattr(Path, "open", lambda path, *args, **kwargs: _ObservedReader(real_open(path, *args, **kwargs)))
+        result = await tool.execute(path=str(f), offset=2, limit=1)
+
+        assert "2| second" in result
+        assert "Showing lines 2-2 of 3" in result
+        assert not any(size < 0 for size in read_sizes)
+        assert read_sizes and all(size > 0 for size in read_sizes)
 
     @pytest.mark.asyncio
     async def test_char_budget_trims(self, tool, tmp_path):
