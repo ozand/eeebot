@@ -1893,6 +1893,16 @@ def _catch_up_main(repo_root: 'Path', state_dir: 'Path | None' = None, cycle_id:
     return row
 
 
+def _system_prompt_budget_fields(prompt_fit: Any) -> dict[str, Any]:
+    """ozand/eeebot-ops-dashboard#368: the builder's resolved budgets
+    (``last_fit["budget"]``: release pool, OPERATING.md reserve, AGENTS.md
+    cap, total prompt budget, compaction window/reserve/threshold/keep) as
+    top-level ``phase: system_prompt`` row fields. Numbers only; ``{}`` when
+    the builder recorded none (older fakes), never fabricated defaults."""
+    budget = prompt_fit.get('budget') if isinstance(prompt_fit, dict) else None
+    return dict(budget) if isinstance(budget, dict) else {}
+
+
 def _restore_to_main(repo_root: 'Path', state_dir: 'Path | None' = None, cycle_id: str = '') -> bool | str:
     """Restore the shared checkout to ``main`` and verify a clean tree.
 
@@ -5385,6 +5395,7 @@ async def _main_impl_body():
                     # bridge tests), never omitted.
                     'missing': list(_prompt_fit.get('missing') or []),
                     'truncated': list(_prompt_fit.get('truncated') or []),
+                    **_system_prompt_budget_fields(_prompt_fit),
                 })
             msg = await mgr.spawn(
                 task=task,
@@ -6862,6 +6873,7 @@ async def _main_impl_body():
                     if isinstance(getattr(mgr, 'last_prompt_fit', None), dict)
                     else None
                 ),
+                **_system_prompt_budget_fields(getattr(mgr, 'last_prompt_fit', None)),
             })
         except Exception as exc:
             print(f'bridge: unexpected error during cycle {cycle_branch}: {exc}')
