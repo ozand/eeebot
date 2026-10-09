@@ -65,6 +65,43 @@ class TestReadFileTool:
         assert "not found" in result
 
     @pytest.mark.asyncio
+    async def test_read_file_never_performs_unbounded_read(self, tool, tmp_path, monkeypatch):
+        from pathlib import Path
+
+        f = tmp_path / "large.txt"
+        f.write_text("first\nsecond\u2028third\n", encoding="utf-8")
+        real_open = Path.open
+        read_sizes = []
+
+        class _ObservedReader:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+                self.readline_sizes = []
+
+            def __enter__(self):
+                self.wrapped.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.wrapped.__exit__(*args)
+
+            def read(self, size=-1):
+                read_sizes.append(size)
+                return self.wrapped.read(size)
+
+            def readline(self, size=-1):
+                self.readline_sizes.append(size)
+                return self.wrapped.readline(size)
+
+        monkeypatch.setattr(Path, "open", lambda path, *args, **kwargs: _ObservedReader(real_open(path, *args, **kwargs)))
+        result = await tool.execute(path=str(f), offset=2, limit=1)
+
+        assert "2| second" in result
+        assert "Showing lines 2-2 of 3" in result
+        assert not any(size < 0 for size in read_sizes)
+        assert read_sizes and all(size > 0 for size in read_sizes)
+
+    @pytest.mark.asyncio
     async def test_char_budget_trims(self, tool, tmp_path):
         """When the selected slice exceeds _MAX_CHARS the output is trimmed."""
         f = tmp_path / "big.txt"
