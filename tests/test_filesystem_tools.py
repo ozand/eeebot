@@ -1,5 +1,7 @@
 """Tests for enhanced filesystem tools: ReadFileTool, EditFileTool, ListDirTool."""
 
+from pathlib import Path
+
 import pytest
 
 from nanobot.agent.tools.filesystem import (
@@ -8,7 +10,6 @@ from nanobot.agent.tools.filesystem import (
     ReadFileTool,
     _find_match,
 )
-
 
 # ---------------------------------------------------------------------------
 # ReadFileTool
@@ -65,11 +66,41 @@ class TestReadFileTool:
         assert "not found" in result
 
     @pytest.mark.asyncio
-    async def test_read_file_never_performs_unbounded_read(self, tool, tmp_path, monkeypatch):
-        from pathlib import Path
+    async def test_streaming_preserves_all_splitlines_boundaries(self, tool, tmp_path):
+        f = tmp_path / "separators.txt"
+        f.write_bytes("a\r\nb\rc\n\v\f\x1c\x1d\x1e\x85\u2028\u2029z".encode("utf-8"))
 
+        result = await tool.execute(path=str(f))
+
+        assert "12 lines total" in result
+        assert "1| a" in result
+        assert "12| z" in result
+
+    @pytest.mark.asyncio
+    async def test_trailing_separator_does_not_add_line(self, tool, tmp_path):
+        f = tmp_path / "trailing.txt"
+        f.write_bytes(b"a\n")
+
+        result = await tool.execute(path=str(f))
+
+        assert "1| a" in result
+        assert "1 lines total" in result
+
+    @pytest.mark.asyncio
+    async def test_large_single_line_remains_bounded_and_has_exact_count(self, tool, tmp_path):
+        f = tmp_path / "long-line.txt"
+        f.write_bytes(b"x" * (ReadFileTool._MAX_CHARS * 4))
+
+        result = await tool.execute(path=str(f))
+
+        assert len(result) <= ReadFileTool._MAX_CHARS + 500
+        assert "Showing lines 1-" in result
+        assert "of 1" in result
+
+    @pytest.mark.asyncio
+    async def test_read_file_never_performs_unbounded_read(self, tool, tmp_path, monkeypatch):
         f = tmp_path / "large.txt"
-        f.write_text("first\nsecond\u2028third\n", encoding="utf-8")
+        f.write_bytes("first\r\nsecond\u2028third\n".encode("utf-8"))
         real_open = Path.open
         read_sizes = []
 

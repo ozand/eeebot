@@ -171,21 +171,72 @@ class ReadFileTool(_FsTool):
                 self._notify_skill_read_failed(path)
                 return f"Error: Not a file: {path}"
 
-            all_lines = fp.read_text(encoding="utf-8").splitlines()
-            total = len(all_lines)
+            offset = max(offset, 1)
+            start = offset - 1
+            page_limit = limit or self._DEFAULT_LIMIT
+            page_end = start + page_limit
+            numbered: list[str] = []
+            total = 0
+            line_parts: list[str] = []
+            line_open = False
+            numbered_chars = 0
+            output_limit_reached = False
 
-            if offset < 1:
-                offset = 1
+            def _finish_line() -> None:
+                nonlocal total, line_parts, line_open
+                nonlocal numbered_chars, output_limit_reached
+                line_number = total
+                total += 1
+                if start <= line_number < page_end and not output_limit_reached:
+                    numbered_line = f"{line_number + 1}| {''.join(line_parts)}"
+                    added_chars = len(numbered_line) + (1 if numbered else 0)
+                    if numbered_chars + added_chars <= self._MAX_CHARS:
+                        numbered.append(numbered_line)
+                        numbered_chars += added_chars
+                    else:
+                        output_limit_reached = True
+                line_parts = []
+                line_open = False
+
+            # Match str.splitlines() boundaries while reading bounded chunks.
+            # CRLF is one separator even when split across chunk boundaries.
+            separators = "\n\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+            pending_cr = False
+            with fp.open("r", encoding="utf-8") as stream:
+                while chunk := stream.read(8192):
+                    for char in chunk:
+                        if pending_cr:
+                            _finish_line()
+                            pending_cr = False
+                            if char == "\n":
+                                continue
+                        if char == "\r":
+                            pending_cr = True
+                        elif char in separators:
+                            _finish_line()
+                        else:
+                            line_open = True
+                            if (
+                                start <= total < page_end
+                                and len(line_parts) < self._MAX_CHARS
+                            ):
+                                line_parts.append(char)
+                if pending_cr:
+                    _finish_line()
+                if line_open:
+                    _finish_line()
+
             if total == 0:
                 return f"(Empty file: {path})"
             if offset > total:
                 return f"Error: offset {offset} is beyond end of file ({total} lines)"
 
-            start = offset - 1
-            end = min(start + (limit or self._DEFAULT_LIMIT), total)
-            numbered = [f"{start + i + 1}| {line}" for i, line in enumerate(all_lines[start:end])]
+            end = (
+                start + len(numbered)
+                if output_limit_reached
+                else min(page_end, total)
+            )
             result = "\n".join(numbered)
-
             if len(result) > self._MAX_CHARS:
                 trimmed, chars = [], 0
                 for line in numbered:
@@ -210,7 +261,13 @@ class ReadFileTool(_FsTool):
             # #1865: an abbreviated read cannot satisfy the planner's
             # mandatory contract read. The normal callback above still
             # observes any successful skill read for fitness accounting.
-            if self._on_complete_skill_read is not None and fp.name == "SKILL.md" and offset == 1 and end == total:
+            if (
+                self._on_complete_skill_read is not None
+                and fp.name == "SKILL.md"
+                and offset == 1
+                and end == total
+                and not output_limit_reached
+            ):
                 try:
                     self._on_complete_skill_read(fp.resolve())
                 except Exception:
