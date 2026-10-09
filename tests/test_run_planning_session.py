@@ -167,7 +167,8 @@ def test_planning_session_uses_1200_second_timeout(tmp_path: Path, monkeypatch):
     outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
 
     assert outcome["ran"] is True
-    assert observed_timeouts == [1200.0]
+    assert len(observed_timeouts) == 1
+    assert observed_timeouts[0] == pytest.approx(1200.0, abs=0.01)
 
 
 def test_planning_session_passes_explicit_cycle_id_to_subagent_manager(tmp_path: Path, monkeypatch):

@@ -3317,7 +3317,7 @@ def _parse_planner_final_response(raw_result: str) -> tuple[dict[str, Any] | Non
 
 async def _run_planning_session(
     *, provider, bus, config, model: str, state_dir: 'Path', selfevo_repo: 'Path',
-    denied_paths: set, cycle_id: str,
+    denied_paths: set, cycle_id: str, wall_deadline: float | None = None,
 ) -> dict:
     """#1852 (ADR-031 rule 5, ADR-032 rule 2): the planning session. Between
     cycles, on the executor's own model, in a clean context, bounded at 20
@@ -3573,6 +3573,11 @@ async def _run_planning_session(
     _integrity_pre = _fitness_sidecar_hashes(state_dir)
 
     try:
+        _planner_started = time.monotonic()
+        _planner_deadline = min(
+            _planner_started + 1200.0,
+            wall_deadline if wall_deadline is not None else _planner_started + 1200.0,
+        )
         planner_manager = SubagentManager(
             provider=provider,
             workspace=selfevo_repo,
@@ -3591,6 +3596,8 @@ async def _run_planning_session(
             role_system_prompt=role_text,
             telemetry_component='planner',
             telemetry_cycle_id=cycle_id,
+            wall_deadline=wall_deadline,
+            planner_deadline=_planner_deadline,
         )
         await planner_manager.spawn(
             task=_planner_task,
@@ -3604,7 +3611,7 @@ async def _run_planning_session(
             try:
                 await _asyncio.wait_for(
                     _asyncio.gather(*list(planner_manager._running_tasks.values()), return_exceptions=True),
-                    timeout=600.0,
+                    timeout=max(0.0, _planner_deadline - time.monotonic()),
                 )
             except _asyncio.TimeoutError:
                 _timed_out = True
@@ -4473,6 +4480,7 @@ async def _main_impl_body():
             provider=provider, bus=bus, config=config, model=_planner_model,
             state_dir=STATE_DIR, selfevo_repo=_selfevo_repo_for_proposer,
             denied_paths=_planning_denied_paths, cycle_id=_planning_cycle_id,
+            wall_deadline=_bridge_wall_deadline,
         )
     except Exception as _planning_exc:
         print(f'planning-session: unexpected error ({_planning_exc})')
