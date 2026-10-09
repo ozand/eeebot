@@ -17,7 +17,7 @@ At immutable source `b3031531ff179728700db74f630c0cf6a042ba90`, `nanobot/runtime
 
 This is disposition observability, not cause attribution. Other interruption handling exists separately (`bridge.py:5664-5694, 5730-5771`); this does not cover every interrupted cycle or explain historical `interrupted_defect` rows in cycle-b56.
 
-The outcome ledger is append-only. `nanobot/runtime/cycle_ledger.py` supports optional nested telemetry and omits it when absent. A new persisted field is a format decision: old rows/callers remain valid, and missing data must not imply a disposition. No public projection is proposed.
+The outcome ledger is append-only. At the same immutable source, `nanobot/runtime/cycle_ledger.py:549-566` defines `record_cycle_outcome` and its optional classification argument; serialization at `cycle_ledger.py:685-699` writes that nested telemetry only when supplied. A new persisted field is a format decision: old rows/callers remain valid, and missing data must not imply a disposition. No public projection is proposed.
 
 # Decision
 
@@ -96,4 +96,4 @@ Before implementation, withdraw/revise this Proposed ADR and linked change propo
 - Related #2050 is separate interruption work.
 - Source SHA `b3031531ff179728700db74f630c0cf6a042ba90`.
 - `nanobot/runtime/bridge.py:5648-5653, 8112-8204`; terminal ledger call near 7374.
-- `nanobot/runtime/cycle_ledger.py:360, 471-478`.
+- `nanobot/runtime/cycle_ledger.py:549-566, 685-699`.
