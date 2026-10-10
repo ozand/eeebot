@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import bridge, cycle_ledger, llm_proposer, state_access
+from nanobot.runtime import bridge, cycle_ledger, state, state_access
 from nanobot.runtime.service_paths import is_delivered
 
 
@@ -240,6 +240,40 @@ class TestTypedHelpers:
         cycle_ledger.record_cycle_outcome(tmp_path, "c1", "success", None, ["a.py"], "selfevo/cycle-1")
         rows = _read_ledger(tmp_path)
         assert "real_result" not in rows[0]
+
+    # ADR-037 (#2076): only the existing handled-marker enum may be persisted.
+    @pytest.mark.parametrize("disposition", sorted(cycle_ledger.VALID_HANDLED_DISPOSITIONS))
+    def test_record_cycle_outcome_preserves_handled_disposition(self, tmp_path, disposition):
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "cycle-adr037", "failed", "executor_llm_error", [], None,
+            handled_disposition=disposition,
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert row["cycle_id"] == "cycle-adr037"
+        assert row["handled_disposition"] == disposition
+
+    def test_record_cycle_outcome_omits_missing_or_unknown_handled_disposition(self, tmp_path):
+        """ADR-037: legacy callers and unknown values add neither key nor payload."""
+        cycle_ledger.record_cycle_outcome(tmp_path, "legacy", "success", None, [], None)
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "unknown", "failed", None, [], None,
+            handled_disposition="raw-secret-sentinel",
+        )
+        rows = _read_ledger(tmp_path)
+        assert "handled_disposition" not in rows[0]
+        assert "handled_disposition" not in rows[1]
+        assert "raw-secret-sentinel" not in (tmp_path / "ledger" / "cycles.jsonl").read_text()
+
+    def test_handled_disposition_is_not_projected_to_live_recent_outcomes(self, tmp_path):
+        """ADR-037: internal disposition remains absent from operator projection."""
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "private-cycle", "failed", None, [], None,
+            handled_disposition="retired_state_lost",
+        )
+        projected = state._live_recent_outcomes(tmp_path)
+        assert len(projected) == 1
+        assert projected[0]["cycle_id"] == "private-cycle"
+        assert "handled_disposition" not in projected[0]
 
     def test_record_cycle_outcome_delivered_is_additive(self, tmp_path):
         cycle_ledger.record_cycle_outcome(
