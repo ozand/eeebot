@@ -51,6 +51,14 @@ class _MockProvider(LLMProvider):
         return LLMResponse(content="done", tool_calls=[])
 
 
+def test_default_bridge_wall_budget_is_3600_seconds(monkeypatch):
+    monkeypatch.delenv("NANOBOT_SUBAGENT_WALL_SECS", raising=False)
+
+    from nanobot.runtime.session_clock import DEFAULT_WALL_SECS, get_bridge_wall_secs
+
+    assert get_bridge_wall_secs() == DEFAULT_WALL_SECS == 3600.0
+
+
 class TestWallClockSafetyMargin:
     """Requirement 1 (#1899): stop before starting model call when budget < p99 + final."""
 
