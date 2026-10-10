@@ -148,12 +148,13 @@ def test_usage_order_moves_only_zero_read_skills_last_and_keeps_alphabetical_gro
     monkeypatch.setenv("NANOBOT_RUNTIME_STATE_ROOT", str(state))
     monkeypatch.setenv("NANOBOT_RUNTIME_STATE_SOURCE", "workspace_state")
     fixed_now = datetime(2026, 9, 15, tzinfo=timezone.utc)
-    real_census = skill_fitness.census
 
-    def census_at_fixed_time(state_dir, selfevo_repo, *, now=None):
-        return real_census(state_dir, selfevo_repo, now=fixed_now)
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz else fixed_now.replace(tzinfo=None)
 
-    monkeypatch.setattr(skill_fitness, "census", census_at_fixed_time)
+    monkeypatch.setattr(skill_fitness, "datetime", FixedDateTime)
 
     loader = SkillsLoader(tmp_path, builtin_skills_dir=tmp_path / "builtins")
     summary = loader.build_skills_summary(excluded_names=[])
