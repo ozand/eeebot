@@ -77,37 +77,33 @@ No schema risk, but the ledger remains unable to answer which handled-marker res
 
 # Test Contract
 
-Proposed only; source implementation and tests are being delivered under #2076. Keep this ADR proposed until its named test contract exists on main; only the operator records acceptance after that repository procedure is satisfied. Contract tests cite ADR-037 per `docs/adr/README.md`.
+Proposed pending the operator's acceptance commit. The source implementation and named tests are merged on main under #2076. Keep this ADR proposed until the operator records acceptance under the procedure in `docs/adr/README.md`. Contract tests cite ADR-037.
 
 | Decision claim | Test | Currently |
 |---|---|---|
-| Each helper return is preserved as matching cycle-row enum | `tests/test_bridge_executor_llm_error.py::TestHandledDispositionLedger::test_helper_returns_are_written_on_the_same_cycle_outcome` | passing locally; source/CI pending |
-| Missing/unknown is omitted; old rows/callers remain compatible | `tests/test_cycle_ledger.py::TestTypedHelpers::test_record_cycle_outcome_omits_missing_or_unknown_handled_disposition` | passing locally |
-| Only enum is added; no raw/free-form field | `tests/test_cycle_ledger.py::TestTypedHelpers::test_record_cycle_outcome_omits_missing_or_unknown_handled_disposition` | passing locally |
-| Disposition is not exposed by live recent-outcome projection | `tests/test_cycle_ledger.py::TestTypedHelpers::test_handled_disposition_is_not_projected_to_live_recent_outcomes` | passing locally |
-| Existing marker/retry behavior unchanged | `tests/test_bridge_executor_llm_error.py` | 14 passed locally; source/CI pending |
+| Each helper return is preserved as matching cycle-row enum | `tests/test_bridge_executor_llm_error.py::TestHandledDispositionLedger::test_helper_returns_are_written_on_the_same_cycle_outcome` | passing on merged PR #2077; exact-head CI passed |
+| Missing/unknown is omitted; old rows/callers remain compatible | `tests/test_cycle_ledger.py::TestTypedHelpers::test_record_cycle_outcome_omits_missing_or_unknown_handled_disposition` | passing on merged PR #2077; exact-head CI passed |
+| Only enum is added; no raw/free-form field | `tests/test_cycle_ledger.py::TestTypedHelpers::test_record_cycle_outcome_preserves_handled_disposition`; `tests/test_cycle_ledger.py::TestTypedHelpers::test_record_cycle_outcome_omits_missing_or_unknown_handled_disposition` | passing on merged PR #2077; exact-head CI passed |
+| Disposition is not exposed by live recent-outcome projection | `tests/test_cycle_ledger.py::TestTypedHelpers::test_handled_disposition_is_not_projected_to_live_recent_outcomes` | passing on merged PR #2077; exact-head CI passed |
+| Existing marker/retry behavior unchanged | `tests/test_bridge_executor_llm_error.py::TestHandledDispositionLedger::test_helper_returns_are_written_on_the_same_cycle_outcome` | handled-disposition integration regression passes on merged PR #2077; exact-head CI passed |
 
 # Verification and staged delivery boundary
 
-This source/CI implementation is in progress under #2076. Local focused tests are recorded above; exact-SHA independent review and CI remain pending. No host validation or rollout is claimed. The target is this repository's source and CI. The staged delivery sequence is:
+The source/CI implementation is merged under #2076. Exact-head review and PR CI passed before merge; post-merge CI run `38024849555` passed on main merge commit `33c6d3fab8305b2445c3724141b7e586abc38899`. No host validation or rollout is claimed. The staged delivery sequence is:
 
 1. **Design review (completed):** validate the owner-approved field against the
    existing helper and ledger source; the bounded read-only governance recovery
    verified the corrected #2076 scope, approval, and no duplicate/claim conflict.
-2. **Proposed source/CI delivery (current stage):** add the optional field and
-   deterministic tests under #2076; keep this ADR proposed until its test
-   contract exists on main and the operator records acceptance. Obtain fresh
-   independent review of the exact PR head and passing CI on that same SHA.
-   Evidence is the immutable source comparison, named ADR/document test output,
-   independent review of the exact commit, and exact-SHA CI result. If anchors do
-   not match, a blocking review finding remains, or CI fails, stop and revise or
-   withdraw this Proposed PR; do not merge or deploy.
-3. **Merge/source publication:** merge only after exact-head review and CI pass;
-   preserve the ADR as proposed until operator acceptance is recorded according
-   to `docs/adr/README.md`. Evidence must include tests for all five legal
-   returns, missing/unknown compatibility, privacy, exact-base diff review, and
-   exact-SHA CI. Stop/revert if mapping, compatibility, privacy, review, or CI
-   gates fail; do not deploy.
+2. **Source/CI delivery (merged):** PR #2077 added the optional field and
+   deterministic tests under #2076. Exact-head review was clean and PR CI passed
+   on `2ef727435aa6bb696fc8a1ab487d392b06474d42`; post-merge CI passed on
+   `33c6d3fab8305b2445c3724141b7e586abc38899`. The ADR remains proposed until
+   the operator records acceptance according to `docs/adr/README.md`.
+3. **Operator acceptance (pending):** after verifying every named contract test
+   exists on main and cites ADR-037, the operator may record acceptance by a
+   commit that changes frontmatter and index status to `accepted` and records the
+   acceptance date and commit/PR under `# Status`, as required by
+   `docs/adr/README.md`. This document update does not itself accept the ADR.
 4. **Host rollout:** excluded and unauthorized. It requires a separate issue,
    named target/environment, rollout evidence, rollback criteria, and explicit
    owner authorization before any host action. No host rollout is part of the
