@@ -1,6 +1,8 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
+import nanobot.runtime.skill_fitness as skill_fitness
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.skills import SkillsLoader
 
@@ -137,12 +139,22 @@ def test_usage_order_moves_only_zero_read_skills_last_and_keeps_alphabetical_gro
         "schema_version": "skill-fitness-v1",
         "reads": [{
             "skill": "zulu", "ts": "2026-09-10T00:00:00Z", "confirmed": True,
+            "skill_commit": "a" * 40, "cycle_base_sha": "b" * 40,
         }],
     }
     path = state / "skill_fitness" / "reads.json"
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(reads), encoding="utf-8")
     monkeypatch.setenv("NANOBOT_RUNTIME_STATE_ROOT", str(state))
+    monkeypatch.setenv("NANOBOT_RUNTIME_STATE_SOURCE", "workspace_state")
+    fixed_now = datetime(2026, 9, 15, tzinfo=timezone.utc)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(skill_fitness, "datetime", FixedDateTime)
 
     loader = SkillsLoader(tmp_path, builtin_skills_dir=tmp_path / "builtins")
     summary = loader.build_skills_summary(excluded_names=[])
