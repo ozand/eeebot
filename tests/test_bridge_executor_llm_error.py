@@ -442,6 +442,19 @@ class TestHandledDispositionLedger:
         self, tmp_path, monkeypatch, manager_cls, expected,
     ):
         state_dir = _wire(tmp_path, monkeypatch, manager_cls)
+        if manager_cls is _FakeSubagentManager:
+            from tests.test_cycle_ledger import _FakeSubagentManager as _BaseFakeManager
+
+            class _HealthyHandledManager(_BaseFakeManager):
+                def __init__(self, *, workspace, telemetry_component="", **kwargs):
+                    super().__init__(workspace=workspace, telemetry_component=telemetry_component, **kwargs)
+                    self._skill_reads_this_cycle = []
+                    self._day_file_reads_this_cycle = []
+
+                def collect_day_file_reads(self):
+                    return []
+
+            monkeypatch.setattr(bridge, "SubagentManager", _HealthyHandledManager)
         title = f"ADR-037 disposition case: {expected}"
         if expected == "retired_state_lost":
             cycle_ledger.record_cycle_outcome(
@@ -453,10 +466,14 @@ class TestHandledDispositionLedger:
 
         asyncio.run(bridge._main_impl())
 
-        outcomes = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
-        outcome = outcomes[-1]
-        assert outcome["cycle_id"]
-        assert outcome["handled_disposition"] == expected
+        ledger_rows = _read_ledger(state_dir)
+        current_cycle_id = [row["cycle_id"] for row in ledger_rows if row.get("phase") == "started"][-1]
+        outcomes = [
+            row for row in ledger_rows
+            if row.get("phase") == "outcome" and row.get("cycle_id") == current_cycle_id
+        ]
+        assert len(outcomes) == 1
+        assert outcomes[0]["handled_disposition"] == expected
 
 
 class TestHelpers:
