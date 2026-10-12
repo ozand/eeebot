@@ -204,7 +204,7 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
             fields = child_stat.read_text(encoding="utf-8").split()
         except (FileNotFoundError, ProcessLookupError):
             break
-        if len(fields) > 2 and fields[2] == "Z":
+        if len(fields) > 21 and (fields[21] != child_start_time or fields[2] == "Z"):
             break
         await asyncio.sleep(0.01)
     if child_stat.exists():
@@ -212,8 +212,12 @@ async def test_watchdog_cancellation_kills_grandchild_after_shell_exits(tmp_path
             fields = child_stat.read_text(encoding="utf-8").split()
         except (FileNotFoundError, ProcessLookupError):
             fields = []
-        assert not fields or fields[2] == "Z", f"grandchild PID {child_pid} survived cancellation"
-        assert not fields or fields[21] != child_start_time, f"grandchild PID {child_pid} still exists"
+        # An orphan belongs to PID 1 after its shell exits. Containers without
+        # a reaping init can retain its zombie entry, which cannot execute or
+        # hold pipes. ExecTool must kill it; only its adoptive parent can reap it.
+        assert not fields or fields[21] != child_start_time or fields[2] == "Z", (
+            f"grandchild PID {child_pid} survived cancellation (state={fields[2]})"
+        )
 
 
 @pytest.mark.asyncio
