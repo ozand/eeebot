@@ -53,6 +53,7 @@ Conventions:
 | [ADR-035](ADR-035-the-planning-session-chooses-and-closes-hadi.md) | The agent's planning session chooses the work and closes the HADI loop; the outer contour diagnoses and never assigns | proposed |
 | [ADR-036](ADR-036-one-dashboard-two-places.md) | One dashboard, two places — the published generator also serves the LAN, and only the LAN sees what the agents said | proposed |
 | [ADR-037](ADR-037-record-handled-disposition-without-implying-cause.md) | Record handled-marker disposition without implying interruption cause | proposed |
+| [ADR-039](ADR-039-warn-on-twelve-started-attempts-per-task.md) | Warn operators after twelve unsuccessful started attempts for one task | proposed |
 
 ## Acceptance
 
