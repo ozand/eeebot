@@ -664,9 +664,7 @@ def test_superseded_and_abandoned_do_not_count_toward_family_futility(tmp_path):
 
 
 def test_pushed_late_resets_family_futility_run_like_success(tmp_path):
-    """#1709 increment 2: 'pushed_late' is a genuine success delayed by one
-    cycle — must reset the family run counter the same as 'success', not
-    count as a non-success attempt."""
+    """A known-delivery late integration resets the family futility run."""
     state = tmp_path / "state"
     item_id = "defect-test-pushed-late"
     item = {"id": item_id, "kind": "defect", "summary": "test defect"}
@@ -683,7 +681,7 @@ def test_pushed_late_resets_family_futility_run_like_success(tmp_path):
         rows.append({"phase": "outcome", "cycle_id": cycle, "outcome": "validation_failed", "ts": ts})
     ts_late = (now + timedelta(seconds=10)).isoformat()
     rows.append({"phase": "proposed", "cycle_id": "c-late", "demand_id": item_id, "ts": ts_late})
-    rows.append({"phase": "outcome", "cycle_id": "c-late", "outcome": "pushed_late", "ts": ts_late})
+    rows.append({"phase": "outcome", "cycle_id": "c-late", "outcome": "pushed_late", "delivery_state": "known", "ts": ts_late})
     ts_after = (now + timedelta(seconds=11)).isoformat()
     rows.append({"phase": "proposed", "cycle_id": "c-after", "demand_id": item_id, "ts": ts_after})
     rows.append({"phase": "outcome", "cycle_id": "c-after", "outcome": "validation_failed", "ts": ts_after})

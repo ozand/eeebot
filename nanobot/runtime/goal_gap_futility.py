@@ -152,6 +152,9 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
     For goal-gap records, counting remains cumulative capacity spent to a
     terminal outcome, paired with metric-improvement checks.
 
+    Unknown delivery on a ``pushed_late`` row is inconclusive, not success;
+    it must not reset consecutive-failure futility accounting.
+
     #1710: an executor-LLM-error retry re-runs the SAME ``cycle_id`` up to
     ``LLM_ERROR_MAX_RETRIES`` times, each attempt writing its own ``outcome``
     row. Both branches above key by ``cycle_id`` (a set or a dict), so those
@@ -170,10 +173,10 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
     above — it is not yet terminal, since the next cycle's pickup resolves it
     to pushed_late/superseded/abandoned.
 
-    #1709 increment 2: of those three resolutions, ``pushed_late`` is a
-    genuine success delayed by one cycle — it resets the family run counter
-    the same as ``success`` (below) and is excluded from the goal-gap
-    cumulative count for the same reason ``success`` alone would not be
+    #1709 increment 2: ``pushed_late`` records late Git integration. A
+    known-delivery row resets the family run counter like ``success``; unknown
+    delivery does not. It is excluded from the goal-gap cumulative count for
+    the same reason ``success`` alone would not be
     (nothing about this attempt "failed"). ``superseded`` and ``abandoned``
     are neither a success nor a failure of the original work — origin/main
     moved, or the branch aged out, through no fault of this attempt — and

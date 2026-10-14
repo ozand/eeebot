@@ -71,9 +71,9 @@ _DEFAULT_RETENTION_DAYS = 90
 # (see their own docstrings/readers, updated alongside this).
 # 'pushed_late' / 'superseded' / 'abandoned' (#1709 increment 2): the three
 # ways a 'push_pending' cycle gets resolved at the next cycle-start boundary
-# (see bridge._finish_pending_pushes). 'pushed_late' is a genuine success —
-# main advanced, just on a later cycle — and is folded into demand.py's
-# completed-demand sidecar the same as 'success'. 'superseded' (origin/main
+# (see bridge._finish_pending_pushes). 'pushed_late' records a Git integration
+# that occurred later; delivery may still be unknown, so it is not necessarily
+# a delivery success. 'superseded' (origin/main
 # moved past the row's recorded base — never merged/rebased automatically)
 # and 'abandoned' (the branch no longer exists) are neither a success nor a
 # failure of the original work; excluded from futility's attempt counting.

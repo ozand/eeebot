@@ -105,7 +105,7 @@ def test_day_actions_counts_success_and_pushed_late_since_day_start(tmp_path):
     events = [
         {"phase": "outcome", "outcome": "success", "files_changed": ["a.py"], "ts": (now - timedelta(hours=2)).isoformat()},
         {"phase": "outcome", "outcome": "pushed_late", "files_changed": ["b.py"], "delivery_state": "known", "ts": (now - timedelta(hours=1)).isoformat()},
-        {"phase": "outcome", "outcome": "pushed_late", "files_changed": ["unknown.py"], "delivery_state": "unknown", "ts": (now - timedelta(minutes=30)).isoformat()},
+        {"phase": "outcome", "outcome": "pushed_late", "reason": "delivery_unknown", "verdict": "inconclusive", "files_changed": ["unknown.py"], "delivery_state": "unknown", "ts": (now - timedelta(minutes=30)).isoformat()},
         # Before today's boundary -- not counted.
         {"phase": "outcome", "outcome": "success", "files_changed": ["yesterday.py"], "ts": (now - timedelta(hours=26)).isoformat()},
         # Failed -- not counted.
@@ -118,6 +118,27 @@ def test_day_actions_counts_success_and_pushed_late_since_day_start(tmp_path):
     assert result["files_touched_today"] == ["a.py", "b.py", "unknown.py"]
     assert result["files_touched_today_total"] == 3
     assert result["status"] != "unavailable"
+
+
+def test_day_actions_counts_late_service_only_merge_as_integration(tmp_path):
+    state_dir = tmp_path / "state"
+    now = datetime(2026, 9, 20, 12, 0, 0, tzinfo=timezone.utc)
+    _write_ledger(state_dir, [
+        {
+            "phase": "outcome", "outcome": "pushed_late", "reason": "delivery_unknown",
+            "delivery_state": "unknown", "files_changed": ["historical.py"],
+            "ts": now.isoformat(),
+        },
+        {
+            "phase": "outcome", "outcome": "partial", "reason": "service_only",
+            "delivery_state": "known", "files_changed": ["service.py"],
+            "ts": now.isoformat(),
+        },
+    ])
+
+    result = day_clock.day_actions(state_dir, now=now)
+    assert result["commits_integrated_today"] == 1
+    assert result["files_touched_today"] == ["historical.py"]
 
 
 def test_day_actions_dedupes_and_caps_the_file_list(tmp_path):
