@@ -117,7 +117,9 @@ def day_actions(state_dir: "Path | str", now: "datetime | None" = None) -> dict[
         # This is an integration/activity view, not a delivery or success
         # score: pushed_late rows count even when delivery is unknown or the
         # change was service-only.
-        if outcome not in ("success", "pushed_late"):
+        if outcome not in ("success", "pushed_late") and not (
+            outcome == "partial" and event.get("reason") == "service_only"
+        ):
             continue
         ts = _parse_ts(event.get("ts"))
         if ts is None or ts < start:

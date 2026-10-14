@@ -137,8 +137,8 @@ def test_day_actions_counts_late_service_only_merge_as_integration(tmp_path):
     ])
 
     result = day_clock.day_actions(state_dir, now=now)
-    assert result["commits_integrated_today"] == 1
-    assert result["files_touched_today"] == ["historical.py"]
+    assert result["commits_integrated_today"] == 2
+    assert result["files_touched_today"] == ["historical.py", "service.py"]
 
 
 def test_day_actions_dedupes_and_caps_the_file_list(tmp_path):
