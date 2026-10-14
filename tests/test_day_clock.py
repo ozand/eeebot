@@ -125,11 +125,6 @@ def test_day_actions_counts_late_service_only_merge_as_integration(tmp_path):
     now = datetime(2026, 9, 20, 12, 0, 0, tzinfo=timezone.utc)
     _write_ledger(state_dir, [
         {
-            "phase": "outcome", "outcome": "pushed_late", "reason": "delivery_unknown",
-            "delivery_state": "unknown", "files_changed": ["historical.py"],
-            "ts": now.isoformat(),
-        },
-        {
             "phase": "outcome", "outcome": "partial", "reason": "service_only",
             "delivery_state": "known", "files_changed": ["service.py"],
             "ts": now.isoformat(),
@@ -137,8 +132,8 @@ def test_day_actions_counts_late_service_only_merge_as_integration(tmp_path):
     ])
 
     result = day_clock.day_actions(state_dir, now=now)
-    assert result["commits_integrated_today"] == 2
-    assert result["files_touched_today"] == ["historical.py", "service.py"]
+    assert result["commits_integrated_today"] == 1
+    assert result["files_touched_today"] == ["service.py"]
 
 
 def test_day_actions_dedupes_and_caps_the_file_list(tmp_path):

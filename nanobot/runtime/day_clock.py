@@ -93,7 +93,8 @@ def deliverable_stage() -> str:
 
 def day_actions(state_dir: "Path | str", now: "datetime | None" = None) -> dict[str, Any]:
     """Today's integrated commits and the files they touched -- actions,
-    never a verdict (ADR-026 decision 2). ``status`` is
+    never a verdict (ADR-026 decision 2). Includes service-only late merges,
+    whose work was integrated even though it was not delivered. ``status`` is
     :func:`state_access.evidence_status` for the day's ledger window:
     ``'complete'``/``'partial'``/``'unavailable'`` -- an unreadable ledger
     is reported as unavailable, never folded into a zero count (the same
