@@ -608,6 +608,11 @@ def _init_selfevo_repo(base: Path) -> tuple[Path, Path]:
     _run(work, "checkout", "-B", "main")
     (work / "tests").mkdir()
     (work / "tests" / "test_smoke.py").write_text("def test_ok():\n    assert True\n")
+    # Pytest otherwise discovers ancestor config (e.g. a workstation-wide
+    # pyproject.toml with coverage addopts) when this synthetic clone lives
+    # under tmp_path. Keep the bridge's real smoke subprocess rooted in this
+    # disposable repo without inheriting unrelated host/test-runner settings.
+    (work / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     (work / "mod.py").write_text("def ok():\n    return True\n")
     _run(work, "add", ".")
     _run(work, "commit", "-m", "init")
