@@ -9,7 +9,7 @@ tags: [runtime, validator-harness, demand, reliability]
 
 # Status
 
-Accepted — implemented for #1320.
+Accepted — implemented for #1320. Owner approval to record this acceptance and its provenance was explicitly reaffirmed on 2026-10-07 in the operator instruction authorizing this documentation increment (#2062). No separate meeting, earlier acceptance date, or verbatim approval quote is asserted here. This documentation records provenance only; it does not alter the accepted decision, implementation, or test contract.
 
 # Context
 

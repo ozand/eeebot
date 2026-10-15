@@ -18,7 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import goal_review
+from nanobot.observability.llm_telemetry import call_context
+from nanobot.runtime import goal_review, llm_proposer
 
 NOW = datetime.now(timezone.utc)
 
@@ -117,6 +118,52 @@ def _write_goal_text(state_dir: Path, text: str = GOAL_TEXT) -> None:
 def _read_goal_text(state_dir: Path) -> str:
     data = json.loads((state_dir / "goals" / "goal_text.json").read_text(encoding="utf-8"))
     return data["text"]
+
+
+def test_call_llm_records_goal_review_component_for_duration_and_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeResponse:
+        model = "test-model"
+        usage = type("Usage", (), {
+            "prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6,
+        })()
+        choices = [type("Choice", (), {
+            "finish_reason": "stop",
+            "message": type("Message", (), {"content": '{"priorities": []}'})(),
+        })()]
+
+    class FakeClient:
+        class Chat:
+            class Completions:
+                @staticmethod
+                def create(**_kwargs):
+                    return FakeResponse()
+            completions = Completions()
+        chat = Chat()
+
+    import openai
+    monkeypatch.setattr(openai, "OpenAI", lambda **_kwargs: FakeClient())
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://fake-gateway.local")
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-fake")
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+    monkeypatch.setenv("RELEASE_ROOT", str(tmp_path / "release"))
+    release_root = tmp_path / "release"
+    (release_root / "roles").mkdir(parents=True)
+    (release_root / "goals.md").write_text("charter", encoding="utf-8")
+    (release_root / "IDENTITY.md").write_text("identity", encoding="utf-8")
+    (release_root / "SOUL.md").write_text("soul", encoding="utf-8")
+    monkeypatch.setattr(llm_proposer, "_model_name", lambda: "test-model")
+
+    with call_context("cycle-goal-review", "goal_review"):
+        assert goal_review._call_llm("review context") == {"priorities": []}
+
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    call_rows = [json.loads(line) for line in (tmp_path / f"{day}.jsonl").read_text().splitlines()]
+    prompt_rows = [json.loads(line) for line in
+                   (tmp_path / "prompts" / f"{day}.jsonl").read_text().splitlines()]
+    assert call_rows[-1]["component"] == "goal_review"
+    assert prompt_rows[-1]["component"] == "goal_review"
 
 
 def test_load_goal_data_prefers_release_charter(tmp_path: Path):

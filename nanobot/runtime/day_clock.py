@@ -93,7 +93,8 @@ def deliverable_stage() -> str:
 
 def day_actions(state_dir: "Path | str", now: "datetime | None" = None) -> dict[str, Any]:
     """Today's integrated commits and the files they touched -- actions,
-    never a verdict (ADR-026 decision 2). ``status`` is
+    never a verdict (ADR-026 decision 2). Includes service-only late merges,
+    whose work was integrated even though it was not delivered. ``status`` is
     :func:`state_access.evidence_status` for the day's ledger window:
     ``'complete'``/``'partial'``/``'unavailable'`` -- an unreadable ledger
     is reported as unavailable, never folded into a zero count (the same
@@ -114,7 +115,12 @@ def day_actions(state_dir: "Path | str", now: "datetime | None" = None) -> dict[
     seen: set[str] = set()
     for event in window.rows:
         outcome = str(event.get("outcome") or "").strip().lower()
-        if outcome not in ("success", "pushed_late"):
+        # This is an integration/activity view, not a delivery or success
+        # score: pushed_late rows count even when delivery is unknown or the
+        # change was service-only.
+        if outcome not in ("success", "pushed_late") and not (
+            outcome == "partial" and event.get("reason") == "service_only"
+        ):
             continue
         ts = _parse_ts(event.get("ts"))
         if ts is None or ts < start:

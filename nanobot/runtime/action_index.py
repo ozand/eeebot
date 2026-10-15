@@ -626,10 +626,10 @@ def build_action_index(
                     continue
                 # #1374: proposer prompt records now carry the cycle_id the
                 # executor will later run under (before #1374 they had "" and
-                # fell out above). They hold no tool calls and their ``seq``
-                # restarts in the proposer's process, so they must not compete
-                # with the executor's records for the cycle's action set.
-                if str(record.get("component") or "") == "proposer":
+                # fell out above). Goal-review prompts also carry the cycle ID
+                # but are not execution action sets. Neither should compete
+                # with executor records when building the cycle's action set.
+                if str(record.get("component") or "") in {"proposer", "goal_review"}:
                     continue
                 current = grouped.get(cycle_id)
                 seq = record.get("seq") if isinstance(record.get("seq"), int) else -1

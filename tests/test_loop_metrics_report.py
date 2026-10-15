@@ -37,6 +37,23 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
             fh.write(json.dumps(row) + "\n")
 
 
+def test_failed_call_stream_does_not_change_l1_token_budget(tmp_path, mod):
+    state = tmp_path / "state"
+    (state / "llm_calls").mkdir(parents=True)
+    yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    (state / "llm_calls" / f"{yesterday}.jsonl").write_text(
+        json.dumps({"prompt_tokens": 100, "completion_tokens": 50}) + "\n", encoding="utf-8",
+    )
+    before = mod._rsi_block(state, datetime.now(timezone.utc))["l1_criteria"]["tokens_last_full_day"]
+    failures = state / "llm_calls" / "failures"
+    failures.mkdir()
+    (failures / f"{yesterday}.jsonl").write_text(
+        json.dumps({"ok": False, "prompt_tokens": 0, "completion_tokens": 0}) + "\n", encoding="utf-8",
+    )
+    after = mod._rsi_block(state, datetime.now(timezone.utc))["l1_criteria"]["tokens_last_full_day"]
+    assert after == before
+
+
 def _ts(now: datetime, minutes_ago: int) -> str:
     return (now - timedelta(minutes=minutes_ago)).isoformat().replace("+00:00", "Z")
 

@@ -1,10 +1,13 @@
 """Replay candidate staging and remote verify-only behavior in a sandbox."""
 from __future__ import annotations
 
+import io
+import json
 import os
 import shlex
 import subprocess
 import sys
+import tarfile
 import textwrap
 from pathlib import Path
 
@@ -28,13 +31,24 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
              "/etc/systemd": str(tmp_path / "etc/systemd").replace("\\", "/")}
     for old, new in roots.items():
         remote = remote.replace(old, new)
-    live = Path(roots["/opt/eeepc-agent"]) / "runtimes/self-evolving-agent/current"
-    live.mkdir(parents=True)
+    live_root = Path(roots["/opt/eeepc-agent"]) / "runtimes/self-evolving-agent"
+    releases = live_root / "releases"
+    live_release = releases / "baseline"
+    (live_release / "scripts").mkdir(parents=True)
+    (live_release / "scripts/__init__.py").write_text("", encoding="utf-8")
+    live_release_health = "\n".join(['def verify_release_health():', '    return {"health": {"dimensions": {"disk": {"status": "OK"}}}}']) + "\n"
+    (live_release / "scripts/verify_release_health.py").write_text(live_release_health, encoding="utf-8")
+    live = live_root / "current"
+    live.symlink_to(live_release)
+    baseline_health = {"health": {"dimensions": {"disk": {"status": "OK"}}}}
     source = tmp_path / "source"
     source.mkdir()
     gate_path = source / "scripts/verify_release_health.py"
     gate_path.parent.mkdir()
-    gate_path.write_text("print('head gate')\\n", encoding="utf-8")
+    gate_path.write_text(textwrap.dedent('''
+        def verify_release_health():
+            return {"health": {"dimensions": {}}}
+    '''), encoding="utf-8")
     _git("init", cwd=source, check=True)
     hooks = source / ".test-hooks"
     hooks.mkdir()
@@ -44,7 +58,33 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
                     GIT_COMMITTER_NAME="test", GIT_COMMITTER_EMAIL="test@example.invalid")
     _git("commit", "-qm", "head gate", cwd=source, check=True, env=identity)
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-    gate_path.write_text(gate_source, encoding="utf-8")
+    gate_path.write_text(
+        textwrap.dedent('''\
+            import json
+
+            def verify_release_health():
+                return json.loads(__import__("os").environ["HEALTH_REPORT_JSON"])
+
+            def compare_health_dimensions(baseline, candidate):
+                rows, findings = [], []
+                for name in sorted(baseline.keys() - candidate.keys()):
+                    rows.append(f"VERIFY_ONLY DIMENSION_MISSING {name}")
+                    findings.append(f"dimension missing: {name}")
+                for name in sorted(candidate.keys() - baseline.keys()):
+                    status = candidate[name]
+                    rows.append(f"VERIFY_ONLY DIMENSION_ADDED {name} {status}")
+                    if name not in {"cpu", "queue"} and status in {"WARN", "CRIT"}:
+                        findings.append(f"new dimension {name}: {status}")
+                for name in sorted(baseline.keys() & candidate.keys()):
+                    before, after = baseline[name], candidate[name]
+                    rows.append(f"VERIFY_ONLY DIMENSION {name} {before} -> {after}")
+                    if name not in {"cpu", "queue"} and not (name in {"reward", "gate"} and after == "WARN"):
+                        if {"OK": 0, "WARN": 1, "CRIT": 2}[after] > {"OK": 0, "WARN": 1, "CRIT": 2}[before]:
+                            findings.append(f"{name}: {before} -> {after}")
+                return rows, findings
+        ''') + gate_source.replace("print('CANDIDATE_GATE_EXECUTED')", "print('CANDIDATE_GATE_EXECUTED', file=__import__('sys').stderr)"),
+        encoding="utf-8",
+    )
     _git("add", "scripts/verify_release_health.py", cwd=source, check=True)
     _git("commit", "-qm", "candidate gate", cwd=source, check=True, env=identity)
     candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
@@ -91,7 +131,8 @@ esac
 ''')
     _write_mock(bindir / "systemctl", f'''echo "systemctl $*" >> {log_path}
 case "$*" in
-  *eeepc-network-fallback*"LoadState"*) echo not-found ;;
+  *eeepc-network-fallback.timer*"-p LoadState"*|*eeepc-network-fallback.service*"-p LoadState"*) echo not-found ;;
+  *eeebot-network-fallback*"-p LoadState"*) echo not-found ;;
   *"-p LoadState"*) echo loaded ;;
   *"-p UnitFileState"*) echo enabled ;;
   *"is-enabled"*) echo enabled ;;
@@ -111,7 +152,8 @@ exec {shlex.quote(sys.executable)} "$@"
     remote_path.write_text(remote, encoding="utf-8")
     env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1",
                FULL_COMMIT="candidate", PREV_RELEASE_PATH=str(live), GATE_TMP=str(gate).replace("\\", "/"),
-               RELEASE_DIR=str(live), HEALTH_GATE_PYTHON=str(bindir / "python3"))
+               RELEASE_DIR=str(live), HEALTH_GATE_PYTHON=str(bindir / "python3"),
+               HEALTH_REPORT_JSON=json.dumps(baseline_health))
     result = subprocess.run(["bash", str(remote_path)], cwd=tmp_path, env=env,
                             capture_output=True, text=True, timeout=480)
     return result, before_systemd, (systemd_sandbox, roots)
@@ -123,8 +165,12 @@ exec {shlex.quote(sys.executable)} "$@"
 ])
 def test_remote_verify_runs_candidate_and_never_mutates_units_or_current(tmp_path: Path, gate_source: str, expected_rc: int, marker: str) -> None:
     result, before_systemd, sandbox = _run_remote_gate(tmp_path, gate_source)
-    assert result.returncode == expected_rc, result.stdout + result.stderr
-    assert marker in result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    assert result.returncode == expected_rc, (
+        f"remote verify rc={result.returncode}, expected={expected_rc}; full output/final remote trace:\n{output}"
+    )
+    assert marker in output
+    assert "ADVANCED_HEAD_ONLY" not in output, "candidate gate must not come from advanced checkout HEAD"
     assert not (tmp_path / "candidate").exists()
     assert not (tmp_path / "opt/eeepc-agent/runtimes/self-evolving-agent/current/SOURCE_COMMIT").exists()
     systemd_sandbox, roots = sandbox
@@ -133,6 +179,99 @@ def test_remote_verify_runs_candidate_and_never_mutates_units_or_current(tmp_pat
     logged = (tmp_path / "calls.log").read_text()
     assert "python3 " in logged and "verify_release_health.py" in logged
     assert not any(x in logged for x in ("systemctl restart", "systemctl stop", "systemctl start", "ln -sfn"))
+
+
+def test_advanced_head_mutation_fails_on_explicit_marker(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    gate = source / "scripts/verify_release_health.py"
+    gate.parent.mkdir()
+    gate.write_text("print('CANDIDATE_GATE_ONLY')\n", encoding="utf-8")
+    (source / "nanobot").mkdir()
+    (source / "nanobot/__init__.py").write_text("# candidate\n", encoding="utf-8")
+    (source / "host/eeepc/etc").mkdir(parents=True)
+    (source / "host/eeepc/etc/preset.env").write_text("FIXTURE=1\n", encoding="utf-8")
+    _git("init", cwd=source, check=True)
+    _git("add", "scripts", "nanobot", "host/eeepc/etc", cwd=source, check=True)
+    _git("commit", "-m", "candidate", cwd=source, check=True)
+    gate.write_text("print('ADVANCED_HEAD_ONLY')\n", encoding="utf-8")
+    _git("add", "scripts/verify_release_health.py", cwd=source, check=True)
+    _git("commit", "-m", "advance", cwd=source, check=True)
+    candidate = _git("rev-parse", "HEAD~", cwd=source, check=True, capture_output=True, text=True).stdout.strip()
+    deploy = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    archive_command = next(line.strip().removesuffix("\\") for line in deploy.splitlines()
+                           if 'GATE_TMP="$(git -C "$REPO_ROOT" archive --format=tar' in line)
+    pipeline = archive_command.removeprefix('GATE_TMP="$(').removesuffix('")').replace(" | ", " ")
+    pipeline = pipeline.replace('"$COMMIT"', 'HEAD', 1)
+    archive = subprocess.run(["bash", "-c", pipeline], env=dict(os.environ, REPO_ROOT=str(source), COMMIT=candidate),
+                             capture_output=True, timeout=30)
+    assert archive.returncode == 0, archive.stderr.decode(errors="replace")
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
+        marker = bundle.extractfile("scripts/verify_release_health.py").read().decode()
+    expected_members = subprocess.check_output(
+        ["git", "-C", str(source), "ls-tree", "-r", "--name-only", candidate, "--", "scripts", "nanobot", "host/eeepc/etc"], text=True
+    ).splitlines()
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
+        archive_members = sorted(member.name for member in bundle.getmembers() if member.isfile())
+    assert archive_members == sorted(expected_members)
+    with pytest.raises(AssertionError, match="ADVANCED_HEAD_ONLY"):
+        assert "ADVANCED_HEAD_ONLY" not in marker, "candidate archive selected advanced checkout HEAD"
+
+
+def test_production_archive_stream_matches_candidate_tree_and_not_advanced_head(tmp_path: Path):
+    """The actual deploy archive must be a tree-exact archive of COMMIT, not checkout HEAD."""
+    source = tmp_path / "source"
+    source.mkdir()
+    gate = source / "scripts/verify_release_health.py"
+    gate.parent.mkdir()
+    gate.write_text("print('CANDIDATE_GATE_ONLY')\n", encoding="utf-8")
+    (source / "nanobot").mkdir()
+    (source / "nanobot/__init__.py").write_text("# candidate\n", encoding="utf-8")
+    (source / "host/eeepc/etc").mkdir(parents=True)
+    (source / "host/eeepc/etc/preset.env").write_text("FIXTURE=1\n", encoding="utf-8")
+    _git("init", cwd=source, check=True)
+    _git("add", "scripts", "nanobot", "host/eeepc/etc", cwd=source, check=True)
+    _git("commit", "-m", "candidate", cwd=source, check=True)
+    candidate = _git("rev-parse", "HEAD", cwd=source, check=True, capture_output=True, text=True).stdout.strip()
+    gate.write_text("print('ADVANCED_HEAD_ONLY')\n", encoding="utf-8")
+    _git("add", "scripts/verify_release_health.py", cwd=source, check=True)
+    _git("commit", "-m", "advance HEAD", cwd=source, check=True)
+
+    deploy = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+    archive_prefix = '  GATE_TMP="$(git -C "$REPO_ROOT" archive --format=tar '
+    archive_lines = deploy.splitlines()
+    archive_start = next(i for i, line in enumerate(archive_lines) if line.startswith(archive_prefix))
+    archive_command = "\n".join(
+        line.strip().removesuffix("\\")
+        for line in archive_lines[archive_start:]
+        if line.strip()
+    ).split(" |", 1)[0]
+    archive_pipeline = archive_command.removeprefix('GATE_TMP="$(')
+    mutated_pipeline = archive_pipeline.replace('"$COMMIT"', 'HEAD', 1)
+    assert mutated_pipeline != archive_pipeline, "production archive-ref mutation did not apply"
+    archive_args = archive_pipeline.removeprefix('git -C "$REPO_ROOT" archive --format=tar ').split()
+    archive_args = [candidate if arg == '"$COMMIT"' else arg.strip('"') for arg in archive_args]
+    if os.environ.get("MUTATE_ARCHIVE_REF"):
+        archive_args[archive_args.index(candidate)] = "HEAD"
+    archive = subprocess.run(
+        ["git", "-C", str(source), "archive", "--format=tar", *archive_args], capture_output=True, check=True,
+    )
+    expected = subprocess.check_output(
+        ["git", "-C", str(source), "ls-tree", "-r", "--name-only", candidate, "--", "scripts", "nanobot", "host/eeepc/etc"], text=True
+    ).splitlines()
+    stage = tmp_path / "candidate-stage"
+    stage.mkdir()
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as bundle:
+        archive_members = sorted(member.name for member in bundle.getmembers() if member.isfile())
+        bundle.extractall(stage, filter="data")
+    assert archive_members == sorted(expected)
+    assert "ADVANCED_HEAD_ONLY" not in archive_members
+    actual = sorted(p.relative_to(stage).as_posix() for p in stage.rglob("*") if p.is_file())
+    assert actual == sorted(expected)
+    result = subprocess.run([sys.executable, str(stage / "scripts/verify_release_health.py")], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ADVANCED_HEAD_ONLY" not in result.stdout, "ADVANCED_HEAD_ONLY: archive selected checkout HEAD instead of candidate"
+    assert "CANDIDATE_GATE_ONLY" in result.stdout
 
 
 def test_staging_failure_after_mktemp_cleans_remote_directory(tmp_path: Path, repo: Path, mock_bin: Path, monkeypatch) -> None:

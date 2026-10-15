@@ -584,11 +584,16 @@ def _loop_section(
 ) -> dict[str, Any]:
     confirmed_cycle_ids = confirmed_cycle_ids or set()
     integrations = 0
+    integration_events = 0
     decay_integrations = 0
+    # This scorecard is delivery/success accounting, not raw Git integration
+    # telemetry: service-only late merges are non-delivery failures and
+    # delivery-unknown late merges are inconclusive, excluded from success.
     # #814: confirmed vs unconfirmed split of `integrations` (decay archivals
     # excluded — they are churn, not new value, and are never the numerator
-    # either split targets). Confirmation is POST-HOC (usage evidence arrives
-    # after the cycle), so this joins each success-outcome cycle_id against
+    # either split targets). Delivery-unknown late pushes are excluded from
+    # this delivery-oriented scorecard. Confirmation is POST-HOC (usage
+    # evidence arrives after the cycle), so this joins each cycle_id against
     # `confirmed_cycle_ids` (built from demand/completed.json, same
     # harness-signal guard as confirmed_ratio) rather than gating at cycle
     # time — the per-cycle scorer cannot know confirmation yet.
@@ -729,7 +734,13 @@ def _loop_section(
                 fallback_cycles += 1
                 if outcome == "success":
                     fallback_successes += 1
-            if outcome == "success":
+            if outcome in {"success", "pushed_late"} or (outcome == "partial" and row.get("reason") == "service_only"):
+                integration_events += 1
+            if (
+                outcome in {"success", "pushed_late"}
+                and row.get("delivery_state") != "unknown"
+                and row.get("reason") != "delivery_unknown"
+            ):
                 shape = str(row.get("change_shape") or "unclassified")
                 if shape not in {"feature", "maintenance", "documentation", "testing", "performance", "knowledge", "unclassified"}:
                     shape = "unclassified"
@@ -799,7 +810,7 @@ def _loop_section(
         "integrations": integrations,
         "change_shape_distribution": change_shape_counts,
         "decay_integrations": decay_integrations,
-        "integrations_total": integrations + decay_integrations,
+        "integrations_total": integration_events,
         # #814: confirmed-vs-unconfirmed split of `integrations` — surfaces
         # the shift so an operator (and the goal-gap analysis below) can see
         # that shipping unconfirmed-use churn is not the same as confirmed

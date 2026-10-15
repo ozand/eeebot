@@ -1,5 +1,7 @@
 # AGENTS.md
 
+For agent routing and responsibility/capability/authority boundaries, read [`AGENT_ROUTING.md`](AGENT_ROUTING.md). This policy guides development sessions and does not itself grant authority.
+
 How we develop the **eeebot** product. This is the operational guide for
 development sessions (AI agents and the operator) working on this codebase.
 

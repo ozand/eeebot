@@ -3500,8 +3500,13 @@ async def _run_planning_session(
         _planner_candidate_items = _planner_candidates_mod.merge_proposer_candidates(
             _planner_candidate_items, _planner_proposer_items,
         )
-        _planner_new_priority_ids = _planner_candidates_mod.mark_new_priority_items(
-            state_dir, _planner_candidate_items,
+        # #2012: peek only here -- the "seen" set is not persisted until
+        # planner startup is confirmed, below, after SubagentManager
+        # construction/prompt-fitting/spawn have all succeeded. A failure
+        # before that point must leave every priority shown here still
+        # markable as "(new)" on the next healthy session.
+        _planner_new_priority_ids, _planner_seen_priority_ids_to_commit = (
+            _planner_candidates_mod.peek_new_priority_items(state_dir, _planner_candidate_items)
         )
         _candidates_block = _planner_candidates_mod.render_candidates_block(
             _planner_candidate_items, _planner_new_priority_ids,
@@ -3509,21 +3514,28 @@ async def _run_planning_session(
         )
     except Exception:
         _candidates_block = ''
+        _planner_seen_priority_ids_to_commit = None
 
+    _dedup_evidence_shown = False
+    _dedup_evidence_to_clear = False  # retained for the legacy acknowledgement path
     if _minimal_mode_active:
         _dedup_evidence_block = ''
+        _dedup_evidence_to_clear = False
     else:
         # ADR-035 rest amendment (#1964): "the sha and the reason are an
         # input to the next session, or it would choose the same increment
-        # again." Consumed (read-and-cleared) here, so it reaches exactly
-        # this one session -- fail-open, same as the candidates block above.
+        # again." #2011/#2050 H2: only peeked here; clear only after this
+        # session produces an integrated plan. Spawn or planning failure
+        # leaves evidence available to the next session.
         try:
             from nanobot.runtime import planner_dedup_evidence as _dedup_evidence_mod
 
-            _dedup_evidence = _dedup_evidence_mod.consume_pending_evidence(state_dir)
+            _dedup_evidence = _dedup_evidence_mod.peek_pending_evidence(state_dir)
             _dedup_evidence_block = _dedup_evidence_mod.render_dedup_evidence_block(_dedup_evidence)
+            _dedup_evidence_shown = _dedup_evidence is not None
         except Exception:
             _dedup_evidence_block = ''
+            _dedup_evidence_to_clear = False
 
     # Architect resolution 2026-09-25 (ADR-035 rule 3 / ADR-031 rule 2): a
     # plan interrupted by a supplier-side executor failure is this
@@ -3578,6 +3590,7 @@ async def _run_planning_session(
             release_root=RELEASE_ROOT,
             role_system_prompt=role_text,
             telemetry_component='planner',
+            telemetry_cycle_id=cycle_id,
         )
         await planner_manager.spawn(
             task=_planner_task,
@@ -3638,6 +3651,30 @@ async def _run_planning_session(
         return _fail('timed_out', 'planner subagent exceeded its 600s wall-clock allowance')
     if not planner_task_id:
         return _fail('spawn_failed', 'no subagent task_id produced')
+
+    # #2011/#2012: only now, with a real planner task_id confirmed (spawn
+    # succeeded and the prompt above was actually delivered), commit the
+    # priority-seen-set. A SubagentManager construction, prompt-fitting, or
+    # spawn failure above returns before this point, so it stays
+    # re-offerable on the next healthy cycle instead of being silently
+    # consumed. (The dedup-evidence record is stricter: cleared only after
+    # an integrated plan, #2050 H2, below.)
+    if _planner_seen_priority_ids_to_commit is not None:
+        try:
+            from nanobot.runtime import planner_candidates as _planner_candidates_commit_mod
+
+            _planner_candidates_commit_mod.commit_seen_priority_ids(
+                state_dir, _planner_seen_priority_ids_to_commit,
+            )
+        except Exception:
+            pass
+    if _dedup_evidence_to_clear:
+        try:
+            from nanobot.runtime import planner_dedup_evidence as _dedup_evidence_commit_mod
+
+            _dedup_evidence_commit_mod.clear_pending_evidence(state_dir)
+        except Exception:
+            pass
 
     try:
         telem_path = state_dir / 'subagents' / f'{planner_task_id}.json'
@@ -3878,19 +3915,18 @@ async def _run_planning_session(
             for d in _declined_raw
             if isinstance(d, dict) and str(d.get('defect_id') or '').strip() and str(d.get('reason') or '').strip()
         }
-        if _declined_map:
-            try:
-                from nanobot.runtime import planner_candidates as _planner_candidates_mod
+        try:
+            from nanobot.runtime import planner_candidates as _planner_candidates_mod
 
-                _decline_results = _planner_candidates_mod.record_defect_declines(
-                    state_dir, cycle_id, _declined_map,
-                )
-                for _defect_id, _reason in _declined_map.items():
-                    _escalated = _decline_results.get(_defect_id, {}).get('escalated', False)
-                    _tag = ' [ESCALATED to operator: 3 declines running]' if _escalated else ''
-                    plan_lines.append(f'Declined: {_defect_id} — {_reason}{_tag}')
-            except Exception:
-                pass
+            _decline_results = _planner_candidates_mod.record_defect_declines(
+                state_dir, cycle_id, _declined_map,
+            )
+            for _defect_id, _reason in _declined_map.items():
+                _escalated = _decline_results.get(_defect_id, {}).get('escalated', False)
+                _tag = ' [ESCALATED to operator: 3 declines running]' if _escalated else ''
+                plan_lines.append(f'Declined: {_defect_id} — {_reason}{_tag}')
+        except Exception:
+            pass
     # Architect resolution 2026-09-25 (ADR-035 rule 3, "I"): the session
     # must resolve a pending open increment (keep/edit/delete) before this
     # plan is treated as produced. Fail-open bookkeeping, same shape as the
@@ -3904,6 +3940,7 @@ async def _run_planning_session(
     _resume_branch: 'str | None' = None
     _resume_cycle_id: 'str | None' = None
     _resume_skip_opening_entry = False
+    _verified_continuation: dict[str, object] | None = None
     if _pending_open_increment:
         _oi_decision = str(parsed.get('open_increment_decision') or '').strip().lower()
         if _oi_decision in ('keep', 'edit', 'delete'):
@@ -3912,6 +3949,18 @@ async def _run_planning_session(
                     _resume_branch = _pending_open_increment.get('branch') or None
                     _resume_cycle_id = _pending_open_increment.get('cycle_id') or None
                     _resume_skip_opening_entry = bool(_pending_open_increment.get('opening_entry_written'))
+                    # Bind the continuation to the exact pending record read
+                    # before resolve(); only return it after resolve_saved verifies
+                    # this keep decision on disk. Never infer authority from title.
+                    _verified_continuation = {
+                        'cycle_id': str(_pending_open_increment.get('cycle_id') or ''),
+                        'branch': str(_pending_open_increment.get('branch') or ''),
+                        'reason': str(_pending_open_increment.get('reason') or ''),
+                        'retry_key': str(_pending_open_increment.get('retry_key') or ''),
+                        'pending_before_resolve': dict(_pending_open_increment),
+                        'deciding_cycle_id': str(cycle_id or ''),
+                        'decision': 'keep',
+                    }
                     # D11 (#1903 planning-cost measurement): the diary
                     # entry itself names which of the two `keep` paths this
                     # was -- confirm reused the previous plan verbatim
@@ -3975,6 +4024,12 @@ async def _run_planning_session(
                         'ran': True, 'iterations_used': iterations_used, 'iterations_planned': iterations_planned,
                         'tampered_files': [], 'plan': None,
                     }
+                if _oi_decision == 'keep' and _verified_continuation is not None:
+                    _verified_continuation['resolve_saved'] = _oi_resolve_state.resolve_saved is True
+                    if _verified_continuation['resolve_saved']:
+                        _verified_continuation['pending_after_resolve'] = (
+                            _open_increment_mod.pending_open_increment(state_dir)
+                        )
                 plan_lines.append(f'Open increment: {_oi_decision}')
             except Exception as _oi_resolve_exc:
                 # Codex review of 777ada1a (nanobot/runtime/bridge.py:3897),
@@ -4058,6 +4113,15 @@ async def _run_planning_session(
     )
     no_plan_recovery.record_outcome(state_dir, cycle_id, write_result['outcome'])
     planner_rest.record_non_rest_outcome(state_dir, cycle_id, write_result['outcome'])
+    # #2050 H2: this session produced a plan with the duplicate-rejection
+    # evidence in view -- only now is that one delivery used up.
+    if _dedup_evidence_shown and write_result['outcome'] == 'integrated':
+        try:
+            from nanobot.runtime import planner_dedup_evidence as _dedup_evidence_clear_mod
+
+            _dedup_evidence_clear_mod.clear_pending_evidence(state_dir)
+        except Exception:
+            pass
     return {
         'ran': True, 'iterations_used': iterations_used,
         'iterations_planned': iterations_planned if write_result['outcome'] == 'integrated' else None,
@@ -4073,6 +4137,7 @@ async def _run_planning_session(
         'resume_branch': _resume_branch,
         'resume_cycle_id': _resume_cycle_id,
         'resume_skip_opening_entry': _resume_skip_opening_entry,
+        'verified_continuation': _verified_continuation,
     }
 
 
@@ -4610,8 +4675,42 @@ async def _main_impl_body():
         # cycle_id) — those are NOT caught here; the _recent_failure_match and
         # existence-index gates below are the remaining semantic-dup fallbacks.
         _cycle_success_tag = f'cycle-{_safe_ref_id(_cycle_id)}-success'
+        _tag_provenance = _planning_result.get('verified_continuation')
+        _tag_pending = None
+        if isinstance(_tag_provenance, dict):
+            try:
+                from nanobot.runtime import open_increment as _tag_open_increment
+                _tag_pending = _tag_open_increment.pending_open_increment(STATE_DIR)
+            except Exception:
+                _tag_pending = None
+        _tag_conflict_continuation = bool(
+            isinstance(_tag_provenance, dict)
+            and _tag_provenance.get('decision') == 'keep'
+            and _tag_provenance.get('resolve_saved') is True
+            and isinstance(_tag_provenance.get('pending_before_resolve'), dict)
+            and _tag_provenance.get('pending_before_resolve', {}).get('cycle_id') == _cycle_id
+            and _tag_provenance.get('pending_before_resolve', {}).get('branch') == _tag_provenance.get('branch')
+            and _tag_provenance.get('pending_before_resolve', {}).get('reason') == _tag_provenance.get('reason')
+            and _tag_provenance.get('pending_before_resolve', {}).get('retry_key') == _tag_provenance.get('retry_key')
+            and _tag_provenance.get('cycle_id') == _cycle_id
+            and _tag_provenance.get('branch') == _resume_branch
+            and _tag_provenance.get('pending_after_resolve') == _tag_pending
+            and isinstance(_tag_pending, dict)
+            and _tag_pending.get('cycle_id') == _tag_provenance.get('cycle_id')
+            and _tag_pending.get('branch') == _tag_provenance.get('branch')
+            and _tag_pending.get('reason') == _tag_provenance.get('reason')
+            and _tag_pending.get('retry_key') == _tag_provenance.get('retry_key')
+            and _tag_pending.get('resumed_by') == _tag_provenance.get('deciding_cycle_id')
+        )
         if _cycle_tag_exists(_selfevo_repo_check, _cycle_success_tag):
             print(f'bridge: cycle {_cycle_id} already tagged {_cycle_success_tag}; skipping subagent spawn')
+            if _tag_conflict_continuation:
+                from nanobot.runtime.cycle_ledger import append_event as _append_cycle_event
+                _append_cycle_event(STATE_DIR, {
+                    'phase': 'open_increment_continuation_conflict',
+                    'cycle_id': _cycle_id,
+                    'reason': 'success_tag_present',
+                })
             handled_marker.write_text(str(req_path), encoding='utf-8')
             _write_bridge_completed_result(
                 state_dir=STATE_DIR,
@@ -4671,11 +4770,21 @@ async def _main_impl_body():
         # and re-spawned every cycle. This suppression adds a separate pre-spawn
         # guard that does not affect [Done] bookkeeping — only prevents
         # re-spawning the same rejected work within the suppression window.
-        if _dup_check_title and (
-            _recent_failure_title := _recent_failure_match(
+        #
+        # #2050 H1: the gate DOES apply to a continuation of the pending open
+        # increment. An interruption is not failure history (see
+        # _INTERRUPTED_ROLLBACK_REASONS), so a `keep` after an interruption
+        # passes; after a GENUINE failure of the continuation it is
+        # suppressed and recorded as rejected_duplicate, which the next
+        # planning session is guaranteed to see (H2) -- so it edits or
+        # deletes instead of re-running a failing increment every cycle
+        # (record_attempt_finished never clears `pending`).
+        _recent_failure_title = None
+        if _dup_check_title:
+            _recent_failure_title = _recent_failure_match(
                 _dup_check_title, STATE_DIR, target_path=_target_path,
             )
-        ):
+        if _recent_failure_title:
             print(
                 f'bridge: task "{_dup_check_title[:60]}" matches recent failure/rejection '
                 f'"{_recent_failure_title[:60]}" (within {FAILURE_SUPPRESS_HOURS}h); '
@@ -4724,6 +4833,46 @@ async def _main_impl_body():
                 f'recent_duplicate_failure:{_recent_failure_title}',
             )
             return 0
+        _continuation = _planning_result.get('verified_continuation')
+        _continuation_reason = (
+            _continuation.get('reason') if isinstance(_continuation, dict) else None
+        )
+        _pending_after_resolve = None
+        if isinstance(_continuation, dict):
+            try:
+                from nanobot.runtime import open_increment as _continuation_state
+                _pending_after_resolve = _continuation_state.pending_open_increment(STATE_DIR)
+            except Exception:
+                _pending_after_resolve = None
+        _is_verified_continuation = bool(
+            isinstance(_continuation, dict)
+            and _continuation.get('decision') == 'keep'
+            and _continuation.get('resolve_saved') is True
+            and isinstance(_continuation.get('pending_before_resolve'), dict)
+            and _continuation.get('pending_after_resolve') == _pending_after_resolve
+            and isinstance(_pending_after_resolve, dict)
+            and _continuation.get('deciding_cycle_id')
+            and _continuation.get('cycle_id')
+            and _continuation.get('branch')
+            and _continuation.get('cycle_id') == _cycle_id
+            and _resume_cycle_id == _cycle_id
+            and _resume_branch == _continuation.get('branch')
+            and _continuation_reason in _INTERRUPTED_ROLLBACK_REASONS
+            and _pending_after_resolve.get('cycle_id') == _cycle_id
+            and _continuation.get('pending_before_resolve', {}).get('cycle_id') == _cycle_id
+            and _continuation.get('pending_before_resolve', {}).get('branch') == _resume_branch
+            and _continuation.get('pending_before_resolve', {}).get('reason') == _continuation_reason
+            and _continuation.get('pending_before_resolve', {}).get('retry_key') == _continuation.get('retry_key')
+            and _pending_after_resolve.get('branch') == _resume_branch
+            and _pending_after_resolve.get('reason') == _continuation_reason
+            and _pending_after_resolve.get('resumed_by') == _continuation.get('deciding_cycle_id')
+        )
+
+        _existence_match = (
+            find_duplicate_script(STATE_DIR, _selfevo_repo_check, _dup_check_title, _target_path)
+            if _dup_check_title else None
+        )
+
         # #750: the two checks above are exact/keyword title matching — they
         # miss SEMANTIC near-duplicates whose title shares no literal words
         # with the past commit/failure (e.g. "monitor RAM and memory usage"
@@ -4735,11 +4884,7 @@ async def _main_impl_body():
         # nanobot.runtime.existence_index) — any internal error yields None,
         # so this branch is a pure ADDITION to the dedup gate, never a new
         # way to block a legitimately novel proposal.
-        elif _dup_check_title and (
-            _existence_match := find_duplicate_script(
-                STATE_DIR, _selfevo_repo_check, _dup_check_title, _target_path,
-            )
-        ):
+        if _existence_match and not _is_verified_continuation:
             print(
                 f'bridge: task "{_dup_check_title[:60]}" is a semantic near-duplicate of '
                 f'existing {_existence_match} (existence index); skipping subagent spawn'
@@ -4789,6 +4934,29 @@ async def _main_impl_body():
             )
             return 0
 
+        elif _is_verified_continuation:
+            if _existence_match:
+                from nanobot.runtime.cycle_ledger import append_event as _append_cycle_event
+                _append_cycle_event(STATE_DIR, {
+                    'phase': 'open_increment_continuation_exempt',
+                    'cycle_id': _cycle_id,
+                    'branch': _resume_branch,
+                    'matched_artifact': str(_existence_match),
+                })
+                # A keep-resumed increment is the same work whose partial
+                # artifact the index found. Log the real hit and its narrow
+                # identity-bound exemption; the lookup did run.
+                _record_guard_key_event(
+                    STATE_DIR, 'existence_index', 'continuation_exempt',
+                    _dup_check_title or '', str(_existence_match),
+                    lookup='bridge_dedup_gate', legacy_outcome='continuation_exempt',
+                )
+            else:
+                _record_guard_key_event(
+                    STATE_DIR, 'existence_index', 'miss', _dup_check_title or '', _target_path or '',
+                    lookup='bridge_dedup_gate', legacy_outcome='miss',
+                )
+            record_dedup_decision(STATE_DIR, _cycle_id, 'proceeded', None)
         else:
             _record_guard_key_event(
                 STATE_DIR, 'existence_index', 'miss', _dup_check_title or '', _target_path or '',
@@ -4839,6 +5007,7 @@ async def _main_impl_body():
     # after the smoke gate passes (R12-R15).
     async def _evaluate_candidate(cand_cycle_id: str, do_integration: bool, meas_metric: str = "") -> dict:
         _cycle_id = cand_cycle_id
+        _handled_disposition: str | None = None
         _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
         # A second, targeted _restore_to_main -- NOT a full
         # _prepare_repository_for_cycle repeat (#1942 follow-up on the ADR-035
@@ -4855,6 +5024,7 @@ async def _main_impl_body():
         # in _prepare_repository_for_cycle guards against.
         _restore_to_main(_selfevo_repo, STATE_DIR)
         _candidate_max_call_gap_s: float | None = None
+
         # _cycle_id was already resolved up front (right after request_id, before
         # the write-ahead ledger marker) — reused here unchanged.
         # ADR-035 keep-work (#1942 B2): a `keep` decision resumes its OWN
@@ -4971,22 +5141,11 @@ async def _main_impl_body():
             _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
             return {'status': 0}
 
-        # Codex review of 777ada1a (nanobot/runtime/llm_proposer.py:558), P1
-        # (architect resolution 2026-09-26): the attempt registration just
-        # above just persisted -- this candidate is actually about to run.
-        # A proposer-authored candidate must be retired here (the same
-        # handled_<rid>.txt marker the old rotation path wrote), or
-        # proposer_candidate_items keeps offering it forever, re-running
-        # the SAME proposal every cycle. Fail-open: retiring is
-        # bookkeeping on top of an already-registered attempt, never a
-        # reason to abort a cycle that is otherwise ready to execute.
-        if _matched_candidate and _matched_candidate.get('provenance') == 'proposer':
-            try:
-                from nanobot.runtime import llm_proposer as _llm_proposer_retire
-
-                _llm_proposer_retire.retire_proposer_request_for_candidate(STATE_DIR, _candidate_id)
-            except Exception:
-                pass
+        # #2010: proposer-request retirement moved past mgr.spawn() and the
+        # confirmed _subagent_task_id below -- see the block right after
+        # that check. Retiring here (right after registration, before
+        # SubagentManager construction/spawn) meant a prompt-build or spawn
+        # failure still retired the request with no executor ever having run.
 
         # #718: the subagent must write into the git checkout the bridge branches,
         # commits, gates, and integrates (_selfevo_repo) — not TARGET_WORKSPACE
@@ -5113,6 +5272,8 @@ async def _main_impl_body():
         # exists).
         _closing_commit_failed = False
         _cycle_tier = 'script'  # #812: 'script' | 'runtime' (set by surface classify below)
+        _candidate_max_call_gap_s: float | None = None
+        _last_call_gap_manager = None
         _integrated = False
         _delivered = False
         _service_only = False
@@ -5257,6 +5418,26 @@ async def _main_impl_body():
                     _open_increment_taskid.record_attempt_task_id(STATE_DIR, _cycle_id, _subagent_task_id)
                 except Exception:
                     pass
+
+                # #2010 (Codex review of 777ada1a, P1): a proposer-authored
+                # candidate is retired here, not right after attempt
+                # registration -- a live task_id in mgr._running_tasks is
+                # the same "the candidate runs" moment as the planner path's
+                # (#2011/#2012), confirmed AFTER prompt construction and
+                # mgr.spawn() both succeeded. A prompt-build or spawn
+                # failure (SystemPromptOverflowError, spawn raising) never
+                # reaches this point, so the request stays live for
+                # proposer_candidate_items to re-offer on a later healthy
+                # tick. Fail-open: retiring is bookkeeping on top of an
+                # attempt that has now genuinely started, never a reason to
+                # abort a cycle that already spawned.
+                if _matched_candidate and _matched_candidate.get('provenance') == 'proposer':
+                    try:
+                        from nanobot.runtime import llm_proposer as _llm_proposer_retire
+
+                        _llm_proposer_retire.retire_proposer_request_for_candidate(STATE_DIR, _candidate_id)
+                    except Exception:
+                        pass
             if mgr._running_tasks:
                 try:
                     # Limit subagent execution time to remaining bridge wall allocation.
@@ -5275,6 +5456,7 @@ async def _main_impl_body():
                     print("All timed-out subagent tasks cancelled.")
 
             _candidate_max_call_gap_s = getattr(mgr, "last_max_call_gap_s", None)
+            _last_call_gap_manager = mgr
             try:
                 from nanobot import crash_record as _run_record
                 _telem = json.loads((STATE_DIR / 'subagents' / f'{_subagent_task_id}.json').read_text(encoding='utf-8')) if _subagent_task_id else {}
@@ -5464,7 +5646,7 @@ async def _main_impl_body():
                     LLM_SUPPLIER_PAUSED_REASON if _llm_error_class == 'paused-supplier'
                     else 'executor_llm_error'
                 )
-            _decide_handled_marker(
+            _handled_disposition = _decide_handled_marker(
                 handled_marker, req_path,
                 llm_error=bool(_executor_llm_error_text and cycle_commit_count == 0),
                 supplier_paused=(_llm_error_class == 'paused-supplier'),
@@ -5741,7 +5923,22 @@ async def _main_impl_body():
                         expected_cycle_branch=cycle_branch,
                         wall_deadline=_bridge_wall_deadline,
                     )
+                    # #2024: fold the gap of the manager this repair REPLACES
+                    # (the primary, or the previous repair) before losing the
+                    # reference -- it has finished its spawn/wait by now. A
+                    # freshly constructed manager has measured nothing yet
+                    # (SubagentManager.__init__ sets None; the value appears
+                    # only while it runs). The last manager is folded at
+                    # finalization via _last_call_gap_manager.
+                    _replaced_gap = getattr(_last_call_gap_manager, "last_max_call_gap_s", None)
+                    if _replaced_gap is not None:
+                        _candidate_max_call_gap_s = max(
+                            gap for gap in (_candidate_max_call_gap_s, _replaced_gap)
+                            if gap is not None
+                        )
+                    _last_call_gap_manager = _repair_mgr
                     _repair_tip_before = _current_tip_sha(_selfevo_repo)
+
                     await _repair_mgr.spawn(
                         task=_repair_prompt,
                         task_id=f'selfevo-repair-{_repair_attempts}',
@@ -5752,6 +5949,71 @@ async def _main_impl_body():
                     _repair_spawn_id = next(iter(_repair_mgr._running_tasks), None)
                     if _repair_spawn_id:
                         _repair_task_ids.append(_repair_spawn_id)
+                    # Prompt construction/provider setup may consume meaningful
+                    # wall time after the first budget check. Recompute at the
+                    # await boundary so a stale positive timeout cannot burn the
+                    # finalization reserve while the manager's pre-call guard
+                    # would reject its first model request.
+                    _repair_wait = repair_wait_budget_secs(
+                        _bridge_wall_deadline,
+                        max_wait_secs=1200.0,
+                        clock=time.monotonic,
+                    )
+                    if _repair_wait is None:
+                        _cancelled_ids = list(_repair_mgr._running_tasks)
+                        for _repair_task in list(_repair_mgr._running_tasks.values()):
+                            _repair_task.cancel()
+                        await asyncio.gather(
+                            *list(_repair_mgr._running_tasks.values()),
+                            return_exceptions=True,
+                        )
+                        # A task cancelled before its first event-loop step never
+                        # enters _run_subagent's CancelledError handler; update
+                        # spawn's existing record while preserving its task and
+                        # correlation metadata.
+                        for _task_id in _cancelled_ids:
+                            telemetry_path = _repair_mgr._telemetry_dir / f'{_task_id}.json'
+                            try:
+                                with telemetry_path.open('r', encoding='utf-8') as fh:
+                                    payload = json.load(fh)
+                            except (OSError, ValueError):
+                                payload = None
+                            if not isinstance(payload, dict):
+                                # Defensive fallback for a missing/corrupt
+                                # record; normally spawn has already persisted it.
+                                payload = _repair_mgr._build_subagent_telemetry_payload(
+                                    task_id=_task_id,
+                                    task=_repair_prompt,
+                                    label='repair',
+                                    started_at=_repair_mgr._read_subagent_started_at(_task_id) or _repair_mgr._utc_now(),
+                                    finished_at=None,
+                                    status='running',
+                                    summary=None,
+                                    result=None,
+                                    origin={
+                                        'channel': 'self-evolving',
+                                        'chat_id': _cycle_id,
+                                        'session_key': None,
+                                    },
+                                    session_key=None,
+                                )
+                            payload.update({
+                                'finished_at': _repair_mgr._utc_now(),
+                                'status': 'cancelled',
+                                'summary': 'Repair skipped before execution: insufficient wall-clock budget.',
+                                'result': 'Repair skipped before execution: insufficient wall-clock budget.',
+                                'stop_reason': 'repair_skipped_no_budget',
+                            })
+                            _repair_mgr._write_subagent_telemetry(_task_id, payload)
+                        append_event(STATE_DIR, {
+                            'phase': 'repair_skipped_no_budget',
+                            'cycle_id': _cycle_id,
+                            'reason': 'repair_skipped_no_budget_before_wait',
+                            'repair_attempt': _repair_attempts,
+                        })
+                        print('repair_skipped_no_budget: pre-await work consumed model-call budget')
+                        _repair_attempts -= 1
+                        break
                     try:
                         await asyncio.wait_for(
                             asyncio.gather(*list(_repair_mgr._running_tasks.values()), return_exceptions=True),
@@ -6606,6 +6868,12 @@ async def _main_impl_body():
             print(f'bridge: unexpected error during cycle {cycle_branch}: {exc}')
             _rollback_reason = _rollback_reason or 'internal_error'
             commits_pushed = cycle_commit_count if _integrated else 0
+            _latest_manager_gap = getattr(_last_call_gap_manager, "last_max_call_gap_s", None)
+            if _latest_manager_gap is not None:
+                _candidate_max_call_gap_s = max(
+                    gap for gap in (_candidate_max_call_gap_s, _latest_manager_gap)
+                    if gap is not None
+                )
         finally:
             # Never leave the shared checkout stranded on a cycle branch.
             if not _integrated:
@@ -6618,6 +6886,14 @@ async def _main_impl_body():
                 pass
         try:
             from nanobot.runtime.session_clock import compute_cycle_max_call_gap
+            _manager_gaps = [
+                _candidate_max_call_gap_s,
+                getattr(_last_call_gap_manager, "last_max_call_gap_s", None),
+            ]
+            _candidate_max_call_gap_s = max(
+                (gap for gap in _manager_gaps if gap is not None),
+                default=None,
+            )
             _candidate_max_call_gap_s = compute_cycle_max_call_gap(
                 STATE_DIR,
                 _cycle_id,
@@ -6655,6 +6931,7 @@ async def _main_impl_body():
             'executor_llm_error': locals().get('_executor_llm_error_text', ''),
             'system_prompt_overflow': locals().get('_system_prompt_overflow_text', ''),
             'run_stop_reason': locals().get('_run_stop_reason', ''),
+            'handled_disposition': _handled_disposition,
             'prompt_fit_rung': locals().get('_prompt_fit_rung'),
             'origin_main_observed': locals().get('_origin_main_observed', locals().get('main_sha_before', '')),
         }
@@ -7134,6 +7411,7 @@ async def _main_impl_body():
             }
             if _executor_llm_error_text else None
         ),
+        handled_disposition=_res.get('handled_disposition'),
     )
     # #721: post-cycle tag at the terminal HEAD, same outcome value as the
     # ledger row above. Integrated -> main_sha_after (shared checkout stayed on
@@ -8059,6 +8337,22 @@ _SKIP_ROLLBACK_REASONS = frozenset({
 })
 
 
+#: #2050 H1: rollback reasons of an attempt that did NOT FINISH -- the
+#: session was interrupted (our own defect, a kill, a supplier outage) and
+#: its work is the pending open increment, resolved by the planner's
+#: keep/edit/delete. Not a verdict on the proposal, so never recent-failure
+#: history for :func:`_recent_failure_match` (same reasoning as the
+#: supplier-paused entry of :data:`_SKIP_ROLLBACK_REASONS`, and as
+#: ``interrupted_defect`` being inconclusive in :data:`_INCONCLUSIVE_REASONS`).
+_INTERRUPTED_ROLLBACK_REASONS = frozenset({
+    'interrupted_defect',
+    'interrupted_kill',
+    'interrupted_supply',
+})
+
+
+
+
 def _recent_failure_match(
     dup_check_title: str,
     state_dir: 'Path',
@@ -8191,6 +8485,10 @@ def _recent_failure_match(
             # rollback.reason naming the skip. Never let them seed the
             # failure history (see docstring: the decay cascade).
             if reason in _SKIP_ROLLBACK_REASONS:
+                continue
+            # #2050 H1: an interrupted attempt never finished -- not a
+            # failure of the proposal (see _INTERRUPTED_ROLLBACK_REASONS).
+            if reason in _INTERRUPTED_ROLLBACK_REASONS:
                 continue
             if str(status or '').lower().startswith('skipped'):
                 continue
