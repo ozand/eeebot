@@ -895,19 +895,33 @@ def test_journal_and_summary_attribute_compacted_assistant_to_actual_tools(tmp_p
     assert "- src/output.py" in carrier["content"]
 
 
-def test_carrier_journal_detail_reports_actual_summary_content_size(tmp_path):
-    messages = _make_messages([_long_content(20_000)] * 3, tool_name="grep")
+def test_carrier_journal_detail_reports_full_returned_carrier_size(tmp_path):
+    messages = _make_messages([_long_content(20_000)] * 4, tool_name="grep")
+    # Give every candidate a distinct identity so the selected carrier's
+    # journal row is located by the message, not by a max-size heuristic.
+    for index, tool_index in enumerate(range(3, len(messages), 2)):
+        messages[tool_index]["name"] = f"tool-{index}"
+    preservation_dir = cc._preservation_path(
+        tmp_path, "carrier-size", "exec-1", 99,
+    ).parent
+    preservation_dir.mkdir(parents=True)
+    (preservation_dir / "older-round.md").write_text("older evidence\n", encoding="utf-8")
+    (preservation_dir / "another-round.md").write_text("more evidence\n", encoding="utf-8")
+
     result = cc.compact_messages(
-        messages, cycle_id="carrier-size", iteration=1, state_root=tmp_path,
-        threshold=0.01, keep_tokens=1, window_tokens=98_304,
+        messages, cycle_id="carrier-size", execution_id="exec-1", iteration=1,
+        state_root=tmp_path, threshold=0.01, keep_tokens=1, window_tokens=98_304,
     )
     event = _last_journal_event(tmp_path)
-    carrier_index = next(i for i, message in enumerate(result) if message.get(cc._CARRIER_FLAG))
-    carrier = result[carrier_index]
-    detail = max(event["compacted_details"], key=lambda item: item["chars_after"])
-    selected_before_index = carrier["content"].split("\nPreserved evidence", 1)[0]
-    actual_after = len(selected_before_index)
+    carrier = next(message for message in result if message.get(cc._CARRIER_FLAG))
+    detail = next(
+        item for item in event["compacted_details"]
+        if item["tool_name"] == carrier["name"]
+    )
+    actual_after = len(cc._message_text(carrier))
 
+    assert "Preserved evidence" in carrier["content"]
+    assert "All preservation files this cycle+execution" in carrier["content"]
     assert actual_after > cc.EXCERPT_HEAD + len(cc._OMIT_MARKER) + cc.EXCERPT_TAIL
     assert detail["chars_after"] == actual_after
     assert detail["dropped_chars"] == detail["chars_before"] - actual_after

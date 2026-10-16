@@ -1310,6 +1310,18 @@ def compact_messages(
             carrier_with_index,
             content=str(carrier_with_index["content"]) + preservation_overhead_text,
         )
+        # #2021: the carrier detail is first recorded with its selected
+        # summary+excerpt above, but the preservation index and complete file
+        # list are part of the actual returned content. Update that one
+        # journal row only after the final splice so chars_after describes
+        # exactly what the caller receives.
+        carrier_detail_index = worth_indices.index(carrier)
+        carrier_detail = compacted_details[carrier_detail_index]
+        compacted_details[carrier_detail_index] = _drop_detail(
+            carrier_detail["tool_name"],
+            _message_text(messages[carrier]),
+            _message_text(new_messages[carrier]),
+        )
 
         after_tokens = _total_tokens(new_messages)
 
