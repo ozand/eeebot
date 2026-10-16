@@ -48,7 +48,11 @@ async def test_chat_with_retry_retries_transient_error_then_succeeds(monkeypatch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("message", ["Request timed out after 60s", "litellm.Timeout: Read timeout"])
+@pytest.mark.parametrize("message", [
+    "Request timed out after 60s",
+    "litellm.Timeout: Read timeout",
+    "Timed out waiting for upstream response",
+])
 async def test_chat_with_retry_retries_timeout_error_then_succeeds(monkeypatch, message) -> None:
     provider = ScriptedProvider([
         LLMResponse(content=message, finish_reason="error"),
