@@ -20,7 +20,7 @@ The chat framework exposes channels, tools, model routing, and user sessions thr
 
 The host bridge runs a bounded cycle through planning, subagent execution, gates, and evidence recording.
 
-The entry point is [[nanobot/runtime/bridge.py#main]]. A cycle performs bounded planning, request selection, isolated subagent execution, gate evaluation, and evidence recording. The bridge chooses whether an accepted result can be integrated; executor output is not itself authority to change the product repository.
+The entry point is [[nanobot/runtime/bridge.py#main]]. A cycle collects demand and proposer candidates before planner selection; a no-plan/rest result does not start the executor. Planned work proceeds through isolated subagent execution, gates, and evidence recording. The bridge chooses whether an accepted result can be integrated; executor output is not itself authority to change the product repository.
 
 The planning session is implemented by [[nanobot/runtime/bridge.py#_run_planning_session]]. It receives demand candidates collected by [[nanobot/runtime/demand.py#collect_demand]] and proposer candidates from [[nanobot/runtime/llm_proposer.py#proposer_candidate_items]], then returns a plan or an explicit no-plan/rest outcome. The executor task is derived from the planner's plan; a candidate is optional context, not a task assignment. Do not infer a no-demand idle rule from older architecture prose without checking current code and configuration.
 
@@ -44,7 +44,7 @@ The self-evolving instance workspace is where bounded cycle changes are staged a
 
 Decision records preserve rationale and their own acceptance status.
 
-ADR-035 is marked **Proposed** in [[docs/adr/ADR-035-the-planning-session-chooses-and-closes-hadi.md]] and the [[docs/adr/README.md]] index, although planner-first behavior is present in current code; this page describes observed implementation and does not accept the ADR. ADR-037 is also Proposed. Do not infer acceptance from implementation, tests, or inclusion in this map.
+ADR-035 is marked **Proposed** in [[docs/adr/ADR-035-the-planning-session-chooses-and-closes-hadi.md]] and the [[docs/adr/README.md]] index, although planner-first behavior is present in current code; this page describes observed implementation and does not accept the ADR. [[docs/adr/ADR-037-record-handled-disposition-without-implying-cause.md|ADR-037, “Record handled-marker disposition without implying interruption cause,”]] is also **Proposed**. Do not infer acceptance from implementation, tests, or inclusion in this map.
 
 ## Source precedence
 
