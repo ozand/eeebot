@@ -325,6 +325,22 @@ class TestOutageCycleOffersTheSameItemAgainUnchanged:
         title = "Add markdown catalog link path resolver to workspace_validation_helpers.py"
         _seed_bridge_request(state_dir, "req-outage", "cycle-outage", task_title=title)
         _stub_planning_session(monkeypatch, title)
+        # Seed a genuine rotation record via its production selector. A supply
+        # interruption/held tick must not consume another presentation turn.
+        from nanobot.runtime import llm_proposer
+        rotation_item = {"id": "priority-rotation-canary", "provenance": "derived"}
+        llm_proposer._select_assigned_demand(state_dir, [rotation_item])
+        rotation_path = state_dir / "demand" / "rotation.json"
+        rotation_before = rotation_path.read_bytes()
+        selector_calls = 0
+        real_select = llm_proposer._select_assigned_demand
+
+        def _track_rotation_selection(*args, **kwargs):
+            nonlocal selector_calls
+            selector_calls += 1
+            return real_select(*args, **kwargs)
+
+        monkeypatch.setattr(llm_proposer, "_select_assigned_demand", _track_rotation_selection)
         bridge_state = state_dir / "subagent_bridge"
 
         rc = asyncio.run(bridge._main_impl())
@@ -338,6 +354,8 @@ class TestOutageCycleOffersTheSameItemAgainUnchanged:
         assert outcome["llm_error_classification"]["class"] == "paused-supplier"
         assert "Connection error" in outcome["llm_error_classification"]["raw_error"]
         assert bridge._classify_llm_error(TRANSPORT_ERROR) == "paused-supplier"
+        assert selector_calls == 0
+        assert rotation_path.read_bytes() == rotation_before
 
         # (2) no error card: no error_card_recording ledger row at all.
         assert not any(r["phase"] == "error_card_recording" for r in _read_ledger(state_dir))
@@ -366,6 +384,8 @@ class TestOutageCycleOffersTheSameItemAgainUnchanged:
         # (started/dedup/gate/outcome) at all, since no session ran.
         new_rows = rows_after[len(rows_before):]
         assert [r["phase"] for r in new_rows] == ["open_increment_held"]
+        assert selector_calls == 0
+        assert rotation_path.read_bytes() == rotation_before
         assert list(bridge_state.glob("handled_*.txt")) == []
         assert list(bridge_state.glob("retry_*.json")) == []
 
