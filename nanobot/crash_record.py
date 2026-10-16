@@ -66,6 +66,9 @@ RUN_RETENTION_DAYS = 90
 # that counter exists to detect the LOOP crash-looping (#1197's own 9h20m
 # incident), not the supplier's uptime.
 SUPPLIER_PAUSED_EXIT_CODE = 5
+# Incomplete model calls still finalize run timing/classification, but are
+# excluded from the success/failure exit-streak mutation in ``main`` below.
+MODEL_CALL_INCOMPLETE_EXIT_CODE = 6
 # Issue #1835: Signals that represent external shutdown / interruption rather
 # than an autonomous loop failure. When systemd stops or restarts the bridge unit
 # (e.g. during deploy_release.sh flip), it issues SIGTERM optionally followed
@@ -237,7 +240,7 @@ def _rotate_runs(root: Path, active: Path, now: datetime) -> None:
             continue
 
 
-def _record_run_end(root: Path, *, outcome: str, exit_status: Any, source: str, service_result: str, stamp: str, exit_code: str = "") -> None:
+def _record_run_end(root: Path, *, outcome: str, exit_status: Any, source: str, service_result: str, stamp: str, exit_code: str = "", classification: str = "") -> None:
     """Materialize one run row from the marker, including signal-only exits."""
     marker_path = root / RUN_MARKER_REL
     try:
@@ -260,7 +263,7 @@ def _record_run_end(root: Path, *, outcome: str, exit_status: Any, source: str, 
             or str(exit_code).lower() in {"timeout", "watchdog", "oom-kill"}
         ):
             metadata["classification"] = "unit_timeout"
-        classification = str(metadata.get("classification") or ("completion" if outcome == "success" else "failed"))
+        classification = str(classification or metadata.get("classification") or ("completion" if outcome == "success" else "failed"))
         row = {
             "schema_version": RUNS_SCHEMA,
             "phase": "run_end",
@@ -309,6 +312,8 @@ def record_exit(
     outcome: str,
     exit_status: Any,
     source: str = "process",
+    outcome_classification: str = "",
+    update_streak: bool = True,
     error: str = "",
     where: str = "",
     service_result: str = "",
@@ -317,23 +322,33 @@ def record_exit(
 ) -> dict[str, Any]:
     """Append one exit row and update the streak; return the new streak state.
 
-    ``outcome`` is ``"success"`` or ``"failure"``. Raises on a write failure
+    ``outcome`` is ``"success"``, ``"failure"``, ``"interrupted"``, or the
+    neutral ``"model_call_incomplete"``. Set ``update_streak=False`` only for
+    that neutral class; it still persists exit/run evidence but changes no streak.
+    Raises on a write failure
     after printing what could not be written — never a silent fallback.
     """
-    if outcome not in ("success", "failure", "interrupted"):
-        raise ValueError(f"outcome must be success|failure|interrupted, got {outcome!r}")
+    if outcome not in ("success", "failure", "interrupted", "model_call_incomplete"):
+        raise ValueError(f"outcome must be success|failure|interrupted|model_call_incomplete, got {outcome!r}")
     root = Path(root)
     records_path, streak_path = root / RECORDS_REL, root / STREAK_REL
     stamp = _now_iso(now)
     row = {
         "ts": stamp, "source": source, "outcome": outcome, "exit_status": exit_status,
+        **({"classification": outcome_classification} if outcome_classification else {}),
         "service_result": service_result, "exit_code": exit_code, "error": error, "where": where,
         "pid": os.getpid(), "argv": list(getattr(sys, "orig_argv", sys.argv))[:6],
     }
     try:
         _record_run_end(root, outcome=outcome, exit_status=exit_status, source=source,
-                        service_result=service_result, stamp=stamp, exit_code=exit_code)
+                        service_result=service_result, stamp=stamp, exit_code=exit_code,
+                        classification=outcome_classification)
         records_path.parent.mkdir(parents=True, exist_ok=True)
+        if not update_streak:
+            row["streak_updated"] = False
+            with records_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            return _load_streak(streak_path)
         streak = _load_streak(streak_path)
         last_ts = _parse_iso(streak.get("updated_at"))
         merged = (
@@ -436,6 +451,19 @@ def main(argv: list[str] | None = None) -> int:
         status = int(status)
     if status == SUPPLIER_PAUSED_EXIT_CODE:
         print(json.dumps({"outcome": "skipped_supplier_paused", "consecutive_failures": None}))
+        return 0
+    if status == MODEL_CALL_INCOMPLETE_EXIT_CODE:
+        # Finalize run and exit telemetry, but leave the defect streak untouched.
+        try:
+            record_exit(
+                root, outcome="model_call_incomplete", exit_status=status,
+                source=args.source, service_result=args.service_result,
+                exit_code=args.exit_code, error=args.error,
+                outcome_classification="model_call_incomplete", update_streak=False,
+            )
+        except OSError:
+            return 2
+        print(json.dumps({"outcome": "model_call_incomplete", "consecutive_failures": None}))
         return 0
     # Issue #1835: SIGTERM / SIGINT from deploy restart or operator shutdown
     # is an external interruption, not an autonomous loop failure.

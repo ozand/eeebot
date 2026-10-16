@@ -1072,7 +1072,7 @@ def _ledger_defects(
     limit: int | None = _MAX_LEDGER_DEFECTS,
     ledger_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
-    """Terminal ledger outcome rows with a real failure in the last 48h.
+    """Terminal ledger failures, including incomplete model calls, in the last 48h.
     ``skipped-*`` outcomes are the dedup stack working, not defects."""
     items: list[dict[str, str]] = []
     seen_summaries: set[str] = set()

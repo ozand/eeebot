@@ -47,6 +47,7 @@ class DailyVerdict:
     progressive_cycles: int
     appearance_cycles: int
     failed_cycles: int
+    model_call_incomplete_cycles: int
     wasted_box_cycles: int
     productive_ratio: float
     reason: str
@@ -111,6 +112,11 @@ def evaluate_daily_movement(
         if str(r.get("outcome")).strip().lower() == "failed"
     ]
     failed_cycles = len(failures)
+    model_call_incomplete = [
+        r for r in outcomes
+        if str(r.get("outcome") or "").strip().lower() == "model_call_incomplete"
+    ]
+    model_call_incomplete_cycles = len(model_call_incomplete)
 
     # #1850: wasted box cycles (consumed >= 80% iterations without progressive delivery)
     wasted_box = 0
@@ -146,6 +152,8 @@ def evaluate_daily_movement(
             f"demonstrated code/functional delivery ({progressive_cycles} progressive cycles, "
             f"productive_ratio={productive_ratio})"
         )
+    if model_call_incomplete_cycles:
+        reason += f"; {model_call_incomplete_cycles} model_call_incomplete cycle(s) counted separately"
     if unattributed_kills:
         verdict = "incomplete"
         reason += f"; incomplete evidence: {len(unattributed_kills)} killed run(s) unattributed"
@@ -161,6 +169,7 @@ def evaluate_daily_movement(
         progressive_cycles=progressive_cycles,
         appearance_cycles=appearance_cycles,
         failed_cycles=failed_cycles,
+        model_call_incomplete_cycles=model_call_incomplete_cycles,
         wasted_box_cycles=wasted_box_cycles,
         productive_ratio=productive_ratio,
         reason=reason,
@@ -169,6 +178,7 @@ def evaluate_daily_movement(
             "trivial_dir_prefixes": list(TRIVIAL_DIR_PREFIXES),
             "killed_by_timeout": len(killed),
             "unattributed_killed_by_timeout": len(unattributed_kills),
+            "model_call_incomplete_cycles": model_call_incomplete_cycles,
             "killed_runs": [
                 {"run_id": r.get("run_id"), "cycle_id": r.get("cycle_id") or None}
                 for r in killed

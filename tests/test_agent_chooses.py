@@ -1633,7 +1633,11 @@ def test_keep_continuation_after_genuine_failure_is_suppressed(tmp_path: Path, m
     monkeypatch.setattr(bridge, "SubagentManager", _NoExecutor)
     assert asyncio.run(bridge._main_impl()) == 0
     assert len(planning_calls) == 1
-    assert _failure_hits == [title]
+    assert len(_failure_hits) == 1
+    evidence = _failure_hits[0]
+    assert isinstance(evidence, dict)
+    assert evidence["title"] == title
+    assert evidence["error_class"] == "mutation_surface_violation"
     assert spawned == []
     assert any(
         row.get("decision") == "skipped_recent_failure"

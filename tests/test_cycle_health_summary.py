@@ -1,6 +1,7 @@
 import gzip
 import json
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -306,6 +307,23 @@ def test_cycle_progress_reads_rotated_archive_and_uses_elapsed_threshold(tmp_pat
     assert progress["state"] == "stalled"
     assert progress["hours_since_last_success"] == 9.0
     assert progress["consecutive_non_integrating_cycles"] == 1
+
+
+def test_cycle_progress_incomplete_only_suffix_trips_time_alert(tmp_path: Path):
+    state = tmp_path / "state"
+    _write_outcomes(state, [
+        {"phase": "outcome", "cycle_id": "success", "outcome": "success", "ts": "2026-09-01T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "incomplete-1", "outcome": "model_call_incomplete", "reason": "model_call_incomplete", "ts": "2026-09-01T00:04:00Z"},
+        {"phase": "outcome", "cycle_id": "incomplete-2", "outcome": "model_call_incomplete", "reason": "model_call_incomplete", "ts": "2026-09-01T00:08:00Z"},
+    ])
+    progress = read_cycle_progress(
+        state, now=datetime(2026, 9, 2, tzinfo=timezone.utc).timestamp(),
+        since_ts="2026-08-01T00:00:00Z",
+    )
+    assert progress["state"] == "stalled"
+    assert progress["alert"] is True
+    assert progress["hours_since_last_success"] >= 8
+    assert progress["consecutive_non_integrating_cycles"] == 0
 
 
 def test_cycle_progress_no_success_is_distinct_and_interleaved_success_is_healthy(tmp_path: Path):

@@ -46,6 +46,8 @@ def test_lib_constant_is_pinned_to_the_bridge_exit_code():
     text = LIB.read_text(encoding="utf-8")
     value = int(re.search(r"^BRIDGE_EXIT_EXECUTOR_LLM_ERROR=(\d+)$", text, re.M).group(1))
     assert value == bridge.EXIT_EXECUTOR_LLM_ERROR == 3
+    incomplete = int(re.search(r"^BRIDGE_EXIT_MODEL_CALL_INCOMPLETE=(\d+)$", text, re.M).group(1))
+    assert incomplete == bridge.EXIT_MODEL_CALL_INCOMPLETE == 6
     overflow = int(re.search(r"^BRIDGE_EXIT_SYSTEM_PROMPT_OVERFLOW=(\d+)$", text, re.M).group(1))
     assert overflow == bridge.EXIT_SYSTEM_PROMPT_OVERFLOW == 4
 
@@ -69,6 +71,7 @@ def test_first_cycle_overflow_rolls_back_with_remedy(tmp_path):
 @pytest.mark.parametrize("rc, result, status, expected", [
     ("0", "success", "0", "ok"),
     ("3", "exit-code", "3", "transport"),          # the 2026-09-05 case
+    ("6", "exit-code", "6", "incomplete"),       # model call did not complete; keep release active
     ("1", "exit-code", "1", "failed"),             # internal error
     ("4", "exit-code", "4", "failed"),             # #1302 system-prompt overflow: a release/config failure, stays fatal
     ("203", "exit-code", "203", "failed"),         # missing interpreter / venv
@@ -272,6 +275,14 @@ def test_self_check_dropin_printf_writes_three_valid_directives(tmp_path):
     ]
 
 
+def test_activation_incomplete_exit_keeps_the_release(tmp_path):
+    res, rolled_back = _drive_activation(tmp_path, restart_rc=6, result="exit-code", status="6")
+    assert res.returncode == 0, res.stderr
+    assert rolled_back is False
+    assert "STANZA-COMPLETED" in res.stdout
+    assert "EXIT_MODEL_CALL_INCOMPLETE (6)" in res.stdout and "release stays active" in res.stdout
+
+
 def test_activation_transport_exit_keeps_the_release(tmp_path):
     res, rolled_back = _drive_activation(tmp_path, restart_rc=3, result="exit-code", status="3")
     assert res.returncode == 0, res.stderr
@@ -309,6 +320,16 @@ def test_activation_clean_exit_continues(tmp_path):
 
 # ── the local health gate: journal and exit-streak reads ────────────────────
 
+def test_gate_incomplete_exit_in_journal_does_not_roll_back(repo, mock_bin):
+    set_ssh_mock(mock_bin, _journal_replay_mock(BRIDGE_UNIT_LINE.format(status=6, name="NOTIMPLEMENTED")))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert res.returncode == 0, combined
+    assert "rolling back to" not in combined and "bridge process crashed" not in combined
+    assert "model call did not complete" in combined and "release stays active" in combined
+    assert "health gate: unknown" in combined
+
+
 def test_gate_transport_exit_in_journal_does_not_roll_back(repo, mock_bin):
     """The exact line systemd logged on 2026-09-05 06:38."""
     set_ssh_mock(mock_bin, _journal_replay_mock(BRIDGE_UNIT_LINE.format(status=3, name="NOTIMPLEMENTED")))
@@ -327,6 +348,17 @@ def test_gate_other_nonzero_exits_still_roll_back(repo, mock_bin, status, name):
     combined = (res.stdout + res.stderr).lower()
     assert res.returncode != 0
     assert "rolling back" in combined and "bridge process crashed" in combined, combined
+
+
+def test_gate_incomplete_streak_waits_instead_of_rolling_back(repo, mock_bin):
+    streak = ('{"schema_version": "bridge-exit-streak-v1", "consecutive_failures": 0, '
+              '"last_failure_ts": "2099-01-01T00:00:00Z", "last_exit_status": 6, "last_outcome": "failure"}')
+    set_ssh_mock(mock_bin, _streak_mock(streak))
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "0", "--ref", "HEAD"])
+    combined = (res.stdout + res.stderr).lower()
+    assert res.returncode == 0, combined
+    assert "rolling back" not in combined and "exit recorder shows a failure" not in combined
+    assert "incomplete model call" in combined and "release stays active" in combined
 
 
 def test_gate_transport_streak_failure_waits_instead_of_rolling_back(repo, mock_bin):
