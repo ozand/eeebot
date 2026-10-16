@@ -7,9 +7,11 @@ count toward `no_plan`. The sha and the reason are an input to the next
 session, or it would choose the same increment again."
 
 This module owns that hand-off: :func:`record_rejected_duplicate` persists
-the evidence; :func:`consume_pending_evidence` reads it back for the next
-planning session's context and clears it -- "the next session" is singular,
-so a rejection is surfaced exactly once, not on every subsequent tick.
+the evidence; :func:`peek_pending_evidence` reads it back for the next
+planning session's context, and :func:`clear_pending_evidence` removes it
+once a session has PRODUCED A PLAN with it in view (#2050 H2) -- "the next
+session" means the next session that actually acted on it, so a timed-out
+or malformed session does not use up the one delivery.
 """
 from __future__ import annotations
 
@@ -73,9 +75,12 @@ def record_rejected_duplicate(
     })
 
 
-def consume_pending_evidence(state_dir: "Path") -> "dict[str, Any] | None":
-    """Read and clear the pending rejection, if any -- delivered to exactly
-    one following planning session."""
+def peek_pending_evidence(state_dir: "Path") -> "dict[str, Any] | None":
+    """Read the pending rejection, if any, WITHOUT clearing it.
+
+    The planning session preserves the evidence through startup and any
+    planning failure; it clears only after producing an integrated plan
+    (#2011, #2050 H2)."""
     path = _state_path(state_dir)
     try:
         raw = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
@@ -83,16 +88,33 @@ def consume_pending_evidence(state_dir: "Path") -> "dict[str, Any] | None":
         raw = None
     if not isinstance(raw, dict):
         return None
-    try:
-        path.unlink(missing_ok=True)
-    except Exception:
-        pass
     return {
         "title": raw.get("title", ""),
         "evidence_sha": raw.get("evidence_sha", ""),
         "reason": raw.get("reason", ""),
         "cycle_id": raw.get("cycle_id", ""),
     }
+
+
+def clear_pending_evidence(state_dir: "Path") -> None:
+    """Delete the pending rejection record only after a planning session
+    produces an integrated plan (#2011, #2050 H2)."""
+    path = _state_path(state_dir)
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def consume_pending_evidence(state_dir: "Path") -> "dict[str, Any] | None":
+    """Read and clear pending rejection evidence in one call.
+
+    Callers needing to preserve delivery through planning should use peek and
+    clear only after an integrated result (#2011, #2050 H2)."""
+    evidence = peek_pending_evidence(state_dir)
+    if evidence is not None:
+        clear_pending_evidence(state_dir)
+    return evidence
 
 
 def render_dedup_evidence_block(evidence: "dict[str, Any] | None") -> str:

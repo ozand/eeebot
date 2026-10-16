@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import shlex
 import subprocess
@@ -30,13 +31,24 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
              "/etc/systemd": str(tmp_path / "etc/systemd").replace("\\", "/")}
     for old, new in roots.items():
         remote = remote.replace(old, new)
-    live = Path(roots["/opt/eeepc-agent"]) / "runtimes/self-evolving-agent/current"
-    live.mkdir(parents=True)
+    live_root = Path(roots["/opt/eeepc-agent"]) / "runtimes/self-evolving-agent"
+    releases = live_root / "releases"
+    live_release = releases / "baseline"
+    (live_release / "scripts").mkdir(parents=True)
+    (live_release / "scripts/__init__.py").write_text("", encoding="utf-8")
+    live_release_health = "\n".join(['def verify_release_health():', '    return {"health": {"dimensions": {"disk": {"status": "OK"}}}}']) + "\n"
+    (live_release / "scripts/verify_release_health.py").write_text(live_release_health, encoding="utf-8")
+    live = live_root / "current"
+    live.symlink_to(live_release)
+    baseline_health = {"health": {"dimensions": {"disk": {"status": "OK"}}}}
     source = tmp_path / "source"
     source.mkdir()
     gate_path = source / "scripts/verify_release_health.py"
     gate_path.parent.mkdir()
-    gate_path.write_text("print('head gate')\\n", encoding="utf-8")
+    gate_path.write_text(textwrap.dedent('''
+        def verify_release_health():
+            return {"health": {"dimensions": {}}}
+    '''), encoding="utf-8")
     _git("init", cwd=source, check=True)
     hooks = source / ".test-hooks"
     hooks.mkdir()
@@ -46,7 +58,33 @@ def _run_remote_gate(tmp_path: Path, gate_source: str) -> tuple[subprocess.Compl
                     GIT_COMMITTER_NAME="test", GIT_COMMITTER_EMAIL="test@example.invalid")
     _git("commit", "-qm", "head gate", cwd=source, check=True, env=identity)
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-    gate_path.write_text(gate_source, encoding="utf-8")
+    gate_path.write_text(
+        textwrap.dedent('''\
+            import json
+
+            def verify_release_health():
+                return json.loads(__import__("os").environ["HEALTH_REPORT_JSON"])
+
+            def compare_health_dimensions(baseline, candidate):
+                rows, findings = [], []
+                for name in sorted(baseline.keys() - candidate.keys()):
+                    rows.append(f"VERIFY_ONLY DIMENSION_MISSING {name}")
+                    findings.append(f"dimension missing: {name}")
+                for name in sorted(candidate.keys() - baseline.keys()):
+                    status = candidate[name]
+                    rows.append(f"VERIFY_ONLY DIMENSION_ADDED {name} {status}")
+                    if name not in {"cpu", "queue"} and status in {"WARN", "CRIT"}:
+                        findings.append(f"new dimension {name}: {status}")
+                for name in sorted(baseline.keys() & candidate.keys()):
+                    before, after = baseline[name], candidate[name]
+                    rows.append(f"VERIFY_ONLY DIMENSION {name} {before} -> {after}")
+                    if name not in {"cpu", "queue"} and not (name in {"reward", "gate"} and after == "WARN"):
+                        if {"OK": 0, "WARN": 1, "CRIT": 2}[after] > {"OK": 0, "WARN": 1, "CRIT": 2}[before]:
+                            findings.append(f"{name}: {before} -> {after}")
+                return rows, findings
+        ''') + gate_source.replace("print('CANDIDATE_GATE_EXECUTED')", "print('CANDIDATE_GATE_EXECUTED', file=__import__('sys').stderr)"),
+        encoding="utf-8",
+    )
     _git("add", "scripts/verify_release_health.py", cwd=source, check=True)
     _git("commit", "-qm", "candidate gate", cwd=source, check=True, env=identity)
     candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
@@ -93,7 +131,8 @@ esac
 ''')
     _write_mock(bindir / "systemctl", f'''echo "systemctl $*" >> {log_path}
 case "$*" in
-  *eeepc-network-fallback*"LoadState"*) echo not-found ;;
+  *eeepc-network-fallback.timer*"-p LoadState"*|*eeepc-network-fallback.service*"-p LoadState"*) echo not-found ;;
+  *eeebot-network-fallback*"-p LoadState"*) echo not-found ;;
   *"-p LoadState"*) echo loaded ;;
   *"-p UnitFileState"*) echo enabled ;;
   *"is-enabled"*) echo enabled ;;
@@ -113,7 +152,8 @@ exec {shlex.quote(sys.executable)} "$@"
     remote_path.write_text(remote, encoding="utf-8")
     env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"], VERIFY_ONLY="1",
                FULL_COMMIT="candidate", PREV_RELEASE_PATH=str(live), GATE_TMP=str(gate).replace("\\", "/"),
-               RELEASE_DIR=str(live), HEALTH_GATE_PYTHON=str(bindir / "python3"))
+               RELEASE_DIR=str(live), HEALTH_GATE_PYTHON=str(bindir / "python3"),
+               HEALTH_REPORT_JSON=json.dumps(baseline_health))
     result = subprocess.run(["bash", str(remote_path)], cwd=tmp_path, env=env,
                             capture_output=True, text=True, timeout=480)
     return result, before_systemd, (systemd_sandbox, roots)
@@ -126,7 +166,9 @@ exec {shlex.quote(sys.executable)} "$@"
 def test_remote_verify_runs_candidate_and_never_mutates_units_or_current(tmp_path: Path, gate_source: str, expected_rc: int, marker: str) -> None:
     result, before_systemd, sandbox = _run_remote_gate(tmp_path, gate_source)
     output = result.stdout + result.stderr
-    assert result.returncode == expected_rc, output
+    assert result.returncode == expected_rc, (
+        f"remote verify rc={result.returncode}, expected={expected_rc}; full output/final remote trace:\n{output}"
+    )
     assert marker in output
     assert "ADVANCED_HEAD_ONLY" not in output, "candidate gate must not come from advanced checkout HEAD"
     assert not (tmp_path / "candidate").exists()

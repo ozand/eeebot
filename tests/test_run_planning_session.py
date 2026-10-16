@@ -74,6 +74,7 @@ def _make_fake_mgr_factory(
 
     class _FakeSubagentManager:
         last_task: str | None = None
+        last_instance: "_FakeSubagentManager | None" = None
 
         def __init__(self, **kwargs):
             if raise_on_init:
@@ -82,6 +83,8 @@ def _make_fake_mgr_factory(
             self.role_system_prompt = kwargs.get("role_system_prompt")
             self.max_iterations = kwargs.get("max_iterations")
             self._telemetry_component = kwargs.get("telemetry_component", "")
+            self._telemetry_cycle_id = kwargs.get("telemetry_cycle_id")
+            type(self).last_instance = self
             self._running_tasks: dict[str, asyncio.Task] = {}
             self._planner_release_skill_reads = (
                 ["nanobot/skills/task-writing/SKILL.md"] if task_writing_read else []
@@ -146,6 +149,19 @@ async def _run(**overrides):
     return await bridge._run_planning_session(**kwargs)
 
 
+def test_planning_session_passes_explicit_cycle_id_to_subagent_manager(tmp_path: Path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    monkeypatch.setattr(bridge, "SubagentManager", _make_fake_mgr_factory(state, {
+        "insight": "x", "plan": "y", "iterations_planned": 5,
+    }))
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["ran"] is True
+    assert bridge.SubagentManager.last_instance._telemetry_cycle_id == "cycle-1"
+
+
 def test_happy_path_writes_the_diary_and_journals_success(tmp_path: Path, monkeypatch):
     repo = _init_repo_with_origin(tmp_path)
     state = tmp_path / "state"
@@ -165,6 +181,7 @@ def test_happy_path_writes_the_diary_and_journals_success(tmp_path: Path, monkey
         # ADR-035 keep-work (#1942 B2): non-None only on a `keep` decision --
         # this fixture has no pending open_increment, so all three are unset.
         "resume_branch": None, "resume_cycle_id": None, "resume_skip_opening_entry": False,
+        "verified_continuation": None,
     }
 
     _git(repo, "fetch", "origin", "main")
@@ -413,6 +430,72 @@ def test_spawn_failure_degrades_to_the_ranked_queue(tmp_path: Path, monkeypatch)
     assert rows[0]["outcome"] == "spawn_failed"
 
 
+def test_dedup_evidence_survives_a_planner_spawn_failure(tmp_path: Path, monkeypatch):
+    """#2011 (Codex re-check on PR #1962, P2, bridge.py:3524): the pending
+    rejected-duplicate record used to be consumed (read-and-cleared)
+    BEFORE SubagentManager construction/spawn -- a construction or spawn
+    failure removed the only explicit sha/reason hand-off without ever
+    presenting it to a planner, letting the next session pick the same
+    duplicate again. Peeking (not consuming) it here, then clearing only
+    once planner startup is confirmed, means a failed spawn must leave it
+    intact for the next attempt."""
+    from nanobot.runtime import planner_dedup_evidence
+
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    planner_dedup_evidence.record_rejected_duplicate(
+        state, "cycle-old", "some increment", "deadbeef", "already done by that commit",
+    )
+    assert planner_dedup_evidence.peek_pending_evidence(state) is not None, (
+        "setup sanity check: the record must exist before the failing spawn"
+    )
+
+    monkeypatch.setattr(bridge, "SubagentManager", _make_fake_mgr_factory(state, {}, raise_on_init=True))
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+    assert outcome["ran"] is False
+
+    evidence = planner_dedup_evidence.peek_pending_evidence(state)
+    assert evidence is not None, "a failed planner spawn must not consume the dedup evidence record"
+    assert evidence["evidence_sha"] == "deadbeef"
+
+
+def test_priority_not_marked_seen_on_a_planner_spawn_failure(tmp_path: Path, monkeypatch):
+    """#2012 (Codex re-check on PR #1962, P2, bridge.py:3505): every
+    current priority id used to be persisted as already-seen while the
+    prompt was still being assembled, before SubagentManager
+    construction/spawn. If spawn failed, the priority was never actually
+    shown, but the next healthy session would render it without the
+    required "(new)" marker. Peeking (not persisting) it here, then
+    committing only once planner startup is confirmed, means a failed
+    spawn must leave it still markable as new."""
+    from nanobot.runtime import demand as demand_mod
+    from nanobot.runtime import planner_candidates
+
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    priority_item = {"kind": "priority", "id": "priority-p1-deadbeef", "summary": "P1: fix the thing"}
+    monkeypatch.setattr(demand_mod, "collect_demand", lambda *_a, **_k: [priority_item])
+
+    new_ids_before, _merged = planner_candidates.peek_new_priority_items(state, [priority_item])
+    assert priority_item["id"] in new_ids_before, (
+        "setup sanity check: the priority must read as new before the failing spawn"
+    )
+
+    monkeypatch.setattr(bridge, "SubagentManager", _make_fake_mgr_factory(state, {}, raise_on_init=True))
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+    assert outcome["ran"] is False
+
+    assert not (state / "planner" / "seen_priority_ids.json").exists(), (
+        "a failed planner spawn must not persist the priority as seen"
+    )
+    new_ids_after, _merged_after = planner_candidates.peek_new_priority_items(state, [priority_item])
+    assert priority_item["id"] in new_ids_after, (
+        "the priority must still read as new on the next session after a failed spawn"
+    )
+
+
 def test_a_dirty_workspace_after_the_session_is_hard_reset(tmp_path: Path, monkeypatch):
     """Safety net: whatever the session's own tools touched must not
     survive -- only this function's own diary write may change main."""
@@ -489,6 +572,34 @@ def test_planning_session_records_declined_defects_in_diary(tmp_path: Path, monk
     assert len(escalations) == 1
     assert escalations[0]["defect_id"] == "defect-flaky-x"
     assert escalations[0]["consecutive"] == 3
+
+
+def test_empty_declined_list_resets_previous_defect_streak(tmp_path: Path, monkeypatch):
+    from nanobot.runtime.planner_candidates import _load_declines
+
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    result_obj = {"insight": "x", "plan": "y", "iterations_planned": 5}
+    monkeypatch.setattr(bridge, "SubagentManager", _make_fake_mgr_factory(state, result_obj))
+    declined = [[{"defect_id": "defect-x", "reason": "not actionable"}], []]
+    import nanobot.runtime.planner_candidates as planner_candidates
+    calls = []
+    original = planner_candidates.record_defect_declines
+
+    def _record(state_dir, cycle_id, entries):
+        calls.append(dict(entries))
+        return original(state_dir, cycle_id, entries)
+
+    monkeypatch.setattr(planner_candidates, "record_defect_declines", _record)
+    for entries in declined:
+        monkeypatch.setattr(bridge, "_parse_planner_final_response", lambda _raw, entries=entries: (
+            {**result_obj, "declined": entries}, "strict", None, None,
+        ))
+        outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+        assert outcome["ran"] is True
+
+    assert calls == [{"defect-x": "not actionable"}, {}]
+    assert _load_declines(state) == {}
 
 
 def test_planning_session_ignores_a_decline_with_no_reason(tmp_path: Path, monkeypatch):

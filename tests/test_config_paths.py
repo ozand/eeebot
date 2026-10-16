@@ -60,6 +60,11 @@ def test_shared_paths_can_prefer_eeebot_home_when_present(monkeypatch, tmp_path:
 def test_workspace_path_is_explicitly_resolved(monkeypatch, tmp_path: Path) -> None:
     home = tmp_path / 'home'
     home.mkdir()
+    # expanduser consults the environment independently of Path.home.
+    # Isolate both POSIX and Windows home expansion from the real user profile.
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('USERPROFILE', str(home))
     monkeypatch.setattr('pathlib.Path.home', lambda: home)
     assert get_workspace_path() == home / '.nanobot' / 'workspace'
-    assert get_workspace_path('~/custom-workspace') == Path('~/custom-workspace').expanduser()
+    assert get_workspace_path('~/custom-workspace') == home / 'custom-workspace'
+    assert (home / 'custom-workspace').is_dir()

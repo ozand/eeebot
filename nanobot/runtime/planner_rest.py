@@ -157,8 +157,12 @@ def snapshot_version(state_dir: "Path", selfevo_repo: "Path | None", wc: WakeCon
 
         if wc.kind == "candidate":
             from nanobot.runtime import demand as _demand_mod
+            from nanobot.runtime import llm_proposer as _llm_proposer_mod
+            from nanobot.runtime import planner_candidates as _planner_candidates_mod
 
             items = _demand_mod.collect_demand(state_dir, selfevo_repo)
+            proposer_items = _llm_proposer_mod.proposer_candidate_items(state_dir)
+            items = _planner_candidates_mod.merge_proposer_candidates(items, proposer_items)
             for item in items:
                 if item.get("id") == wc.ref:
                     return hashlib.sha256(

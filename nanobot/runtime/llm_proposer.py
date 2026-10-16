@@ -75,6 +75,7 @@ from nanobot.runtime.goal_text_utils import (
 )
 from nanobot.runtime.lessons_context import build_lessons_context
 from nanobot.runtime.model_registry import resolve_model
+from nanobot.runtime.mutation_policy import MUTATION_POLICY
 from nanobot.runtime.operator_documents import (
     PRIORITY_UNAVAILABLE,
     STATE_ABSENT,
@@ -88,7 +89,6 @@ from nanobot.runtime.operator_documents import (
     resolve_operator_priorities,
 )
 from nanobot.runtime.reflection_context import build_reflection_hints
-from nanobot.runtime.mutation_policy import MUTATION_POLICY
 
 _LOG = logging.getLogger(__name__)
 
@@ -565,10 +565,36 @@ def proposer_candidate_items(state_dir: Path) -> list[dict[str, str]]:
             continue
         items.append(_make_item(
             "proposer", title, str(req.get("task") or ""),
-            affected_path=str(req.get("target_path") or ""),
+            affected_path=_extract_request_target_path(req),
             provenance="proposer",
         ))
     return items
+
+
+def _extract_request_target_path(req: dict) -> str:
+    """Recover the target path :func:`write_request` embedded in a proposer
+    request's task text (#2013).
+
+    ``write_request`` deliberately never adds a top-level ``target_path``
+    key to the request payload it writes to disk -- that would break the
+    C1 request-schema-equality invariant -- so it carries the target ONLY
+    as a literal ``Target path: <path>`` line in the ``task`` field (echoed
+    in ``recommended_next_action`` as ``(target: <path>)``). A plain
+    ``req.get("target_path")`` in :func:`proposer_candidate_items` therefore
+    always resolved to "", silently dropping every proposer candidate's
+    target path. Mirrors ``bridge._extract_target_path``'s marker regex.
+    """
+    for field in ("task", "recommended_next_action"):
+        text = req.get(field)
+        if not text or not isinstance(text, str):
+            continue
+        m = re.search(r"Target path:\s*(\S+)", text)
+        if m:
+            return m.group(1).strip().rstrip(").,;")
+        m = re.search(r"\(target:\s*(\S+?)\)", text)
+        if m:
+            return m.group(1).strip()
+    return ""
 
 
 def retire_proposer_request_for_candidate(state_dir: Path, candidate_id: str) -> bool:
@@ -2191,18 +2217,51 @@ def _dedup_exhausted(
         return False
 
 
+def _record_failed_proposer_call(
+    exc: Exception, requested_model: str, component: str = "proposer", ts: str | None = None,
+) -> None:
+    try:
+        from nanobot.observability.llm_telemetry import call_context, record_llm_failure
+
+        status = getattr(exc, "status_code", None)
+        headers = getattr(exc, "headers", None)
+        if headers is None:
+            headers = getattr(getattr(exc, "response", None), "headers", None)
+        if headers is not None and not isinstance(headers, dict):
+            headers = dict(headers)
+        retry_after = None
+        if isinstance(headers, dict):
+            raw_retry = headers.get("Retry-After") or headers.get("retry-after")
+            try:
+                retry_after = float(raw_retry) if raw_retry is not None else None
+            except (TypeError, ValueError):
+                retry_after = None
+        component = str(component or "proposer")[:64]
+        with call_context(current_cycle_id(component), component):
+            record_llm_failure(
+                component=component, requested_model=requested_model,
+                error_type=type(exc).__name__, http_status=status,
+                retry_after_s=retry_after, ts=ts,
+            )
+    except Exception:
+        pass
+
+
 def propose(
     context: str,
     *,
     rejection_reason: str | None = None,
     timeout: float = 120.0,
     system_prompt: str | None = None,
+    component: str = "proposer",
 ) -> dict[str, Any] | None:
     """One chat completion via the same LiteLLM gateway the bridge uses.
 
     ``system_prompt`` (#760): demand-driven callers pass
     :data:`_DEMAND_PROPOSER_SYSTEM_PROMPT`; default (``None``) keeps the
     pre-#760 :data:`_PROPOSER_SYSTEM_PROMPT` for the kill-switch-off path.
+    ``component`` controls telemetry attribution; normal proposer callers keep
+    the default while goal-review records its own component.
 
     Fails open (returns ``None``) on any missing config, network error, or
     unparseable reply — never raises.
@@ -2214,11 +2273,13 @@ def propose(
         from openai import OpenAI
     except Exception as exc:
         _last_propose_failure = type(exc).__name__
+        _record_failed_proposer_call(exc, "", component)
         return None
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
     api_key = os.environ.get("LITELLM_API_KEY", "").strip()
     if not base_url or not api_key:
         _last_propose_failure = "MissingGatewayConfiguration"
+        _record_failed_proposer_call(RuntimeError(_last_propose_failure), _model_name(), component)
         return None
     user_content = context
     if rejection_reason:
@@ -2235,10 +2296,12 @@ def propose(
     system_content = _build_proposer_role_prompt(role_body)
     if system_content is None:
         return None
+    requested_model = _model_name()
+    call_start_utc = datetime.now(timezone.utc)
     try:
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         create_kwargs: dict[str, Any] = dict(
-            model=_model_name(),
+            model=requested_model,
             messages=[
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": user_content},
@@ -2265,7 +2328,7 @@ def propose(
         try:
             # #1374: keep the cycle the caller attributed (maybe_propose sets
             # it before the first call); ``None`` here erased it to "".
-            with call_context(current_cycle_id(), "proposer"):
+            with call_context(current_cycle_id(), component):
                 record_llm_call(
                     model=model, duration_ms=duration_ms, usage=usage,
                     finish_reason=finish_reason, retries=0,
@@ -2283,6 +2346,10 @@ def propose(
         reply = content
     except Exception as exc:
         _last_propose_failure = f"{type(exc).__name__}: {exc}"
+        _record_failed_proposer_call(
+            exc, requested_model, component,
+            ts=call_start_utc.isoformat().replace("+00:00", "Z"),
+        )
         return None
     return _extract_json_object(reply)
 
@@ -2313,11 +2380,13 @@ def propose_multi(
         from openai import OpenAI
     except Exception as exc:
         _last_propose_failure = type(exc).__name__
+        _record_failed_proposer_call(exc, "", "proposer")
         return None
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
     api_key = os.environ.get("LITELLM_API_KEY", "").strip()
     if not base_url or not api_key:
         _last_propose_failure = "MissingGatewayConfiguration"
+        _record_failed_proposer_call(RuntimeError(_last_propose_failure), _model_name(), "proposer")
         return None
     user_content = (
         f"{context}\n\n"
@@ -2331,10 +2400,12 @@ def propose_multi(
     system_content = _build_proposer_role_prompt(role_body)
     if system_content is None:
         return None
+    requested_model = _model_name()
+    call_start_utc = datetime.now(timezone.utc)
     try:
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         create_kwargs: dict[str, Any] = dict(
-            model=_model_name(),
+            model=requested_model,
             messages=[
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": user_content},
@@ -2379,6 +2450,10 @@ def propose_multi(
         reply = content
     except Exception as exc:
         _last_propose_failure = f"{type(exc).__name__}: {exc}"
+        _record_failed_proposer_call(
+            exc, requested_model, "proposer",
+            ts=call_start_utc.isoformat().replace("+00:00", "Z"),
+        )
         return None
     return _extract_json_array(reply)
 

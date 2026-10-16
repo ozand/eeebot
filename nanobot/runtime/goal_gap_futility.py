@@ -152,6 +152,9 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
     For goal-gap records, counting remains cumulative capacity spent to a
     terminal outcome, paired with metric-improvement checks.
 
+    Unknown delivery on a ``pushed_late`` row is inconclusive, not success;
+    it must not reset consecutive-failure futility accounting.
+
     #1710: an executor-LLM-error retry re-runs the SAME ``cycle_id`` up to
     ``LLM_ERROR_MAX_RETRIES`` times, each attempt writing its own ``outcome``
     row. Both branches above key by ``cycle_id`` (a set or a dict), so those
@@ -170,10 +173,10 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
     above — it is not yet terminal, since the next cycle's pickup resolves it
     to pushed_late/superseded/abandoned.
 
-    #1709 increment 2: of those three resolutions, ``pushed_late`` is a
-    genuine success delayed by one cycle — it resets the family run counter
-    the same as ``success`` (below) and is excluded from the goal-gap
-    cumulative count for the same reason ``success`` alone would not be
+    #1709 increment 2: ``pushed_late`` records late Git integration. A
+    known-delivery row resets the family run counter like ``success``; unknown
+    delivery does not. It is excluded from the goal-gap cumulative count for
+    the same reason ``success`` alone would not be
     (nothing about this attempt "failed"). ``superseded`` and ``abandoned``
     are neither a success nor a failure of the original work — origin/main
     moved, or the branch aged out, through no fault of this attempt — and
@@ -217,6 +220,7 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
 
     proposed_cycles: set[str] = set()
     terminal_outcomes: dict[str, str] = {}
+    terminal_delivery_states: dict[str, str | None] = {}
     terminal_ts: dict[str, datetime] = {}
     for row in rows:
         cycle = str(row.get("cycle_id") or "").strip()
@@ -236,6 +240,7 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
             and str(row.get("outcome")) not in _NOT_YET_TERMINAL
         ):
             terminal_outcomes[cycle] = str(row.get("outcome"))
+            terminal_delivery_states[cycle] = row.get("delivery_state")
             if ts is not None:
                 terminal_ts[cycle] = ts
 
@@ -244,9 +249,12 @@ def _demand_attempt_count(rows: list[dict[str, Any]], gap_id: str, after: dateti
 
     run = 0
     for c in matched:
-        # #1709: pushed_late is a genuine success delayed by one cycle —
-        # resets the run the same as success.
-        if terminal_outcomes[c] in ("success", "pushed_late"):
+        # Late pushes with unknown delivery cannot reset futility; only a
+        # known-delivery pushed_late is an integration success.
+        if terminal_outcomes[c] == "success" or (
+            terminal_outcomes[c] == "pushed_late"
+            and terminal_delivery_states.get(c) != "unknown"
+        ):
             run = 0
         else:
             run += 1

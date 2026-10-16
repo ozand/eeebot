@@ -376,7 +376,13 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
   cycle ledger. Behind the `SELFEVO_EXISTENCE_INDEX_ENABLED` kill-switch
   (default ON); fail-open on any internal error (missing/corrupt index,
   missing source directories) — degrades to R32/R33-only behavior, never
-  blocks a proposal it failed to evaluate.
+  blocks a proposal it failed to evaluate. An authenticated continuation of a
+  pending interrupted cycle is exempt from this existence-index suppression
+  only when the planner's `keep` decision was verified as persisted and its
+  captured cycle/branch/reason/retry identity matches the pending record after
+  resolution; title similarity alone is never authority. Exact success-tag
+  replay and #716 genuine recent-failure suppression remain fail-closed and
+  take precedence. Fresh/non-continuation duplicate proposals remain suppressed.
 - R36 (issue #751). Every proposal SHALL name what goal it serves, and the
   proposer MAY honestly decline to propose when nothing serves a goal, so
   goal-alignment is queryable and a saturated theme space produces a
@@ -1289,8 +1295,11 @@ new nine-key breakdown.
   racing through `_setup_cycle_branch`/`_git_cmd` on the same shared
   checkout; the lock is defense-in-depth for an out-of-band invocation (e.g.
   a manual `python -m nanobot.runtime.bridge`) overlapping a timer-triggered
-  run, bounded by the shared ~3000s bridge wall including repair turns; each
-  repair wait also preserves the reserved finalization/smoke/gate budget. If the lock is already
+  run, bounded by the shared ~3000s bridge wall including repair turns. The
+  bridge subtracts the finalization/smoke/gate reserve once, then requires the
+  remaining repair budget to cover the model-call p99 before spawning; this
+  avoids a no-op repair and avoids double-reserving finalization. It recomputes
+  the wait immediately before awaiting. If the lock is already
   held, `main()` SHALL log one line and exit cleanly (`0`, not an error — a
   concurrent run is expected, not a fault) without touching `STATE_DIR` or
   the git checkout. On a platform without `fcntl` (non-POSIX; the eeepc host

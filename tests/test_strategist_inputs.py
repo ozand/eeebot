@@ -300,9 +300,13 @@ def test_decision_row_carries_inputs_status(roots):
 
 
 def test_refuses_the_llm_call_when_two_inputs_are_empty(roots, monkeypatch, capsys):
-    """Pre-fix: the LLM was called on an empty view and advice was applied."""
+    """No public charter means no LLM call and no private goal-text leakage."""
     state_root, repo_root, _ = roots
-    # scorecard latest present but no charter, no lessons, no tree; funnel from one row
+    private_marker = "SYNTHETIC_PRIVATE_GOAL_CANARY_2053"
+    private_goal = state_root / "goals" / "goal_text.json"
+    private_goal.parent.mkdir(parents=True, exist_ok=True)
+    private_goal.write_text(json.dumps({"text": private_marker}), encoding="utf-8")
+    # scorecard latest present but no public charter, no lessons, no tree; funnel from one row
     (state_root / "scorecard.json").write_text(json.dumps({"cycles_total": 1}), encoding="utf-8")
     _write_ledger(state_root, [{"phase": "proposed", "cycle_id": "c1", "demand_id": "d1", "ts": _iso(0)}])
     save_watermark(state_root, {"total_runs": 4, "last_run": "2026-09-01T00:00:00Z"})
@@ -322,6 +326,12 @@ def test_refuses_the_llm_call_when_two_inputs_are_empty(roots, monkeypatch, caps
     rows = (state_root / "strategist" / "decisions.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(rows) == 1 and json.loads(rows[0])["reason"] == "no_charter"
     assert not (state_root / "strategist" / "errors.jsonl").exists()
+    # Scan every strategist-owned output file produced in this scenario, not
+    # just the decision row: the synthetic private marker must never escape.
+    strategist_outputs = state_root / "strategist"
+    for output in strategist_outputs.rglob("*"):
+        if output.is_file():
+            assert private_marker not in output.read_text(encoding="utf-8")
     # the systemd entry point treats the refusal as a clean run
     monkeypatch.setattr(sys, "argv", ["strategist", "--state-root", str(state_root), "--repo", str(repo_root)])
     with patch("nanobot.runtime.strategist._default_llm", side_effect=AssertionError("must not be called")):

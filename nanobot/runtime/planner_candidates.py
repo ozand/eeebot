@@ -78,6 +78,37 @@ def _write_json(path: "Path", data: Any) -> None:
                 pass
 
 
+def peek_new_priority_items(
+    state_dir: "Path", items: list[dict[str, str]],
+) -> "tuple[set[str], list[str]]":
+    """Read-only half of :func:`mark_new_priority_items`: compute which
+    ``kind == "priority"`` item ids in ``items`` are new, and the full
+    seen-set list a following :func:`commit_seen_priority_ids` call would
+    persist -- without writing anything yet.
+
+    #2012: the planner's prompt needs this BEFORE the planner has actually
+    started (it renders the "(new)" marker), but persisting "seen" must
+    wait until startup is confirmed -- a session that never received the
+    prompt (``SubagentManager`` construction, prompt fitting, or
+    ``spawn()`` failing) must not have spent its one shot at showing a
+    priority as new.
+    """
+    path = Path(state_dir).joinpath(*_SEEN_PRIORITIES_RELPATH)
+    seen = _read_json(path)
+    seen_ids: set[str] = set(seen.get("ids") or []) if isinstance(seen, dict) else set()
+
+    priority_ids = {it["id"] for it in items if it.get("kind") == "priority" and it.get("id")}
+    new_ids = priority_ids - seen_ids
+    return new_ids, sorted(seen_ids | priority_ids)
+
+
+def commit_seen_priority_ids(state_dir: "Path", merged_ids: list[str]) -> None:
+    """Persist the seen-priority-ids set :func:`peek_new_priority_items`
+    computed. Call only once planner startup is confirmed (#2012)."""
+    path = Path(state_dir).joinpath(*_SEEN_PRIORITIES_RELPATH)
+    _write_json(path, {"schema": "planner-seen-priorities-v1", "ids": list(merged_ids)})
+
+
 def mark_new_priority_items(state_dir: "Path", items: list[dict[str, str]]) -> set[str]:
     """Return the ids of ``kind == "priority"`` items in ``items`` not
     previously shown to the planner, and persist the updated seen-set so
@@ -88,15 +119,15 @@ def mark_new_priority_items(state_dir: "Path", items: list[dict[str, str]]) -> s
     only grows, so a priority that reappears unchanged (same id) never
     re-reads as new; one that reappears CHANGED (new id, since the id is
     derived from number+title) does.
+
+    Computes and persists in one call, for callers that don't need to gate
+    persistence on a later confirmation. A caller that must defer
+    persisting until planner startup is confirmed (#2012) should use
+    :func:`peek_new_priority_items` + :func:`commit_seen_priority_ids`
+    instead.
     """
-    path = Path(state_dir).joinpath(*_SEEN_PRIORITIES_RELPATH)
-    seen = _read_json(path)
-    seen_ids: set[str] = set(seen.get("ids") or []) if isinstance(seen, dict) else set()
-
-    priority_ids = {it["id"] for it in items if it.get("kind") == "priority" and it.get("id")}
-    new_ids = priority_ids - seen_ids
-
-    _write_json(path, {"schema": "planner-seen-priorities-v1", "ids": sorted(seen_ids | priority_ids)})
+    new_ids, merged_ids = peek_new_priority_items(state_dir, items)
+    commit_seen_priority_ids(state_dir, merged_ids)
     return new_ids
 
 
