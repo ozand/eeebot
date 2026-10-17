@@ -18,4 +18,6 @@ Scorecard summaries and held-out checks provide fitness evidence distinct from t
 
 The instance cannot author its own fitness verdict or protected fitness inputs.
 
-Fitness definitions and fitness input sidecars are outside the instance's writable authority. [[nanobot/runtime/scorecard.py#fitness_sidecar_hashes]] supports integrity checks around execution; a changed input is an integrity event, not a new self-authored fitness result. See [[nanobot/runtime/bridge.py#_main_impl]] and [[tests/test_bridge_fitness_integrity.py#TestSpawnBoundaryTamperDetection#test_subagent_sidecar_write_records_integrity_row]]. The repository describes the contract, not whether a host ran a particular check or what its current metrics are.
+The bridge snapshots and compares protected fitness inputs around subagent spawn windows, recording detected changes as integrity events.
+
+The instance cannot author fitness verdicts or protected inputs. [[nanobot/runtime/scorecard.py#fitness_sidecar_hashes]] computes the hash inventory; [[nanobot/runtime/bridge.py#_run_planning_session]] and [[nanobot/runtime/bridge.py#_main_impl_body]] perform pre/post comparisons and append integrity evidence when values change. See [[tests/test_bridge_fitness_integrity.py#TestSpawnBoundaryTamperDetection#test_subagent_sidecar_write_records_integrity_row]]. The repository describes this mechanism, not whether a host ran a check or what its current metrics are.
