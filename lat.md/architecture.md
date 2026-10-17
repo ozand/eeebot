@@ -22,15 +22,15 @@ The host bridge runs a bounded cycle through planning, subagent execution, gates
 
 The entry point is [[nanobot/runtime/bridge.py#main]]. A cycle collects demand and proposer candidates before planner selection; a no-plan/rest result does not start the executor. Planned work proceeds through isolated subagent execution, gates, and evidence recording. The bridge chooses whether an accepted result can be integrated; executor output is not itself authority to change the product repository.
 
-The planning session is implemented by [[nanobot/runtime/bridge.py#_run_planning_session]]. It receives demand candidates collected by [[nanobot/runtime/demand.py#collect_demand]] and proposer candidates from [[nanobot/runtime/llm_proposer.py#proposer_candidate_items]], then returns a plan or an explicit no-plan/rest outcome. The executor task is derived from the planner's plan; a candidate is optional context, not a task assignment. Do not infer a no-demand idle rule from older architecture prose without checking current code and configuration.
+The planning session is implemented by [[nanobot/runtime/bridge.py#_run_planning_session]]. It receives demand candidates collected by [[nanobot/runtime/demand.py#collect_demand]] and proposer candidates from [[nanobot/runtime/llm_proposer.py#proposer_candidate_items]], then returns a plan or an explicit no-plan/rest outcome. The executor task is derived from the planner's plan; a candidate is optional context, not a task assignment. Do not infer a no-demand idle rule from older architecture prose without checking current code and configuration. See [[planning]] for the candidate/selection boundary.
 
 The LLM proposer can author bounded candidates through [[nanobot/runtime/llm_proposer.py#maybe_propose]]. It is a candidate/request source, not the planner. Planner selection and proposer authoring are related but distinct steps, and an idle, failed, rested, blocked, or unplanned cycle is not an executed task.
 
 ## Evidence, gates, and authority
 
-Cycle and phase evidence is append-oriented in the runtime ledger at [[nanobot/runtime/cycle_ledger.py#append_event]]. Demand collection and ranking provide inputs; they do not establish that work passed a gate or integrated.
+Cycle and phase evidence is append-oriented in the runtime ledger at [[nanobot/runtime/cycle_ledger.py#append_event]]. Demand collection and ranking provide inputs; they do not establish that work passed a gate or integrated. See [[evidence]] for evidence status and fitness boundaries.
 
-A subagent works in a cycle-scoped branch through [[nanobot/runtime/bridge.py#_setup_cycle_branch]]. The bridge applies the bounded smoke and mutation-surface checks before integration. Runtime-slice changes are promotion candidates for operator review rather than ordinary script-tier auto-integration; see [[docs/specs/subagent-bridge/spec.md]] and [[docs/specs/promotion-and-release/spec.md]].
+A subagent works in a cycle-scoped branch through [[nanobot/runtime/bridge.py#_setup_cycle_branch]]. The bridge applies the bounded smoke and mutation-surface checks before integration. Runtime-slice changes are promotion candidates for operator review rather than ordinary script-tier auto-integration; see [[gates-and-promotion]], [[docs/specs/subagent-bridge/spec.md]], and [[docs/specs/promotion-and-release/spec.md]].
 
 The fitness boundary is harness-owned: scorecard and held-out verification are product-side evidence, outside the instance's writable workspace. The instance cannot define or edit its own fitness checkers. See [[nanobot/runtime/scorecard.py#compute_scorecard]], [[docs/specs/self-evolving-runtime/spec.md]], and [[docs/specs/promotion-and-release/spec.md]].
 
@@ -38,7 +38,7 @@ The fitness boundary is harness-owned: scorecard and held-out verification are p
 
 Code, mutable instance workspace, runtime state, and product release are separate authority domains.
 
-The self-evolving instance workspace is where bounded cycle changes are staged and integrated. Runtime state is held separately under the configured state root; it is evidence and operational state, not a second source-code repository. Product releases are selected through the host release mechanism and verified separately from repository CI. This page makes no claim about current host installation or health. See [[docs/specs/host-runtime/spec.md]], [[docs/specs/subagent-bridge/spec.md]], and [[docs/CURRENT_ARCHITECTURE.md]].
+The self-evolving instance workspace is where bounded cycle changes are staged and integrated. Runtime state is held separately under the configured state root; it is evidence and operational state, not a second source-code repository. Product releases are selected through the host release mechanism and verified separately from repository CI. This page makes no claim about current host installation or health. See [[host-boundaries]], [[docs/specs/host-runtime/spec.md]], [[docs/specs/subagent-bridge/spec.md]], and [[docs/CURRENT_ARCHITECTURE.md]].
 
 ## Decision-record navigation
 
