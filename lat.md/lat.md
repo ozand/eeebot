@@ -1,3 +1,7 @@
-This Lat graph indexes the implemented eeebot runtime and its architecture. Start at [[architecture]].
+This Lat graph indexes the implemented eeebot runtime, evidence, and authority boundaries. Start at [[architecture]].
 
-- [[architecture]] — Product architecture, runtime boundaries, and navigation to canonical specifications.
+- [[architecture]] — Product identity, runtime surfaces, broad architecture, and source precedence.
+- [[planning]] — Demand and proposer candidates versus planner selection and executor task.
+- [[evidence]] — Cycle ledger, bounded evidence, scorecard, held-out checks, and fitness trust.
+- [[gates-and-promotion]] — Cycle gate/integration versus the separate promotion path.
+- [[host-boundaries]] — Source integration, promotion, host release activation, and runtime-state boundary.
