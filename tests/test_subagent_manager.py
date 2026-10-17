@@ -197,6 +197,44 @@ import uuid
 import json
 
 @pytest.mark.asyncio
+async def test_planner_final_turn_starts_at_t_minus_120_without_tools(tmp_path, monkeypatch):
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMResponse, ToolCallRequest
+
+    clock = [0.0]
+    observed = []
+
+    class Provider:
+        def get_default_model(self):
+            return "test-model"
+
+        async def chat_with_retry(self, *, messages, tools, model):
+            observed.append((clock[0], tools, messages[-1]["content"]))
+            if len(observed) == 1:
+                clock[0] = 1080.0
+                return LLMResponse(content="continue", tool_calls=[ToolCallRequest(
+                    id="call-1", name="read_file", arguments={"path": "missing"},
+                )])
+            return LLMResponse(content='{"plan":"ok","iterations_planned":1}', tool_calls=[])
+
+    monkeypatch.setattr("nanobot.agent.subagent.time.monotonic", lambda: clock[0])
+    manager = SubagentManager(
+        provider=Provider(), workspace=tmp_path, bus=MessageBus(),
+        max_iterations=20, telemetry_component="planner", planner_deadline=1200.0,
+    )
+    spawned = await manager.spawn("plan", label="planner", origin_channel="system", origin_chat_id="test")
+    task_id = next(iter(manager._running_tasks))
+    await manager._running_tasks[task_id]
+
+    assert spawned.startswith("Subagent [planner] started")
+    assert len(observed) == 2
+    assert observed[1][0] == 1080.0
+    assert observed[1][1] == []
+    assert "final planning turn" in observed[1][2]
+
+
+@pytest.mark.asyncio
 async def test_subagent_telemetry_tracks_context_usage(tmp_path):
     # Dummy provider returning a mocked LLMChatResponse
     class FakeResponse:

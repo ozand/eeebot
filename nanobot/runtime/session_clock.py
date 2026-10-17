@@ -26,7 +26,7 @@ from typing import Callable
 DEFAULT_CALL_P99_SECS: float = 243.0
 DEFAULT_FINAL_BUDGET_SECS: float = 300.0
 DEFAULT_PROGRESS_TIMEOUT_SECS: float = 600.0  # 10 minutes
-DEFAULT_WALL_SECS: float = 3000.0  # 50 minutes
+DEFAULT_WALL_SECS: float = 3600.0  # 60 minutes
 
 
 def get_call_p99_secs() -> float:
