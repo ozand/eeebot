@@ -14,6 +14,33 @@ are the operational guide and the principles behind it.
 - PRs target `main`. There is no separate `nightly` branch in this fork.
 - Discuss ideas, questions, and proposals via GitHub Issues on this repo.
 
+### Task provenance and completion receipts
+
+For Pi-assisted repository work, make the receipt describe what actually ran; a
+session's current directory or a model-written path is not proof of repository
+identity or authorization. Record the observed cwd, Git top-level, branch, full
+starting and ending HEAD SHAs, task/owner/writer, selected generator and import
+or source provenance, single-writer scope, and admitted baseline-to-final path
+status. State exact completion evidence (for example, focused checks, Lat
+validation, independent review, or CI) and distinguish passed, failed, skipped,
+and not-run work.
+
+Keep receipts outside the product tree in an explicitly approved evidence
+location. Default to path names/status, not content: never read, copy, publish,
+or hash credentials, auth/session state, private files, caches, or whole trees.
+Only inspect or hash content for explicitly admitted non-private paths. Record
+which paths were admitted and why; unknown paths remain uninspected. Do not
+claim a guard blocked writes unless its exact tool coverage and result are
+verified.
+
+The proposed Pi protected-root guard is owned by
+[`ozand/pi-config#38`](https://github.com/ozand/pi-config/issues/38). Its
+implementation, registration schema, activation, and receipt interface are not
+established by this repository workflow; check that issue for the current
+contract before relying on automated protection. Do not treat cwd, branch,
+environment values, or this guidance alone as authenticated identity or a
+sandbox.
+
 ## Development setup
 
 ```bash
