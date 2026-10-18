@@ -33,13 +33,18 @@ which paths were admitted and why; unknown paths remain uninspected. Do not
 claim a guard blocked writes unless its exact tool coverage and result are
 verified.
 
-The proposed Pi protected-root guard is owned by
-[`ozand/pi-config#38`](https://github.com/ozand/pi-config/issues/38). Its
-implementation, registration schema, activation, and receipt interface are not
-established by this repository workflow; check that issue for the current
-contract before relying on automated protection. Do not treat cwd, branch,
-environment values, or this guidance alone as authenticated identity or a
-sandbox.
+The best-effort Pi protected-root guard implementation is maintained in
+[`ozand/pi-config`](https://github.com/ozand/pi-config); its registration schema
+and limits are documented in the
+[pinned upstream README](https://github.com/ozand/pi-config/blob/700fb7ce9c76889b0b6077c3e503f327e595b5a3/README.md#protected-root-guard-not-activated-by-this-change)
+and [ADR-004](https://github.com/ozand/pi-config/blob/700fb7ce9c76889b0b6077c3e503f327e595b5a3/docs/adr/ADR-004-protect-registered-product-roots-at-the-pi-tool-boundary.md).
+It covers only supported direct Pi `write`/`edit` calls and is not a sandbox.
+The implementation PR is merged, but installation/activation is separate; see
+[pi-config#41](https://github.com/ozand/pi-config/issues/41) for canary/readiness
+status. Check current upstream state before relying on protection. Operator-
+provided environment registration is a launch trust assumption, not
+cryptographic identity; cwd, branch, and model-supplied fields alone do not
+authorize writes.
 
 ## Development setup
 
