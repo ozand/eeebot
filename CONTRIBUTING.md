@@ -34,17 +34,18 @@ claim a guard blocked writes unless its exact tool coverage and result are
 verified.
 
 The best-effort Pi protected-root guard implementation is maintained in
-[`ozand/pi-config`](https://github.com/ozand/pi-config); its registration schema
-and limits are documented in the
-[pinned upstream README](https://github.com/ozand/pi-config/blob/700fb7ce9c76889b0b6077c3e503f327e595b5a3/README.md#protected-root-guard-not-activated-by-this-change)
-and [ADR-004](https://github.com/ozand/pi-config/blob/700fb7ce9c76889b0b6077c3e503f327e595b5a3/docs/adr/ADR-004-protect-registered-product-roots-at-the-pi-tool-boundary.md).
+[`ozand/pi-config`](https://github.com/ozand/pi-config). The implementation and
+subsequent evidence-journal repair are merged and independently reviewed; the
+exact merged repair is pinned at
+[`ca9dd0c575d67577479a92433a91f7fc6700c1c6` README](https://github.com/ozand/pi-config/blob/ca9dd0c575d67577479a92433a91f7fc6700c1c6/README.md#protected-root-guard-not-activated-by-this-change)
+and [ADR-004](https://github.com/ozand/pi-config/blob/ca9dd0c575d67577479a92433a91f7fc6700c1c6/docs/adr/ADR-004-protect-registered-product-roots-at-the-pi-tool-boundary.md).
 It covers only supported direct Pi `write`/`edit` calls and is not a sandbox.
-The implementation PR is merged, but installation/activation is separate; see
-[pi-config#41](https://github.com/ozand/pi-config/issues/41) for canary/readiness
-status. Check current upstream state before relying on protection. Operator-
-provided environment registration is a launch trust assumption, not
-cryptographic identity; cwd, branch, and model-supplied fields alone do not
-authorize writes.
+The guard has not thereby been installed or activated. Canary/readiness work is
+tracked separately in [pi-config#41](https://github.com/ozand/pi-config/issues/41);
+canary completion and production approval are not claimed here. Check current
+upstream state before relying on protection. Operator-provided environment
+registration is a launch trust assumption, not cryptographic identity; cwd,
+branch, and model-supplied fields alone do not authorize writes.
 
 ## Development setup
 
