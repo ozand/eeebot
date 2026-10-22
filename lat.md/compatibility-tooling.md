@@ -6,7 +6,7 @@ Compatibility aliases and repository tools serve stable operator-facing contract
 
 `eeebot` remains the public compatibility package over the `nanobot` implementation; explicit alias modules preserve shared module identity and both CLI entry points. See [[eeebot/__init__.py]], [[nanobot/cli/commands.py#main]], [[nanobot/cli/eeebot.py#main]], and [[docs/specs/migration/spec.md]].
 
-The compatibility shims under `eeebot/` expose bus, channels, CLI, config, cron, heartbeat, providers, runtime state, security, sessions, and utilities. Alias identity is exercised by [[tests/test_eeebot_imports.py]] and import hygiene by [[tests/test_import_hygiene.py]]. Direct tests for every individual shim are not implied.
+The compatibility shims under `eeebot/` expose bus, channels, CLI, config, cron, heartbeat, providers, runtime state, security, sessions, and utilities. Alias identity is exercised by [[tests/test_eeebot_imports.py#test_import_eeebot_cli_commands_alias]] and [[tests/test_eeebot_imports.py#test_import_eeebot_runtime_state_alias]], with import hygiene in [[tests/test_import_hygiene.py]]. Direct behavior tests for every shim are not implied.
 
 ## Bounded verification tools
 
