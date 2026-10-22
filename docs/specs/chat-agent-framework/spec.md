@@ -26,6 +26,10 @@ single shared message bus; the agent loop is channel-agnostic.
 > state, decided in #619; internal imports use `nanobot.*` (enforced by
 > `tests/test_import_hygiene.py`). See the `migration` spec.
 
+## Web fetch security boundary
+
+The `web_fetch` tool uses a direct-only pinned transport. It resolves and rejects invalid DNS snapshots per hop, connects only to a validated address while preserving origin Host and TLS verification, and validates each redirect before requesting it. Proxy routing and the Jina fetch path are disabled for `web_fetch`; web-search providers are unaffected. Deterministic regression coverage lives in `tests/test_web_fetch_security.py` and `tests/test_security_network.py`; architecture rationale is recorded in Proposed [ADR-041](../../adr/ADR-041-bind-web-fetch-connections-to-validated-addresses.md).
+
 ## Requirements
 
 ### Channel registry and discovery

@@ -17,7 +17,7 @@ Proposed — policy approved by owner; this record and its implementation remain
 
 Issue #2107 identified that web_fetch follows redirects before checking the resulting URL. Current checks resolve names but do not bind the HTTP socket to the checked addresses, leaving resolution and connection as separate operations. This is a source-level ordering/control gap, not evidence of a successful exploit. Owner approved strict direct-only behavior on 2026-10-22.
 
-HTTPX 0.28.1's public AsyncBaseTransport seam can adapt HTTPCore 1.0.9's AsyncConnectionPool with an explicit AsyncNetworkBackend. HTTPX's standard AsyncHTTPTransport does not expose that backend. Direct HTTPCore use therefore needs an explicit bounded dependency, rather than relying on a transitive dependency. The project currently declares HTTPX >=0.28,<1.0 and has no checked-in dependency lockfile.
+HTTPX 0.28.1's public AsyncBaseTransport seam can adapt HTTPCore 1.0.9's AsyncConnectionPool with an explicit AsyncNetworkBackend. HTTPX's standard AsyncHTTPTransport does not expose that backend. Direct HTTPCore use therefore needs an explicit bounded dependency, rather than relying on a transitive dependency. The project currently declares HTTPX >=0.28,<1.0 and has no checked-in dependency lockfile. The direct HTTPCore range is bounded to >=1.0.9,<1.1.0 because the adapter uses the reviewed 1.0.9 public API; upgrades beyond that compatibility line need review and transport regression coverage.
 
 ## Decision
 
@@ -56,13 +56,13 @@ web_search provider routing and public web_fetch JSON/error and extraction behav
 
 | Claim | Test | Status |
 |---|---|---|
-| Each TCP connection is limited to validated addresses while Host and TLS identity retain the URL origin | `tests/test_web_fetch_security.py::test_transport_pins_address_and_preserves_origin` | not yet written |
-| Empty, failed, malformed, mixed blocked DNS answers fail before connection | `tests/test_web_fetch_security.py::test_rejects_invalid_dns_snapshot_before_connect` | not yet written |
-| Every redirect is validated before connecting and redirect limit is enforced | `tests/test_web_fetch_security.py::test_redirect_targets_validated_before_connect` | not yet written |
-| Explicit/environment proxy configuration is rejected before resolution or request | `tests/test_web_fetch_security.py::test_proxy_rejected_before_resolution` | not yet written |
-| Jina fetch fallback cannot cause an outbound request | `tests/test_web_fetch_security.py::test_web_fetch_never_uses_jina` | not yet written |
-| Response streams close on success, redirects, and errors | `tests/test_web_fetch_security.py::test_response_streams_close` | not yet written |
-| Resolver rejects prohibited addresses consistently | `tests/test_security_network.py::test_rejects_mixed_blocked_resolution` | not yet written |
+| Each TCP connection is limited to validated addresses while Host and TLS identity retain the URL origin | `tests/test_web_fetch_security.py::test_transport_pins_address_and_preserves_origin` | passing |
+| Empty, failed, malformed, mixed blocked DNS answers fail before connection | `tests/test_web_fetch_security.py::test_resolver_rejects_mixed_empty_and_malformed` | passing |
+| Every redirect is validated before connecting | `tests/test_web_fetch_security.py::test_redirect_private_target_is_never_requested` | passing |
+| Explicit proxy configuration is rejected before resolution | `tests/test_web_fetch_security.py::test_web_fetch_rejects_proxy_before_dns` | passing |
+| Jina fetch fallback cannot cause an outbound request | Not yet written | not yet written |
+| Response streams close on success, redirects, and errors | Not yet written | not yet written |
+| Resolver rejects prohibited addresses consistently | `tests/test_web_fetch_security.py::test_resolver_rejects_mixed_empty_and_malformed` | passing |
 
 ## References
 
