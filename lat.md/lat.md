@@ -5,3 +5,9 @@ This Lat graph indexes the implemented eeebot runtime, evidence, and authority b
 - [[evidence]] — Cycle ledger, bounded evidence, scorecard, held-out checks, and fitness trust.
 - [[gates-and-promotion]] — Cycle gate/integration versus the separate promotion path.
 - [[host-boundaries]] — Source integration, promotion, host release activation, and runtime-state boundary.
+- [[chat-agent-framework]] — Chat-agent framework contracts and test coverage.
+- [[runtime-contracts]] — Runtime interfaces and behavioral contracts.
+- [[compatibility-tooling]] — Compatibility aliases and tooling behavior.
+- [[chat-framework-coverage]] — Chat framework test coverage dispositions.
+- [[runtime-module-coverage]] — Runtime module coverage dispositions.
+- [[tooling-coverage]] — Tooling coverage dispositions.
