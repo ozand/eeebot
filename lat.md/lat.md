@@ -7,6 +7,8 @@ This Lat graph indexes the implemented eeebot runtime, evidence, and authority b
 - [[host-boundaries]] — Source integration, promotion, host release activation, and runtime-state boundary.
 - [[chat-agent-framework]] — Chat-agent framework contracts and test coverage.
 - [[runtime-contracts]] — Runtime interfaces and behavioral contracts.
+- [[overlay-subagent-contracts]] — Overlay and subagent contracts.
+- [[runtime-flow-persistence]] — Runtime flow persistence contracts.
 - [[compatibility-tooling]] — Compatibility aliases and tooling behavior.
 - [[chat-framework-coverage]] — Chat framework test coverage dispositions.
 - [[runtime-module-coverage]] — Runtime module coverage dispositions.
