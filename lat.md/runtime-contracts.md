@@ -16,7 +16,9 @@ Ledger rows and scorecard summaries are evidence with bounded availability, not 
 
 ## State and operator authority
 
-Runtime state, operator documents, and product code are different authority domains; absence or unreadability must not imply healthy emptiness. [[nanobot/runtime/state_access.py#Window]] bounds state reads, [[nanobot/runtime/state_paths.py#STATE_PATH_WRITERS]] declares state writers, and [[nanobot/runtime/operator_documents.py#resolve_operator_priorities]] handles operator input. See [[host-boundaries]].
+Runtime state, operator documents, and product code are different authority domains.
+
+State readers report unavailable inputs explicitly: [[nanobot/runtime/state_access.py#ledger_window]] reports a missing ledger directory, while [[nanobot/runtime/operator_documents.py#resolve_operator_priorities]] distinguishes empty priorities from unavailable input. Writer inventory: [[nanobot/runtime/state_paths.py#STATE_PATH_WRITERS]]. Evidence: [[tests/test_state_access.py#test_ledger_window_missing_dir_is_unavailable]], [[tests/test_operator_documents.py#test_whitespace_only_goal_text_json_is_unavailable_not_empty]], and [[host-boundaries]].
 
 ## Constraints and unknowns
 
