@@ -55,6 +55,7 @@ Conventions:
 | [ADR-037](ADR-037-record-handled-disposition-without-implying-cause.md) | Record handled-marker disposition without implying interruption cause | proposed |
 | [ADR-039](ADR-039-warn-on-twelve-started-attempts-per-task.md) | Warn operators after twelve unsuccessful started attempts for one task | proposed |
 | [ADR-040](ADR-040-reflector-selects-authoritative-executor-attempt.md) | Reflector selects the authoritative executor attempt | proposed |
+| [ADR-041](ADR-041-bind-web-fetch-connections-to-validated-addresses.md) | Bind each web fetch connection to its validated address snapshot | proposed |
 
 ## Acceptance
 
