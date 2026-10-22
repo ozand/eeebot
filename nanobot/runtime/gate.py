@@ -485,9 +485,20 @@ def _memory_lessons_append_only_violations(
     for no_shrink in MUTATION_POLICY.append_only_no_shrink_files:
         if no_shrink not in changed_files:
             continue
+        base_path = _git_lines(repo_root, ['ls-tree', '--name-only', base_sha, '--', no_shrink])
+        if base_path is None:
+            violations.append(
+                f'memory_lessons_append_only: baseline unavailable at {base_sha[:12]}: {no_shrink}'
+            )
+            continue
+        if not base_path:
+            continue  # did not exist at base_sha -- no existing line to have removed
         old_text = _git_show_many(repo_root, base_sha, [no_shrink])[no_shrink]
         if old_text is None:
-            continue  # did not exist at base_sha -- no existing line to have removed
+            violations.append(
+                f'memory_lessons_append_only: baseline unreadable at {base_sha[:12]}: {no_shrink}'
+            )
+            continue
         new_text = _git_show_many(repo_root, 'HEAD', [no_shrink])[no_shrink]
         if new_text is None:
             violations.append(f'memory_lessons_append_only: unreadable at HEAD: {no_shrink}')

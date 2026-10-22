@@ -8,7 +8,9 @@ A planner-selected task, not a candidate request, is the executor assignment. Th
 
 ## Gate, mutation, and promotion boundaries
 
-Cycle work is isolated and checked before integration; runtime-slice work follows a separate promotion path. [[nanobot/runtime/gate.py#_validate_mutation_surfaces]] constrains changed surfaces and [[nanobot/runtime/mutation_policy.py#MutationPolicy]] represents allowed mutation policy. [[nanobot/runtime/promoted_overlay.py#install_promoted_overlay]] installs only validated promoted code. See [[gates-and-promotion#Cycle branch and gate]] and [[tests/test_bounded_gate.py#TestFailSafe#test_harness_exception_fails_closed]].
+Cycle work is isolated and checked before integration. [[nanobot/runtime/gate.py#_validate_mutation_surfaces]] applies mutation policy, and [[nanobot/runtime/promoted_overlay.py#install_promoted_overlay]] installs validated code.
+
+The append-only history check distinguishes an absent base file from an unavailable or unreadable baseline, which blocks the gate. See [[gates-and-promotion#Cycle branch and gate]] and [[tests/test_bounded_gate.py#TestFailSafe#test_harness_exception_fails_closed]].
 
 ## Evidence and fitness trust
 

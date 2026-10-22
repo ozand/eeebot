@@ -208,6 +208,31 @@ def test_history_md_new_file_has_nothing_to_have_removed(tmp_path):
     assert _violations(repo, base, changed) == []
 
 
+def test_unreadable_existing_history_baseline_blocks(tmp_path, monkeypatch):
+    repo, base = _repo_with(tmp_path, {"memory/HISTORY.md": "first entry\n"})
+    changed = _cycle_commit(repo, base, {"memory/HISTORY.md": "first entry\nsecond\n"})
+    monkeypatch.setattr(gate, "_git_show_many", lambda *_: {"memory/HISTORY.md": None})
+    assert _violations(repo, base, changed) == [
+        f"memory_lessons_append_only: baseline unreadable at {base[:12]}: memory/HISTORY.md"
+    ]
+
+
+def test_unavailable_history_baseline_blocks(tmp_path, monkeypatch):
+    repo, base = _repo_with(tmp_path, {"memory/HISTORY.md": "first entry\n"})
+    changed = _cycle_commit(repo, base, {"memory/HISTORY.md": "first entry\nsecond\n"})
+    original_git_lines = gate._git_lines
+
+    def fail_baseline_lookup(root, args):
+        if args[:1] == ["ls-tree"]:
+            return None
+        return original_git_lines(root, args)
+
+    monkeypatch.setattr(gate, "_git_lines", fail_baseline_lookup)
+    assert _violations(repo, base, changed) == [
+        f"memory_lessons_append_only: baseline unavailable at {base[:12]}: memory/HISTORY.md"
+    ]
+
+
 def test_history_md_untouched_this_cycle_is_not_checked(tmp_path):
     repo, base = _repo_with(tmp_path, {"memory/HISTORY.md": "[2026-09-01 00:00] first entry\n"})
     changed = _cycle_commit(repo, base, {"memory/facts/x.md": "unrelated add\n"})
