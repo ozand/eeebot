@@ -51,3 +51,16 @@ Actual capability and environment vary by session. Confirm available tools, repo
 - Host, systemd, rollout, and production actions remain out of scope unless explicitly authorized for the named environment. A merged repository PR does not imply host deployment.
 - Do not merge, close an issue, or change an ADR status unless the governing acceptance procedure and explicit authority permit that exact action.
 - Handoffs contain only the task-relevant, sanitized context, exact source/base references, evidence, blockers, and next action. Do not copy prompts, secrets, session transcripts, or unrelated workspace data.
+
+## Data-boundary deviation: contain and continue safely
+
+An individual data-boundary deviation does not revoke independently approved work. Stop the forbidden action and contain only the deviation; terminate the offending child when needed. Do not reuse or forward the implicated payload. Provide a sanitized receipt that separates known facts from unknowns and contains no sensitive paths or secrets. Preserve existing logs and evidence; do not perform destructive cleanup.
+
+Continue only when the same independent task remains authorized and separable: start from a fresh context using only its approved source SHA, issue, and CI job. No new GO is needed for that already-approved work. Never repeat a prohibited scan through another executor. Escalate new access or scope, inseparable contamination, concrete credential-publication or rotation need, unauthorized mutation that compromises evidence, or guard bypass. A guard/access rejection is not unavailability; do not change executor or tool to evade the same restriction. All existing review, CI, merge, issue-closure, and deployment gates remain in force.
+
+### Verification scenarios
+
+1. **Private-history read:** Stop further access and do not reuse or forward the read material. Provide a sanitized known/unknown receipt, preserve logs, then continue the already-approved independent analysis in a fresh context from its approved source SHA, issue, and CI job. Existing review and CI gates still apply.
+2. **Published secret:** Contain the publication and escalate the concrete incident and any credential-rotation need; do not repeat or propagate the secret. Continue independent work only if it is demonstrably separable and uses a fresh approved source context. Keep all existing delivery gates.
+3. **Guard denial:** Stop the denied action and report the rejection as a guard/access boundary, not unavailability. Do not retry with another executor or tool; escalate if the task needs new access or scope. No work proceeds by bypass, and gates remain unchanged.
+4. **Unknown source index:** Preserve the checkout and logs; do not guess, substitute a source, or destructively clean up. Report known facts and unknowns without sensitive paths, and leave the result unaccepted until the approved source SHA is known. Resume only from that approved source with the existing gates intact.
