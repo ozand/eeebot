@@ -162,6 +162,54 @@ def test_rename_out_of_lessons_is_rejected_even_though_name_only_shows_only_dest
     ]
 
 
+def test_unavailable_full_status_blocks_destination_only_rename_out(tmp_path, monkeypatch):
+    for prefix in ("memory", "lessons"):
+        source = f"{prefix}/old.md"
+        root = tmp_path / prefix
+        root.mkdir()
+        repo, base = _repo_with(root, {source: "same content padded out\\nfor rename detection\\n"})
+        destination = "docs/new.md"
+        (repo / source).unlink()
+        _write(repo, destination, "same content padded out\\nfor rename detection\\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "rename out")
+        changed = [destination]
+        monkeypatch.setattr(gate, "_git_lines", lambda *_: None)
+        assert _violations(repo, base, changed) == [
+            f"memory_lessons_append_only: cannot read diff status {base[:12]}..HEAD — protected paths cannot be verified"
+        ]
+        monkeypatch.undo()
+
+
+def test_unavailable_full_status_blocks_even_when_changed_paths_look_unrelated(tmp_path, monkeypatch):
+    repo, base = _repo_with(tmp_path, {})
+    changed = ["docs/unrelated.md"]
+    monkeypatch.setattr(gate, "_git_lines", lambda *_: None)
+    assert _violations(repo, base, changed) == [
+        f"memory_lessons_append_only: cannot read diff status {base[:12]}..HEAD — protected paths cannot be verified"
+    ]
+
+
+def test_available_empty_full_status_allows_unrelated_changes(tmp_path, monkeypatch):
+    repo, base = _repo_with(tmp_path, {})
+    monkeypatch.setattr(gate, "_git_lines", lambda *_: [])
+    assert _violations(repo, base, ["docs/unrelated.md"]) == []
+
+
+def test_available_unrelated_full_status_allows_unrelated_changes(tmp_path, monkeypatch):
+    repo, base = _repo_with(tmp_path, {})
+    monkeypatch.setattr(gate, "_git_lines", lambda *_: ["A\tdocs/unrelated.md"])
+    assert _violations(repo, base, ["docs/unrelated.md"]) == []
+
+
+def test_malformed_full_status_blocks_even_when_changed_paths_look_unrelated(tmp_path, monkeypatch):
+    repo, base = _repo_with(tmp_path, {})
+    monkeypatch.setattr(gate, "_git_lines", lambda *_: ["R100\tdocs/new.md"])
+    assert _violations(repo, base, ["docs/new.md"]) == [
+        f"memory_lessons_append_only: malformed diff status {base[:12]}..HEAD — protected paths cannot be verified"
+    ]
+
+
 def test_deleting_outside_memory_or_lessons_is_not_this_checks_concern(tmp_path):
     repo, base = _repo_with(tmp_path, {"docs/x.md": "doc\n"})
     changed = _cycle_commit(repo, base, {"docs/x.md": None})

@@ -448,8 +448,11 @@ def _memory_lessons_append_only_violations(
     executor-only checks above are never called from the curator's pickup
     function today.
 
-    Fail-closed on a git failure: an unreadable diff blocks with a single
-    "unverifiable" violation rather than silently passing every deletion.
+    Fail-closed on a git failure: an unreadable full diff-status lookup blocks
+    because protected-path changes cannot be verified, even when the
+    name-only changed-path list contains no protected path. ``_git_lines``
+    returns ``None`` for command failures and timeouts, while an empty list is
+    a successful lookup with no changes.
     """
     prefixes = MUTATION_POLICY.append_only_prefixes
     if not prefixes:
@@ -457,16 +460,23 @@ def _memory_lessons_append_only_violations(
     touched = [f for f in changed_files if any(f.startswith(p) for p in prefixes)]
     lines = _git_lines(repo_root, ['diff', '--name-status', '-M', base_sha, 'HEAD'])
     if lines is None:
-        if not touched:
-            return []
         return [
             f'memory_lessons_append_only: cannot read diff status {base_sha[:12]}..HEAD '
-            f'— {len(touched)} path(s) unverifiable'
+            f'— protected paths cannot be verified'
         ]
     violations: list[str] = []
     for line in lines:
         parts = line.split('\t')
         code = parts[0]
+        expected_paths = 3 if code[:1] in ('R', 'C') else 2
+        valid_code = code in ('A', 'M', 'D', 'T', 'U', 'X', 'B') or (
+            code[:1] in ('R', 'C') and code[1:].isdigit() and len(code) == 4
+        )
+        if not valid_code or len(parts) != expected_paths or any(not path for path in parts[1:]):
+            return [
+                f'memory_lessons_append_only: malformed diff status {base_sha[:12]}..HEAD '
+                '— protected paths cannot be verified'
+            ]
         if code[:1] == 'D' and len(parts) == 2:
             path = parts[1]
             if any(path.startswith(p) for p in prefixes):
