@@ -1,4 +1,4 @@
-﻿"""Tests for web_fetch SSRF protection and untrusted content marking."""
+"""Tests for web_fetch SSRF protection and untrusted content marking."""
 
 from __future__ import annotations
 

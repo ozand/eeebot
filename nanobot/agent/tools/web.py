@@ -1,4 +1,4 @@
-﻿"""Web tools: web_search and web_fetch."""
+"""Web tools: web_search and web_fetch."""
 
 from __future__ import annotations
 
