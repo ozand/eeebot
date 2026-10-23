@@ -28,7 +28,7 @@ def _is_private(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 
 
 def resolve_public_addresses(hostname: str, port: int) -> tuple[tuple[str, ...], str]:
-    """Resolve one immutable public address snapshot, rejecting every malformed or blocked answer."""
+    """Resolve one immutable address snapshot accepted by the existing blocked-network policy."""
     try:
         infos = socket.getaddrinfo(hostname, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
     except (OSError, OverflowError, TypeError):
