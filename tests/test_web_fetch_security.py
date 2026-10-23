@@ -1,4 +1,4 @@
-"""Tests for web_fetch SSRF protection and untrusted content marking."""
+﻿"""Tests for web_fetch SSRF protection and untrusted content marking."""
 
 from __future__ import annotations
 
@@ -85,6 +85,63 @@ async def test_web_fetch_security_error_is_not_framed_as_external_data():
         result = await registry.execute("web_fetch", {"url": "http://169.254.169.254/latest"})
     assert "[BEGIN EXTERNAL DATA]" not in result
     assert "URL validation failed" in result
+
+
+@pytest.mark.asyncio
+async def test_pinned_backend_shares_timeout_budget_across_addresses(monkeypatch):
+    import asyncio
+
+    import httpcore
+
+    from nanobot.agent.tools.web_transport import _PinnedBackend
+
+    clock = [0.0]
+    budgets = []
+    async def advance(*args, **kwargs):
+        clock[0] += 1.0
+        raise TimeoutError("attempt timed out")
+    async def wait_for(operation, timeout):
+        budgets.append(timeout)
+        return await operation
+    class Loop:
+        def time(self): return clock[0]
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: Loop())
+    monkeypatch.setattr(asyncio, "open_connection", advance)
+    monkeypatch.setattr(asyncio, "wait_for", wait_for)
+    with pytest.raises(httpcore.ConnectTimeout):
+        await _PinnedBackend(("192.0.2.1", "192.0.2.2", "192.0.2.3"), "example.com", 80).connect_tcp("example.com", 80, timeout=2.5)
+    assert budgets == [2.5, 1.5, 0.5]
+
+
+@pytest.mark.asyncio
+async def test_pinned_backend_fails_over_with_remaining_timeout(monkeypatch):
+    import asyncio
+
+    from nanobot.agent.tools.web_transport import _PinnedBackend
+
+    clock = [0.0]
+    budgets = []
+    class Loop:
+        def time(self): return clock[0]
+    class Reader:
+        pass
+
+    class Writer:
+        pass
+    async def wait_for(operation, timeout):
+        budgets.append(timeout)
+        return await operation
+    async def connect(host, port, **kwargs):
+        clock[0] += 1.0
+        if len(budgets) == 1:
+            raise OSError("first address failed")
+        return Reader(), Writer()
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: Loop())
+    monkeypatch.setattr(asyncio, "open_connection", connect)
+    monkeypatch.setattr(asyncio, "wait_for", wait_for)
+    result = await _PinnedBackend(("192.0.2.1", "192.0.2.2"), "example.com", 80).connect_tcp("example.com", 80, timeout=2.5)
+    assert result.reader is not None
+    assert budgets == [2.5, 1.5]
 
 
 def test_external_envelope_frames_imperative_as_data_not_instruction():
@@ -185,7 +242,7 @@ async def test_web_fetch_does_not_leak_cookies_across_redirects(monkeypatch):
 
     calls = []
     class Client:
-        def __init__(self, **kwargs): self._cookies = kwargs["cookies"]
+        def __init__(self, **kwargs): self._cookies = httpx.Cookies(kwargs["cookies"])
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
         async def get(self, url, **kwargs):
@@ -235,7 +292,7 @@ async def test_web_fetch_carries_same_origin_cookie_to_redirect(monkeypatch):
             self.cookies.set_cookie_header(request)
             calls.append((url, request.headers.get("cookie")))
             if url.endswith("/start"):
-                response = httpx.Response(302, headers={"location": "/next", "set-cookie": "sid=ok; Path=/; Secure"}, request=request)
+                response = httpx.Response(302, headers={"location": "/next", "set-cookie": "sid=old; Path=/; Secure"}, request=request)
                 self.cookies.extract_cookies(response)
                 return response
             return httpx.Response(200, headers={"content-type": "text/plain"}, content=b"done", request=request)
@@ -243,7 +300,36 @@ async def test_web_fetch_carries_same_origin_cookie_to_redirect(monkeypatch):
     monkeypatch.setattr(WebFetchTool, "_resolve_hop", staticmethod(lambda url: (("93.184.216.34",), "")))
     result = json.loads(await WebFetchTool()._fetch_readability("https://example.com/start", "text", 100))
     assert result["text"] == "done"
-    assert calls == [("https://example.com/start", None), ("https://example.com/next", "sid=ok")]
+    assert calls == [("https://example.com/start", None), ("https://example.com/next", "sid=old")]
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_removes_expired_cookie_before_next_redirect(monkeypatch):
+    import httpx
+
+    calls = []
+    class Client:
+        def __init__(self, **kwargs): self.cookies = httpx.Cookies(kwargs["cookies"])
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url, **kwargs):
+            request = httpx.Request("GET", url, headers=kwargs["headers"])
+            self.cookies.set_cookie_header(request)
+            calls.append((url, request.headers.get("cookie")))
+            if url.endswith("/start"):
+                response = httpx.Response(302, headers={"location": "/expire", "set-cookie": "sid=old; Path=/; Secure"}, request=request)
+            elif url.endswith("/expire"):
+                response = httpx.Response(302, headers={"location": "/final", "set-cookie": "sid=; Max-Age=0; Path=/; Secure"}, request=request)
+            else:
+                return httpx.Response(200, headers={"content-type": "text/plain"}, content=b"ok", request=request)
+            self.cookies.extract_cookies(response)
+            return response
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    monkeypatch.setattr(WebFetchTool, "_resolve_hop", staticmethod(lambda url: (("93.184.216.34",), "")))
+    result = json.loads(await WebFetchTool()._fetch_readability("https://example.com/start", "text", 100))
+    assert result["text"] == "ok"
+    assert calls == [("https://example.com/start", None), ("https://example.com/expire", "sid=old"), ("https://example.com/final", None)]
+    assert len(calls) == 3
 
 
 @pytest.mark.asyncio

@@ -72,17 +72,24 @@ class _PinnedBackend(httpcore.AsyncNetworkBackend):
     async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
         if host.lower() != self.expected_host.lower() or port != self.expected_port:
             raise httpcore.ConnectError("Connection origin did not match validated URL")
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
         last_error = None
         for address in self.addresses:
+            remaining = None if deadline is None else deadline - loop.time()
+            if remaining is not None and remaining <= 0:
+                break
             try:
                 operation = asyncio.open_connection(address, port, local_addr=local_address)
-                if timeout is not None:
-                    reader, writer = await asyncio.wait_for(operation, timeout)
+                if remaining is not None:
+                    reader, writer = await asyncio.wait_for(operation, remaining)
                 else:
                     reader, writer = await operation
                 return _AsyncioNetworkStream(reader, writer)
             except (OSError, asyncio.TimeoutError, httpcore.ConnectError) as exc:
                 last_error = exc
+        if deadline is not None and loop.time() >= deadline:
+            raise httpcore.ConnectTimeout("Connection attempts exhausted timeout") from last_error
         raise httpcore.ConnectError("All validated addresses failed") from last_error
 
     async def connect_unix_socket(self, path, timeout=None, socket_options=None):

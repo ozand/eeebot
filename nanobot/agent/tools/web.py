@@ -1,4 +1,4 @@
-"""Web tools: web_search and web_fetch."""
+﻿"""Web tools: web_search and web_fetch."""
 
 from __future__ import annotations
 
@@ -355,7 +355,7 @@ class WebFetchTool(Tool):
                                              follow_redirects=False, timeout=30.0) as client:
                     response = await client.get(current, headers={"User-Agent": USER_AGENT})
                     if hasattr(client, "cookies"):
-                        cookies.update(client.cookies)
+                        cookies.jar = client.cookies.jar
                     if response.status_code in (301, 302, 303, 307, 308):
                         location = response.headers.get("location") or response.headers.get("Location")
                         try:
