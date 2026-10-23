@@ -345,6 +345,54 @@ def _git_lines(repo_root: 'Path', args: 'list[str]') -> 'list[str] | None':
     return [line.rstrip('\r') for line in r.stdout.split('\n') if line]
 
 
+def _parse_name_status_z(output: bytes) -> 'list[tuple[str, ...]] | None':
+    """Parse Git ``--name-status -z`` records without pathname quoting."""
+    if not output:
+        return []
+    if not output.endswith(b'\x00'):
+        return None
+    fields = output[:-1].split(b'\x00')
+    records: list[tuple[str, ...]] = []
+    index = 0
+    while index < len(fields):
+        status_bytes = fields[index]
+        index += 1
+        try:
+            status = status_bytes.decode('ascii')
+        except UnicodeDecodeError:
+            return None
+        if status in ('A', 'M', 'D', 'T', 'U', 'X', 'B'):
+            path_count = 1
+        elif (len(status) == 4 and status[0] in ('R', 'C')
+              and status[1:].isdigit()):
+            path_count = 2
+        else:
+            return None
+        if index + path_count > len(fields) or any(not path for path in fields[index:index + path_count]):
+            return None
+        try:
+            paths = tuple(path.decode('utf-8') for path in fields[index:index + path_count])
+        except UnicodeDecodeError:
+            return None
+        records.append((status, *paths))
+        index += path_count
+    return records
+
+
+def _git_name_status_z(repo_root: 'Path', base_sha: str) -> 'list[tuple[str, ...]] | None':
+    """Read authoritative, NUL-delimited name-status records; None means unavailable."""
+    try:
+        result = subprocess.run(
+            _git_cmd(repo_root) + ['diff', '--name-status', '-z', '-M', base_sha, 'HEAD'],
+            capture_output=True, timeout=_SKILL_GIT_TIMEOUT,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return _parse_name_status_z(result.stdout)
+
+
 def _git_tree_paths(repo_root: 'Path', ref: str, prefix: str) -> 'set[str] | None':
     """Paths under *prefix* in the tree at *ref*; None when git cannot answer."""
     lines = _git_lines(repo_root, ['ls-tree', '-r', '--name-only', ref, '--', prefix])
@@ -419,8 +467,8 @@ def _memory_lessons_append_only_violations(
     and :func:`_agents_md_scope_violations` already use.
 
     Structural and deterministic, per the issue: the delete/rename check is
-    git's own ``--name-status`` diff code (``D``/``R``), never a heuristic on
-    file content. The one place this necessarily reads content is the
+    git's own NUL-delimited ``--name-status`` records (``D``/``R``), never a
+    heuristic on file content. The one place this necessarily reads content is
     ``HISTORY.md`` no-shrink rule — git's status code for a modified file
     (``M``) does not say whether lines were added, removed, or both, so the
     only way to enforce "no existing line disappears" is to compare the old
@@ -429,16 +477,14 @@ def _memory_lessons_append_only_violations(
     similarity/heuristic diff) — it is answering a question ``--name-status``
     structurally cannot answer, not substituting a heuristic for one it can.
 
-    Unscoped by design: the full ``base_sha..HEAD`` diff status is read (not
-    scoped to ``-- memory/ lessons/`` via pathspec) so a rename that moves a
-    path INTO one of these prefixes is caught even though ``git diff
-    --name-only`` (what ``changed_files`` comes from) lists only a rename's
-    destination. Symmetrically with :func:`_skill_hygiene_violations`
-    (scoped to ``skills/`` only), a rename that moves a path OUT of
-    ``memory/``/``lessons/`` to some other allowed prefix is not separately
-    flagged as an escape from THIS surface's protection — its destination is
-    still bound by the ordinary allowed-prefix/tier classification for
-    wherever it lands, and closing that further is not attempted here.
+    Unscoped by design: the full ``base_sha..HEAD`` diff status is read from
+    Git's NUL-delimited ``--name-status -z`` output (not scoped to a pathspec),
+    preserving pathname bytes so either endpoint of a rename remains visible
+    even though ``git diff --name-only`` (what ``changed_files`` comes from)
+    lists only the destination. Any rename with either endpoint under
+    ``memory/`` or ``lessons/`` is rejected, including renames that move a
+    protected path out
+    to another allowed prefix.
 
     Only intended to be wired into the EXECUTOR's cycle-branch gate decision
     (:func:`nanobot.runtime.bridge._changed_files_and_violations`, alongside
@@ -451,33 +497,31 @@ def _memory_lessons_append_only_violations(
     executor-only checks above are never called from the curator's pickup
     function today.
 
-    Fail-closed on a git failure: an unreadable diff blocks with a single
-    "unverifiable" violation rather than silently passing every deletion.
+    Fail-closed on a git failure: an unreadable or malformed full diff-status
+    lookup blocks because protected-path changes cannot be verified, even when
+    the name-only changed-path list contains no protected path. An empty parsed
+    record list is a successful lookup with no changes.
     """
     prefixes = MUTATION_POLICY.append_only_prefixes
     if not prefixes:
         return []
-    touched = [f for f in changed_files if any(f.startswith(p) for p in prefixes)]
-    if not touched:
-        return []
-    lines = _git_lines(repo_root, ['diff', '--name-status', '-M', base_sha, 'HEAD'])
+    lines = _git_name_status_z(repo_root, base_sha)
     if lines is None:
         return [
             f'memory_lessons_append_only: cannot read diff status {base_sha[:12]}..HEAD '
-            f'— {len(touched)} path(s) unverifiable'
+            f'— protected paths cannot be verified'
         ]
     violations: list[str] = []
-    for line in lines:
-        parts = line.split('\t')
-        code = parts[0]
-        if code[:1] == 'D' and len(parts) == 2:
-            path = parts[1]
+    for record in lines:
+        code, *paths = record
+        if code[:1] == 'D' and len(paths) == 1:
+            path = paths[0]
             if any(path.startswith(p) for p in prefixes):
                 violations.append(
                     f'memory_lessons_append_only: delete blocked under append-only surface: {path}'
                 )
-        elif code[:1] == 'R' and len(parts) == 3:
-            old, new = parts[1], parts[2]
+        elif code[:1] == 'R' and len(paths) == 2:
+            old, new = paths
             if any(old.startswith(p) for p in prefixes) or any(new.startswith(p) for p in prefixes):
                 violations.append(
                     f'memory_lessons_append_only: rename blocked under append-only surface: {old} -> {new}'
@@ -485,9 +529,20 @@ def _memory_lessons_append_only_violations(
     for no_shrink in MUTATION_POLICY.append_only_no_shrink_files:
         if no_shrink not in changed_files:
             continue
+        base_path = _git_lines(repo_root, ['ls-tree', '--name-only', base_sha, '--', no_shrink])
+        if base_path is None:
+            violations.append(
+                f'memory_lessons_append_only: baseline unavailable at {base_sha[:12]}: {no_shrink}'
+            )
+            continue
+        if not base_path:
+            continue  # did not exist at base_sha -- no existing line to have removed
         old_text = _git_show_many(repo_root, base_sha, [no_shrink])[no_shrink]
         if old_text is None:
-            continue  # did not exist at base_sha -- no existing line to have removed
+            violations.append(
+                f'memory_lessons_append_only: baseline unreadable at {base_sha[:12]}: {no_shrink}'
+            )
+            continue
         new_text = _git_show_many(repo_root, 'HEAD', [no_shrink])[no_shrink]
         if new_text is None:
             violations.append(f'memory_lessons_append_only: unreadable at HEAD: {no_shrink}')
