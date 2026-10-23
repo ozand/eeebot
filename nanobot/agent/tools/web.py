@@ -340,14 +340,23 @@ class WebFetchTool(Tool):
                             return json.dumps({"error": "Redirect response missing Location", "url": url}, ensure_ascii=False)
                         current = urljoin(current, location)
                         continue
-                    response.raise_for_status()
-                    if hasattr(response, "aread"):
-                        content = await response.aread()
+                    try:
+                        response.raise_for_status()
+                        if hasattr(response, "aread"):
+                            content = await response.aread()
+                        else:
+                            content = response.text.encode("utf-8")
+                        status, headers = response.status_code, response.headers
+                    except BaseException:
+                        if hasattr(response, "aclose"):
+                            try:
+                                await response.aclose()
+                            except BaseException:
+                                logger.warning("WebFetch response cleanup failed", exc_info=True)
+                        raise
                     else:
-                        content = response.text.encode("utf-8")
-                    status, headers = response.status_code, response.headers
-                    if hasattr(response, "aclose"):
-                        await response.aclose()
+                        if hasattr(response, "aclose"):
+                            await response.aclose()
             except Exception as exc:
                 logger.error("WebFetch error for {}: {}", current, exc)
                 return json.dumps({"error": str(exc), "url": url}, ensure_ascii=False)

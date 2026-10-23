@@ -180,6 +180,75 @@ def test_resolver_rejects_mixed_empty_and_malformed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_web_fetch_does_not_call_jina_fetch(monkeypatch):
+    calls = []
+    async def forbidden(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("Jina fetch must not be called")
+    monkeypatch.setattr(WebFetchTool, "_fetch_jina", forbidden)
+    monkeypatch.setattr(WebFetchTool, "_resolve_hop", lambda url: ((), "blocked"))
+    await WebFetchTool().execute("https://example.com")
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_transport_closes_pool_on_response_read_error(monkeypatch):
+    import asyncio
+
+    import httpx
+
+    class Writer:
+        def write(self, data): pass
+        async def drain(self): pass
+        def close(self): pass
+        async def wait_closed(self): pass
+        def start_tls(self, *args, **kwargs): pass
+        def get_extra_info(self, name): return None
+    class Reader:
+        def __init__(self): self.reads = 0
+        async def read(self, size=-1):
+            self.reads += 1
+            if self.reads == 1:
+                return b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n"
+            raise OSError("simulated response read failure")
+    async def open_connection(*args, **kwargs): return Reader(), Writer()
+    monkeypatch.setattr(asyncio, "open_connection", open_connection)
+    transport = PinnedAddressTransport(("93.184.216.34",), "origin.example", 80)
+    response = await transport.handle_async_request(httpx.Request("GET", "http://origin.example/"))
+    with pytest.raises(OSError, match="simulated response read failure"):
+        await response.aread()
+    await response.aclose()
+    assert transport._pools
+    await transport.aclose()
+    assert transport._pools == []
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_closes_response_when_read_is_cancelled(monkeypatch):
+    import asyncio
+
+    import httpx
+
+    closed = []
+    class Response:
+        status_code = 200
+        headers = {"content-type": "text/plain"}
+        def raise_for_status(self): pass
+        async def aread(self): raise asyncio.CancelledError
+        async def aclose(self): closed.append(True)
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, *args, **kwargs): return Response()
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    monkeypatch.setattr(WebFetchTool, "_resolve_hop", staticmethod(lambda url: (("93.184.216.34",), "")))
+    with pytest.raises(asyncio.CancelledError):
+        await WebFetchTool()._fetch_readability("http://example.com/", "text", 100)
+    assert closed == [True]
+
+
+@pytest.mark.asyncio
 async def test_web_fetch_rejects_proxy_before_dns(monkeypatch):
     calls = []
     monkeypatch.setattr("nanobot.security.network.socket.getaddrinfo", lambda *a, **k: calls.append("dns"))

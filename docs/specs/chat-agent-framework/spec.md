@@ -28,7 +28,7 @@ single shared message bus; the agent loop is channel-agnostic.
 
 ## Web fetch security boundary
 
-The `web_fetch` tool uses a direct-only pinned transport. It resolves and rejects invalid DNS snapshots per hop, connects only to a validated address while preserving origin Host and TLS verification, and validates each redirect before requesting it. Proxy routing and the Jina fetch path are disabled for `web_fetch`; web-search providers are unaffected. Deterministic regression coverage lives in `tests/test_web_fetch_security.py` and `tests/test_security_network.py`; architecture rationale is recorded in Proposed [ADR-041](../../adr/ADR-041-bind-web-fetch-connections-to-validated-addresses.md).
+The `web_fetch` tool uses a direct-only pinned transport. It resolves and rejects invalid DNS snapshots per hop, connects only to a validated address while preserving origin Host and TLS verification, and validates each redirect before requesting it. Proxy routing and the Jina fetch path are disabled for `web_fetch`; web-search providers are unaffected. Deterministic regression coverage in `tests/test_web_fetch_security.py` exercises the actual transport's TCP/TLS identity, response/pool cleanup on read failure, cancellation cleanup, redirect blocking, and the absence of Jina fetch calls; resolver coverage also lives in `tests/test_security_network.py`. Architecture rationale is recorded in Proposed [ADR-041](../../adr/ADR-041-bind-web-fetch-connections-to-validated-addresses.md).
 
 ## Requirements
 

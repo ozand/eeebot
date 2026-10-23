@@ -60,8 +60,8 @@ web_search provider routing and public web_fetch JSON/error and extraction behav
 | Empty, failed, malformed, mixed blocked DNS answers fail before connection | `tests/test_web_fetch_security.py::test_resolver_rejects_mixed_empty_and_malformed` | passing |
 | Every redirect is validated before connecting | `tests/test_web_fetch_security.py::test_redirect_private_target_is_never_requested` | passing |
 | Explicit proxy configuration is rejected before resolution | `tests/test_web_fetch_security.py::test_web_fetch_rejects_proxy_before_dns` | passing |
-| Jina fetch fallback cannot cause an outbound request | Not yet written | not yet written |
-| Response streams close on success, redirects, and errors | Not yet written | not yet written |
+| Jina fetch fallback cannot cause an outbound request | `tests/test_web_fetch_security.py::test_web_fetch_does_not_call_jina_fetch` | passing |
+| Response streams close on success, redirects, and errors/cancellation | `tests/test_web_fetch_security.py::test_transport_pins_address_and_preserves_origin`, `tests/test_web_fetch_security.py::test_transport_closes_pool_on_response_read_error`, `tests/test_redirect_private_target_is_never_requested` | passing |
 | Resolver rejects prohibited addresses consistently | `tests/test_web_fetch_security.py::test_resolver_rejects_mixed_empty_and_malformed` | passing |
 
 ## References
