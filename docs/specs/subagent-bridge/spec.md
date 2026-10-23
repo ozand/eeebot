@@ -172,7 +172,7 @@ passes — so a broken or unverified cycle never reaches `main`.
 
 ### Append-only memory and lesson changes (#1768)
 
-The cycle gate SHALL allow additions under `memory/` and `lessons/`, reject deletions and renames there, and reject removal of existing lines from `memory/HISTORY.md`. For the history comparison, a file genuinely absent from the base revision has no prior lines to preserve and may be added; a baseline lookup that is unavailable or unreadable is unknown, not absent, and SHALL block with a deterministic violation. Readable baselines retain the existing no-shrink comparison. This rule applies to executor cycle gating; it does not change the intentional fail-open test-guard policy or curator promotion path.
+The cycle gate SHALL allow additions under `memory/` and `lessons/`, reject deletions under those prefixes and any rename with either endpoint under those prefixes, and reject removal of existing lines from `memory/HISTORY.md`. For the history comparison, a file genuinely absent from the base revision has no prior lines to preserve and may be added; a baseline lookup that is unavailable or unreadable is unknown, not absent, and SHALL block with a deterministic violation. Readable baselines retain the existing no-shrink comparison. This rule applies to executor cycle gating; it does not change the intentional fail-open test-guard policy or curator promotion path.
 
 ### Skill mutation and first-hand usage fitness (#939)
 

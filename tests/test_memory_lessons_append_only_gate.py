@@ -130,6 +130,38 @@ def test_rename_into_memory_is_caught_even_though_name_only_shows_only_the_desti
     ]
 
 
+def test_rename_out_of_memory_is_rejected_even_though_name_only_shows_only_destination(tmp_path):
+    repo, base = _repo_with(tmp_path, {"memory/facts/old.md": "same content padded out\\nfor rename detection\\n"})
+    (repo / "memory/facts/old.md").unlink()
+    _write(repo, "docs/new.md", "same content padded out\\nfor rename detection\\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "rename out")
+    changed = [
+        line for line in _git(repo, "diff", "--name-only", base, "HEAD").stdout.splitlines() if line.strip()
+    ]
+    assert changed == ["docs/new.md"]  # production shape: destination only
+    assert _violations(repo, base, changed) == [
+        "memory_lessons_append_only: rename blocked under append-only surface: "
+        "memory/facts/old.md -> docs/new.md"
+    ]
+
+
+def test_rename_out_of_lessons_is_rejected_even_though_name_only_shows_only_destination(tmp_path):
+    repo, base = _repo_with(tmp_path, {"lessons/old.md": "same content padded out\\nfor rename detection\\n"})
+    (repo / "lessons/old.md").unlink()
+    _write(repo, "docs/new.md", "same content padded out\\nfor rename detection\\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "rename out")
+    changed = [
+        line for line in _git(repo, "diff", "--name-only", base, "HEAD").stdout.splitlines() if line.strip()
+    ]
+    assert changed == ["docs/new.md"]  # production shape: destination only
+    assert _violations(repo, base, changed) == [
+        "memory_lessons_append_only: rename blocked under append-only surface: "
+        "lessons/old.md -> docs/new.md"
+    ]
+
+
 def test_deleting_outside_memory_or_lessons_is_not_this_checks_concern(tmp_path):
     repo, base = _repo_with(tmp_path, {"docs/x.md": "doc\n"})
     changed = _cycle_commit(repo, base, {"docs/x.md": None})

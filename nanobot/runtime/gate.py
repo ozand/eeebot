@@ -433,12 +433,9 @@ def _memory_lessons_append_only_violations(
     scoped to ``-- memory/ lessons/`` via pathspec) so a rename that moves a
     path INTO one of these prefixes is caught even though ``git diff
     --name-only`` (what ``changed_files`` comes from) lists only a rename's
-    destination. Symmetrically with :func:`_skill_hygiene_violations`
-    (scoped to ``skills/`` only), a rename that moves a path OUT of
-    ``memory/``/``lessons/`` to some other allowed prefix is not separately
-    flagged as an escape from THIS surface's protection — its destination is
-    still bound by the ordinary allowed-prefix/tier classification for
-    wherever it lands, and closing that further is not attempted here.
+    destination. Any rename with either endpoint under ``memory/`` or
+    ``lessons/`` is rejected, including renames that move a protected path out
+    to another allowed prefix.
 
     Only intended to be wired into the EXECUTOR's cycle-branch gate decision
     (:func:`nanobot.runtime.bridge._changed_files_and_violations`, alongside
@@ -458,10 +455,10 @@ def _memory_lessons_append_only_violations(
     if not prefixes:
         return []
     touched = [f for f in changed_files if any(f.startswith(p) for p in prefixes)]
-    if not touched:
-        return []
     lines = _git_lines(repo_root, ['diff', '--name-status', '-M', base_sha, 'HEAD'])
     if lines is None:
+        if not touched:
+            return []
         return [
             f'memory_lessons_append_only: cannot read diff status {base_sha[:12]}..HEAD '
             f'— {len(touched)} path(s) unverifiable'
