@@ -180,6 +180,91 @@ def test_resolver_rejects_mixed_empty_and_malformed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_web_fetch_does_not_leak_cookies_across_redirects(monkeypatch):
+    import httpx
+
+    calls = []
+    class Client:
+        def __init__(self, **kwargs): self._cookies = kwargs["cookies"]
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url, **kwargs):
+            request = httpx.Request("GET", url, headers=kwargs["headers"])
+            self._cookies.set_cookie_header(request)
+            calls.append((url, request.headers.get("cookie")))
+            if url == "https://example.com/start":
+                response = httpx.Response(302, headers={"location": "https://other.test/next", "set-cookie": "sid=ok; Path=/; Secure"}, request=request)
+                self._cookies.extract_cookies(response)
+                return response
+            return httpx.Response(200, headers={"content-type": "text/plain"}, content=b"done", request=request)
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    monkeypatch.setattr(WebFetchTool, "_resolve_hop", staticmethod(lambda url: (("93.184.216.34",), "")))
+    result = json.loads(await WebFetchTool()._fetch_readability("https://example.com/start", "text", 100))
+    assert result["text"] == "done"
+    assert calls == [("https://example.com/start", None), ("https://other.test/next", None)]
+
+
+def test_web_fetch_cookie_jar_preserves_domain_path_and_secure_scope():
+    import httpx
+
+    cookies = httpx.Cookies()
+    response = httpx.Response(302, headers={"set-cookie": "sid=ok; Domain=example.com; Path=/safe; Secure"}, request=httpx.Request("GET", "https://example.com/safe/start"))
+    cookies.extract_cookies(response)
+    def cookie_for(url):
+        request = httpx.Request("GET", url)
+        cookies.set_cookie_header(request)
+        return request.headers.get("cookie")
+    assert cookie_for("https://example.com/safe/next") == "sid=ok"
+    assert cookie_for("https://sub.example.com/safe/next") == "sid=ok"
+    assert cookie_for("http://example.com/safe/next") is None
+    assert cookie_for("https://example.com/other") is None
+    assert cookie_for("https://other.test/safe/next") is None
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_carries_same_origin_cookie_to_redirect(monkeypatch):
+    import httpx
+
+    calls = []
+    class Client:
+        def __init__(self, **kwargs): self.cookies = kwargs["cookies"]
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url, **kwargs):
+            request = httpx.Request("GET", url, headers=kwargs["headers"])
+            self.cookies.set_cookie_header(request)
+            calls.append((url, request.headers.get("cookie")))
+            if url.endswith("/start"):
+                response = httpx.Response(302, headers={"location": "/next", "set-cookie": "sid=ok; Path=/; Secure"}, request=request)
+                self.cookies.extract_cookies(response)
+                return response
+            return httpx.Response(200, headers={"content-type": "text/plain"}, content=b"done", request=request)
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    monkeypatch.setattr(WebFetchTool, "_resolve_hop", staticmethod(lambda url: (("93.184.216.34",), "")))
+    result = json.loads(await WebFetchTool()._fetch_readability("https://example.com/start", "text", 100))
+    assert result["text"] == "done"
+    assert calls == [("https://example.com/start", None), ("https://example.com/next", "sid=ok")]
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_decodes_declared_charset(monkeypatch):
+    import httpx
+
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url, **kwargs):
+            html = "<html><body>café</body></html>".encode("iso-8859-1")
+            return httpx.Response(200, headers={"content-type": "text/html; charset=iso-8859-1"}, content=html, request=httpx.Request("GET", url))
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    monkeypatch.setattr(WebFetchTool, "_resolve_hop", staticmethod(lambda url: (("93.184.216.34",), "")))
+    result = json.loads(await WebFetchTool()._fetch_readability("http://example.com/", "text", 100))
+    assert "café" in result["text"]
+    assert "�" not in result["text"]
+
+
+@pytest.mark.asyncio
 async def test_web_fetch_does_not_call_jina_fetch(monkeypatch):
     calls = []
     async def forbidden(*args, **kwargs):

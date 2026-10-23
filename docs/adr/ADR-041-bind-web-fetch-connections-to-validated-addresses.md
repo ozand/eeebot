@@ -33,6 +33,8 @@ No URL-to-IP rewriting, private HTTPX pool mutation, proxy support, automatic re
 
 ## Consequences
 
+The per-hop transport arrangement must preserve the prior fetch client's scoped cookie-jar behavior across redirects without forwarding cookie headers outside HTTPX domain, path, and secure-cookie rules. Response extraction must likewise retain HTTPX's declared-charset/default UTF-8 text-decoding behavior after bytes are read.
+
 ### What gets easier
 
 Tests can prove the actual TCP destination is in the validated snapshot while preserving origin identity.
@@ -43,7 +45,7 @@ A small transport adapter and direct HTTPCore dependency add compatibility and m
 
 ### What does not change
 
-web_search provider routing and public web_fetch JSON/error and extraction behavior remain as compatible as possible.
+web_search provider routing and public web_fetch JSON/error behavior remain unchanged; per-hop fetching preserves scoped cookie and declared-charset decoding behavior.
 
 ## Alternatives Considered
 
@@ -61,6 +63,8 @@ web_search provider routing and public web_fetch JSON/error and extraction behav
 | Every redirect is validated before connecting | `tests/test_web_fetch_security.py::test_redirect_private_target_is_never_requested` | passing |
 | Explicit proxy configuration is rejected before resolution | `tests/test_web_fetch_security.py::test_web_fetch_rejects_proxy_before_dns` | passing |
 | Jina fetch fallback cannot cause an outbound request | `tests/test_web_fetch_security.py::test_web_fetch_does_not_call_jina_fetch` | passing |
+| Redirect chain preserves scoped cookies without cross-origin leakage | `tests/test_web_fetch_security.py::test_web_fetch_carries_same_origin_cookie_to_redirect`, `tests/test_web_fetch_security.py::test_web_fetch_does_not_leak_cookies_across_redirects`, `tests/test_web_fetch_security.py::test_web_fetch_cookie_jar_preserves_domain_path_and_secure_scope` | passing |
+| Declared response charset is honored during extraction | `tests/test_web_fetch_security.py::test_web_fetch_decodes_declared_charset` | passing |
 | Response/pool cleanup attempts on success, redirects, status/read/close error, and cancellation | The web-fetch cleanup and redirect-close tests in `tests/test_web_fetch_security.py` cover retries, cancellation propagation, error JSON, no next hop after redirect close failure, and actual transport pool cleanup | passing (attempts do not guarantee cleanup completion if cleanup operations fail or cancellation recurs) |
 | Resolver rejects prohibited addresses consistently | `tests/test_web_fetch_security.py::test_resolver_rejects_mixed_empty_and_malformed` | passing |
 

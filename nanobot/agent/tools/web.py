@@ -341,6 +341,7 @@ class WebFetchTool(Tool):
             Document = None  # noqa: N806
 
         current = url
+        cookies = httpx.Cookies()
         for hop in range(MAX_REDIRECTS + 1):
             addresses, error = self._resolve_hop(current)
             if error:
@@ -350,9 +351,11 @@ class WebFetchTool(Tool):
             port = parsed.port or (443 if parsed.scheme == "https" else 80)
             transport = PinnedAddressTransport(addresses, parsed.hostname, port)
             try:
-                async with httpx.AsyncClient(transport=transport, trust_env=False,
+                async with httpx.AsyncClient(transport=transport, cookies=cookies, trust_env=False,
                                              follow_redirects=False, timeout=30.0) as client:
                     response = await client.get(current, headers={"User-Agent": USER_AGENT})
+                    if hasattr(client, "cookies"):
+                        cookies.update(client.cookies)
                     if response.status_code in (301, 302, 303, 307, 308):
                         location = response.headers.get("location") or response.headers.get("Location")
                         try:
@@ -393,7 +396,8 @@ class WebFetchTool(Tool):
             break
 
         ctype = headers.get("content-type", "")
-        decoded = content.decode("utf-8", errors="replace")
+        decoded_response = httpx.Response(200, headers=headers, content=content)
+        decoded = decoded_response.text
         if "application/json" in ctype:
             text, extractor = json.dumps(json.loads(decoded), indent=2, ensure_ascii=False), "json"
         elif "text/html" in ctype or decoded[:256].lower().startswith(("<!doctype", "<html")):
