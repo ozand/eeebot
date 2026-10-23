@@ -6,6 +6,16 @@ The bounded runtime turns candidate work into isolated, checked changes while ke
 
 A planner-selected task, not a candidate request, is the executor assignment. The bridge coordinates demand/proposer input, planning, bounded execution, gates, and evidence; [[nanobot/runtime/bridge.py#_run_planning_session]] selects plan or rest, and [[nanobot/runtime/demand.py#collect_demand]] supplies candidates. See [[planning#Planner choice]] and [[tests/test_agent_chooses.py#test_planner_runs_first_and_its_plan_is_the_task]].
 
+### No-plan recovery
+
+Recovery classifies planner and supply outcomes separately and bounds consecutive failures before degradation or stopping.
+
+[[nanobot/runtime/no_plan_recovery.py#classify]] separates supply failures (`timed_out`, `supplier_error`) from planner outcomes (`refused`, `malformed`, `no_plan`); other outcomes such as infrastructure failures do not count. [[nanobot/runtime/no_plan_recovery.py#record_outcome]] applies consecutive-family thresholds: 3 planner outcomes enable `planner_degraded` and minimal mode, 6 planner outcomes stop cycle starts, and 6 supply outcomes set `model_supply_degraded` without minimal mode or stopping. Switching families clears the opposite streak. These bounds are directly asserted by [[tests/test_agent_chooses.py#test_no_plan_recovery_is_bounded_and_visible]], [[tests/test_agent_chooses.py#test_supply_and_planner_no_plan_are_counted_apart]], [[tests/test_agent_chooses.py#test_switching_no_plan_family_resets_the_other_consecutive_streak]], and supplier-error coverage in [[tests/test_agent_chooses.py#test_planner_supplier_error_classified_as_supply]].
+
+An integrated plan resets recovery counters and degraded/stopped flags; operator [[nanobot/runtime/no_plan_recovery.py#resume]] only clears `stopped`, preserving counters and minimal mode until an integrated plan. The distinction is asserted by [[tests/test_agent_chooses.py#test_reset_and_resume_after_stop]]. Recovery state does not select candidates or assign work: [[tests/test_agent_chooses.py#test_no_automatic_candidate_selection]] and [[tests/test_agent_chooses.py#test_no_plan_does_not_fall_back_to_assignment]] assert absent task/candidate selection and no fallback assignment. The bridge's planner-selected task flow remains the assignment authority, not optional candidate context.
+
+These assertions establish the listed thresholds and state transitions, not a general duration, retry, or recovery-time guarantee. [[tests/test_agent_chooses.py#test_planner_rest_resets_supply_streak]] exercises a distinct open-increment supply-interruption streak reset on successful planner rest; it is not the integrated-plan reset above.
+
 ## Gate, mutation, and promotion boundaries
 
 Cycle work is isolated and checked before integration. [[nanobot/runtime/gate.py#_validate_mutation_surfaces]] applies mutation policy, and [[nanobot/runtime/promoted_overlay.py#install_promoted_overlay]] installs validated code.
