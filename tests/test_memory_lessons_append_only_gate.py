@@ -22,8 +22,11 @@ commit path is the honest proof of "not blocked".
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from nanobot.runtime import gate
 
@@ -75,6 +78,59 @@ def _cycle_commit(repo: Path, base_sha: str, writes: dict[str, str | None]) -> l
 
 def _violations(repo: Path, base_sha: str, changed: list[str]) -> list[str]:
     return gate._memory_lessons_append_only_violations(repo, base_sha, changed)
+
+
+@pytest.mark.parametrize("status,paths", [
+    ("R100", ("memory/a\t\nb.md", "docs/new.md")),
+    ("C075", ("lessons/a\\b.md", "docs/copied.md")),
+    ("M", ("memory/space and quote\\\".md",)),
+    ("A", ("lessons/факт.md",)),
+])
+def test_name_status_z_parser_preserves_special_path_bytes(status, paths):
+    raw = status.encode("ascii") + b"\0" + b"\0".join(
+        path.encode("utf-8") for path in paths
+    ) + b"\0"
+    parsed = gate._parse_name_status_z(raw)
+    assert parsed == [(status, *paths)]
+
+
+@pytest.mark.parametrize("raw", [
+    b"M\0docs/a",  # missing terminal NUL
+    b"M\0\0",  # empty pathname
+    b"Q\0docs/a\0",  # unsupported status
+    b"R100\0docs/a\0",  # truncated rename record
+    b"M\xff\0",  # pathname cannot be decoded on this platform
+])
+def test_name_status_z_parser_rejects_malformed_records(raw):
+    assert gate._parse_name_status_z(raw) is None
+
+
+@pytest.mark.parametrize("record", [
+    b"M\0docs/a\0",
+    b"R100\0memory/a\0docs/a\0",
+    b"C075\0lessons/a\0docs/a\0",
+    b"A\0lessons/new.md\0",
+])
+def test_name_status_z_parser_accepts_complete_record_shapes(record):
+    parsed = gate._parse_name_status_z(record)
+    assert parsed is not None
+    assert len(parsed) == 1
+
+
+def test_name_status_z_lookup_blocks_on_nonzero_exit(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        gate.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, b"", b"failed"),
+    )
+    assert gate._git_name_status_z(tmp_path, "base") is None
+
+
+def test_name_status_z_lookup_blocks_on_timeout(monkeypatch, tmp_path):
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs.get("timeout"))
+
+    monkeypatch.setattr(gate.subprocess, "run", timeout)
+    assert gate._git_name_status_z(tmp_path, "base") is None
 
 
 # ─── delete / rename: structural, git status only ────────────────────────────
@@ -130,6 +186,31 @@ def test_rename_into_memory_is_caught_even_though_name_only_shows_only_the_desti
     ]
 
 
+@pytest.mark.parametrize("source", [
+    "memory/факт.md",
+    "memory/space name.md",
+    "memory/-leading.md",
+    'memory/quote"name.md',
+    "memory/tab\tname.md",
+    "memory/newline\nname.md",
+])
+def test_special_name_rename_out_of_memory_is_rejected(tmp_path, source):
+    if os.name == "nt" and any(char in source for char in "\\t\\n"):
+        pytest.skip(f"Windows does not support pathname {source!r}")
+    content = "same content padded out\nfor rename detection\n"
+    repo, base = _repo_with(tmp_path, {source: content})
+    (repo / source).unlink()
+    _write(repo, "docs/new.md", content)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "unicode rename out")
+    changed = _git(repo, "diff", "--name-only", base, "HEAD").stdout.splitlines()
+    assert changed == ["docs/new.md"]
+    assert _violations(repo, base, changed) == [
+        f"memory_lessons_append_only: rename blocked under append-only surface: "
+        f"{source} -> docs/new.md"
+    ]
+
+
 def test_rename_out_of_memory_is_rejected_even_though_name_only_shows_only_destination(tmp_path):
     repo, base = _repo_with(tmp_path, {"memory/facts/old.md": "same content padded out\\nfor rename detection\\n"})
     (repo / "memory/facts/old.md").unlink()
@@ -174,7 +255,7 @@ def test_unavailable_full_status_blocks_destination_only_rename_out(tmp_path, mo
         _git(repo, "add", "-A")
         _git(repo, "commit", "-q", "-m", "rename out")
         changed = [destination]
-        monkeypatch.setattr(gate, "_git_lines", lambda *_: None)
+        monkeypatch.setattr(gate, "_git_name_status_z", lambda *_: None)
         assert _violations(repo, base, changed) == [
             f"memory_lessons_append_only: cannot read diff status {base[:12]}..HEAD — protected paths cannot be verified"
         ]
@@ -184,7 +265,7 @@ def test_unavailable_full_status_blocks_destination_only_rename_out(tmp_path, mo
 def test_unavailable_full_status_blocks_even_when_changed_paths_look_unrelated(tmp_path, monkeypatch):
     repo, base = _repo_with(tmp_path, {})
     changed = ["docs/unrelated.md"]
-    monkeypatch.setattr(gate, "_git_lines", lambda *_: None)
+    monkeypatch.setattr(gate, "_git_name_status_z", lambda *_: None)
     assert _violations(repo, base, changed) == [
         f"memory_lessons_append_only: cannot read diff status {base[:12]}..HEAD — protected paths cannot be verified"
     ]
@@ -192,21 +273,21 @@ def test_unavailable_full_status_blocks_even_when_changed_paths_look_unrelated(t
 
 def test_available_empty_full_status_allows_unrelated_changes(tmp_path, monkeypatch):
     repo, base = _repo_with(tmp_path, {})
-    monkeypatch.setattr(gate, "_git_lines", lambda *_: [])
+    monkeypatch.setattr(gate, "_git_name_status_z", lambda *_: [])
     assert _violations(repo, base, ["docs/unrelated.md"]) == []
 
 
 def test_available_unrelated_full_status_allows_unrelated_changes(tmp_path, monkeypatch):
     repo, base = _repo_with(tmp_path, {})
-    monkeypatch.setattr(gate, "_git_lines", lambda *_: ["A\tdocs/unrelated.md"])
+    monkeypatch.setattr(gate, "_git_name_status_z", lambda *_: [("A", "docs/unrelated.md")])
     assert _violations(repo, base, ["docs/unrelated.md"]) == []
 
 
-def test_malformed_full_status_blocks_even_when_changed_paths_look_unrelated(tmp_path, monkeypatch):
+def test_unavailable_binary_status_blocks_even_when_changed_paths_look_unrelated(tmp_path, monkeypatch):
     repo, base = _repo_with(tmp_path, {})
-    monkeypatch.setattr(gate, "_git_lines", lambda *_: ["R100\tdocs/new.md"])
+    monkeypatch.setattr(gate, "_git_name_status_z", lambda *_: None)
     assert _violations(repo, base, ["docs/new.md"]) == [
-        f"memory_lessons_append_only: malformed diff status {base[:12]}..HEAD — protected paths cannot be verified"
+        f"memory_lessons_append_only: cannot read diff status {base[:12]}..HEAD — protected paths cannot be verified"
     ]
 
 
