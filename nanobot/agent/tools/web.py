@@ -311,6 +311,28 @@ class WebFetchTool(Tool):
         except (TypeError, ValueError) as exc:
             return (), str(exc)
 
+    @staticmethod
+    async def _close_response(response: httpx.Response) -> None:
+        """Attempt response cleanup again if closing raises or is cancelled."""
+        stream = getattr(response, "stream", None)
+        try:
+            await response.aclose()
+        except BaseException:
+            try:
+                if stream is not None:
+                    await stream.aclose()
+                else:
+                    await response.aclose()
+            except BaseException:
+                logger.warning("WebFetch response cleanup retry failed", exc_info=True)
+            cleanup = getattr(stream, "cleanup_after_close_failure", None)
+            if cleanup is not None:
+                try:
+                    await cleanup()
+                except BaseException:
+                    logger.warning("WebFetch pool cleanup failed", exc_info=True)
+            raise
+
     async def _fetch_readability(self, url: str, extract_mode: str, max_chars: int) -> str:
         """Fetch manually validated redirects through a pinned, direct transport."""
         try:
@@ -333,7 +355,11 @@ class WebFetchTool(Tool):
                     response = await client.get(current, headers={"User-Agent": USER_AGENT})
                     if response.status_code in (301, 302, 303, 307, 308):
                         location = response.headers.get("location") or response.headers.get("Location")
-                        await response.aclose()
+                        try:
+                            await self._close_response(response)
+                        except Exception as exc:
+                            logger.error("WebFetch redirect response close failed for {}: {}", current, exc)
+                            return json.dumps({"error": str(exc), "url": url}, ensure_ascii=False)
                         if hop >= MAX_REDIRECTS:
                             return json.dumps({"error": "Too many redirects", "url": url}, ensure_ascii=False)
                         if not location:
@@ -350,23 +376,17 @@ class WebFetchTool(Tool):
                     except BaseException:
                         if hasattr(response, "aclose"):
                             try:
-                                await response.aclose()
+                                await self._close_response(response)
                             except BaseException:
                                 logger.warning("WebFetch response cleanup failed", exc_info=True)
                         raise
                     else:
                         if hasattr(response, "aclose"):
                             try:
-                                await response.aclose()
+                                await self._close_response(response)
                             except Exception as exc:
                                 logger.error("WebFetch response close failed for {}: {}", current, exc)
                                 return json.dumps({"error": str(exc), "url": url}, ensure_ascii=False)
-                            except BaseException:
-                                try:
-                                    await response.aclose()
-                                except BaseException:
-                                    logger.warning("WebFetch response cleanup failed", exc_info=True)
-                                raise
             except Exception as exc:
                 logger.error("WebFetch error for {}: {}", current, exc)
                 return json.dumps({"error": str(exc), "url": url}, ensure_ascii=False)

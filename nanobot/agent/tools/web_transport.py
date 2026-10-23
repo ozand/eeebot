@@ -148,3 +148,11 @@ class _PoolStream(httpx.AsyncByteStream):
                 raise
         if stream_error is not None:
             raise stream_error
+
+    async def cleanup_after_close_failure(self) -> None:
+        """Retry stream close and explicitly close its pool after a failed close."""
+        try:
+            await self.stream.aclose()
+        except BaseException:
+            pass
+        await self.pool.aclose()

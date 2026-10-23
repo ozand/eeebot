@@ -328,6 +328,192 @@ async def test_web_fetch_closes_response_when_close_is_cancelled(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_web_fetch_does_not_advance_after_redirect_limit_close_failure(monkeypatch):
+    import httpx
+
+    from nanobot.agent.tools.web import MAX_REDIRECTS
+
+    calls = []
+    class Response:
+        status_code = 302
+        headers = {"location": "http://next.example/"}
+        async def aclose(self):
+            if len(calls) == MAX_REDIRECTS + 1:
+                raise OSError("limit redirect close failed")
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url, **kwargs):
+            calls.append(url)
+            return Response()
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    monkeypatch.setattr(WebFetchTool, "_resolve_hop", staticmethod(lambda url: (("93.184.216.34",), "")))
+    result = json.loads(await WebFetchTool()._fetch_readability("http://start.example/", "text", 100))
+    assert result["error"] == "limit redirect close failed"
+    assert len(calls) == MAX_REDIRECTS + 1
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_does_not_advance_after_missing_location_close_failure(monkeypatch):
+    import httpx
+
+    calls = []
+    class Response:
+        status_code = 302
+        headers = {}
+        async def aclose(self): raise OSError("missing-location close failed")
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url, **kwargs):
+            calls.append(url)
+            return Response()
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    monkeypatch.setattr(WebFetchTool, "_resolve_hop", staticmethod(lambda url: (("93.184.216.34",), "")))
+    result = json.loads(await WebFetchTool()._fetch_readability("http://start.example/", "text", 100))
+    assert result["error"] == "missing-location close failed"
+    assert calls == ["http://start.example/"]
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_redirect_close_error_stops_before_next_hop(monkeypatch):
+    import httpx
+
+    calls = []
+    class Response:
+        status_code = 302
+        headers = {"location": "http://next.example/"}
+        async def aclose(self): raise OSError("redirect close failed")
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url, **kwargs):
+            calls.append(url)
+            return Response()
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    monkeypatch.setattr(WebFetchTool, "_resolve_hop", staticmethod(lambda url: (("93.184.216.34",), "")))
+    result = json.loads(await WebFetchTool()._fetch_readability("http://start.example/", "text", 100))
+    assert result["error"] == "redirect close failed"
+    assert calls == ["http://start.example/"]
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_redirect_close_pool_cleanup_reaches_actual_transport(monkeypatch):
+    import asyncio
+
+
+    connected, close_calls, pools = [], [], []
+    class Writer:
+        def write(self, data): pass
+        async def drain(self): pass
+        def close(self): pass
+        async def wait_closed(self): pass
+        def start_tls(self, *args, **kwargs): pass
+        def get_extra_info(self, name): return None
+    class Reader:
+        async def read(self, size=-1):
+            if not connected:
+                connected.append(True)
+                return b"HTTP/1.1 302 Found\r\nLocation: http://next.example/\r\nContent-Length: 0\r\n\r\n"
+            return b""
+    async def open_connection(*args, **kwargs): return Reader(), Writer()
+    monkeypatch.setattr(asyncio, "open_connection", open_connection)
+    monkeypatch.setattr(WebFetchTool, "_resolve_hop", staticmethod(lambda url: (("93.184.216.34",), "")))
+    original_handle = PinnedAddressTransport.handle_async_request
+    async def track_handle(self, request):
+        response = await original_handle(self, request)
+        pools.extend(self._pools)
+        return response
+    monkeypatch.setattr(PinnedAddressTransport, "handle_async_request", track_handle)
+    original_close = _PoolStream.aclose
+    async def fail_close(self):
+        close_calls.append(True)
+        await original_close(self)
+        if len(close_calls) == 1:
+            raise OSError("actual redirect close failed")
+    monkeypatch.setattr(_PoolStream, "aclose", fail_close)
+    result = json.loads(await WebFetchTool()._fetch_readability("http://start.example/", "text", 100))
+    assert result["error"] == "actual redirect close failed"
+    assert len(close_calls) == 1
+    assert connected == [True]
+    assert pools and all(not pool._connections for pool in pools)
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_redirect_close_pool_cancellation_reaches_actual_transport(monkeypatch):
+    import asyncio
+
+
+    connected, pools, cancellations = [], [], []
+    class Writer:
+        def write(self, data): pass
+        async def drain(self): pass
+        def close(self): pass
+        async def wait_closed(self): pass
+        def start_tls(self, *args, **kwargs): pass
+        def get_extra_info(self, name): return None
+    class Reader:
+        async def read(self, size=-1):
+            if not connected:
+                connected.append(True)
+                return b"HTTP/1.1 302 Found\r\nLocation: http://next.example/\r\nContent-Length: 0\r\n\r\n"
+            return b""
+    async def open_connection(*args, **kwargs): return Reader(), Writer()
+    monkeypatch.setattr(asyncio, "open_connection", open_connection)
+    monkeypatch.setattr(WebFetchTool, "_resolve_hop", staticmethod(lambda url: (("93.184.216.34",), "")))
+    original_handle = PinnedAddressTransport.handle_async_request
+    async def track_handle(self, request):
+        response = await original_handle(self, request)
+        pools.extend(self._pools)
+        return response
+    monkeypatch.setattr(PinnedAddressTransport, "handle_async_request", track_handle)
+    original_close = _PoolStream.aclose
+    async def cancel_once(self):
+        cancellations.append(True)
+        await original_close(self)
+        if len(cancellations) == 1:
+            raise asyncio.CancelledError
+    monkeypatch.setattr(_PoolStream, "aclose", cancel_once)
+    with pytest.raises(asyncio.CancelledError):
+        await WebFetchTool()._fetch_readability("http://start.example/", "text", 100)
+    assert len(cancellations) == 1
+    assert connected == [True]
+    assert pools and all(not pool._connections for pool in pools)
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_redirect_close_cancellation_retries_cleanup_without_following(monkeypatch):
+    import asyncio
+
+    import httpx
+
+    calls, closed = [], []
+    class Response:
+        status_code = 302
+        headers = {"location": "http://next.example/"}
+        async def aclose(self):
+            closed.append(True)
+            if len(closed) == 1:
+                raise asyncio.CancelledError
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, url, **kwargs):
+            calls.append(url)
+            return Response()
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    monkeypatch.setattr(WebFetchTool, "_resolve_hop", staticmethod(lambda url: (("93.184.216.34",), "")))
+    with pytest.raises(asyncio.CancelledError):
+        await WebFetchTool()._fetch_readability("http://start.example/", "text", 100)
+    assert calls == ["http://start.example/"]
+    assert len(closed) == 2
+
+
+@pytest.mark.asyncio
 async def test_web_fetch_rejects_proxy_before_dns(monkeypatch):
     calls = []
     monkeypatch.setattr("nanobot.security.network.socket.getaddrinfo", lambda *a, **k: calls.append("dns"))
