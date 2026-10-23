@@ -11,7 +11,7 @@ import pytest
 from nanobot.agent.tools.external import external_data_envelope
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool, _format_results
-from nanobot.agent.tools.web_transport import PinnedAddressTransport
+from nanobot.agent.tools.web_transport import PinnedAddressTransport, _PoolStream
 from nanobot.security.network import resolve_public_addresses
 
 
@@ -246,6 +246,85 @@ async def test_web_fetch_closes_response_when_read_is_cancelled(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await WebFetchTool()._fetch_readability("http://example.com/", "text", 100)
     assert closed == [True]
+
+
+@pytest.mark.asyncio
+async def test_pool_stream_attempts_pool_close_after_stream_close_cancellation():
+    import asyncio
+
+    calls = []
+    class Stream:
+        async def aclose(self):
+            calls.append("stream-start")
+            raise asyncio.CancelledError
+    class Pool:
+        async def aclose(self): calls.append("pool-closed")
+    with pytest.raises(asyncio.CancelledError):
+        await _PoolStream(Pool(), Stream()).aclose()
+    assert calls == ["stream-start", "pool-closed"]
+
+
+@pytest.mark.asyncio
+async def test_pool_stream_closes_pool_when_stream_close_fails():
+    closed = []
+    class Stream:
+        async def aclose(self):
+            raise OSError("stream close failed")
+    class Pool:
+        async def aclose(self): closed.append(True)
+    with pytest.raises(OSError, match="stream close failed"):
+        await _PoolStream(Pool(), Stream()).aclose()
+    assert closed == [True]
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_returns_error_when_response_close_fails(monkeypatch):
+    import httpx
+
+    class Response:
+        status_code = 200
+        headers = {"content-type": "text/plain"}
+        def raise_for_status(self): pass
+        async def aread(self): return b"content"
+        async def aclose(self): raise OSError("close failed")
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, *args, **kwargs): return Response()
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    monkeypatch.setattr(WebFetchTool, "_resolve_hop", staticmethod(lambda url: (("93.184.216.34",), "")))
+    result = json.loads(await WebFetchTool()._fetch_readability("http://example.com/", "text", 100))
+    assert result["error"] == "close failed"
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_closes_response_when_close_is_cancelled(monkeypatch):
+    import asyncio
+
+    import httpx
+
+    calls = []
+    class Response:
+        status_code = 200
+        headers = {"content-type": "text/plain"}
+        def raise_for_status(self): pass
+        async def aread(self): return b"content"
+        async def aclose(self):
+            calls.append("close")
+            if len(calls) == 1:
+                raise asyncio.CancelledError
+            calls.append("closed")
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get(self, *args, **kwargs): return Response()
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    monkeypatch.setattr(WebFetchTool, "_resolve_hop", staticmethod(lambda url: (("93.184.216.34",), "")))
+    with pytest.raises(asyncio.CancelledError):
+        await WebFetchTool()._fetch_readability("http://example.com/", "text", 100)
+    assert calls == ["close", "close", "closed"]
 
 
 @pytest.mark.asyncio

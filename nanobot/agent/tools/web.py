@@ -356,7 +356,17 @@ class WebFetchTool(Tool):
                         raise
                     else:
                         if hasattr(response, "aclose"):
-                            await response.aclose()
+                            try:
+                                await response.aclose()
+                            except Exception as exc:
+                                logger.error("WebFetch response close failed for {}: {}", current, exc)
+                                return json.dumps({"error": str(exc), "url": url}, ensure_ascii=False)
+                            except BaseException:
+                                try:
+                                    await response.aclose()
+                                except BaseException:
+                                    logger.warning("WebFetch response cleanup failed", exc_info=True)
+                                raise
             except Exception as exc:
                 logger.error("WebFetch error for {}: {}", current, exc)
                 return json.dumps({"error": str(exc), "url": url}, ensure_ascii=False)

@@ -136,7 +136,15 @@ class _PoolStream(httpx.AsyncByteStream):
             yield chunk
 
     async def aclose(self) -> None:
+        stream_error: BaseException | None = None
         try:
             await self.stream.aclose()
-        finally:
+        except BaseException as exc:
+            stream_error = exc
+        try:
             await self.pool.aclose()
+        except BaseException:
+            if stream_error is None:
+                raise
+        if stream_error is not None:
+            raise stream_error
