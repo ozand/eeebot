@@ -1,6 +1,6 @@
 ---
 title: Accept bounded delivery deviations only with independent evidence and truthful acceptance
-status: proposed
+status: accepted
 date: 2026-10-24
 authors: [eeebot maintainers]
 related: ["#2116", "ADR-008", "ADR-035", "ADR-037", "ADR-041"]
@@ -9,11 +9,15 @@ tags: [process, authority, delivery]
 
 # ADR-042: Accept bounded process deviations only with truthful evidence
 
-**Status**: Proposed
+**Status**: Accepted — delegated technical acceptance recorded 2026-10-24
 **Date**: 2026-10-24
 **Authors**: eeebot maintainers
 **Supersedes**: None
 **Related**: ADR-008 (delegated technical authority), ADR-035 (planning and closure), ADR-037 (handled disposition), ADR-041 (web fetch safety)
+
+# Status
+
+Accepted by the authorized delivery executor under the owner's explicitly approved technical outcome on 2026-10-24. This is delegated technical acceptance, not a claim that the operator personally accepted the ADR or that the independent reviewer authored the decision. Independent review `826cdf94` passed the complete policy candidate, and `e386db39` passed exact source revision `1abd086184ff26d4d4a4f773495a15cb8fd81f1c`, including the metadata correction. The focused ADR acceptance test passed (47 passed, 11 skipped, 4 xfailed), and CI run `40052476268` passed all six Python-version/timezone checks on that revision. Parent delegated the technical acceptance and limited automated-test deferral in https://github.com/ozand/eeebot/issues/2116#issuecomment-6379195242; the prior review/CI receipt is https://github.com/ozand/eeebot/issues/2116#issuecomment-6378662362. The four manual policy scenarios are recorded in the issue receipts linked in the Test Contract; their automated policy-conformance tests are explicitly deferred to #2116, with no claim of automated policy coverage or runtime activation. This records source acceptance only; it establishes neither PR merge nor installation or activation.
 
 ## Context
 
@@ -53,10 +57,10 @@ Exact-final-revision independent review, applicable checks, explicit scope, prot
 
 | Claim in Decision | Test | Currently |
 |---|---|---|
-| Approved ordinary delivery needs no repeated GO, while reserved decisions still escalate | Manual scenario recorded in [#2116 project delivery receipt](https://github.com/ozand/eeebot/issues/2116#issuecomment-6378418639) | manually checked against candidate `15d6c642268101bf845090415042299113372b39`; no automated policy test |
-| A necessary technical ADR may be accepted by the delegated executor only after checks and independent PASS on its exact final revision, without claiming operator or human-reviewer acceptance | Manual scenario recorded in [#2116 review-fix receipt](https://github.com/ozand/eeebot/issues/2116#issuecomment-6378180472) | manually checked against candidate `15d6c642268101bf845090415042299113372b39`; no automated policy test |
-| A limited deviation preserves original per-criterion met/partial/unmet evidence and cannot bypass review or guards | Manual scenario recorded in [#2116 project delivery receipt](https://github.com/ozand/eeebot/issues/2116#issuecomment-6378418639) | manually checked against candidate `15d6c642268101bf845090415042299113372b39`; no automated policy test |
-| Unresolved substantive criteria or reserved authority keep the task open | Manual scenario recorded in [#2116 project delivery receipt](https://github.com/ozand/eeebot/issues/2116#issuecomment-6378418639) | manually checked against candidate `15d6c642268101bf845090415042299113372b39`; no automated policy test |
+| Approved ordinary delivery needs no repeated GO, while reserved decisions still escalate | Manual scenario recorded in [#2116 project delivery receipt](https://github.com/ozand/eeebot/issues/2116#issuecomment-6378418639) | manually checked against candidate `15d6c642268101bf845090415042299113372b39`; automated policy test deferred (#2116): no automated policy-conformance tests are added in this bounded documentation change |
+| A necessary technical ADR may be accepted by the delegated executor only after checks and independent PASS on its exact final revision, without claiming operator or human-reviewer acceptance | Manual scenario recorded in [#2116 review-fix receipt](https://github.com/ozand/eeebot/issues/2116#issuecomment-6378180472) | manually checked against candidate `15d6c642268101bf845090415042299113372b39`; automated policy test deferred (#2116): no automated policy-conformance tests are added in this bounded documentation change |
+| A limited deviation preserves original per-criterion met/partial/unmet evidence and cannot bypass review or guards | Manual scenario recorded in [#2116 project delivery receipt](https://github.com/ozand/eeebot/issues/2116#issuecomment-6378418639) | manually checked against candidate `15d6c642268101bf845090415042299113372b39`; automated policy test deferred (#2116): no automated policy-conformance tests are added in this bounded documentation change |
+| Unresolved substantive criteria or reserved authority keep the task open | Manual scenario recorded in [#2116 project delivery receipt](https://github.com/ozand/eeebot/issues/2116#issuecomment-6378418639) | manually checked against candidate `15d6c642268101bf845090415042299113372b39`; automated policy test deferred (#2116): no automated policy-conformance tests are added in this bounded documentation change |
 
 ## References
 

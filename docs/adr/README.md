@@ -56,7 +56,7 @@ Conventions:
 | [ADR-039](ADR-039-warn-on-twelve-started-attempts-per-task.md) | Warn operators after twelve unsuccessful started attempts for one task | proposed |
 | [ADR-040](ADR-040-reflector-selects-authoritative-executor-attempt.md) | Reflector selects the authoritative executor attempt | proposed |
 | [ADR-041](ADR-041-bind-web-fetch-connections-to-validated-addresses.md) | Bind each web fetch connection to its validated address snapshot | proposed |
-| [ADR-042](ADR-042-accept-bounded-delivery-deviations-with-truthful-evidence.md) | Accept bounded process deviations only with truthful evidence | proposed |
+| [ADR-042](ADR-042-accept-bounded-delivery-deviations-with-truthful-evidence.md) | Accept bounded process deviations only with truthful evidence | accepted |
 
 ## Acceptance
 
