@@ -80,8 +80,14 @@ A record moves `proposed -> accepted` when, and only when:
    `deferred (#NNN)`. An item with neither is the reason the record is not
    accepted. Amending a proposed record's contract items to name their tests
    is part of accepting it.
-2. The operator accepts, by a commit that flips frontmatter `status:` to
-   `accepted`. Not the agent that wrote the record, and not the loop.
+2. The authorized decision owner or, for a necessary technical ADR within an
+   explicitly owner-approved outcome, the delegated delivery executor accepts
+   the record by a commit that flips frontmatter `status:` to `accepted`.
+   Delegated technical acceptance requires applicable checks and independent
+   review PASS on the exact final revision, with the authority and reviewed
+   revision recorded under [`AGENT_ROUTING.md`](../../AGENT_ROUTING.md). It is
+   not a claim that a human reviewer or operator personally accepted it. No
+   agent may record operator acceptance on the operator's behalf.
 3. The record carries its own acceptance: date and accepting change (PR
    number or commit) under `# Status`.
 

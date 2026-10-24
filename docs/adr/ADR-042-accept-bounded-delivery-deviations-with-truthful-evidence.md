@@ -23,7 +23,7 @@ A missing project-level rule is how to disposition a process-only deviation whil
 
 ## Decision
 
-An explicitly approved technical plan may proceed through its agreed technical delivery lifecycle without repeated approval prompts. A process-only deviation may be technically accepted only when an independent reviewer assesses the exact final revision and retained evidence shows there is no substantive outcome failure, ongoing exposure, guard/access bypass, or unresolved reserved decision. Record every original acceptance criterion as met, partial, or unmet against its own evidence. A deviation never turns partial or unmet into met, rewrites history, waives substantive outcomes, or bypasses required checks and review. Unresolved substantive criteria or reserved authority keep the task open. Escalate only new scope or product outcome, protected access, dangerous irreversible action, unapproved production operation, or an explicit reserved decision.
+An explicitly approved technical plan may proceed through its agreed technical delivery lifecycle without repeated approval prompts. For a necessary technical ADR within that approved outcome, the authorized delivery executor may accept the ADR only after applicable checks and independent review PASS the exact final revision, recording the delegated authority and reviewed revision. This is technical acceptance under delegation, not a claim that a human reviewer or operator personally accepted it. A process-only deviation may be technically accepted only when an independent reviewer assesses the exact final revision and retained evidence shows there is no substantive outcome failure, ongoing exposure, guard/access bypass, or unresolved reserved decision. Record every original acceptance criterion as met, partial, or unmet against its own evidence. A deviation never turns partial or unmet into met, rewrites history, waives substantive outcomes, or bypasses required checks and review. Unresolved substantive criteria or reserved authority keep the task open. Escalate only new scope or product outcome, protected access, dangerous irreversible action, unapproved production operation, or an explicit reserved decision.
 
 ### What this is not
 
@@ -41,7 +41,7 @@ Reviewers must distinguish process-only deviation from substantive failure and r
 
 ### What does not change
 
-Exact-final-revision independent review, applicable checks, explicit scope, protected-operation gates, and truthful acceptance evidence remain mandatory.
+Exact-final-revision independent review, applicable checks, explicit scope, protected-operation gates, and truthful acceptance evidence remain mandatory. Technical ADR acceptance may be delegated only within an explicitly owner-approved outcome and never represents personal human review or operator acceptance.
 
 ## Alternatives Considered
 
@@ -54,6 +54,7 @@ Exact-final-revision independent review, applicable checks, explicit scope, prot
 | Claim in Decision | Test | Currently |
 |---|---|---|
 | Approved ordinary delivery needs no repeated GO, while reserved decisions still escalate | Manual scenario in #2116 review receipt | not yet written |
+| A necessary technical ADR may be accepted by the delegated executor only after checks and independent PASS on its exact final revision, without claiming operator or human-reviewer acceptance | Manual scenario in #2116 review receipt | not yet written |
 | A limited deviation preserves original per-criterion met/partial/unmet evidence and cannot bypass review or guards | Manual scenario in #2116 review receipt | not yet written |
 | Unresolved substantive criteria or reserved authority keep the task open | Manual scenario in #2116 review receipt | not yet written |
 
