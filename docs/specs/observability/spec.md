@@ -13,6 +13,13 @@ remains the explanatory reference (signal map, anti-patterns, walkthroughs).
 
 ## Requirements
 
+### Runtime dashboard recovery visibility (#2118)
+
+The existing runtime dashboard presents a bounded, read-only projection of persisted planner recovery state.
+
+- The existing metrics, health, and rendered HTML surfaces SHALL label availability and expose only validated recovery flags and consecutive counts; missing, malformed, or unreadable state is not healthy zero.
+- The projection SHALL omit deferred verdict identifiers and arbitrary state payload fields and SHALL NOT trigger recovery writes, resume, cycle execution, or publisher actions.
+
 ### Seven operator questions
 
 - R1. From durable state alone (no access to the live process), the runtime SHALL

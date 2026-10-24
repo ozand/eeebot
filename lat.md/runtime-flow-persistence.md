@@ -26,6 +26,12 @@ Bounded state reads distinguish unavailable inputs from partial evidence.
 
 [[nanobot/runtime/state_access.py#ledger_window]] returns status-bearing bounded reads: a missing directory is unavailable, and a corrupt rotated archive can make an otherwise readable window partial rather than silently presenting complete evidence. Existing assertions: [[tests/test_state_access.py#test_ledger_window_missing_dir_is_unavailable]] and [[tests/test_state_access.py#test_ledger_window_corrupt_archive_is_partial]]. Separately, [[nanobot/runtime/open_increment.py#_save_state]] is followed by read-back verification in resolution; [[tests/test_agent_chooses.py#test_open_increment_resolution_raising_fails_closed]] covers a resolution failure, but does not independently establish atomic-write guarantees for every persistence path. Do not treat absent or unreadable state as an empty successful history.
 
+## Dashboard recovery projection
+
+The runtime dashboard reads planner recovery state for visibility only and omits private deferred-work identifiers.
+
+[[scripts/eeebot_dashboard.py#read_no_plan_recovery]] accepts only the recovery schema and bounded flags/counts from the existing JSON state; labelled source failures and invalid state remain unavailable rather than zero. Existing metrics, health, and HTML presentation use [[scripts/eeebot_dashboard.py#collect_metrics_uncached]] and [[scripts/eeebot_dashboard.py#render_html]]. [[tests/test_dashboard_no_plan_recovery.py]] exercises GET output and rendered HTML for unavailable, stopped, degraded, and normal fixtures, including omission of private payload fields. This read-only projection does not add resume or recovery authority; ADR-035 remains Proposed.
+
 ## Spec and decision status
 
 The spec describes product intent, while ADR-035 remains proposed; neither implies host deployment.
