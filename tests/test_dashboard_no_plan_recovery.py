@@ -118,3 +118,42 @@ def test_stopped_degraded_normal_are_visible_on_get_and_html(tmp_path, monkeypat
         metrics = json.loads(metrics_body)
         dimensions = {name: status for name, status, _ in DASHBOARD._build_health_dimensions(metrics)}
         assert dimensions["planner_recovery"] == health
+
+
+def test_invalid_utf8_recovery_is_malformed_on_every_get_surface(tmp_path, monkeypatch):
+    path = tmp_path / "planner" / "no_plan_recovery.json"
+    path.parent.mkdir()
+    path.write_bytes(bytes([255]) + b"private payload")
+    for endpoint in ("/api/metrics", "/api/health", "/"):
+        code, body = _get(monkeypatch, tmp_path, endpoint)
+        assert code == 200
+        if endpoint == "/api/metrics":
+            assert json.loads(body)["no_plan_recovery"]["source_status"] == "malformed"
+        elif endpoint == "/api/health":
+            assert json.loads(body)["dimensions"]["planner_recovery"]["status"] == "WARN"
+        else:
+            assert 'data-status="malformed"' in body
+            assert "неверный формат" in body
+        assert "private payload" not in body
+        assert "�" not in body
+
+
+def test_recovery_badge_severity_is_distinct_from_source_availability(tmp_path, monkeypatch):
+    path = tmp_path / "planner" / "no_plan_recovery.json"
+    path.parent.mkdir()
+    for values, expected_status, health in (
+        ({"consecutive_planner": 6, "stopped": True}, "critical", "CRIT"),
+        ({"consecutive_planner": 3, "minimal_mode": True, "planner_degraded": True}, "caution", "WARN"),
+        ({}, "valid", "OK"),
+    ):
+        path.write_text(json.dumps(_state(**values)), encoding="utf-8")
+        code, metrics_body = _get(monkeypatch, tmp_path, "/api/metrics")
+        assert code == 200
+        assert json.loads(metrics_body)["no_plan_recovery"]["source_status"] == "valid"
+        code, health_body = _get(monkeypatch, tmp_path, "/api/health")
+        assert code == 200
+        assert json.loads(health_body)["dimensions"]["planner_recovery"]["status"] == health
+        code, html_body = _get(monkeypatch, tmp_path, "/")
+        assert code == 200
+        assert f'data-status="{expected_status}"' in html_body
+        assert "PRIVATE_" not in html_body and "PRIVATE_TASK" not in html_body

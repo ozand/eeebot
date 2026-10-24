@@ -212,6 +212,8 @@ def read_json_state(path: Path) -> tuple[Any, str]:
         return None, "permission"
     except OSError:
         return None, "unreadable"
+    except UnicodeDecodeError:
+        return None, "malformed"
     try:
         value = json.loads(text)
     except json.JSONDecodeError:
@@ -3070,6 +3072,11 @@ def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
     ctx["lessons_status"] = escape_html_text(m.get("lessons_status", "unavailable"))
     recovery = m.get("no_plan_recovery", {})
     recovery_status = recovery.get("source_status", "unavailable") if isinstance(recovery, dict) else "unavailable"
+    if recovery_status == "valid":
+        if recovery.get("stopped"):
+            recovery_status = "critical"
+        elif recovery.get("planner_degraded") or recovery.get("model_supply_degraded"):
+            recovery_status = "caution"
     ctx["no_plan_recovery_status"] = html.escape(str(recovery_status), quote=True)
     ctx["no_plan_recovery_text"] = escape_html_text(m.get("no_plan_recovery_text", "недоступно"))
 
