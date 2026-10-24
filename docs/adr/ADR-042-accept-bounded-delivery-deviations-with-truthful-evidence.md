@@ -1,7 +1,7 @@
 ---
 title: Accept bounded delivery deviations only with independent evidence and truthful acceptance
 status: proposed
-date: 2026-09-22
+date: 2026-10-24
 authors: [eeebot maintainers]
 related: ["#2116", "ADR-008", "ADR-035", "ADR-037", "ADR-041"]
 tags: [process, authority, delivery]
@@ -10,7 +10,7 @@ tags: [process, authority, delivery]
 # ADR-042: Accept bounded process deviations only with truthful evidence
 
 **Status**: Proposed
-**Date**: 2026-09-22
+**Date**: 2026-10-24
 **Authors**: eeebot maintainers
 **Supersedes**: None
 **Related**: ADR-008 (delegated technical authority), ADR-035 (planning and closure), ADR-037 (handled disposition), ADR-041 (web fetch safety)
@@ -53,12 +53,12 @@ Exact-final-revision independent review, applicable checks, explicit scope, prot
 
 | Claim in Decision | Test | Currently |
 |---|---|---|
-| Approved ordinary delivery needs no repeated GO, while reserved decisions still escalate | Manual scenario in #2116 review receipt | not yet written |
-| A necessary technical ADR may be accepted by the delegated executor only after checks and independent PASS on its exact final revision, without claiming operator or human-reviewer acceptance | Manual scenario in #2116 review receipt | not yet written |
-| A limited deviation preserves original per-criterion met/partial/unmet evidence and cannot bypass review or guards | Manual scenario in #2116 review receipt | not yet written |
-| Unresolved substantive criteria or reserved authority keep the task open | Manual scenario in #2116 review receipt | not yet written |
+| Approved ordinary delivery needs no repeated GO, while reserved decisions still escalate | Manual scenario recorded in [#2116 project delivery receipt](https://github.com/ozand/eeebot/issues/2116#issuecomment-6378418639) | manually checked against candidate `15d6c642268101bf845090415042299113372b39`; no automated policy test |
+| A necessary technical ADR may be accepted by the delegated executor only after checks and independent PASS on its exact final revision, without claiming operator or human-reviewer acceptance | Manual scenario recorded in [#2116 review-fix receipt](https://github.com/ozand/eeebot/issues/2116#issuecomment-6378180472) | manually checked against candidate `15d6c642268101bf845090415042299113372b39`; no automated policy test |
+| A limited deviation preserves original per-criterion met/partial/unmet evidence and cannot bypass review or guards | Manual scenario recorded in [#2116 project delivery receipt](https://github.com/ozand/eeebot/issues/2116#issuecomment-6378418639) | manually checked against candidate `15d6c642268101bf845090415042299113372b39`; no automated policy test |
+| Unresolved substantive criteria or reserved authority keep the task open | Manual scenario recorded in [#2116 project delivery receipt](https://github.com/ozand/eeebot/issues/2116#issuecomment-6378418639) | manually checked against candidate `15d6c642268101bf845090415042299113372b39`; no automated policy test |
 
 ## References
 
 - Issue #2116 and its research record: https://github.com/ozand/eeebot/issues/2116
-- ADR-008 — accepted global technical delegation, reused without changing its status or scope.
+- `ozand/pi-config` `docs/adr/ADR-008-delegate-reviewed-technical-delivery-decisions.md` — accepted global technical-delivery delegation; see the published source at https://github.com/ozand/pi-config/blob/062907f10394a8520ffe507505c2b9c85d355c45/docs/adr/ADR-008-delegate-reviewed-technical-delivery-decisions.md (ADR-008 status and index verified at baseline `062907f10394a8520ffe507505c2b9c85d355c45`).
