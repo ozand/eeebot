@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from nanobot.runtime import no_plan_recovery
-from tests.test_eeebot_dashboard_truth import DASHBOARD, _health_metrics, _mutation_test_request_class, _render_ready
+from tests.test_eeebot_dashboard_truth import DASHBOARD, _mutation_test_request_class
 
 
 def _state(**overrides):
@@ -29,18 +29,21 @@ def _get(monkeypatch, state_dir: Path, endpoint: str):
     for name in ("_save_state", "record_outcome", "resume", "defer_or_bound_verdicts"):
         monkeypatch.setattr(no_plan_recovery, name, forbidden)
     monkeypatch.setattr(DASHBOARD, "STATE_DIR", state_dir)
-    monkeypatch.setattr(DASHBOARD, "collect_metrics", lambda: _render_ready({
-        **_health_metrics(report_status="fresh", materialized_status="fresh"),
-        "captured_at": "fixture",
-        "goal": "fixture",
-        "active_task": "fixture",
-        "reward_average": "unavailable",
-        "host_capability_coverage": "fixture",
-        "no_plan_recovery": DASHBOARD.read_no_plan_recovery(state_dir),
-        "no_plan_recovery_text": DASHBOARD.format_no_plan_recovery(
-            DASHBOARD.read_no_plan_recovery(state_dir)
-        ),
-    }))
+    monkeypatch.setattr(DASHBOARD, "load_json", lambda *_args: {})
+    monkeypatch.setattr(DASHBOARD, "load_latest_materialized", lambda: (None, {}))
+    monkeypatch.setattr(DASHBOARD, "scan_report_artifacts", lambda: (None, {}, []))
+    monkeypatch.setattr(DASHBOARD, "load_host_capabilities", lambda: {})
+    monkeypatch.setattr(DASHBOARD, "scan_subagent_tree_stats", lambda: (0, 0, None, 0, None))
+    monkeypatch.setattr(DASHBOARD, "scan_all_report_rewards", lambda **_kwargs: [])
+    monkeypatch.setattr(DASHBOARD, "scan_prompt_fit_ledger", lambda *_args: {"source_status": "missing"})
+    monkeypatch.setattr(DASHBOARD, "scan_skill_fitness", lambda *_args: {"source_status": "missing"})
+    monkeypatch.setattr(DASHBOARD, "scan_lessons_corpus", lambda *_args: {"source_status": "missing", "index_status": "missing"})
+    monkeypatch.setattr(DASHBOARD, "scan_hypotheses_sources", lambda *_args: {"sources": {}})
+    monkeypatch.setattr(DASHBOARD, "scan_integration_class_share", lambda *_args: {"source_status": "missing"})
+    monkeypatch.setattr(DASHBOARD, "get_cpu_load", lambda: 0.0)
+    monkeypatch.setattr(DASHBOARD, "get_memory_usage_pct", lambda: 0.0)
+    monkeypatch.setattr(DASHBOARD, "get_disk_usage_pct", lambda: 0.0)
+    monkeypatch.setattr(DASHBOARD, "collect_metrics", DASHBOARD.collect_metrics_uncached)
     state_path = state_dir / "planner" / "no_plan_recovery.json"
     before = state_path.read_bytes() if state_path.exists() else None
     request = _mutation_test_request_class()(endpoint)

@@ -30,7 +30,7 @@ Bounded state reads distinguish unavailable inputs from partial evidence.
 
 The runtime dashboard reads planner recovery state for visibility only and omits private deferred-work identifiers.
 
-[[scripts/eeebot_dashboard.py#read_no_plan_recovery]] accepts only the recovery schema and bounded flags/counts from the existing JSON state; labelled source failures and invalid state remain unavailable rather than zero. Existing metrics, health, and HTML presentation use [[scripts/eeebot_dashboard.py#collect_metrics_uncached]] and [[scripts/eeebot_dashboard.py#render_html]]. [[tests/test_dashboard_no_plan_recovery.py]] exercises GET output and rendered HTML for unavailable, stopped, degraded, and normal fixtures, including omission of private payload fields. This read-only projection does not add resume or recovery authority; ADR-035 remains Proposed.
+[[scripts/eeebot_dashboard.py#read_no_plan_recovery]] accepts only the recovery schema and bounded flags/counts from the existing JSON state; labelled source failures and invalid state remain unavailable rather than zero. Existing metrics, health, and HTML presentation use [[scripts/eeebot_dashboard.py#collect_metrics_uncached]] and [[scripts/eeebot_dashboard.py#render_html]]. [[tests/test_dashboard_no_plan_recovery.py]] exercises those GET surfaces using the production collector with unrelated host/state probes stubbed, including omission of private payload fields and no recovery writes. A controlled temporary removal of the collector wiring fails the integration assertions; source bytes are restored afterward. This read-only projection does not add resume or recovery authority; ADR-035 remains Proposed.
 
 ## Spec and decision status
 
