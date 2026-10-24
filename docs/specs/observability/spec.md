@@ -17,7 +17,8 @@ remains the explanatory reference (signal map, anti-patterns, walkthroughs).
 
 The existing runtime dashboard presents a bounded, read-only projection of persisted planner recovery state.
 
-- The existing metrics, health, and rendered HTML surfaces SHALL label availability and expose only validated recovery flags and consecutive counts; missing, malformed, or unreadable state is not healthy zero.
+- The existing metrics, health, and rendered HTML surfaces SHALL label availability and expose only validated recovery flags and consecutive counts; missing, malformed (including invalid UTF-8), or unreadable state is not healthy zero and SHALL NOT break GET rendering.
+- Health status and the HTML recovery badge SHALL reflect stopped/degraded severity separately from source availability: stopped is critical, degraded is caution, and valid normal state is nominal.
 - The projection SHALL omit deferred verdict identifiers and arbitrary state payload fields and SHALL NOT trigger recovery writes, resume, cycle execution, or publisher actions.
 
 ### Seven operator questions
