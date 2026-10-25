@@ -57,9 +57,10 @@ Read `planner/no_plan_recovery.json` directly, not through permissive
 round-trip unknown JSON object fields unchanged for forward compatibility.
 Validate exact types for known fields (`bool` is not an integer), nonnegative
 integer counters, booleans, and a list of strings for deferred verdict IDs.
-Reject missing known fields, malformed or invalid UTF-8/JSON, wrong schema, and
-non-stopped state. Do not include state payload or OS exception text in output.
-Do not create missing state directories or defaults.
+Reject missing known fields, malformed or invalid UTF-8/JSON, wrong schema,
+non-stopped state, and symlinked root/lock/state paths. Do not include state
+payload or OS exception text in output. Do not create missing state directories
+or defaults.
 
 On valid stopped state, atomically persist only `stopped=false` via a
 same-directory temporary file, flush/`fsync`, replace, and parent-directory
@@ -79,9 +80,11 @@ event is absent). Do not truncate partial ledger lines or retry this command
 once state is no longer stopped.
 
 Emit bounded JSON with `result` (`resumed`, `partial`, `refused`),
-`state_status` (`unchanged`, `verified`, `unverified`), and `audit_status`
-(`not_attempted`, `verified`, `unverified`). Only verified state and audit
-permit zero-exit success. Emit no raw exception, path, or state payload.
+`state_status` (`unchanged`, `verified`, `unverified`),
+`state_durability` (`not_attempted`, `verified`, `unverified`), and
+`audit_status` (`not_attempted`, `verified`, `unverified`). Only verified state
+durability and audit permit zero-exit success. Emit no raw exception, path, or
+state payload.
 
 ### What this IS NOT
 
@@ -128,11 +131,11 @@ provider/cycle behavior, dashboard, or host configuration changes.
 
 | Claim in Decision | Test | Currently |
 |---|---|---|
-| Explicit root and bounded safe JSON output/exits; both public CLI entrypoints remain usable | `tests/test_cli.py::test_recovery_resume_requires_explicit_root_and_reports_safe_result` | not yet written |
-| Valid stopped state clears only `stopped`, preserving known fields, unknown fields, and deferred IDs; exactly one transition is durable | `tests/test_no_plan_recovery_cli.py::test_resume_preserves_state_and_records_one_transition` | not yet written |
-| Missing/unreadable/invalid UTF-8/malformed/wrong-schema/missing-field/wrong-type/negative-count/non-stopped state refuses without state mutation | `tests/test_no_plan_recovery_cli.py::test_invalid_or_nonstopped_state_is_unchanged` | not yet written |
-| Busy and unsupported lock refuse before mutation; lock covers state and ledger operation | `tests/test_no_plan_recovery_cli.py::test_resume_refuses_busy_or_unsupported_lock` | not yet written |
-| Replace followed by parent-directory `fsync` failure reports state durability unverified and ledger not attempted; ledger append/fsync/read-back failures report audit verified only when proved, otherwise unverified; neither case rolls back state or reports success | `tests/test_no_plan_recovery_cli.py::test_post_replace_and_ledger_failures_report_truthful_phase_status` | not yet written |
+| Explicit root and bounded safe JSON output/exits; both public CLI entrypoints remain usable | `tests/test_no_plan_recovery_cli.py::test_recovery_resume_requires_explicit_root_and_reports_safe_result` | passing |
+| Valid stopped state clears only `stopped`, preserving known fields, unknown fields, and deferred IDs; exactly one transition is durable, with non-stopped repeat refused | `tests/test_no_plan_recovery_cli.py::test_recovery_resume_requires_explicit_root_and_reports_safe_result` | passing |
+| Missing/unreadable/invalid UTF-8/malformed/wrong-schema/missing-field/wrong-type/negative-count/non-stopped and symlinked state refuse without state mutation | `tests/test_no_plan_recovery_cli.py::test_invalid_or_nonstopped_state_is_unchanged`; `tests/test_no_plan_recovery_cli.py::test_missing_known_field_refuses_without_mutation`; `tests/test_no_plan_recovery_cli.py::test_missing_malformed_and_invalid_utf8_state_refuse_without_mutation`; `tests/test_no_plan_recovery_cli.py::test_unreadable_state_refuses_without_mutation`; `tests/test_no_plan_recovery_cli.py::test_symlink_state_file_refuses_without_mutation` | passing; POSIX permission test skipped on Windows |
+| Busy and unsupported lock refuse before mutation; lock covers state and ledger operation | `tests/test_no_plan_recovery_cli.py::test_resume_refuses_busy_or_unsupported_lock`; `tests/test_no_plan_recovery_cli.py::test_unsupported_lock_fails_closed`; `tests/test_no_plan_recovery_cli.py::test_real_bridge_flock_contention_refuses_without_state_change` | passing; POSIX-only case skipped on Windows |
+| Replace followed by parent-directory `fsync` failure reports state durability unverified and ledger not attempted; ledger append/fsync/read-back failures report audit verified only when proved, otherwise unverified; neither case rolls back state or reports success | `tests/test_no_plan_recovery_cli.py::test_state_directory_fsync_failure_is_partial_and_skips_ledger`; `tests/test_no_plan_recovery_cli.py::test_ledger_failure_is_partial_and_never_rolls_back`; `tests/test_no_plan_recovery_cli.py::test_ledger_fsync_failure_reports_event_if_readback_proves_it`; `tests/test_no_plan_recovery_cli.py::test_ledger_write_that_cannot_be_verified_is_not_claimed_absent` | passing |
 
 ## Rollback
 

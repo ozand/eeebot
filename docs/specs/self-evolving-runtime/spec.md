@@ -443,6 +443,19 @@ records `planning_session.outcome=no_plan` with its specific reason, not
 contract remains `malformed`. Neither failure writes a diary plan. No
 additional model turn is granted.
 
+### Operator recovery resume (#2121, ADR-043)
+
+The `nanobot recovery-resume --runtime-state-root PATH` command requires an
+explicit state root and a strictly validated stopped `no_plan_recovery-v1`
+record. It holds the bridge's non-blocking `bridge.lock` across validation,
+state mutation, ledger append, and verification; clears only `stopped`; and
+records the `operator-resume` transition. Success requires verified state
+durability and audit evidence. Post-replacement or ledger failures return
+nonzero with explicit verified/unverified/not-attempted statuses; the command
+does not roll back, start a cycle, or call a provider. See Proposed ADR-043,
+`nanobot/runtime/operator_recovery.py`, and
+`tests/test_no_plan_recovery_cli.py`.
+
 ADR-035 rule 1 (#1942 B2): the planning session is now the sole, authoritative
 source of the cycle's candidate — the ranked-queue fallback (`find_pending_request`
 and its rotation-based selection) is retired, not merely deprioritized. A
