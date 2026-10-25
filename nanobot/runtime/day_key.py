@@ -99,10 +99,22 @@ def _decode_cutover(raw: Any) -> datetime:
     return parsed
 
 
+def _strict_marker_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate cutover marker key")
+        result[key] = value
+    return result
+
+
 def load_cutover(marker_path: "Path | str") -> "datetime | None":
     """Best-effort compatibility reader: any unavailable/corrupt marker is absent."""
     try:
-        return _decode_cutover(json.loads(Path(marker_path).read_text(encoding="utf-8")))
+        raw = json.loads(Path(marker_path).read_text(encoding="utf-8"))
+        value = raw["cutover_utc"]
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
     except Exception:
         return None
 
@@ -131,7 +143,10 @@ def record_cutover_if_absent(
     """Idempotently record one ledger cutover instant; optionally fail on write errors."""
     path = Path(marker_path)
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_strict_marker_object if strict else None,
+        )
     except FileNotFoundError:
         raw = _MISSING
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RecursionError):

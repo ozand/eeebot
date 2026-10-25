@@ -75,6 +75,8 @@ def test_day_key_defaults_to_system_clock():
     '{"cutover_utc": 1}',
     '{"cutover_utc": null}',
     '{"cutover_utc": "2026-01-01T00:00:00"}',
+    '{"cutover_utc":"2026-01-01T00:00:00Z","cutover_utc":"2026-01-02T00:00:00Z"}',
+    '{"cutover_utc":"2026-01-01T00:00:00Z","cutover_utc":"invalid"}',
     "{" + "[" * 2000 + "0" + "]" * 2000 + "}",
 ])
 def test_strict_cutover_read_rejects_invalid_existing_marker_without_overwrite(tmp_path, payload):
