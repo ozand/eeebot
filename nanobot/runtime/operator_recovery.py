@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -104,10 +105,54 @@ def _write_state(path: Path, raw: dict[str, Any]) -> None:
         raise ResumeRefusedError("state_write_failed") from exc
 
 
-def _append_transition(state_root: Path, count: int) -> bytes:
+def _reject_symlink_components(path: Path) -> None:
+    """Reject static symlink components; bridge.lock coordinates conforming writers."""
+    absolute = path.absolute()
+    for candidate in (absolute, *absolute.parents):
+        if candidate.is_symlink():
+            raise ResumeRefusedError("unsafe_state_path")
+
+
+def _preflight_ledger(state_root: Path) -> tuple[Path, bytes]:
+    from nanobot.runtime.cycle_ledger import _LEDGER_FILENAME, _ledger_dir
+
+    directory = _ledger_dir(state_root)
+    ledger = directory / _LEDGER_FILENAME
+    _reject_symlink_components(directory)
+    _reject_symlink_components(ledger)
+    from nanobot.runtime.day_key import cutover_marker_path
+
+    _reject_symlink_components(cutover_marker_path(directory))
+    for archive in directory.glob("cycles-*.jsonl.gz"):
+        _reject_symlink_components(archive)
+    if not directory.exists():
+        return ledger, b""
+    if not directory.is_dir():
+        raise ResumeRefusedError("unsafe_ledger_path")
+    if not ledger.exists():
+        return ledger, b""
+    if not stat.S_ISREG(ledger.stat().st_mode):
+        raise ResumeRefusedError("unsafe_ledger_path")
+    try:
+        previous = ledger.read_bytes()
+    except OSError as exc:
+        raise ResumeRefusedError("ledger_unavailable") from exc
+    if previous and not previous.endswith(b"\n"):
+        raise ResumeRefusedError("ledger_unterminated_line")
+    return ledger, previous
+
+
+def _append_transition(state_root: Path, count: int, *, now=None) -> dict[str, Any]:
     from datetime import datetime, timezone
 
-    from nanobot.runtime.cycle_ledger import _LEDGER_FILENAME, _ledger_dir
+    from nanobot.runtime import day_key
+    from nanobot.runtime.cycle_ledger import (
+        _LEDGER_FILENAME,
+        _append_transition_marker,
+        _ledger_dir,
+        _retention_days,
+        _rotate_and_prune,
+    )
 
     directory = _ledger_dir(state_root)
     created = not directory.exists()
@@ -118,18 +163,33 @@ def _append_transition(state_root: Path, count: int) -> bytes:
     except Exception as exc:
         raise AuditWriteError(attempted=False, durable=False) from exc
     ledger = directory / _LEDGER_FILENAME
+    moment = now or datetime.now(timezone.utc)
+    had_prior_history = any(directory.glob("cycles-*.jsonl.gz"))
+    current_day = day_key.day_key(now)
+    _rotate_and_prune(directory, ledger, current_day, _retention_days())
+    cutover, just_recorded = day_key.record_cutover_if_absent(day_key.cutover_marker_path(directory), moment)
+    local_tz = now.tzinfo if now is not None else None
+    if just_recorded and had_prior_history and day_key.is_transition_day(
+        current_day, local_tz=local_tz, cutover_utc=cutover
+    ):
+        _append_transition_marker(ledger, current_day, cutover, moment)
+        _fsync_directory(directory)
     row = {
         "phase": "no_plan_recovery",
         "cycle_id": "operator-resume",
         "family": "planner",
         "consecutive_count": count,
         "state": "normal",
-        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "ts": (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     payload = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
     durable = False
     attempted = False
     try:
+        if ledger.exists():
+            existing = ledger.read_bytes()
+            if existing and not existing.endswith(bytes([10])):
+                raise OSError("ledger ends with an incomplete line")
         attempted = True
         with open(ledger, "ab") as fh:
             fh.write(payload)
@@ -137,9 +197,12 @@ def _append_transition(state_root: Path, count: int) -> bytes:
             os.fsync(fh.fileno())
         _fsync_directory(directory)
         durable = True
-        if payload.rstrip(b"\n") not in ledger.read_bytes().splitlines():
+        complete_lines = ledger.read_bytes().splitlines(keepends=True)
+        if not complete_lines or not complete_lines[-1].endswith(bytes([10])):
             raise OSError("ledger verification failed")
-        return payload
+        if json.loads(complete_lines[-1]) != row:
+            raise OSError("ledger verification failed")
+        return row
     except Exception as exc:
         raise AuditWriteError(attempted=attempted, durable=durable) from exc
 
@@ -157,8 +220,8 @@ def resume_operator(state_root: Path) -> dict[str, str]:
     lock_path = root / "bridge.lock"
     state_dir = root / "planner"
     state_path = state_dir / "no_plan_recovery.json"
-    if lock_path.is_symlink() or state_dir.is_symlink() or state_path.is_symlink():
-        raise ResumeRefusedError("unsafe_state_path")
+    _reject_symlink_components(lock_path)
+    _reject_symlink_components(state_path)
     try:
         lock_handle = open(lock_path, "a+")
     except OSError as exc:
@@ -175,33 +238,29 @@ def resume_operator(state_root: Path) -> dict[str, str]:
                 object_pairs_hook=_strict_object,
                 parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("invalid JSON constant")),
             )
-        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
             raise ResumeRefusedError("state_unavailable_or_invalid") from exc
         updated = _validate(raw)
         count = updated["consecutive_planner"]
+        ledger_path, ledger_before = _preflight_ledger(root)
         updated["stopped"] = False
         _write_state(state_path, updated)
-        from nanobot.runtime.cycle_ledger import _LEDGER_FILENAME, _ledger_dir
-
-        ledger_path = _ledger_dir(root) / _LEDGER_FILENAME
-        try:
-            ledger_before = ledger_path.read_bytes() if ledger_path.exists() else b""
-        except OSError:
-            ledger_before = None
         try:
             _append_transition(root, count)
         except Exception as exc:
             audit = "unverified" if getattr(exc, "attempted", True) else "not_attempted"
-            if getattr(exc, "durable", False) and ledger_before is not None:
+            if getattr(exc, "durable", False):
                 try:
-                    appended = ledger_path.read_bytes()[len(ledger_before):].splitlines()
-                    audit = "verified" if any(
-                        (row := json.loads(line)).get("phase") == "no_plan_recovery"
-                        and row.get("cycle_id") == "operator-resume"
-                        and row.get("family") == "planner"
-                        and row.get("consecutive_count") == count
-                        and row.get("state") == "normal" for line in appended
-                    ) else "unverified"
+                    appended = ledger_path.read_bytes()[len(ledger_before):].splitlines(keepends=True)
+                    if appended and appended[-1].endswith(bytes([10])):
+                        row = json.loads(appended[-1])
+                        audit = "verified" if (
+                            row.get("phase") == "no_plan_recovery"
+                            and row.get("cycle_id") == "operator-resume"
+                            and row.get("family") == "planner"
+                            and row.get("consecutive_count") == count
+                            and row.get("state") == "normal"
+                        ) else "unverified"
                 except Exception:
                     pass
             raise ResumeRefusedError("audit_unverified", result="partial", state="verified", audit=audit, durability="verified") from exc

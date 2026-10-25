@@ -82,20 +82,56 @@ def test_invalid_or_nonstopped_state_is_unchanged(tmp_path, change):
     assert raw.get("secret") not in result.stdout if raw.get("secret") else True
 
 
-def test_symlink_state_file_refuses_without_mutation(tmp_path):
+@pytest.mark.parametrize("symlinked", ["root", "lock", "state_directory", "state_file"])
+def test_symlink_state_paths_refuse_without_mutation(tmp_path, symlinked):
     import pytest
 
-    state_path, _ = _state(tmp_path)
-    target = tmp_path / "target.json"
-    target.write_bytes(state_path.read_bytes())
-    state_path.unlink()
-    try:
-        state_path.symlink_to(target)
-    except (OSError, NotImplementedError):
-        pytest.skip("symlink creation unavailable")
+    if symlinked == "root":
+        target_root = tmp_path / "target-root"
+        state_path, _ = _state(target_root)
+        link_root = tmp_path / "root-link"
+        try:
+            link_root.symlink_to(target_root, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation unavailable")
+        root = link_root
+        target = state_path
+    else:
+        root = tmp_path / "root"
+        state_path, _ = _state(root)
+        target = root / "outside-target"
+        target.write_bytes(state_path.read_bytes())
+        try:
+            if symlinked == "lock":
+                (root / "bridge.lock").symlink_to(target)
+            elif symlinked == "state_file":
+                state_path.unlink()
+                state_path.symlink_to(target)
+            else:
+                external_dir = root / "outside-planner"
+                external_dir.mkdir()
+                external_state = external_dir / state_path.name
+                external_state.write_bytes(state_path.read_bytes())
+                state_path.unlink()
+                state_path.parent.rmdir()
+                state_path.parent.symlink_to(external_dir, target_is_directory=True)
+                target = external_state
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation unavailable")
     before = target.read_bytes()
+    result = _run(root)
+    assert result.exit_code != 0
+    assert target.read_bytes() == before
+
+
+def test_deeply_nested_json_refuses_without_mutation(tmp_path):
+    state_path, _ = _state(tmp_path)
+    state_path.write_text('{"schema":"no-plan-recovery-v1","nested":' + "[" * 5000 + "0" + "]" * 5000 + "}", encoding="utf-8")
+    before = state_path.read_bytes()
     result = _run(tmp_path)
-    assert result.exit_code != 0 and target.read_bytes() == before
+    assert result.exit_code != 0
+    assert json.loads(result.stdout)["result"] == "refused"
+    assert state_path.read_bytes() == before
     assert not (tmp_path / "ledger").exists()
 
 
@@ -175,6 +211,41 @@ def test_state_directory_fsync_failure_is_partial_and_skips_ledger(tmp_path, mon
     assert not (tmp_path / "ledger").exists()
 
 
+def test_unterminated_ledger_line_refuses_before_state_change(tmp_path):
+    state_path, _ = _state(tmp_path)
+    ledger = tmp_path / "ledger" / "cycles.jsonl"
+    ledger.parent.mkdir()
+    ledger.write_bytes(b'{"phase":"prior"}')
+    state_before = state_path.read_bytes()
+    ledger_before = ledger.read_bytes()
+    result = _run(tmp_path)
+    assert result.exit_code != 0
+    assert state_path.read_bytes() == state_before
+    assert ledger.read_bytes() == ledger_before
+
+
+def test_ledger_rotation_and_cutover_preparation_precede_resume_transition(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from nanobot.runtime import cycle_ledger
+
+    _fake_fcntl(monkeypatch)
+    state_path, _ = _state(tmp_path)
+    ledger = tmp_path / "ledger" / "cycles.jsonl"
+    ledger.parent.mkdir()
+    ledger.write_text('{"phase":"old"}\n', encoding="utf-8")
+    stale = (datetime.now(timezone.utc) - timedelta(days=1)).timestamp()
+    import os
+    os.utime(ledger, (stale, stale))
+    monkeypatch.setattr(operator_recovery, "_fsync_directory", lambda path: None)
+    result = _run(tmp_path)
+    assert result.exit_code == 0
+    archives = list(ledger.parent.glob("cycles-*.jsonl.gz"))
+    assert len(archives) == 1
+    assert cycle_ledger.read_events(tmp_path)[-1]["cycle_id"] == "operator-resume"
+    assert json.loads(state_path.read_text())["stopped"] is False
+
+
 def test_ledger_failure_is_partial_and_never_rolls_back(tmp_path, monkeypatch):
     _fake_fcntl(monkeypatch)
     monkeypatch.setattr(operator_recovery, "_fsync_directory", lambda path: None)
@@ -208,6 +279,56 @@ def test_ledger_fsync_failure_reports_event_if_readback_proves_it(tmp_path, monk
     assert payload["result"] == "partial" and payload["audit_status"] == "unverified"
     assert json.loads(state_path.read_text())["stopped"] is False
     monkeypatch.setattr(operator_recovery.os, "fsync", original)
+
+
+@pytest.mark.parametrize("failure", ["directory", "file"])
+def test_ledger_symlink_refuses_before_state_or_outside_file_changes(tmp_path, failure, monkeypatch):
+    import os
+
+    _fake_fcntl(monkeypatch)
+    state_path, _ = _state(tmp_path)
+    outside_dir = tmp_path.parent / f"outside-ledger-{failure}"
+    outside_dir.mkdir()
+    outside = outside_dir / "cycles.jsonl"
+    outside.write_bytes(b'{"outside":true}\\n')
+    ledger_dir = tmp_path / "ledger"
+    ledger_dir.mkdir()
+    try:
+        if failure == "directory":
+            link = tmp_path / "ledger-link"
+            link.symlink_to(outside_dir, target_is_directory=True)
+            ledger_dir.rmdir()
+            os.replace(link, ledger_dir)
+        else:
+            ledger = ledger_dir / "cycles.jsonl"
+            link = tmp_path / "ledger-link"
+            link.symlink_to(outside)
+            os.replace(link, ledger)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    before = state_path.read_bytes()
+    outside_before = outside.read_bytes()
+    result = _run(tmp_path)
+    assert result.exit_code != 0
+    assert state_path.read_bytes() == before
+    assert outside.read_bytes() == outside_before
+
+
+def test_existing_unterminated_ledger_is_not_verified_as_a_new_row(tmp_path, monkeypatch):
+    _fake_fcntl(monkeypatch)
+    monkeypatch.setattr(operator_recovery, "_fsync_directory", lambda path: None)
+    state_path, _ = _state(tmp_path)
+    ledger = tmp_path / "ledger" / "cycles.jsonl"
+    ledger.parent.mkdir()
+    prior = b'{"phase":"prior"}'
+    ledger.write_bytes(prior)
+    before = state_path.read_bytes()
+    result = _run(tmp_path)
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["audit_status"] == "not_attempted"
+    assert state_path.read_bytes() == before
+    assert ledger.read_bytes() == prior
 
 
 def test_ledger_write_that_cannot_be_verified_is_not_claimed_absent(tmp_path, monkeypatch):

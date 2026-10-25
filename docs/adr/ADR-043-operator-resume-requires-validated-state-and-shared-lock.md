@@ -57,10 +57,12 @@ Read `planner/no_plan_recovery.json` directly, not through permissive
 round-trip unknown JSON object fields unchanged for forward compatibility.
 Validate exact types for known fields (`bool` is not an integer), nonnegative
 integer counters, booleans, and a list of strings for deferred verdict IDs.
-Reject missing known fields, malformed or invalid UTF-8/JSON, wrong schema,
-non-stopped state, and symlinked root/lock/state paths. Do not include state
-payload or OS exception text in output. Do not create missing state directories
-or defaults.
+Reject missing known fields, malformed or invalid UTF-8/JSON (including parser
+recursion failures and duplicate keys), wrong schema, non-stopped state, and
+symlinked root/lock/state/ledger paths before changing recovery state. Refuse
+an existing active ledger that is not newline-terminated; do not repair or
+rewrite its history. Do not include state payload or OS exception text in
+output. Do not create missing state directories or defaults.
 
 On valid stopped state, atomically persist only `stopped=false` via a
 same-directory temporary file, flush/`fsync`, replace, and parent-directory
@@ -70,14 +72,17 @@ occurred but directory `fsync` fails, return nonzero `partial`: state is
 `unverified` unless read-back verifies its value; audit is `not_attempted`.
 Never roll state back.
 
-Only after state durability is confirmed, append exactly one
+Only after state durability is confirmed, preserve the cycle ledger's normal
+append preparation: rotate/prune a stale active file and apply its existing
+day-boundary cutover-marker preparation before appending. Append exactly one
 `no_plan_recovery` transition (`cycle_id=operator-resume`, `family=planner`,
 unchanged planner count, `state=normal`) with strict error reporting, flush/
-`fsync`, and read-back verification. The two files are not transactional. An
-audit failure after state replacement is nonzero `partial`; report audit as
-`verified` only if read-back proves it, otherwise `unverified` (never imply the
-event is absent). Do not truncate partial ledger lines or retry this command
-once state is no longer stopped.
+`fsync`, and verification using the ledger reader's complete-JSONL-line
+semantics. The two files are not transactional. An audit failure after state
+replacement is nonzero `partial`; report audit as `verified` only if the full
+appended line is proven readable, otherwise `unverified` (never imply the event
+is absent). Do not truncate partial ledger lines or retry this command once
+state is no longer stopped.
 
 Emit bounded JSON with `result` (`resumed`, `partial`, `refused`),
 `state_status` (`unchanged`, `verified`, `unverified`),
@@ -133,9 +138,9 @@ provider/cycle behavior, dashboard, or host configuration changes.
 |---|---|---|
 | Explicit root and bounded safe JSON output/exits; both public CLI entrypoints remain usable | `tests/test_no_plan_recovery_cli.py::test_recovery_resume_requires_explicit_root_and_reports_safe_result` | passing on Windows local and CI Python 3.11/3.13; Python 3.12 failure fixed in PR #2122 follow-up |
 | Valid stopped state clears only `stopped`, preserving known fields, unknown fields, and deferred IDs; exactly one transition is durable, with non-stopped repeat refused | `tests/test_no_plan_recovery_cli.py::test_recovery_resume_requires_explicit_root_and_reports_safe_result` | passing |
-| Missing/unreadable/invalid UTF-8/malformed/wrong-schema/missing-field/wrong-type/negative-count/non-stopped and symlinked state refuse without state mutation | `tests/test_no_plan_recovery_cli.py::test_invalid_or_nonstopped_state_is_unchanged`; `tests/test_no_plan_recovery_cli.py::test_missing_known_field_refuses_without_mutation`; `tests/test_no_plan_recovery_cli.py::test_missing_malformed_and_invalid_utf8_state_refuse_without_mutation`; `tests/test_no_plan_recovery_cli.py::test_unreadable_state_refuses_without_mutation`; `tests/test_no_plan_recovery_cli.py::test_symlink_state_file_refuses_without_mutation` | passing; POSIX permission test skipped on Windows and root-run Linux CI |
+| Invalid state and unsafe root/lock/state/ledger paths refuse before mutation; deep JSON recursion and permission failures stay bounded | `tests/test_no_plan_recovery_cli.py::test_invalid_or_nonstopped_state_is_unchanged`; `tests/test_no_plan_recovery_cli.py::test_deeply_nested_json_refuses_without_mutation`; `tests/test_no_plan_recovery_cli.py::test_ledger_symlink_refuses_before_state_or_outside_file_changes`; `tests/test_no_plan_recovery_cli.py::test_unreadable_state_refuses_without_mutation` | passing; POSIX permission test skipped on Windows and when run as root |
 | Busy and unsupported lock refuse before mutation; lock covers state and ledger operation | `tests/test_no_plan_recovery_cli.py::test_resume_refuses_busy_or_unsupported_lock`; `tests/test_no_plan_recovery_cli.py::test_unsupported_lock_fails_closed`; `tests/test_no_plan_recovery_cli.py::test_real_bridge_flock_contention_refuses_without_state_change` | passing; POSIX lock test skipped on Windows |
-| Replace followed by parent-directory `fsync` failure reports state durability unverified and ledger not attempted; ledger append/fsync/read-back failures report audit verified only when proved, otherwise unverified; neither case rolls back state or reports success | `tests/test_no_plan_recovery_cli.py::test_state_directory_fsync_failure_is_partial_and_skips_ledger`; `tests/test_no_plan_recovery_cli.py::test_ledger_failure_is_partial_and_never_rolls_back`; `tests/test_no_plan_recovery_cli.py::test_ledger_fsync_failure_reports_event_if_readback_proves_it`; `tests/test_no_plan_recovery_cli.py::test_ledger_write_that_cannot_be_verified_is_not_claimed_absent` | passing |
+| Replace followed by directory `fsync` failure and audit append/fsync/verification failure report truthful state/audit status; only complete readable ledger lines count as verified; normal rollover preparation is preserved | `tests/test_no_plan_recovery_cli.py::test_state_directory_fsync_failure_is_partial_and_skips_ledger`; `tests/test_no_plan_recovery_cli.py::test_ledger_failure_is_partial_and_never_rolls_back`; `tests/test_no_plan_recovery_cli.py::test_ledger_fsync_failure_reports_event_if_readback_proves_it`; `tests/test_no_plan_recovery_cli.py::test_ledger_write_that_cannot_be_verified_is_not_claimed_absent`; `tests/test_no_plan_recovery_cli.py::test_existing_unterminated_ledger_is_not_verified_as_a_new_row`; `tests/test_no_plan_recovery_cli.py::test_unterminated_ledger_line_refuses_before_state_change`; `tests/test_cycle_ledger.py::TestRotation::test_rotates_stale_active_file_to_gz`; `tests/test_no_plan_recovery_cli.py::test_ledger_rotation_and_cutover_preparation_precede_resume_transition` | passing |
 
 ## Rollback
 
