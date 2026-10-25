@@ -47,8 +47,8 @@ def test_recovery_resume_requires_explicit_root_and_reports_safe_result(tmp_path
     _fake_fcntl(monkeypatch)
     monkeypatch.setattr(operator_recovery, "_fsync_directory", lambda path: None)
     from nanobot.cli.eeebot import app as eeebot_app
-    alias_help = runner.invoke(eeebot_app, ["recovery-resume", "--help"])
-    assert alias_help.exit_code == 0 and "--runtime-state-root" in alias_help.stdout
+    alias_help = runner.invoke(eeebot_app, ["recovery-resume", "--help"], color=False)
+    assert alias_help.exit_code == 0 and "runtime-state-root" in alias_help.stdout
     missing = runner.invoke(app, ["recovery-resume"])
     assert missing.exit_code != 0
     state_path, original = _state(tmp_path)
@@ -245,8 +245,8 @@ def test_unreadable_state_refuses_without_mutation(tmp_path, monkeypatch):
 
     import pytest
 
-    if os.name == "nt":
-        pytest.skip("permission-based unreadable-file test requires POSIX")
+    if os.name == "nt" or os.geteuid() == 0:
+        pytest.skip("permission test requires an unprivileged POSIX user")
     state_path, _ = _state(tmp_path)
     before = state_path.read_bytes()
     state_path.chmod(0)
