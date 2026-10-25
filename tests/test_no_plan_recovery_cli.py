@@ -48,7 +48,9 @@ def test_recovery_resume_requires_explicit_root_and_reports_safe_result(tmp_path
     monkeypatch.setattr(operator_recovery, "_fsync_directory", lambda path: None)
     from nanobot.cli.eeebot import app as eeebot_app
     alias_help = runner.invoke(eeebot_app, ["recovery-resume", "--help"], color=False)
-    assert alias_help.exit_code == 0 and "runtime-state-root" in alias_help.stdout
+    from click.termui import strip_ansi
+    help_text = strip_ansi(alias_help.stdout)
+    assert alias_help.exit_code == 0 and "--runtime-state-root" in help_text
     missing = runner.invoke(app, ["recovery-resume"])
     assert missing.exit_code != 0
     state_path, original = _state(tmp_path)
