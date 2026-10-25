@@ -248,7 +248,26 @@ def test_rotation_archive_failure_is_partial_and_not_success(tmp_path, monkeypat
     assert not archive.exists()
 
 
-def test_cutover_marker_failure_is_partial_and_not_success(tmp_path, monkeypatch):
+def test_existing_bad_cutover_marker_causes_partial_without_replacement(tmp_path, monkeypatch):
+    _fake_fcntl(monkeypatch)
+    state_path, _ = _state(tmp_path)
+    ledger_dir = tmp_path / "ledger"
+    ledger_dir.mkdir()
+    marker = ledger_dir / "day_key_cutover.json"
+    marker.write_text("not-json", encoding="utf-8")
+    marker_before = marker.read_bytes()
+    result = _run(tmp_path)
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["result"] == "partial"
+    assert payload["state_status"] == "verified"
+    assert payload["audit_status"] == "not_attempted"
+    assert json.loads(state_path.read_text())["stopped"] is False
+    assert marker.read_bytes() == marker_before
+    assert not (ledger_dir / "cycles.jsonl").exists()
+
+
+def test_cutover_marker_write_failure_is_partial_and_not_success(tmp_path, monkeypatch):
     from nanobot.runtime import day_key
 
     _fake_fcntl(monkeypatch)
