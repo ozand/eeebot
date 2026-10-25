@@ -160,20 +160,25 @@ def _append_transition(state_root: Path, count: int, *, now=None) -> dict[str, A
         directory.mkdir(parents=True, exist_ok=True)
         if created:
             _fsync_directory(directory.parent)
+        ledger = directory / _LEDGER_FILENAME
+        moment = now or datetime.now(timezone.utc)
+        had_prior_history = any(directory.glob("cycles-*.jsonl.gz"))
+        current_day = day_key.day_key(now)
+        _rotate_and_prune(directory, ledger, current_day, _retention_days(), strict=True)
+        cutover, just_recorded = day_key.record_cutover_if_absent(
+            day_key.cutover_marker_path(directory), moment, strict=True
+        )
     except Exception as exc:
         raise AuditWriteError(attempted=False, durable=False) from exc
-    ledger = directory / _LEDGER_FILENAME
-    moment = now or datetime.now(timezone.utc)
-    had_prior_history = any(directory.glob("cycles-*.jsonl.gz"))
-    current_day = day_key.day_key(now)
-    _rotate_and_prune(directory, ledger, current_day, _retention_days())
-    cutover, just_recorded = day_key.record_cutover_if_absent(day_key.cutover_marker_path(directory), moment)
     local_tz = now.tzinfo if now is not None else None
     if just_recorded and had_prior_history and day_key.is_transition_day(
         current_day, local_tz=local_tz, cutover_utc=cutover
     ):
-        _append_transition_marker(ledger, current_day, cutover, moment)
-        _fsync_directory(directory)
+        try:
+            _append_transition_marker(ledger, current_day, cutover, moment)
+            _fsync_directory(directory)
+        except Exception as exc:
+            raise AuditWriteError(attempted=False, durable=False) from exc
     row = {
         "phase": "no_plan_recovery",
         "cycle_id": "operator-resume",

@@ -224,7 +224,52 @@ def test_unterminated_ledger_line_refuses_before_state_change(tmp_path):
     assert ledger.read_bytes() == ledger_before
 
 
+def test_rotation_archive_failure_is_partial_and_not_success(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from nanobot.runtime import cycle_ledger
+
+    _fake_fcntl(monkeypatch)
+    state_path, _ = _state(tmp_path)
+    ledger = tmp_path / "ledger" / "cycles.jsonl"
+    ledger.parent.mkdir()
+    ledger.write_bytes(b'{"phase":"prior"}' + bytes([10]))
+    archive = ledger.parent / "cycles-2020-01-01.jsonl.gz"
+    stale = datetime.now(timezone.utc) - timedelta(days=1)
+    monkeypatch.setattr(cycle_ledger, "_file_mtime_local", lambda path: stale)
+    monkeypatch.setattr(cycle_ledger.gzip, "open", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("injected archive failure")))
+    result = _run(tmp_path)
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["result"] == "partial"
+    assert payload["state_status"] == "verified"
+    assert payload["audit_status"] == "not_attempted"
+    assert json.loads(state_path.read_text())["stopped"] is False
+    assert not archive.exists()
+
+
+def test_cutover_marker_failure_is_partial_and_not_success(tmp_path, monkeypatch):
+    from nanobot.runtime import day_key
+
+    _fake_fcntl(monkeypatch)
+    state_path, _ = _state(tmp_path)
+    ledger_dir = tmp_path / "ledger"
+    ledger_dir.mkdir()
+    archive = ledger_dir / "cycles-2020-01-01.jsonl.gz"
+    archive.write_bytes(b"prior compressed archive placeholder")
+    monkeypatch.setattr(day_key, "record_cutover_if_absent", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("injected cutover failure")))
+    result = _run(tmp_path)
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["result"] == "partial"
+    assert payload["state_status"] == "verified"
+    assert payload["audit_status"] == "not_attempted"
+    assert json.loads(state_path.read_text())["stopped"] is False
+    assert not (ledger_dir / "cycles.jsonl").exists()
+
+
 def test_ledger_rotation_and_cutover_preparation_precede_resume_transition(tmp_path, monkeypatch):
+    import os
     from datetime import datetime, timedelta, timezone
 
     from nanobot.runtime import cycle_ledger
@@ -234,9 +279,7 @@ def test_ledger_rotation_and_cutover_preparation_precede_resume_transition(tmp_p
     ledger = tmp_path / "ledger" / "cycles.jsonl"
     ledger.parent.mkdir()
     ledger.write_text('{"phase":"old"}\n', encoding="utf-8")
-    stale = (datetime.now(timezone.utc) - timedelta(days=1)).timestamp()
-    import os
-    os.utime(ledger, (stale, stale))
+    os.utime(ledger, ((datetime.now(timezone.utc) - timedelta(days=1)).timestamp(),) * 2)
     monkeypatch.setattr(operator_recovery, "_fsync_directory", lambda path: None)
     result = _run(tmp_path)
     assert result.exit_code == 0
@@ -373,9 +416,28 @@ def test_unreadable_state_refuses_without_mutation(tmp_path, monkeypatch):
     state_path.chmod(0)
     try:
         result = _run(tmp_path)
-        assert result.exit_code != 0 and state_path.read_bytes() == before
     finally:
         state_path.chmod(0o600)
+    assert result.exit_code != 0
+    assert state_path.read_bytes() == before
+
+
+def test_permission_error_is_bounded_refusal_on_every_platform(tmp_path, monkeypatch):
+    state_path, _ = _state(tmp_path)
+    before = state_path.read_bytes()
+    original_read_text = Path.read_text
+
+    def fail_state_read(path, *args, **kwargs):
+        if path == state_path:
+            raise PermissionError("injected permission denial")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_state_read)
+    result = _run(tmp_path)
+    assert result.exit_code != 0
+    assert json.loads(result.stdout)["result"] == "refused"
+    assert state_path.read_bytes() == before
+    assert not (tmp_path / "ledger").exists()
 
 
 def test_unsupported_lock_fails_closed(tmp_path, monkeypatch):

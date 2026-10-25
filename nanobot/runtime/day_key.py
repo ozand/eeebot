@@ -99,7 +99,7 @@ def load_cutover(marker_path: "Path | str") -> "datetime | None":
 
 
 def record_cutover_if_absent(
-    marker_path: "Path | str", now: "datetime | None" = None
+    marker_path: "Path | str", now: "datetime | None" = None, *, strict: bool = False
 ) -> "tuple[datetime, bool]":
     """Idempotently record the cutover instant for one ledger directory.
 
@@ -122,6 +122,7 @@ def record_cutover_if_absent(
     docstring) since losing this one marker only means a later call
     retries the same detection, not silent data loss.
     """
+    """Idempotently record one ledger cutover instant; optionally fail on write errors."""
     existing = load_cutover(marker_path)
     if existing is not None:
         return existing, False
@@ -134,7 +135,8 @@ def record_cutover_if_absent(
         tmp.write_text(payload, encoding="utf-8")
         os.replace(tmp, path)
     except Exception:
-        pass
+        if strict:
+            raise
     return moment, True
 
 
