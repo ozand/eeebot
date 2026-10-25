@@ -57,6 +57,7 @@ Conventions:
 | [ADR-040](ADR-040-reflector-selects-authoritative-executor-attempt.md) | Reflector selects the authoritative executor attempt | proposed |
 | [ADR-041](ADR-041-bind-web-fetch-connections-to-validated-addresses.md) | Bind each web fetch connection to its validated address snapshot | proposed |
 | [ADR-042](ADR-042-accept-bounded-delivery-deviations-with-truthful-evidence.md) | Accept bounded process deviations only with truthful evidence | accepted |
+| [ADR-043](ADR-043-operator-resume-requires-validated-state-and-shared-lock.md) | Operator resume validates stopped state under the shared bridge lock | proposed |
 
 ## Acceptance
 

@@ -154,7 +154,14 @@ def _file_mtime_local(path: Path) -> datetime:
     return datetime.fromtimestamp(path.stat().st_mtime)
 
 
-def _rotate_and_prune(ledger_dir: Path, active_path: Path, today: str, retention_days: int) -> None:
+def _rotate_and_prune(
+    ledger_dir: Path,
+    active_path: Path,
+    today: str,
+    retention_days: int,
+    *,
+    strict: bool = False,
+) -> None:
     """Archive a stale active file and prune expired archives.
 
     Mirrors ``llm_telemetry._rotate_and_prune``'s shape (gzip prior content,
@@ -181,7 +188,8 @@ def _rotate_and_prune(ledger_dir: Path, active_path: Path, today: str, retention
                     shutil.copyfileobj(f_in, f_out)
                 active_path.unlink()
     except Exception:
-        pass
+        if strict:
+            raise
 
     try:
         from datetime import timedelta
@@ -189,9 +197,13 @@ def _rotate_and_prune(ledger_dir: Path, active_path: Path, today: str, retention
         today_date = datetime.strptime(today, day_key.DAY_KEY_FORMAT).date()
         cutoff_ordinal = (today_date - timedelta(days=retention_days)).toordinal()
     except Exception:
+        if strict:
+            raise
         return
 
     for path in ledger_dir.glob("cycles-*.jsonl.gz"):
+        if strict and path.is_symlink():
+            raise OSError("ledger archive is a symlink")
         day = _day_str(path.name)
         if not day:
             continue
@@ -200,6 +212,8 @@ def _rotate_and_prune(ledger_dir: Path, active_path: Path, today: str, retention
             if day_ordinal < cutoff_ordinal:
                 path.unlink(missing_ok=True)
         except Exception:
+            if strict:
+                raise
             continue
 
 

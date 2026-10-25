@@ -33,6 +33,12 @@ ALLOW = {
     "nanobot/runtime/scorecard.py",
     "nanobot/runtime/strategist.py",
     "nanobot/runtime/usage_evidence.py",
+    # #2121: operator resume must validate symlink paths across every archive
+    # that strict rollover may inspect/prune; it cannot use a bounded reader
+    # that deliberately omits out-of-window archives before that safety check.
+    "nanobot/runtime/operator_recovery.py",
+    # #2121: fixture verifies strict rollover archived the prior active ledger.
+    "tests/test_no_plan_recovery_cli.py",
     "nanobot/runtime/heldout/checkers.py",
     "host/eeepc/libexec/eeepc_promotion_verifier.py",
 }
@@ -51,6 +57,13 @@ def test_raw_state_reader_patterns_have_explicit_allowlist():
         if any(pattern in text for pattern in patterns) and rel not in ALLOW:
             violations.append(rel)
     assert not violations, f"unmigrated state readers: {violations}"
+
+
+def test_operator_recovery_archive_access_has_only_its_narrow_allowlist():
+    assert {
+        path for path in ALLOW
+        if path in {"nanobot/runtime/operator_recovery.py", "tests/test_no_plan_recovery_cli.py"}
+    } == {"nanobot/runtime/operator_recovery.py", "tests/test_no_plan_recovery_cli.py"}
 
 
 def test_hygiene_detector_rejects_new_raw_reader_pattern(tmp_path):
