@@ -11,7 +11,7 @@ tags: [runtime, recovery, operator, locking]
 
 ## Status
 
-Accepted — delegated technical acceptance by the implementation executor under the owner's explicit #2121 authorization, recorded 2026-10-25 in issue comment [6393893998](https://github.com/ozand/eeebot/issues/2121#issuecomment-6393893998) and accepting commit `REPLACE_AFTER_COMMIT`. Implementation merged in PR [#2122](https://github.com/ozand/eeebot/pull/2122) at `ef69f9989a8871c0e5c14fbd1219c31f654e3fe4`. Independent design review passed on `495e52a4f5e005646b8396b8115c976eaa05218`; implementation review passed on `47cb68fe26489676115a72b699c7fbde9ec93244` and the accepted PR head was verified in CI run `40162028399`.
+Accepted — delegated technical acceptance by the implementation executor under the owner's explicit #2121 authorization, recorded 2026-10-25 in issue comment [6393893998](https://github.com/ozand/eeebot/issues/2121#issuecomment-6393893998) and accepting commit `231872ff1c815d29e897cf8e850fde92029cc54f`. Implementation merged in PR [#2122](https://github.com/ozand/eeebot/pull/2122) at `ef69f9989a8871c0e5c14fbd1219c31f654e3fe4`. Independent design review passed on `495e52a4f5e005646b8396b8115c976eaa05218`; implementation review passed on `47cb68fe26489676115a72b699c7fbde9ec93244` and the accepted PR head was verified in CI run `40162028399`.
 
 This is delegated technical acceptance, not personal operator acceptance. ADR-035 and issue #1942 remain Proposed/open and are not accepted by this decision.
 
