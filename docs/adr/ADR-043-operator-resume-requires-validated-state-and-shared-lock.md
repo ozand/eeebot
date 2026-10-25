@@ -7,7 +7,7 @@ related: ["#2121", "ADR-035", "#1942"]
 tags: [runtime, recovery, operator, locking]
 ---
 
-# ADR-041: Operator resume validates stopped state under the shared bridge lock
+# ADR-043: Operator resume validates stopped state under the shared bridge lock
 
 ## Status
 
@@ -61,33 +61,21 @@ Reject missing known fields, malformed or invalid UTF-8/JSON, wrong schema, and
 non-stopped state. Do not include state payload or OS exception text in output.
 Do not create missing state directories or defaults.
 
-On a valid stopped state, clear only `stopped`; preserve every other validated
-field and the existing JSON schema. Persist using a same-directory temporary
-file, flush and `fsync` it, atomically replace the state file, then `fsync` the
-parent directory. Record exactly one transition with family `planner`, the
-unchanged `consecutive_planner` count, state `normal`, and a fixed bounded
-operator command cycle identifier (`operator-resume`). Append the typed JSONL
-ledger event using a strict error-reporting path (not best-effort
-`append_event()`); flush and `fsync` the ledger and verify the appended event.
-Normal success is reported only after both persisted state and ledger event
-are verified.
+On valid stopped state, atomically persist only `stopped=false` via a
+same-directory temporary file, flush/`fsync`, replace, and parent-directory
+`fsync`. Preserve all other known and unknown fields. Then append exactly one
+`no_plan_recovery` ledger event with `cycle_id=operator-resume`, `family=planner`,
+the unchanged planner count, and `state=normal`, using strict error reporting,
+flush/`fsync`, and verify both files before reporting success.
 
-The two-file sequence is explicitly not transactional. If state replacement
-succeeds but ledger append/verification fails, do not roll state back and do
-not claim unchanged state or full success: return nonzero with a bounded
-`partial` result stating `recovery_unblocked: true` and `audit_recorded: false`.
-The command refuses retries after that point because the state is no longer
-stopped; operator reconciliation is outside this command. If state persistence
-fails before replacement, report failure and make no success claim. If a ledger
-failure leaves a partial line, do not truncate/repair it here. Errors before
-state replacement return nonzero and identify only a safe error category.
-
-Emit one bounded JSON result to stdout with `result` (`resumed`, `partial`, or
-`refused`), `recovery_unblocked`, and `audit_recorded`; use nonzero exit for
-refusal or partial failure and zero only for fully persisted success. No raw
-exception, path contents, counters, or deferred IDs are emitted. Expected
-operator refusals use concise safe categories; diagnostics do not include
-sensitive filesystem content.
+State and ledger are not transactional. A ledger append or verification failure
+after state replacement is nonzero `partial` (`recovery_unblocked=true`,
+`audit_recorded=false`); do not roll back state or retry through this command
+(the state is no longer stopped). Never truncate a partial ledger line. Failure
+before replacement is nonzero refusal with state unchanged. Output one bounded
+JSON result (`resumed`, `partial`, or `refused`) with recovery/audit booleans;
+zero exit only for verified success. Emit no raw exception, path, or state
+payload.
 
 ### What this IS NOT
 
@@ -98,59 +86,37 @@ It does not protect files from writers that ignore `bridge.lock`.
 
 ### Success criteria
 
-- Exactly one resume transition and only the `stopped` field changes on full
-  success; all other fields remain byte-value-equivalent after JSON decoding.
-- State and ledger durability/verification both precede success exit/output.
-- Every validation, lock, and pre-replacement failure leaves state unmodified;
-  post-replacement ledger failure is truthfully reported as partial, never
-  rolled back or reported as success.
-- Output and exit behavior disclose no state payload or exception/path detail.
+- Success means the stopped flag and exactly one matching transition are
+  persisted; all other state fields are preserved.
+- Validation, lock, and pre-replacement failures leave state unchanged; a
+  post-replacement ledger failure is partial, never rolled back or successful.
+- Output is bounded and contains no state payload, raw exception, or path.
 
 ## Consequences
 
 ### What gets easier
 
-An operator has an explicit local recovery operation whose success means both
-the state change and its audit transition were durably observed.
+Operators can explicitly resume stopped recovery and distinguish full success
+from an incomplete audit write.
 
 ### What gets harder
 
-Strict validation may require manual repair for old or extended state files.
-The shared lock only excludes conforming writers. State and ledger cannot be
-committed atomically, so a ledger failure after state replacement leaves
-recovery unblocked and audit evidence unavailable; the CLI cannot retry that
-transition safely without a separate reconciliation authority. `fsync` and
-strict ledger handling add failure modes and platform constraints.
+Strict validation may require manual repair; the lock excludes only
+conforming writers. State and ledger cannot be committed atomically, so a ledger
+failure after replacement leaves recovery unblocked without audit and requires
+reconciliation outside the command.
 
 ### What does not change
 
-Existing runtime callers retain permissive `load_state()`, `_save_state()`,
-and `resume()` semantics. Bridge cycle locking behavior is not altered. No
-state field, transition meaning, provider/cycle behavior, dashboard, or host
-configuration changes.
+Existing recovery API callers and bridge lock behavior are unchanged. No
+provider/cycle behavior, dashboard, or host configuration changes.
 
 ## Alternatives Considered
 
-### Reuse `resume()` and trust its return
-
-Rejected: it accepts permissively defaulted state and cannot surface swallowed
-state-save or ledger failures, so the CLI could falsely report success.
-
-### Make the two existing helpers strict globally
-
-Rejected: changes runtime callers beyond #2121 and turns a local operator
-increment into a recovery-storage rewrite.
-
-### Roll state back when ledger append fails
-
-Rejected: the ledger may have partially appended, and rollback creates a
-second state write with its own failure window; it cannot establish an atomic
-state/ledger outcome or safely overwrite concurrent/nonconforming changes.
-
-### Do nothing
-
-Leaves the current plain API without an operator-facing trigger; the explicit
-bounded local command is the issue's requested capability.
+- **Reuse `resume()` directly:** rejected because permissive load and swallowed write/ledger errors cannot establish safe success.
+- **Make existing helpers strict globally:** rejected because it changes runtime callers beyond #2121.
+- **Roll back state after ledger failure:** rejected because partial append and second-write failures cannot make the files transactional.
+- **Do nothing:** leaves no operator-facing trigger for the requested bounded capability.
 
 ## Test Contract
 
@@ -164,12 +130,9 @@ bounded local command is the issue's requested capability.
 
 ## Rollback
 
-The command and its tests can be removed without changing existing runtime
-callers or state format. Once a successful resume has written its ledger event,
-that audit event is append-only; rollback removes future command availability
-but does not erase the historical event or reinstate `stopped`. A partial
-state-success/ledger-failure outcome requires operator reconciliation outside
-this command; no automatic reversal is safe.
+Removing the command does not alter runtime callers or state format. It cannot
+erase an append-only transition or reinstate a previously cleared stop; partial
+outcomes require separate operator reconciliation.
 
 ## References
 
