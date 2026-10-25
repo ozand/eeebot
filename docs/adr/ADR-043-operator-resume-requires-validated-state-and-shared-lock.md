@@ -63,19 +63,25 @@ Do not create missing state directories or defaults.
 
 On valid stopped state, atomically persist only `stopped=false` via a
 same-directory temporary file, flush/`fsync`, replace, and parent-directory
-`fsync`. Preserve all other known and unknown fields. Then append exactly one
-`no_plan_recovery` ledger event with `cycle_id=operator-resume`, `family=planner`,
-the unchanged planner count, and `state=normal`, using strict error reporting,
-flush/`fsync`, and verify both files before reporting success.
+`fsync`; preserve every other known and unknown field. A failure before replace
+is `refused`, with state `unchanged` and audit `not_attempted`. If replace
+occurred but directory `fsync` fails, return nonzero `partial`: state is
+`unverified` unless read-back verifies its value; audit is `not_attempted`.
+Never roll state back.
 
-State and ledger are not transactional. A ledger append or verification failure
-after state replacement is nonzero `partial` (`recovery_unblocked=true`,
-`audit_recorded=false`); do not roll back state or retry through this command
-(the state is no longer stopped). Never truncate a partial ledger line. Failure
-before replacement is nonzero refusal with state unchanged. Output one bounded
-JSON result (`resumed`, `partial`, or `refused`) with recovery/audit booleans;
-zero exit only for verified success. Emit no raw exception, path, or state
-payload.
+Only after state durability is confirmed, append exactly one
+`no_plan_recovery` transition (`cycle_id=operator-resume`, `family=planner`,
+unchanged planner count, `state=normal`) with strict error reporting, flush/
+`fsync`, and read-back verification. The two files are not transactional. An
+audit failure after state replacement is nonzero `partial`; report audit as
+`verified` only if read-back proves it, otherwise `unverified` (never imply the
+event is absent). Do not truncate partial ledger lines or retry this command
+once state is no longer stopped.
+
+Emit bounded JSON with `result` (`resumed`, `partial`, `refused`),
+`state_status` (`unchanged`, `verified`, `unverified`), and `audit_status`
+(`not_attempted`, `verified`, `unverified`). Only verified state and audit
+permit zero-exit success. Emit no raw exception, path, or state payload.
 
 ### What this IS NOT
 
@@ -86,10 +92,10 @@ It does not protect files from writers that ignore `bridge.lock`.
 
 ### Success criteria
 
-- Success means the stopped flag and exactly one matching transition are
-  persisted; all other state fields are preserved.
-- Validation, lock, and pre-replacement failures leave state unchanged; a
-  post-replacement ledger failure is partial, never rolled back or successful.
+- Only verified state durability and verified transition evidence permit
+  success; all other state fields are preserved.
+- Failures after replacement report uncertainty honestly and never roll state
+  back; ledger is not attempted when state durability is unverified.
 - Output is bounded and contains no state payload, raw exception, or path.
 
 ## Consequences
@@ -126,7 +132,7 @@ provider/cycle behavior, dashboard, or host configuration changes.
 | Valid stopped state clears only `stopped`, preserving known fields, unknown fields, and deferred IDs; exactly one transition is durable | `tests/test_no_plan_recovery_cli.py::test_resume_preserves_state_and_records_one_transition` | not yet written |
 | Missing/unreadable/invalid UTF-8/malformed/wrong-schema/missing-field/wrong-type/negative-count/non-stopped state refuses without state mutation | `tests/test_no_plan_recovery_cli.py::test_invalid_or_nonstopped_state_is_unchanged` | not yet written |
 | Busy and unsupported lock refuse before mutation; lock covers state and ledger operation | `tests/test_no_plan_recovery_cli.py::test_resume_refuses_busy_or_unsupported_lock` | not yet written |
-| State write failure and ledger append/fsync/verification failure never report full success; post-replace ledger failure is explicitly partial and does not roll back state | `tests/test_no_plan_recovery_cli.py::test_write_and_ledger_failures_are_truthful` | not yet written |
+| Replace followed by parent-directory `fsync` failure reports state durability unverified and ledger not attempted; ledger append/fsync/read-back failures report audit verified only when proved, otherwise unverified; neither case rolls back state or reports success | `tests/test_no_plan_recovery_cli.py::test_post_replace_and_ledger_failures_report_truthful_phase_status` | not yet written |
 
 ## Rollback
 
