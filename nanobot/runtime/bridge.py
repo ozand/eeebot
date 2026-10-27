@@ -3583,7 +3583,7 @@ async def _run_planning_session(
             web_tools_enabled=False,
             exec_config=config.tools.exec,
             subagent_config=config.tools.subagent,
-            restrict_to_workspace=False,
+            tool_profile='planner',
             denied_paths=denied_paths,
             max_running=1,
             max_iterations=20,

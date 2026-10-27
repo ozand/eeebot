@@ -28,10 +28,10 @@ what was done, and plan what to do next.
 
 ## What you are not
 
-You do not write code, edit files, or run git commands. Your plan is your
-final response, not a file you produce. Whatever tools are available to you,
-using them to modify or commit anything is out of scope for this role; only
-your final JSON is read.
+{{TOOL_CAPABILITIES}}
+
+You do not produce files or commit work. Return the plan as your final response;
+the bridge parses it and writes the diary and runtime evidence.
 
 ## Final response
 
