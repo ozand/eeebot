@@ -1,6 +1,6 @@
 ---
 title: Planner tool capabilities are explicit and minimal
-status: proposed
+status: accepted
 date: 2026-10-26
 authors: [eeebot maintainers]
 related: ["#2036", "ADR-001", "ADR-028", "ADR-035"]
@@ -11,10 +11,16 @@ tags: [runtime, planner, tools, safety]
 
 ## Status
 
-Proposed under #2036. This record authorizes no implementation or ADR acceptance.
-It covers only the planner-capability slice of #2036; planner timeout
-finalization (#1899/#1925) and forced-proposal pressure review remain separate
-acceptance items. ADR-035 remains Proposed.
+Accepted — delegated technical acceptance under the owner-authorized #2036
+capability slice, 2026-10-27. This is not personal operator acceptance. The
+exact accepted revision is this ADR status commit, following prerequisite test
+citations merged in PR #2125 at `9c88962c75a3ff5bd4756471679046a4312ac634`.
+Implementation was reviewed and merged in PR #2124 at
+`2138f0587da76f7a6d63164d5c55a077522829f1`; main CI run `40446247702` passed
+all six jobs for that implementation merge. This record covers only the
+planner-capability slice; timeout finalization (#1899/#1925) and forced-proposal
+pressure review remain separate #2036 acceptance items. ADR-035 remains
+Proposed and #2036 remains open.
 
 ## Context
 
