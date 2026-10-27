@@ -163,16 +163,20 @@ def test_planner_registry_forbids_mutating_tools_without_side_effects(tmp_path, 
 def test_planner_read_and_list_use_preserved_path_policy(tmp_path):
     from nanobot.agent.tools.filesystem import ListDirTool, ReadFileTool
 
-    planner = manager(tmp_path, tool_profile="planner", restrict_to_workspace=True)
-    external = tmp_path.parent / f"{tmp_path.name}-outside.txt"
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    planner = manager(workspace, tool_profile="planner", restrict_to_workspace=True)
+    external = outside / "outside.txt"
     external.write_text("outside-readable", encoding="utf-8")
-    (tmp_path / "inside.txt").write_text("inside-readable", encoding="utf-8")
-    read = ReadFileTool(workspace=tmp_path, allowed_dir=planner._allowed_dir)
-    listing = ListDirTool(workspace=tmp_path, allowed_dir=planner._allowed_dir)
+    (workspace / "inside.txt").write_text("inside-readable", encoding="utf-8")
+    read = ReadFileTool(workspace=workspace, allowed_dir=planner._allowed_dir)
+    listing = ListDirTool(workspace=workspace, allowed_dir=planner._allowed_dir)
     assert "inside-readable" in asyncio.run(read.execute("inside.txt"))
     assert "outside-readable" in asyncio.run(read.execute(str(external)))
-    assert "inside.txt" in asyncio.run(listing.execute(str(tmp_path)))
-    assert "outside.txt" in asyncio.run(listing.execute(str(tmp_path.parent)))
+    assert "inside.txt" in asyncio.run(listing.execute(str(workspace)))
+    assert "outside.txt" in asyncio.run(listing.execute(str(outside)))
 
 
 def test_planner_bridge_wiring_selects_explicit_profile():
