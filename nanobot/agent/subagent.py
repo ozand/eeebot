@@ -265,6 +265,8 @@ class SubagentManager:
         #: (every caller before this) leaves :meth:`_build_subagent_prompt`
         #: unchanged.
         self._role_system_prompt = role_system_prompt.strip() if role_system_prompt else None
+        if self._explicit_tool_profile and self._role_system_prompt and "{{TOOL_CAPABILITIES}}" not in self._role_system_prompt:
+            raise ValueError("explicit tool profile requires role prompt capability placeholder")
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
         from nanobot.runtime.state import resolve_runtime_state_location
@@ -1351,7 +1353,11 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         if getattr(self, '_role_system_prompt', None) is not None:
             prompt = self._role_system_prompt
             if getattr(self, "_explicit_tool_profile", False):
-                prompt += "\n\n## Available tool capabilities\n\n" + self.allowed_actions_text()
+                prompt = prompt.replace(
+                    "{{TOOL_CAPABILITIES}}", self.allowed_actions_text(),
+                )
+                if "{{TOOL_CAPABILITIES}}" in prompt:
+                    raise ValueError("role prompt omitted tool capability placeholder")
             if self.system_context:
                 prompt += "\n\n---\n\n" + self.system_context
             return prompt

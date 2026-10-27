@@ -38,13 +38,13 @@ These facts are source-verified; no host state was inspected.
 `SubagentManager` receives one of two immutable, built-in tool capability
 profiles: the legacy executor profile (the compatibility default) or the
 planner profile. A profile explicitly contains tool names, file-operation
-allowances, file path-resolution scope, and its allowed-actions description.
-Profiles are validated against the known profiles and tool implementations
+allowances, file path-resolution scope, and its generated allowed-actions
+text. Profiles are validated against the known profiles and tool implementations
 before registration; unknown, empty, or malformed profiles refuse startup and
 never fall back to a broader profile. The same resolved profile configures
-registered tool implementations and their exposed definitions, and supplies
-the role's allowed-actions text. No separate role-specific capability list is
-maintained.
+registered tool implementations and their exposed definitions, and generates
+the role's allowed-actions text. The role file contains no competing tool/path
+inventory; it retains only the planner's functional instructions.
 
 The planner profile permits only `read_file` and `list_dir`. It preserves the
 existing planner path behavior exactly: workspace-relative paths resolve under
@@ -99,9 +99,9 @@ without granting a search tool that mutates runtime index state.
 - Unknown/malformed profile values fail closed before spawn; neither the
   legacy `restrict_to_workspace` flag nor an omitted/invalid explicit profile
   can silently replace or broaden a selected profile.
-- Planner bridge wiring explicitly selects the planner profile. The role's
-  allowed-actions text is rendered from that profile and agrees with the actual
-  registry and path/operation policy.
+- Planner bridge wiring explicitly selects the planner profile. The profile-
+  generated allowed-actions text fills one role placeholder and agrees with the
+  actual registry and path/operation policy; no second role inventory exists.
 - The permitted reads/list operations work under the declared path rules; tests
   exercise both accepted and denied cases required by those rules.
 - Final JSON parsing and harness-owned diary/ledger writes remain functional.
@@ -163,8 +163,8 @@ roles require an explicit reviewed profile, not arbitrary runtime composition.
 |---|---|---|
 | The built-in planner profile names exactly `read_file`/`list_dir`, encodes their read/list operations and the existing absolute/workspace-relative path policy, and rejects unknown profiles | `tests/test_planner_tool_profile.py::test_planner_profile_declares_exact_tools_operations_and_existing_paths`, `::test_invalid_profiles_fail_closed` | passing |
 | Actual planner manager resolves path policy over legacy flag; actual `ReadFileTool`/`ListDirTool` preserve relative and absolute path behavior | `tests/test_planner_tool_profile.py::test_profile_is_source_for_registration_and_allowed_actions`, `::test_planner_read_and_list_use_preserved_path_policy` | passing |
-| Actual planner manager exposes only read/list; each forbidden tool call is sent to the real registry and refused without index creation or command/delegation effects | `tests/test_planner_tool_profile.py::test_planner_registry_forbids_mutating_tools_without_side_effects` | passing |
-| Planner allowed-actions text comes from its profile and bridge selects it explicitly | `tests/test_planner_tool_profile.py::test_planner_registry_forbids_mutating_tools_without_side_effects`, `::test_planner_bridge_wiring_selects_explicit_profile` | passing |
+| Actual planner manager exposes only read/list; forbidden provider tool calls are refused by that same registry without file/index/exec effects | `tests/test_planner_tool_profile.py::test_planner_registry_forbids_mutating_tools_without_side_effects` | passing |
+| Planner allowed-actions text comes from its profile placeholder, role file has no duplicate tool/path inventory, and bridge selects the profile explicitly | `tests/test_planner_tool_profile.py::test_profile_is_source_for_registration_and_allowed_actions`, `::test_planner_registry_forbids_mutating_tools_without_side_effects`, `::test_planner_bridge_wiring_selects_explicit_profile` | passing |
 | Real planning response parsing and harness-owned diary/ledger output succeed without planner write tools | `tests/test_run_planning_session.py::test_happy_path_writes_the_diary_and_journals_success` | passing; focused test rerun |
 | Default executor profile preserves existing registered tools and interactive web compatibility | `tests/test_subagent_manager.py::test_executor_declared_and_registered_tool_names_match`, `::test_interactive_subagent_role_keeps_web_tools_available`, `tests/test_planner_tool_profile.py::test_profile_is_source_for_registration_and_allowed_actions` | passing |
 
