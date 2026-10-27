@@ -42,13 +42,18 @@ profile. Tool registration and exposed tool definitions use that same validated
 profile. The role's allowed-actions description is derived from the profile,
 not maintained as a conflicting second list.
 
-The planner profile allows only `read_file`, `list_dir`, and `search_memory`:
-bounded read/search capabilities required for its context. It excludes
-`write_file`, `edit_file`, `exec`, web tools, `spawn`, and any dynamically added
-or aliased mutation/delegation capability. The bridge passes this profile
-explicitly at the planner construction site. The existing executor profile
-remains the compatibility default for current non-planner callers and is
-unchanged in names and behavior.
+The planner profile allows only `read_file` and `list_dir`, the workspace
+capabilities required to consult its declared diary, skills, memory, and lesson
+paths. The role reads `memory/index.md` directly; `search_memory` is excluded
+because its existing `MemorySearchTool.execute` calls
+`existence_index.search_memory` with `reindex_first=True`, which creates or
+updates `<state_dir>/existence_index/index.sqlite`. This record does not permit
+that planner-triggered runtime-state write. The profile also excludes
+`write_file`, `edit_file`, `exec`, web tools, `search_memory`, `spawn`, and any
+dynamically added or aliased mutation/delegation capability. The bridge passes
+the profile explicitly at the planner construction site. The existing executor
+profile remains the compatibility default for current non-planner callers and
+is unchanged in names and behavior.
 
 Planner output remains its final JSON response. The harness remains the writer
 of diary plans and runtime evidence. Tests must verify that parsing and
@@ -62,12 +67,15 @@ does not narrow workspace read access beyond existing tool path rules, add a
 command allowlist/runner, add a new output sidecar, introduce dependencies,
 change planner semantics, grant the planner delegation, or change executor
 tools. No generic capability framework beyond the explicit profile is
-introduced.
+introduced. The declared memory entry point `memory/index.md` remains in the
+planner role; this change preserves that product obligation without granting a
+search tool that mutates runtime index state.
 
 ### Success criteria
 
-- The actual planner registry exposes only the declared read-only tools; a
-  forbidden invocation is refused as unavailable and cannot execute.
+- The actual planner registry exposes only `read_file` and `list_dir`; a
+  forbidden invocation is refused as unavailable and cannot execute. The
+  `search_memory` counterexample is covered explicitly by the negative test.
 - Invalid profile values fail closed before spawn; no default-profile fallback
   can grant planner write, edit, exec, or delegation tools.
 - Planner bridge wiring explicitly passes its profile; the role's capability
@@ -80,14 +88,15 @@ introduced.
 ### What gets easier
 
 Planner intent no longer depends on prompt obedience for the prohibited write,
-edit, and command capabilities. Registry behavior and role guidance have one
-profile source.
+edit, search/index-maintenance, and command capabilities. Registry behavior
+and role guidance have one profile source.
 
 ### What gets harder
 
 A planner requiring a newly justified tool needs a reviewed profile change and
-tests. Read-only tools still expose data permitted by the current workspace and
-memory-search boundaries; this decision is not a confidentiality sandbox.
+tests. `read_file` and `list_dir` retain existing workspace-scoped application
+checks; they are not an OS sandbox or protection from a compromised process.
+This decision makes no stronger filesystem-isolation claim.
 
 ### What does not change
 
@@ -104,20 +113,29 @@ unchanged.
 - **Keep exec but add a read-only command runner/allowlist:** rejected for this
   slice; planner has no required command output, while a runner creates a new
   parser/argument-security surface.
-- **Remove every planner tool:** rejected; the planner needs bounded reads of
-  diary/context and memory to choose work.
+- **Remove every planner tool:** rejected; the planner needs bounded `read_file`
+  and `list_dir` access to consult diary/context and memory files directly.
+- **Retain `search_memory` with `reindex_first=False`:** rejected for this slice;
+  the existing tool still opens/creates and configures the SQLite database, and
+  using it would require changing the shared tool's semantics or defining a
+  separate query-only access contract. Direct reads preserve the planner's
+  existing memory discovery obligation without that state write.
 - **Do nothing:** leaves a shared-repository planner with unnecessary
   mutation/command capabilities and no downstream planner gate.
+
+The manager uses its existing error response for unknown tool invocation; the
+negative registry test must prove that calling `search_memory` (as well as
+write/edit/exec and delegation names) cannot execute or trigger index creation.
 
 ## Test Contract
 
 | Claim | Test | Currently |
 |---|---|---|
-| Actual planner manager registers exactly its explicit read-only profile; write/edit/exec/delegation names are unavailable | `tests/test_subagent_manager.py::test_planner_profile_registers_only_read_tools` and `::test_planner_profile_rejects_forbidden_tool_invocation` | not yet written |
+| Actual planner manager registers exactly `read_file` and `list_dir`; write/edit/exec/search_memory/delegation names are unavailable | `tests/test_subagent_manager.py::test_planner_profile_registers_only_read_tools` and `::test_planner_profile_rejects_forbidden_tool_invocation` | not yet written |
 | Invalid/unknown profiles fail before spawn and never fall back to executor capabilities | `tests/test_subagent_manager.py::test_invalid_tool_profile_fails_closed` | not yet written |
-| Planner profile is passed at bridge construction and its role capability text matches registered names | `tests/test_agent_chooses.py::test_planner_bridge_passes_read_only_tool_profile` | not yet written |
+| Planner profile is passed at bridge construction and role text agrees with the exact two registered tools | `tests/test_agent_chooses.py::test_planner_bridge_passes_read_only_tool_profile` | not yet written |
 | Real planning response parsing and harness-owned diary/ledger output succeed without planner write tools | `tests/test_agent_chooses.py::test_planner_profile_preserves_harness_plan_output` | not yet written |
-| Default executor registered tools and declarations remain unchanged | `tests/test_subagent_manager.py::test_executor_default_profile_unchanged` | not yet written |
+| Default executor registered tools and declarations remain unchanged, including `search_memory` | `tests/test_subagent_manager.py::test_executor_default_profile_unchanged` | not yet written |
 
 ## Rollback
 
