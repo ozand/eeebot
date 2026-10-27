@@ -13,7 +13,7 @@ tags: [runtime, planner, tools, safety]
 
 Accepted — delegated technical acceptance under the owner-authorized #2036
 capability slice, 2026-10-27. This is not personal operator acceptance. The
-exact accepted revision is this ADR status commit, following prerequisite test
+exact accepted revision is this ADR status commit `fcca5519836ef4c0593bc310509c54a2d947350a`, following prerequisite test
 citations merged in PR #2125 at `9c88962c75a3ff5bd4756471679046a4312ac634`.
 Implementation was reviewed and merged in PR #2124 at
 `2138f0587da76f7a6d63164d5c55a077522829f1`; main CI run `40446247702` passed
