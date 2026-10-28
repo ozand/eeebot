@@ -50,7 +50,7 @@ claim H6 is met, accept ADR-035, or authorize implementation in another repo.
 Dashboard repository authority is unknown. Any dashboard issue/PR, edit, test,
 comment, or publication requires separately established authority and review.
 This PR lands only the eeebot-owned design handoff, so its change folder is
-archived on this PR's merge per [`docs/changes/README.md`](../../../README.md).
+archived on this PR's merge per [`docs/changes/README.md`](../../README.md).
 Dashboard implementation and H6 acceptance remain pending for a separate,
 authorized task. Host/runtime actions and #2047's proposer fallback behavior
 are out of scope.
