@@ -84,6 +84,9 @@ def _make_fake_mgr_factory(
             self.max_iterations = kwargs.get("max_iterations")
             self._telemetry_component = kwargs.get("telemetry_component", "")
             self._telemetry_cycle_id = kwargs.get("telemetry_cycle_id")
+            self._planner_phase_budget = kwargs.get("planner_phase_budget", False)
+            self._planner_deadline = kwargs.get("planner_deadline")
+            self.web_tools_enabled = kwargs.get("web_tools_enabled")
             type(self).last_instance = self
             self._running_tasks: dict[str, asyncio.Task] = {}
             self._planner_release_skill_reads = (
@@ -149,8 +152,10 @@ async def _run(**overrides):
     return await bridge._run_planning_session(**kwargs)
 
 
-def test_planning_session_uses_1200_second_timeout(tmp_path: Path, monkeypatch):
+def test_planning_session_uses_600_second_legacy_timeout_by_default(tmp_path: Path, monkeypatch):
+    """ADR-045: absent opt-in preserves published-main planner timeout."""
     repo = _init_repo_with_origin(tmp_path)
+    monkeypatch.delenv("SELFEVO_PLANNER_PHASE_BUDGET_ENABLED", raising=False)
     state = tmp_path / "state"
     manager_factory = _make_fake_mgr_factory(state, {
         "insight": "x", "plan": "y", "iterations_planned": 5,
@@ -168,7 +173,61 @@ def test_planning_session_uses_1200_second_timeout(tmp_path: Path, monkeypatch):
 
     assert outcome["ran"] is True
     assert len(observed_timeouts) == 1
-    assert observed_timeouts[0] == pytest.approx(1200.0, abs=0.01)
+    assert observed_timeouts[0] == pytest.approx(600.0, abs=0.01)
+
+
+def test_planning_session_uses_opted_in_6000_second_phase_deadline(tmp_path: Path, monkeypatch):
+    """ADR-045: enabled P=6000/E=3000 deadline reaches existing manager safely."""
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    monkeypatch.setenv("SELFEVO_PLANNER_PHASE_BUDGET_ENABLED", "true")
+    monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "9000")
+    monkeypatch.setattr(bridge.time, "monotonic", lambda: 0.0)
+    manager_factory = _make_fake_mgr_factory(state, {
+        "insight": "x", "plan": "y", "iterations_planned": 5,
+    })
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+    seen = []
+
+    async def _capture_timeout(awaitable, *, timeout):
+        seen.append(timeout)
+        return await awaitable
+
+    monkeypatch.setattr(bridge.asyncio, "wait_for", _capture_timeout)
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set(), wall_deadline=9000.0, planner_phase_budget=True))
+    assert outcome["ran"] is True
+    assert seen[0] == pytest.approx(6000.0)
+    assert bridge.SubagentManager.last_instance._planner_phase_budget is True
+    assert bridge.SubagentManager.last_instance._planner_deadline == pytest.approx(6000.0)
+    assert bridge.SubagentManager.last_instance.web_tools_enabled is False
+    assert bridge.SubagentManager.last_instance.max_iterations == 20
+
+
+def test_opted_in_planner_deadline_timeout_records_no_plan_without_diary(tmp_path: Path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    monkeypatch.setenv("SELFEVO_PLANNER_PHASE_BUDGET_ENABLED", "true")
+    monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "9000")
+    manager_factory = _make_fake_mgr_factory(state, {"plan": "must not persist"})
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+    observed_timeouts = []
+    monkeypatch.setattr(bridge.time, "monotonic", lambda: 0.0)
+
+    async def _expire(awaitable, *, timeout):
+        observed_timeouts.append(timeout)
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(bridge.asyncio, "wait_for", _expire)
+    outcome = asyncio.run(_run(
+        state_dir=state, selfevo_repo=repo, denied_paths=set(),
+        wall_deadline=9000.0, planner_phase_budget=True,
+    ))
+    assert outcome["ran"] is False
+    assert observed_timeouts == [pytest.approx(6000.0)]
+    assert not (repo / diary_relpath()).exists()
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["outcome"] == "timed_out"
+    assert manager_factory.last_instance._planner_phase_budget is True
 
 
 def test_planning_session_passes_explicit_cycle_id_to_subagent_manager(tmp_path: Path, monkeypatch):

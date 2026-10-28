@@ -16,6 +16,7 @@ Addresses unit timeout kills (TimeoutStartSec=3300s):
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from datetime import datetime
@@ -26,7 +27,57 @@ from typing import Callable
 DEFAULT_CALL_P99_SECS: float = 243.0
 DEFAULT_FINAL_BUDGET_SECS: float = 300.0
 DEFAULT_PROGRESS_TIMEOUT_SECS: float = 600.0  # 10 minutes
-DEFAULT_WALL_SECS: float = 3600.0  # 60 minutes
+DEFAULT_WALL_SECS: float = 3000.0  # 50 minutes; below the source unit timeout
+PLANNER_PHASE_BUDGET_ENABLED_ENV = "SELFEVO_PLANNER_PHASE_BUDGET_ENABLED"
+PLANNER_PHASE_WALL_SECS = 6000.0
+PLANNER_PHASE_EXECUTOR_SECS = 3000.0  # Includes DEFAULT_FINAL_BUDGET_SECS
+PLANNER_PHASE_TOTAL_SECS = PLANNER_PHASE_WALL_SECS + PLANNER_PHASE_EXECUTOR_SECS
+
+
+class PlannerBudgetConfigurationError(ValueError):
+    """Planner phase opt-in has an invalid or incompatible explicit budget."""
+
+
+def planner_phase_budget_enabled() -> bool:
+    """Parse the planner-only opt-in without changing legacy wall-budget semantics."""
+    raw = os.environ.get(PLANNER_PHASE_BUDGET_ENABLED_ENV)
+    if raw is None or raw == "false":
+        return False
+    if raw == "true":
+        wall_raw = os.environ.get("NANOBOT_SUBAGENT_WALL_SECS")
+        if wall_raw is None:
+            raise PlannerBudgetConfigurationError(
+                "planner phase budget requires NANOBOT_SUBAGENT_WALL_SECS=9000"
+            )
+        try:
+            wall_secs = float(wall_raw.strip())
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise PlannerBudgetConfigurationError(
+                "planner phase budget requires a finite 9000-second total wall budget"
+            ) from exc
+        if not math.isfinite(wall_secs) or wall_secs != PLANNER_PHASE_TOTAL_SECS:
+            raise PlannerBudgetConfigurationError(
+                "planner phase budget requires NANOBOT_SUBAGENT_WALL_SECS=9000"
+            )
+        if get_call_p99_secs() + get_final_budget_secs() > PLANNER_PHASE_EXECUTOR_SECS:
+            raise PlannerBudgetConfigurationError(
+                "planner phase budget is incompatible with configured shared call/final reserve"
+            )
+        return True
+    raise PlannerBudgetConfigurationError(
+        f"{PLANNER_PHASE_BUDGET_ENABLED_ENV} must be exactly 'true' or 'false'"
+    )
+
+
+def planner_phase_deadline(
+    planner_started: float,
+    shared_deadline: float,
+) -> float:
+    """Partition the opted-in total wall into planner and executor phases."""
+    return min(
+        planner_started + PLANNER_PHASE_WALL_SECS,
+        shared_deadline - PLANNER_PHASE_EXECUTOR_SECS,
+    )
 
 
 def get_call_p99_secs() -> float:
@@ -124,13 +175,16 @@ def should_stop_for_wall_clock(
     wall_deadline: float | None,
     *,
     clock: Callable[[], float] | None = None,
+    planner_phase: bool = False,
 ) -> bool:
-    """Return True iff remaining wall clock is less than the safety margin (#1899)."""
+    """Return True iff remaining wall clock is less than the applicable guard."""
     if wall_deadline is None:
         return False
     c = clock or time.monotonic
     remaining = wall_deadline - c()
-    return remaining < get_wall_safety_margin_secs()
+    # Planner-local Dplanner uses C only; the process-wide Dshared keeps C+F.
+    margin = get_call_p99_secs() if planner_phase else get_wall_safety_margin_secs()
+    return remaining < margin
 
 
 class ProgressWatchdog:
