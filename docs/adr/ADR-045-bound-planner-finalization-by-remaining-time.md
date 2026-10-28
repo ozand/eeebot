@@ -1,6 +1,6 @@
 ---
 title: Bound planner finalization by remaining time inside a reserved shared budget
-status: proposed
+status: accepted
 date: 2026-10-28
 authors: [ozand, delegated delivery]
 related: ["#2050", "#1899", "#1925", "ADR-031"]
@@ -9,7 +9,7 @@ tags: [runtime, planning, deadlines, budget]
 
 # Status
 
-Proposed design amendment under #2050. Planner target P=6000s is confirmed. This record does not accept a budget, authorize implementation, change a host unit, or authorize host activation or rollout. The source opt-in below is not evidence of service capacity approval. Independent exact-revision review and an authorized technical decision are required before implementation.
+Accepted — delegated technical acceptance under the owner's explicitly approved #2050 source outcome, recorded 2026-10-28 in accepting commit pending exact-revision review and parent ratification. This narrow repository-source contract is not personal operator acceptance, host/service-capacity approval, unit approval, activation, deployment, rollout, or acceptance of all #2050/#2036 criteria. PR #2071 merged at `43b7fa0d2d6baedeb865c13b67c757358de706a`; its source implementation and tests are on main. Independent exact-revision review of this acceptance candidate and parent ratification remain required before publication.
 
 # Context
 
@@ -79,22 +79,23 @@ Retain P/E/B as proposed software values; do not set M/S here. M is unmeasured a
 
 # Test Contract
 
-Proposed only; tests below are not claimed to exist or pass. Before acceptance, map claims to real named tests citing ADR-045 or explicitly defer under repository policy. Use fake monotonic clock/provider fixtures, not live providers.
+The contract below maps the decision claims to named tests that exist on main and cite ADR-045. PR #2071 merged as `43b7fa0d2d6baedeb865c13b67c757358de706a`; exact-main CI run `40718183360` passed all six Python/timezone jobs. The tests use fake monotonic clock/provider fixtures, not live providers. Passing tests establish repository-source behavior only, not host timing, service capacity, or hard cancellation.
 
-| Decision claim | Planned test | Currently |
+| Decision claim | Test | Currently |
 |---|---|---|
-| Dedicated boolean absent/false preserves legacy behavior including wall setting 9000; malformed boolean errors before provider/spawn; enabled mode validates exact compatible total budget | `tests/test_session_clock.py::test_planner_phase_opt_in_validation_and_deadline_partition` | passing |
-| Default remains 3000s and phase math preserves P=6000/E=3000 including F only once; pre-planner elapsed reduces planner deadline | `tests/test_session_clock.py::test_default_bridge_wall_budget_is_3000_seconds`, `tests/test_session_clock.py::test_planner_phase_opt_in_validation_and_deadline_partition` | passing |
-| Enabled bridge wiring passes planner deadline 6000 with B=9000/E=3000; legacy path retains 600s | `tests/test_run_planning_session.py::test_planning_session_uses_opted_in_6000_second_phase_deadline`, `tests/test_run_planning_session.py::test_planning_session_uses_600_second_legacy_timeout_by_default` | passing |
-| Final admission needs local C and shared C+F; with B=9000, E=3000, Dplanner=6000 and C=243, a final turn at 5757 is bounded to 243s and leaves E intact | `tests/test_subagent_manager.py::test_planner_final_turn_starts_at_local_call_reserve_without_tools` | passing |
-| Shared reserve incompatibility, malformed/non-finite total budgets, and boolean errors fail closed without changing legacy budget parsing; local C and shared C+F guards retain separate boundaries | `tests/test_session_clock.py::test_planner_phase_opt_in_validation_and_deadline_partition`, `tests/test_session_clock.py::test_planner_wall_guard_uses_local_call_c_while_shared_guard_stays_c_plus_f` | passing |
-| Final admission has a C-sized timeout at Dplanner-C; normal work cannot consume that local window; a planner entering at Dplanner makes no provider call; executor profile remains unchanged | `tests/test_subagent_manager.py::test_planner_final_turn_starts_at_local_call_reserve_without_tools`, `tests/test_subagent_manager.py::test_opted_in_planner_entry_too_late_stops_without_provider_call`, `tests/test_subagent_manager.py::test_executor_declared_and_registered_tool_names_match` | passing; cancellation-resistant operation covered by `test_opted_in_planner_tool_timeout_drains_cancellation_without_late_call` |
-| Only validated plan JSON reaches existing harness diary; opted-in bridge timeout cancels/drains real manager/provider and records timed_out without diary persistence; valid plan still uses existing writer | `tests/test_run_planning_session.py::test_opted_in_planner_deadline_timeout_cancels_real_manager_before_diary`, `tests/test_run_planning_session.py::test_planning_session_uses_opted_in_6000_second_phase_deadline`, `tests/test_run_planning_session.py::test_happy_path_writes_the_diary_and_journals_success` | passing; outer wait shortened by wrapper around original wait_for; host timing not tested
+| Dedicated boolean absent/false preserves legacy behavior including wall setting 9000; malformed boolean errors before provider/spawn; enabled mode validates exact compatible total budget | `tests/test_session_clock.py::test_planner_phase_opt_in_validation_and_deadline_partition` | passing on main; CI run 40718183360 |
+| Default remains 3000s and phase math preserves P=6000/E=3000 including F only once; pre-planner elapsed reduces planner deadline | `tests/test_session_clock.py::test_default_bridge_wall_budget_is_3000_seconds`, `tests/test_session_clock.py::test_planner_phase_opt_in_validation_and_deadline_partition` | passing on main; CI run 40718183360 |
+| Enabled bridge wiring passes planner deadline 6000 with B=9000/E=3000; legacy path retains 600s | `tests/test_run_planning_session.py::test_planning_session_uses_opted_in_6000_second_phase_deadline`, `tests/test_run_planning_session.py::test_planning_session_uses_600_second_legacy_timeout_by_default` | passing on main; CI run 40718183360 |
+| Final admission needs local C and shared C+F; with B=9000, E=3000, Dplanner=6000 and C=243, a final turn at 5757 is bounded to 243s and leaves E intact | `tests/test_subagent_manager.py::test_planner_final_turn_starts_at_local_call_reserve_without_tools` | passing on main; CI run 40718183360 |
+| Shared reserve incompatibility, malformed/non-finite total budgets, and boolean errors fail closed without changing legacy budget parsing; local C and shared C+F guards retain separate boundaries | `tests/test_session_clock.py::test_planner_phase_opt_in_validation_and_deadline_partition`, `tests/test_session_clock.py::test_planner_wall_guard_uses_local_call_c_while_shared_guard_stays_c_plus_f` | passing on main; CI run 40718183360 |
+| Final admission has a C-sized timeout at Dplanner-C; normal work cannot consume that local window; a planner entering at Dplanner makes no provider call; executor profile remains unchanged | `tests/test_subagent_manager.py::test_planner_final_turn_starts_at_local_call_reserve_without_tools`, `tests/test_subagent_manager.py::test_opted_in_planner_entry_too_late_stops_without_provider_call`, `tests/test_subagent_manager.py::test_executor_declared_and_registered_tool_names_match`, `tests/test_subagent_manager.py::test_opted_in_planner_tool_timeout_drains_cancellation_without_late_call` | passing on main; CI run 40718183360; cancellation remains cooperative, not a hard-stop guarantee |
+| Only validated plan JSON reaches existing harness diary; opted-in bridge timeout cancels/drains real manager/provider and records timed_out without diary persistence; valid plan still uses existing writer | `tests/test_run_planning_session.py::test_opted_in_planner_deadline_timeout_cancels_real_manager_before_diary`, `tests/test_run_planning_session.py::test_planning_session_uses_opted_in_6000_second_phase_deadline`, `tests/test_run_planning_session.py::test_happy_path_writes_the_diary_and_journals_success` | passing on main; CI run 40718183360; outer wait shortened by wrapper around original wait_for; host timing not tested
 
 The explicit-off test includes `SELFEVO_PLANNER_PHASE_BUDGET_ENABLED=false` with `NANOBOT_SUBAGENT_WALL_SECS=9000` and verifies legacy planner behavior while that shared wall value remains honored. Cancellation is cooperative: an operation suppressing `CancelledError` may run until the test-owned release and finish late. The manager test proves no next provider call is admitted and records bounded-stop; it does not prove hard execution stop or exclude all possible late side effects. The bridge test uses the real manager/provider path and shortens only the outer planner wait with a wrapper around original `asyncio.wait_for`; it verifies cancellation reaches and is drained before timed_out returns. Neither fixture establishes host timing or process-level hard termination.
 
 # References
 
+- #2050 source-stage authorization: https://github.com/ozand/eeebot/issues/2050#issuecomment-6472608510; this acceptance is limited to repository-source contract.
 - #2050 design-only authorization: https://github.com/ozand/eeebot/issues/2050#issuecomment-6464219856
 - #2050 budget receipt: https://github.com/ozand/eeebot/issues/2050#issuecomment-6142430759
 - #2050 source-preparation receipt: https://github.com/ozand/eeebot/issues/2050#issuecomment-6074015927
