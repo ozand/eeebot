@@ -1,6 +1,6 @@
 # H6: separate proposer activity from execution-cycle counts
 
-**Status:** design-only handoff; dashboard implementation and H6 acceptance remain pending.
+**Status:** design-only handoff; this artifact is archived when this PR lands. Dashboard implementation and H6 acceptance remain pending.
 **Issue:** eeebot #2050, H6. The issue's acceptance criteria are unchanged.
 
 ## Problem
@@ -49,7 +49,8 @@ This artifact interprets the existing H6 wording; it does not rewrite #2050 AC,
 claim H6 is met, accept ADR-035, or authorize implementation in another repo.
 Dashboard repository authority is unknown. Any dashboard issue/PR, edit, test,
 comment, or publication requires separately established authority and review.
-The work here is only an eeebot-owned design handoff; host/runtime actions and
-#2047's proposer fallback behavior are out of scope. Keep this change folder
-active while implementation is pending; archive it on landing per
-[`docs/changes/README.md`](../README.md).
+This PR lands only the eeebot-owned design handoff, so its change folder is
+archived on this PR's merge per [`docs/changes/README.md`](../../../README.md).
+Dashboard implementation and H6 acceptance remain pending for a separate,
+authorized task. Host/runtime actions and #2047's proposer fallback behavior
+are out of scope.
