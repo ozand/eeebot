@@ -1,6 +1,6 @@
 # H6: separate proposer activity from execution-cycle counts
 
-**Status:** design proposal only; not an implementation or acceptance of #2050.
+**Status:** design-only handoff; dashboard implementation and H6 acceptance remain pending.
 **Issue:** eeebot #2050, H6. The issue's acceptance criteria are unchanged.
 
 ## Problem
@@ -16,10 +16,12 @@ misstates execution activity, especially during proposer-model unavailability.
 
 In a future, separately authorized dashboard change, exclude a ledger group from
 execution feed/history rows and their row counts only when available evidence
-confirms it is proposer-only: proposer evidence exists and no positive execution
-or terminal evidence exists. Retain proposer attempts and model-call activity in
-their proposer-activity surface. Do not modify or suppress the runtime ledger
-writer to achieve this projection.
+confirms it is proposer-only: a `proposed`, `proposer_skip`, or
+`proposer_reject` decision row has a usable identity, and no positive execution
+or terminal evidence exists. Do not infer proposer-only status from arbitrary
+phases, telemetry, or missing rows. Retain proposer attempts and model-call
+activity in their proposer-activity surface. Do not modify or suppress the
+runtime ledger writer to achieve this projection.
 
 Treat a write-ahead `phase=started` as positive execution-start evidence. Retain
 such cycles in the execution feed regardless of rest/no-plan, failure, kill, or
@@ -48,4 +50,6 @@ claim H6 is met, accept ADR-035, or authorize implementation in another repo.
 Dashboard repository authority is unknown. Any dashboard issue/PR, edit, test,
 comment, or publication requires separately established authority and review.
 The work here is only an eeebot-owned design handoff; host/runtime actions and
-#2047's proposer fallback behavior are out of scope.
+#2047's proposer fallback behavior are out of scope. Keep this change folder
+active while implementation is pending; archive it on landing per
+[`docs/changes/README.md`](../README.md).

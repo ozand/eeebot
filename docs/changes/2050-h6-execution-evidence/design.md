@@ -9,14 +9,18 @@ partial page or one archive independently when other evidence for that identity
 is present in the reader's available scope.
 
 Let `S` mean at least one valid `phase=started` row; `T` mean at least one valid
-terminal `phase=outcome` row; `P` mean valid proposer-only evidence such as
-`proposed` or `proposer_reject`; `O` mean other recognized execution evidence;
-and `U` mean missing, malformed, conflicting, or insufficiently covered input.
+terminal `phase=outcome` row; `P` mean at least one recognized proposer decision
+row (`phase=proposed`, `phase=proposer_skip`, or `phase=proposer_reject`) with a
+usable identity; `O` mean other recognized execution evidence; and `U` mean
+missing, malformed, conflicting, or insufficiently covered input. Only these
+explicit proposer-decision phases qualify as `P`; do not infer proposer-only
+status from arbitrary ledger phases, telemetry rows, absent rows, or an `idle`
+heartbeat (which has no cycle ID).
 
 | Evidence | Execution row? | Execution row count? | Started-cycle denominator? | Treatment |
 |---|---:|---:|---:|---|
 | `S` (with or without `P`, `T`, or `O`) | yes | yes | yes | Preserve running/terminal classification; rest, no-plan, failure, or kill does not erase start. |
-| `P` only, with complete available identity coverage and no `S`, `T`, or `O` | no | no | no | Proposer activity remains visible separately. |
+| `P` only, with complete available identity coverage and no `S`, `T`, or `O` | no | no | no | `proposed`, `proposer_skip`, and `proposer_reject` are examples; each is proposer activity, not execution start. Keep proposer activity visible separately. |
 | `T` without `S` | yes, conservatively | yes | no | `UNKNOWN`; terminal evidence is not proof of a write-ahead start, but is enough not to discard as proposer-only. |
 | `O` without `S` or `T` | yes, conservatively | yes | no | `UNKNOWN` unless existing semantics establish a more specific truthful classification. |
 | `U`, including malformed rows or incomplete history coverage | retained/flagged where a row can be rendered | not silently treated as proposer-only or zero | no | Report coverage/classification as `UNKNOWN`; do not fabricate start or outcome. |
@@ -47,17 +51,21 @@ handling and fallback semantics under eeebot #2047 are separate work.
 Use existing dashboard test fixtures and public feed/publisher-render path (no
 new framework or synthetic host/runtime data):
 
-1. Archived proposal-only group: absent from execution rows/count; proposer
+1. Archived `proposed`-only group: absent from execution rows/count; proposer
    activity remains represented; not `running` or a fabricated terminal state.
-2. Started active group: retained and `running`.
-3. Started then rest/no-plan: retained as execution evidence, not success.
-4. Started then failed/killed/terminal: retained with existing outcome or
+2. `proposer_skip`-only group with a usable identity: absent from execution
+   rows/count; skip remains proposer activity, not a started or successful run.
+3. `proposer_reject`-only group with a usable identity: absent from execution
+   rows/count; rejection remains proposer activity, not an execution failure.
+4. Started active group: retained and `running`.
+5. Started then rest/no-plan: retained as execution evidence, not success.
+6. Started then failed/killed/terminal: retained with existing outcome or
    killed/incomplete classification.
-5. Terminal without start: retained as `UNKNOWN`, excluded from confirmed-start
+7. Terminal without start: retained as `UNKNOWN`, excluded from confirmed-start
    denominator, not silently dropped.
-6. Malformed/conflicting evidence or incomplete archive coverage: not classified
+8. Malformed/conflicting evidence or incomplete archive coverage: not classified
    as confirmed proposer-only; uncertainty/coverage is surfaced, not zeroed.
-7. Matching identity rows split between live and archived inputs: join before
+9. Matching identity rows split between live and archived inputs: join before
    classification and count once within the declared scope.
 
 These are proposed tests, not existing coverage claims. Existing #390 regression
