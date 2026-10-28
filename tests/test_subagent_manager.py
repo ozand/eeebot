@@ -300,6 +300,73 @@ async def test_opted_in_planner_entry_too_late_stops_without_provider_call(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_opted_in_planner_tool_suppresses_cancellation_and_cannot_start_late_call(tmp_path, monkeypatch):
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "0.05")
+    monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "0")
+    monkeypatch.setenv("NANOBOT_PROGRESS_TIMEOUT_SECS", "10")
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMResponse, ToolCallRequest
+
+    clock = [0.0]
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+    tool_cancelled = asyncio.Event()
+    second_provider_call = asyncio.Event()
+
+    class Provider:
+        def get_default_model(self):
+            return "test-model"
+
+        async def chat_with_retry(self, *, messages, tools, model):
+            if second_provider_call.is_set():
+                raise AssertionError("provider called after shared deadline")
+            if any(message.get("role") == "tool" for message in messages):
+                second_provider_call.set()
+            return LLMResponse(content="continue", tool_calls=[ToolCallRequest(
+                id="deadline-call", name="read_file", arguments={"path": "fixture"},
+            )])
+
+    class _CancellationResistantRegistry(ToolRegistry):
+        async def execute(self, name, params):
+            tool_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                tool_cancelled.set()
+                await release_tool.wait()
+                clock[0] = 9000.0
+                return "late tool result after cancellation"
+
+    monkeypatch.setattr("nanobot.agent.subagent.ToolRegistry", _CancellationResistantRegistry)
+    manager = SubagentManager(
+        provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner",
+        planner_phase_budget=True, planner_deadline=6000.0, wall_deadline=9000.0,
+        max_iterations=20, tool_profile=PLANNER_PROFILE,
+        role_system_prompt="planner {{TOOL_CAPABILITIES}}",
+    )
+    manager._monotonic = lambda: clock[0]
+    spawned = await manager.spawn("plan", label="planner", origin_channel="system", origin_chat_id="test")
+    task = manager._running_tasks[next(iter(manager._running_tasks))]
+    await asyncio.wait_for(tool_started.wait(), timeout=2)
+    clock[0] = 8957.0
+    task.cancel()
+    await asyncio.wait_for(tool_cancelled.wait(), timeout=2)
+    assert not second_provider_call.is_set()
+    assert task.done() is False  # cancellation was suppressed; a timeout is not a hard stop
+    release_tool.set()
+    await asyncio.gather(task, return_exceptions=True)
+    assert spawned.startswith("Subagent [planner] started")
+    assert not second_provider_call.is_set()
+    row = json.loads(next((tmp_path / "state" / "subagents").glob("*.json")).read_text(encoding="utf-8"))
+    assert row["status"] == "bounded_stop"
+    assert row["stop_reason"] == "wall_clock_deadline"
+    assert "wall-clock time limit" in row["result"]
+
+
+@pytest.mark.asyncio
 async def test_subagent_telemetry_tracks_context_usage(tmp_path):
     # Dummy provider returning a mocked LLMChatResponse
     class FakeResponse:

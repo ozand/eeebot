@@ -204,6 +204,7 @@ def test_planning_session_uses_opted_in_6000_second_phase_deadline(tmp_path: Pat
 
 
 def test_opted_in_planner_deadline_timeout_records_no_plan_without_diary(tmp_path: Path, monkeypatch):
+    """ADR-045: bridge cancellation is observed and no partial plan persists."""
     repo = _init_repo_with_origin(tmp_path)
     state = tmp_path / "state"
     monkeypatch.setenv("SELFEVO_PLANNER_PHASE_BUDGET_ENABLED", "true")
@@ -215,6 +216,10 @@ def test_opted_in_planner_deadline_timeout_records_no_plan_without_diary(tmp_pat
 
     async def _expire(awaitable, *, timeout):
         observed_timeouts.append(timeout)
+        try:
+            await awaitable
+        except asyncio.CancelledError:
+            pass
         raise asyncio.TimeoutError
 
     monkeypatch.setattr(bridge.asyncio, "wait_for", _expire)
