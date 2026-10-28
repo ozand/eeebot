@@ -354,14 +354,27 @@ async def test_opted_in_planner_tool_timeout_drains_cancellation_without_late_ca
     manager._monotonic = lambda: clock[0]
     spawned = await manager.spawn("plan", label="planner", origin_channel="system", origin_chat_id="test")
     task = manager._running_tasks[next(iter(manager._running_tasks))]
-    await asyncio.wait_for(tool_started.wait(), timeout=2)
-    clock[0] = 8957.0
-    await asyncio.wait_for(tool_cancelled.wait(), timeout=2)
+    cleanup_done = asyncio.Event()
+    normal_completion = False
+    try:
+        await asyncio.wait_for(tool_started.wait(), timeout=2)
+        clock[0] = 8957.0
+        await asyncio.wait_for(tool_cancelled.wait(), timeout=2)
+        assert not second_provider_call.is_set()
+        assert task.done() is False  # wait_for requested cancellation; tool suppresses it
+        assert spawned.startswith("Subagent [planner] started")
+        release_tool.set()
+        await asyncio.wait_for(asyncio.shield(task), timeout=3)
+        normal_completion = True
+    finally:
+        # Release cancellation-resistant work even when startup/wait/assertion fails.
+        release_tool.set()
+        if not normal_completion and not task.done():
+            task.cancel()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=3)
+        cleanup_done.set()
+    assert cleanup_done.is_set()
     assert not second_provider_call.is_set()
-    assert task.done() is False  # the wait_for timeout requested cancellation; tool suppresses it
-    release_tool.set()
-    await asyncio.gather(task, return_exceptions=True)
-    assert spawned.startswith("Subagent [planner] started")
     assert not second_provider_call.is_set()
     row = json.loads(next((tmp_path / "state" / "subagents").glob("*.json")).read_text(encoding="utf-8"))
     assert provider_calls[0] == 1
