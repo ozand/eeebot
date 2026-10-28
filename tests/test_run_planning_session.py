@@ -271,12 +271,22 @@ def test_opted_in_planner_deadline_timeout_cancels_real_manager_before_diary(tmp
             provider=Provider(), bus=bridge.MessageBus(), config=_fake_config(),
             model="an/test-model", cycle_id="cycle-cancel-test",
         ))
-        await real_wait_for(provider_started.wait(), timeout=2)
-        await real_wait_for(provider_cancelled.wait(), timeout=2)
-        assert not run_task.done(), "bridge drain waits for the real manager task to unwind"
-        assert not (repo / diary_relpath()).exists()
-        release_provider.set()
-        return await run_task
+        try:
+            await real_wait_for(provider_started.wait(), timeout=2)
+            await real_wait_for(provider_cancelled.wait(), timeout=2)
+            assert not run_task.done(), "bridge drain waits for the real manager task to unwind"
+            assert not (repo / diary_relpath()).exists()
+            release_provider.set()
+            return await run_task
+        finally:
+            # Always release the cancellation-resistant provider, including if
+            # a startup/wait/assertion fails, then boundedly drain owned work.
+            release_provider.set()
+            if not run_task.done():
+                run_task.cancel()
+            await real_wait_for(
+                asyncio.gather(run_task, return_exceptions=True), timeout=3,
+            )
 
     outcome = asyncio.run(_release_after_cancellation())
     assert outcome["ran"] is False
