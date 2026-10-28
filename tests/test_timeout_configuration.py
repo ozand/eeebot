@@ -18,7 +18,7 @@ def test_git_subprocesses_cannot_prompt_for_terminal_input() -> None:
 
 def test_blocking_fixture_fails_by_timeout(tmp_path: Path) -> None:
     (tmp_path / "pytest.ini").write_text(
-        "[pytest]\ntimeout = 0.2\ntimeout_method = thread\n",
+        "[pytest]\ntimeout = 0.2\ntimeout_method = thread\nasyncio_default_fixture_loop_scope = function\n",
         encoding="utf-8",
     )
     (tmp_path / "test_blocking.py").write_text(

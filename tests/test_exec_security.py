@@ -238,7 +238,7 @@ async def test_watchdog_repeated_cancellation_finishes_real_process_cleanup(tmp_
     child_script = tmp_path / "child.py"
     child_script.write_text("\n".join((
         "import os, signal, sys, time",
-        "open(sys.argv[1], 'w').write(str(os.getpid()))",
+        "open(sys.argv[1], 'w').write(str(os.getpid()) + '\\n')",
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
         "time.sleep(60)",
         "",
@@ -256,18 +256,63 @@ async def test_watchdog_repeated_cancellation_finishes_real_process_cleanup(tmp_
         )
 
     monkeypatch.setattr(ExecTool, "_terminate_and_reap", staticmethod(_observe_cleanup))
+    original_read_text = Path.read_text
+    child_pid_reads_before_complete = 0
+
+    def _read_text_with_partial_child_pid_publication(path, *args, **kwargs):
+        nonlocal child_pid_reads_before_complete
+        if path == child_pid_file:
+            child_pid_reads_before_complete += 1
+            if child_pid_reads_before_complete == 1:
+                return ""
+            if child_pid_reads_before_complete == 2:
+                return "42"
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _read_text_with_partial_child_pid_publication)
     execution = asyncio.create_task(ExecTool(timeout=60).execute(command))
+
+    def _read_complete_pid(path):
+        try:
+            content = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        if not content.endswith("\n"):
+            return None
+        pid_text = content[:-1]
+        if not pid_text.isascii() or not pid_text.isdecimal():
+            return None
+        pid = int(pid_text)
+        return pid if pid > 0 else None
+
     deadline = time.monotonic() + 10
-    while (not child_pid_file.exists() or not shell_pid_file.exists()) and time.monotonic() < deadline:
-        await asyncio.sleep(0.01)
-    assert child_pid_file.exists() and shell_pid_file.exists(), "real shell/child did not start"
-    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
-    shell_pid = int(shell_pid_file.read_text(encoding="utf-8"))
-    execution.cancel()
-    await asyncio.wait_for(cleanup_started.wait(), timeout=5)
-    execution.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(execution, timeout=8)
+    child_pid = shell_pid = None
+    try:
+        while time.monotonic() < deadline:
+            child_pid = _read_complete_pid(child_pid_file)
+            shell_pid = _read_complete_pid(shell_pid_file)
+            if child_pid is not None and shell_pid is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert child_pid_reads_before_complete >= 3, (
+            "empty and unterminated child PID states were not both exercised"
+        )
+        assert child_pid is not None and shell_pid is not None, (
+            "real shell/child did not publish valid positive PIDs before startup deadline"
+        )
+
+        execution.cancel()
+        await asyncio.wait_for(cleanup_started.wait(), timeout=5)
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(execution, timeout=8)
+    finally:
+        if not execution.done():
+            execution.cancel()
+            try:
+                await asyncio.wait_for(execution, timeout=8)
+            except asyncio.CancelledError:
+                pass
 
     for pid in (shell_pid, child_pid):
         proc_stat = Path(f"/proc/{pid}/stat")
