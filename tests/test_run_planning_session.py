@@ -203,36 +203,89 @@ def test_planning_session_uses_opted_in_6000_second_phase_deadline(tmp_path: Pat
     assert bridge.SubagentManager.last_instance.max_iterations == 20
 
 
-def test_opted_in_planner_deadline_timeout_records_no_plan_without_diary(tmp_path: Path, monkeypatch):
-    """ADR-045: bridge cancellation is observed and no partial plan persists."""
+def test_opted_in_planner_deadline_timeout_cancels_real_manager_before_diary(tmp_path: Path, monkeypatch):
+    """ADR-045: the bridge timeout cancels/drains a real in-flight manager."""
     repo = _init_repo_with_origin(tmp_path)
     state = tmp_path / "state"
     monkeypatch.setenv("SELFEVO_PLANNER_PHASE_BUDGET_ENABLED", "true")
     monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "9000")
-    manager_factory = _make_fake_mgr_factory(state, {"plan": "must not persist"})
-    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
-    observed_timeouts = []
-    monkeypatch.setattr(bridge.time, "monotonic", lambda: 0.0)
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "500")
+    monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "300")
+    monkeypatch.setenv("NANOBOT_PROGRESS_TIMEOUT_SECS", "10000")
+    release = Path(__file__).resolve().parents[1]
+    # Use the repository's immutable charter fixture; never rewrite tracked goals.md.
+    monkeypatch.setattr(bridge, "RELEASE_ROOT", release)
 
-    async def _expire(awaitable, *, timeout):
-        observed_timeouts.append(timeout)
-        try:
-            await awaitable
-        except asyncio.CancelledError:
-            pass
-        raise asyncio.TimeoutError
+    provider_started = asyncio.Event()
+    provider_cancelled = asyncio.Event()
+    release_provider = asyncio.Event()
 
-    monkeypatch.setattr(bridge.asyncio, "wait_for", _expire)
-    outcome = asyncio.run(_run(
-        state_dir=state, selfevo_repo=repo, denied_paths=set(),
-        wall_deadline=9000.0, planner_phase_budget=True,
-    ))
+    class Provider:
+        def get_default_model(self):
+            return "test-model"
+
+        async def chat_with_retry(self, **_kwargs):
+            provider_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                provider_cancelled.set()
+                await release_provider.wait()
+                raise
+
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+
+    real_manager_init = SubagentManager.__init__
+
+    def _manager_init(self, **kwargs):
+        kwargs["tool_profile"] = PLANNER_PROFILE
+        kwargs["role_system_prompt"] = "planner {{TOOL_CAPABILITIES}}"
+        return real_manager_init(self, **kwargs)
+
+    monkeypatch.setattr(SubagentManager, "__init__", _manager_init)
+    monkeypatch.setattr(bridge, "SubagentManager", SubagentManager)
+    real_wait_for = asyncio.wait_for
+    outer_timeouts: list[float] = []
+
+    async def _shorten_only_bridge_wait(awaitable, *, timeout):
+        if isinstance(awaitable, asyncio.Future) and timeout > 5000:
+            outer_timeouts.append(timeout)
+            try:
+                return await real_wait_for(awaitable, timeout=0.5)
+            except asyncio.TimeoutError:
+                awaitable.cancel()
+                try:
+                    await awaitable
+                except asyncio.CancelledError:
+                    pass
+                raise
+        return await real_wait_for(awaitable, timeout=timeout)
+
+    monkeypatch.setattr(bridge.asyncio, "wait_for", _shorten_only_bridge_wait)
+
+    async def _release_after_cancellation():
+        run_task = asyncio.create_task(_run(
+            state_dir=state, selfevo_repo=repo, denied_paths=set(),
+            wall_deadline=bridge.time.monotonic() + 9000.0, planner_phase_budget=True,
+            provider=Provider(), bus=bridge.MessageBus(), config=_fake_config(),
+            model="an/test-model", cycle_id="cycle-cancel-test",
+        ))
+        await real_wait_for(provider_started.wait(), timeout=2)
+        await real_wait_for(provider_cancelled.wait(), timeout=2)
+        assert not run_task.done(), "bridge drain waits for the real manager task to unwind"
+        assert not (repo / diary_relpath()).exists()
+        release_provider.set()
+        return await run_task
+
+    outcome = asyncio.run(_release_after_cancellation())
     assert outcome["ran"] is False
-    assert observed_timeouts == [pytest.approx(6000.0)]
+    assert len(outer_timeouts) == 1
+    assert 5990.0 < outer_timeouts[0] <= 6000.0
+    assert provider_cancelled.is_set()
     assert not (repo / diary_relpath()).exists()
     [row] = _ledger_rows(state, "planning_session")
     assert row["outcome"] == "timed_out"
-    assert manager_factory.last_instance._planner_phase_budget is True
 
 
 def test_planning_session_passes_explicit_cycle_id_to_subagent_manager(tmp_path: Path, monkeypatch):
