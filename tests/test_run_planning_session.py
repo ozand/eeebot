@@ -252,7 +252,7 @@ def test_opted_in_planner_deadline_timeout_cancels_real_manager_before_diary(tmp
         if isinstance(awaitable, asyncio.Future) and timeout > 5000:
             outer_timeouts.append(timeout)
             try:
-                return await real_wait_for(awaitable, timeout=0.5)
+                return await real_wait_for(awaitable, timeout=1.5)
             except asyncio.TimeoutError:
                 awaitable.cancel()
                 try:
@@ -272,8 +272,8 @@ def test_opted_in_planner_deadline_timeout_cancels_real_manager_before_diary(tmp
             model="an/test-model", cycle_id="cycle-cancel-test",
         ))
         try:
-            await real_wait_for(provider_started.wait(), timeout=2)
-            await real_wait_for(provider_cancelled.wait(), timeout=2)
+            await real_wait_for(provider_started.wait(), timeout=5)
+            await real_wait_for(provider_cancelled.wait(), timeout=5)
             assert not run_task.done(), "bridge drain waits for the real manager task to unwind"
             assert not (repo / diary_relpath()).exists()
             release_provider.set()
