@@ -1,6 +1,6 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-10-27 (#2036 capability slice: the planner subagent uses an explicit read/list tool profile; ADR-044 accepted for this narrow slice). Previous entry: 2026-07-18 (#768: added R45 — the periodic
+_Status: current. Last updated: 2026-10-28 (#2050 H3 planner phase budget: explicit opt-in selects a 6000s planner phase with a reserved 3000s executor/gate phase; feature remains OFF by default and does not authorize host activation). Previous entry: 2026-10-27 (#2036 capability slice: the planner subagent uses an explicit read/list tool profile; ADR-044 accepted for this narrow slice). Earlier entry: 2026-07-18 (#768: added R45 — the periodic
 goal-review: `nanobot/runtime/goal_review.py`, behind
 `SELFEVO_GOAL_REVIEW_ENABLED` (default OFF) + a daily watermark, formulates
 1-3 bounded priorities from goal vectors + measured evidence (scorecard

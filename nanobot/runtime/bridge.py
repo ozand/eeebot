@@ -3317,7 +3317,8 @@ def _parse_planner_final_response(raw_result: str) -> tuple[dict[str, Any] | Non
 
 async def _run_planning_session(
     *, provider, bus, config, model: str, state_dir: 'Path', selfevo_repo: 'Path',
-    denied_paths: set, cycle_id: str,
+    denied_paths: set, cycle_id: str, wall_deadline: float | None = None,
+    planner_phase_budget: bool = False,
 ) -> dict:
     """#1852 (ADR-031 rule 5, ADR-032 rule 2): the planning session. Between
     cycles, on the executor's own model, in a clean context, bounded at 20
@@ -3573,6 +3574,17 @@ async def _run_planning_session(
     _integrity_pre = _fitness_sidecar_hashes(state_dir)
 
     try:
+        _planner_started = time.monotonic()
+        if planner_phase_budget:
+            from nanobot.runtime.session_clock import planner_phase_deadline
+            _effective_wall_deadline = wall_deadline or (_planner_started + 9000.0)
+            _planner_deadline = planner_phase_deadline(_planner_started, _effective_wall_deadline)
+        else:
+            _effective_wall_deadline = wall_deadline
+            _planner_deadline = min(
+                _planner_started + 600.0,
+                wall_deadline if wall_deadline is not None else _planner_started + 600.0,
+            )
         planner_manager = SubagentManager(
             provider=provider,
             workspace=selfevo_repo,
@@ -3591,6 +3603,9 @@ async def _run_planning_session(
             role_system_prompt=role_text,
             telemetry_component='planner',
             telemetry_cycle_id=cycle_id,
+            wall_deadline=_effective_wall_deadline,
+            planner_deadline=_planner_deadline,
+            planner_phase_budget=planner_phase_budget,
         )
         await planner_manager.spawn(
             task=_planner_task,
@@ -3604,7 +3619,7 @@ async def _run_planning_session(
             try:
                 await _asyncio.wait_for(
                     _asyncio.gather(*list(planner_manager._running_tasks.values()), return_exceptions=True),
-                    timeout=600.0,
+                    timeout=max(0.0, _planner_deadline - time.monotonic()),
                 )
             except _asyncio.TimeoutError:
                 _timed_out = True
@@ -3648,7 +3663,8 @@ async def _run_planning_session(
     # Timeout is its own durable outcome. The contract was already pre-read,
     # so a later model timeout must never be misclassified as a missing read.
     if _timed_out:
-        return _fail('timed_out', 'planner subagent exceeded its 600s wall-clock allowance')
+        _allowance = 6000 if planner_phase_budget else 600
+        return _fail('timed_out', f'planner subagent exceeded its {_allowance}s wall-clock allowance')
     if not planner_task_id:
         return _fail('spawn_failed', 'no subagent task_id produced')
 
@@ -4181,6 +4197,15 @@ async def _main_impl_body():
     _clear_result_entries_cache()
     set_config_path(CONFIG_PATH)
     config = load_config(CONFIG_PATH)
+    from nanobot.runtime.session_clock import (
+        PlannerBudgetConfigurationError,
+        planner_phase_budget_enabled,
+    )
+    try:
+        _planner_phase_budget_enabled = planner_phase_budget_enabled()
+    except PlannerBudgetConfigurationError as exc:
+        print(f"planning-session: configuration error ({exc})")
+        return 1
     # #721: bounded, fail-open tag pruning — run once per bridge invocation
     # (this function runs exactly once per process, per `main()`'s docstring),
     # right after the concurrency lock in `main()` is held, before anything
@@ -4473,6 +4498,8 @@ async def _main_impl_body():
             provider=provider, bus=bus, config=config, model=_planner_model,
             state_dir=STATE_DIR, selfevo_repo=_selfevo_repo_for_proposer,
             denied_paths=_planning_denied_paths, cycle_id=_planning_cycle_id,
+            wall_deadline=_bridge_wall_deadline,
+            planner_phase_budget=_planner_phase_budget_enabled,
         )
     except Exception as _planning_exc:
         print(f'planning-session: unexpected error ({_planning_exc})')
