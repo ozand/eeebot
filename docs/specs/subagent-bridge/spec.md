@@ -1,6 +1,6 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-10-27 (#2036 capability slice: the planner subagent uses an explicit read/list tool profile; see ADR-044, Proposed). Previous entry: 2026-07-18 (#768: added R45 — the periodic
+_Status: current. Last updated: 2026-10-27 (#2036 capability slice: the planner subagent uses an explicit read/list tool profile; ADR-044 accepted for this narrow slice). Previous entry: 2026-07-18 (#768: added R45 — the periodic
 goal-review: `nanobot/runtime/goal_review.py`, behind
 `SELFEVO_GOAL_REVIEW_ENABLED` (default OFF) + a daily watermark, formulates
 1-3 bounded priorities from goal vectors + measured evidence (scorecard
@@ -170,7 +170,7 @@ passes — so a broken or unverified cycle never reaches `main`.
 
 ## Requirements
 
-### Planner capability profile (#2036, ADR-044 Proposed)
+### Planner capability profile (#2036, ADR-044 accepted 2026-10-27)
 
 The planning subagent SHALL receive the closed `planner` capability profile:
 `read_file` and `list_dir` only, with the profile's declared read/list
@@ -180,8 +180,7 @@ command, memory-index search, web, or delegation tools. Invalid profile values
 SHALL fail before spawn without falling back to the executor profile. The legacy
 executor profile remains the default and preserves its existing tool and path
 behavior. This is an application tool-registration boundary, not OS-level
-filesystem isolation. See `docs/adr/ADR-044-planner-tool-capabilities-are-explicit-and-minimal.md`;
-that ADR remains Proposed pending its test-on-main acceptance procedure.
+filesystem isolation. See `docs/adr/ADR-044-planner-tool-capabilities-are-explicit-and-minimal.md`.
 
 ### Append-only memory and lesson changes (#1768)
 
