@@ -300,7 +300,8 @@ async def test_opted_in_planner_entry_too_late_stops_without_provider_call(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_opted_in_planner_tool_suppresses_cancellation_and_cannot_start_late_call(tmp_path, monkeypatch):
+async def test_opted_in_planner_tool_timeout_drains_cancellation_without_late_call(tmp_path, monkeypatch):
+    """ADR-045: a timed-out tool may finish late, but no later provider turn starts."""
     monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "0.05")
     monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "0")
     monkeypatch.setenv("NANOBOT_PROGRESS_TIMEOUT_SECS", "10")
@@ -316,11 +317,14 @@ async def test_opted_in_planner_tool_suppresses_cancellation_and_cannot_start_la
     tool_cancelled = asyncio.Event()
     second_provider_call = asyncio.Event()
 
+    provider_calls = [0]
+
     class Provider:
         def get_default_model(self):
             return "test-model"
 
         async def chat_with_retry(self, *, messages, tools, model):
+            provider_calls[0] += 1
             if second_provider_call.is_set():
                 raise AssertionError("provider called after shared deadline")
             if any(message.get("role") == "tool" for message in messages):
@@ -352,15 +356,15 @@ async def test_opted_in_planner_tool_suppresses_cancellation_and_cannot_start_la
     task = manager._running_tasks[next(iter(manager._running_tasks))]
     await asyncio.wait_for(tool_started.wait(), timeout=2)
     clock[0] = 8957.0
-    task.cancel()
     await asyncio.wait_for(tool_cancelled.wait(), timeout=2)
     assert not second_provider_call.is_set()
-    assert task.done() is False  # cancellation was suppressed; a timeout is not a hard stop
+    assert task.done() is False  # the wait_for timeout requested cancellation; tool suppresses it
     release_tool.set()
     await asyncio.gather(task, return_exceptions=True)
     assert spawned.startswith("Subagent [planner] started")
     assert not second_provider_call.is_set()
     row = json.loads(next((tmp_path / "state" / "subagents").glob("*.json")).read_text(encoding="utf-8"))
+    assert provider_calls[0] == 1
     assert row["status"] == "bounded_stop"
     assert row["stop_reason"] == "wall_clock_deadline"
     assert "wall-clock time limit" in row["result"]
