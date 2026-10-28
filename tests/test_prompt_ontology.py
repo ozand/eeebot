@@ -327,7 +327,9 @@ def test_surface_allowed_targets_appears_only_in_operating_md_at_release_root():
     offenders = [
         path.name
         for path in sorted(RELEASE_ROOT.glob("*.md"))
-        if path.name != "OPERATING.md" and marker in path.read_text(encoding="utf-8")
+        if path.is_file()
+        and path.name != "OPERATING.md"
+        and marker in path.read_text(encoding="utf-8")
     ]
     assert offenders == [], f"{marker!r} also found in: {offenders}"
 

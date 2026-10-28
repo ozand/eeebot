@@ -20,7 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import bridge, cycle_ledger, goal_gap_futility as futility, scorecard
+from nanobot.runtime import bridge, cycle_ledger, scorecard
+from nanobot.runtime import goal_gap_futility as futility
 from tests.test_bridge_executor_llm_error import (
     TRANSPORT_ERROR,
     _LLMDeadSubagentManager,
@@ -307,6 +308,7 @@ class TestOutageCycleOffersTheSameItemAgainUnchanged:
         assert rc == 0
         outcome = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"][-1]
         assert outcome["outcome"] == "success"
+        assert outcome["handled_disposition"] == "handled"
         assert (state_dir / "subagent_bridge" / f"handled_{key}.txt").exists()
 
 

@@ -12,7 +12,9 @@ independently documented before this migration.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -66,6 +68,55 @@ def test_day_key_defaults_to_system_clock():
     result = dk.day_key()
     after = datetime.now().astimezone()
     assert before.strftime(dk.DAY_KEY_FORMAT) <= result <= after.strftime(dk.DAY_KEY_FORMAT)
+
+
+@pytest.mark.parametrize("payload", [
+    "not-json",
+    '{"cutover_utc": 1}',
+    '{"cutover_utc": null}',
+    '{"cutover_utc": "2026-01-01T00:00:00"}',
+    '{"cutover_utc":"2026-01-01T00:00:00Z","cutover_utc":"2026-01-02T00:00:00Z"}',
+    '{"cutover_utc":"2026-01-01T00:00:00Z","cutover_utc":"invalid"}',
+    "{" + "[" * 2000 + "0" + "]" * 2000 + "}",
+])
+def test_strict_cutover_read_rejects_invalid_existing_marker_without_overwrite(tmp_path, payload):
+    marker = tmp_path / dk.CUTOVER_MARKER_FILENAME
+    marker.write_text(payload, encoding="utf-8")
+    before = marker.read_bytes()
+
+    with pytest.raises((ValueError, json.JSONDecodeError, RecursionError)):
+        dk.record_cutover_if_absent(marker, datetime(2030, 1, 1, tzinfo=timezone.utc), strict=True)
+
+    assert marker.read_bytes() == before
+
+
+def test_strict_cutover_read_permission_error_preserves_marker(monkeypatch, tmp_path):
+    marker = tmp_path / dk.CUTOVER_MARKER_FILENAME
+    marker.write_text('{"cutover_utc":"2026-01-01T00:00:00Z"}', encoding="utf-8")
+    before = marker.read_bytes()
+    monkeypatch.setattr(Path, "read_text", lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("denied")))
+    with pytest.raises(PermissionError):
+        dk.record_cutover_if_absent(marker, strict=True)
+    assert marker.read_bytes() == before
+
+
+def test_strict_cutover_write_failure_propagates(tmp_path, monkeypatch):
+    marker = tmp_path / dk.CUTOVER_MARKER_FILENAME
+    monkeypatch.setattr(Path, "write_text", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk failure")))
+    with pytest.raises(OSError):
+        dk.record_cutover_if_absent(marker, datetime(2026, 1, 1, tzinfo=timezone.utc), strict=True)
+    assert not marker.exists()
+
+
+def test_strict_cutover_read_accepts_valid_marker_and_genuinely_absent(tmp_path):
+    moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    marker = tmp_path / dk.CUTOVER_MARKER_FILENAME
+    recorded, created = dk.record_cutover_if_absent(marker, moment, strict=True)
+    assert recorded == moment and created is True
+    assert dk.record_cutover_if_absent(marker, strict=True) == (moment, False)
+    assert dk.record_cutover_if_absent(marker, moment) == (moment, False)
+    absent = tmp_path / "absent.json"
+    assert dk.record_cutover_if_absent(absent, moment, strict=True) == (moment, True)
 
 
 def test_local_offset_reads_the_supplied_moment():

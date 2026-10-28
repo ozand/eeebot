@@ -1,6 +1,6 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-07-18 (#768: added R45 — the periodic
+_Status: current. Last updated: 2026-10-27 (#2036 capability slice: the planner subagent uses an explicit read/list tool profile; ADR-044 accepted for this narrow slice). Previous entry: 2026-07-18 (#768: added R45 — the periodic
 goal-review: `nanobot/runtime/goal_review.py`, behind
 `SELFEVO_GOAL_REVIEW_ENABLED` (default OFF) + a daily watermark, formulates
 1-3 bounded priorities from goal vectors + measured evidence (scorecard
@@ -169,6 +169,22 @@ passes — so a broken or unverified cycle never reaches `main`.
 > thin wrapper kept for the unchanged systemd/deploy contract).
 
 ## Requirements
+
+### Planner capability profile (#2036, ADR-044 accepted 2026-10-27)
+
+The planning subagent SHALL receive the closed `planner` capability profile:
+`read_file` and `list_dir` only, with the profile's declared read/list
+operations, existing workspace-relative and unrestricted absolute path behavior,
+and generated allowed-actions text. The planner SHALL NOT receive write, edit,
+command, memory-index search, web, or delegation tools. Invalid profile values
+SHALL fail before spawn without falling back to the executor profile. The legacy
+executor profile remains the default and preserves its existing tool and path
+behavior. This is an application tool-registration boundary, not OS-level
+filesystem isolation. See `docs/adr/ADR-044-planner-tool-capabilities-are-explicit-and-minimal.md`.
+
+### Append-only memory and lesson changes (#1768)
+
+The cycle gate SHALL allow additions under `memory/` and `lessons/`, reject deletions under those prefixes and any rename with either endpoint under those prefixes, and reject removal of existing lines from `memory/HISTORY.md`. For the history comparison, a file genuinely absent from the base revision has no prior lines to preserve and may be added; a baseline lookup that is unavailable or unreadable is unknown, not absent, and SHALL block with a deterministic violation. The full diff-status check SHALL use NUL-delimited records to preserve pathnames containing quotes, tabs, newlines, or non-ASCII characters. If the lookup fails or records are malformed, the gate SHALL block because protected-path changes cannot be verified, even when the name-only changed-path list contains no protected path; a successful empty result is distinct from an unavailable lookup. Readable baselines retain the existing no-shrink comparison. This rule applies to executor cycle gating; it does not change the intentional fail-open test-guard policy or curator promotion path.
 
 ### Skill mutation and first-hand usage fitness (#939)
 

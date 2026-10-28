@@ -1,4 +1,4 @@
-"""ADR-031 rule 5, ADR-032 rule 2 (#1852): the planning session itself --
+"""ADR-031 rule 5, ADR-032 rule 2 (#1852), ADR-044 planner-profile output compatibility: the planning session itself --
 :func:`bridge._run_planning_session`.
 
 ``SubagentManager`` is faked here (not the real agent loop -- no LLM call

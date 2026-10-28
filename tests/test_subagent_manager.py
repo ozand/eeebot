@@ -2,6 +2,7 @@ import pytest
 
 
 def test_executor_declared_and_registered_tool_names_match():
+    """ADR-044: the compatibility-default executor profile stays unchanged."""
     from nanobot.agent.subagent import SubagentManager
 
     assert SubagentManager.declared_tool_names() == (
@@ -42,6 +43,7 @@ def test_runtime_registration_assertion_rejects_declared_tool_divergence(tmp_pat
 
 
 def test_interactive_subagent_role_keeps_web_tools_available():
+    """ADR-044: interactive executor compatibility retains web tools."""
     from nanobot.agent.subagent import SubagentManager
 
     manager = object.__new__(SubagentManager)

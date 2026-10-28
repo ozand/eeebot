@@ -71,9 +71,9 @@ _DEFAULT_RETENTION_DAYS = 90
 # (see their own docstrings/readers, updated alongside this).
 # 'pushed_late' / 'superseded' / 'abandoned' (#1709 increment 2): the three
 # ways a 'push_pending' cycle gets resolved at the next cycle-start boundary
-# (see bridge._finish_pending_pushes). 'pushed_late' is a genuine success —
-# main advanced, just on a later cycle — and is folded into demand.py's
-# completed-demand sidecar the same as 'success'. 'superseded' (origin/main
+# (see bridge._finish_pending_pushes). 'pushed_late' records a Git integration
+# that occurred later; delivery may still be unknown, so it is not necessarily
+# a delivery success. 'superseded' (origin/main
 # moved past the row's recorded base — never merged/rebased automatically)
 # and 'abandoned' (the branch no longer exists) are neither a success nor a
 # failure of the original work; excluded from futility's attempt counting.
@@ -106,6 +106,12 @@ VALID_DEDUP_DECISIONS = frozenset({"proceeded", "skipped_duplicate", "skipped_re
 # Derivation lives in nanobot.runtime.bridge (deterministic, code-only —
 # never a new LLM call); this module only validates and stores the result.
 VALID_VERDICTS = frozenset({"accept", "reject", "inconclusive"})
+
+# ADR-037 (#2076): existing _decide_handled_marker return values only.
+VALID_HANDLED_DISPOSITIONS = frozenset({
+    "supplier_paused", "handled", "retired_state_lost",
+    "retired_after_retries", "retry",
+})
 
 
 def _ledger_dir(state_dir: Path) -> Path:
@@ -148,7 +154,14 @@ def _file_mtime_local(path: Path) -> datetime:
     return datetime.fromtimestamp(path.stat().st_mtime)
 
 
-def _rotate_and_prune(ledger_dir: Path, active_path: Path, today: str, retention_days: int) -> None:
+def _rotate_and_prune(
+    ledger_dir: Path,
+    active_path: Path,
+    today: str,
+    retention_days: int,
+    *,
+    strict: bool = False,
+) -> None:
     """Archive a stale active file and prune expired archives.
 
     Mirrors ``llm_telemetry._rotate_and_prune``'s shape (gzip prior content,
@@ -175,7 +188,8 @@ def _rotate_and_prune(ledger_dir: Path, active_path: Path, today: str, retention
                     shutil.copyfileobj(f_in, f_out)
                 active_path.unlink()
     except Exception:
-        pass
+        if strict:
+            raise
 
     try:
         from datetime import timedelta
@@ -183,9 +197,13 @@ def _rotate_and_prune(ledger_dir: Path, active_path: Path, today: str, retention
         today_date = datetime.strptime(today, day_key.DAY_KEY_FORMAT).date()
         cutoff_ordinal = (today_date - timedelta(days=retention_days)).toordinal()
     except Exception:
+        if strict:
+            raise
         return
 
     for path in ledger_dir.glob("cycles-*.jsonl.gz"):
+        if strict and path.is_symlink():
+            raise OSError("ledger archive is a symlink")
         day = _day_str(path.name)
         if not day:
             continue
@@ -194,6 +212,8 @@ def _rotate_and_prune(ledger_dir: Path, active_path: Path, today: str, retention
             if day_ordinal < cutoff_ordinal:
                 path.unlink(missing_ok=True)
         except Exception:
+            if strict:
+                raise
             continue
 
 
@@ -571,6 +591,7 @@ def record_cycle_outcome(
     max_call_gap_s: float | None = None,
     delivered: bool | None = None,
     delivery_state: str | None = None,
+    handled_disposition: str | None = None,
 ) -> None:
     """Write the terminal, exactly-once-per-cycle row with an enum ``outcome``.
 
@@ -656,6 +677,8 @@ def record_cycle_outcome(
         row["verdict"] = verdict
         if verdict_reason:
             row["verdict_reason"] = str(verdict_reason)[:200]
+    if handled_disposition in VALID_HANDLED_DISPOSITIONS:
+        row["handled_disposition"] = handled_disposition
     if delivered is not None:
         row["delivered"] = bool(delivered)
     if delivery_state in {"known", "unknown"}:

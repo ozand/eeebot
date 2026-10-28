@@ -53,6 +53,12 @@ Conventions:
 | [ADR-035](ADR-035-the-planning-session-chooses-and-closes-hadi.md) | The agent's planning session chooses the work and closes the HADI loop; the outer contour diagnoses and never assigns | proposed |
 | [ADR-036](ADR-036-one-dashboard-two-places.md) | One dashboard, two places — the published generator also serves the LAN, and only the LAN sees what the agents said | proposed |
 | [ADR-037](ADR-037-record-handled-disposition-without-implying-cause.md) | Record handled-marker disposition without implying interruption cause | proposed |
+| [ADR-039](ADR-039-warn-on-twelve-started-attempts-per-task.md) | Warn operators after twelve unsuccessful started attempts for one task | proposed |
+| [ADR-040](ADR-040-reflector-selects-authoritative-executor-attempt.md) | Reflector selects the authoritative executor attempt | proposed |
+| [ADR-041](ADR-041-bind-web-fetch-connections-to-validated-addresses.md) | Bind each web fetch connection to its validated address snapshot | proposed |
+| [ADR-042](ADR-042-accept-bounded-delivery-deviations-with-truthful-evidence.md) | Accept bounded process deviations only with truthful evidence | accepted |
+| [ADR-043](ADR-043-operator-resume-requires-validated-state-and-shared-lock.md) | Operator resume validates stopped state under the shared bridge lock | accepted |
+| [ADR-044](ADR-044-planner-tool-capabilities-are-explicit-and-minimal.md) | Planner tool capabilities are explicit and minimal | accepted |
 | [ADR-045](ADR-045-bound-planner-finalization-by-remaining-time.md) | Bound planner finalization by remaining time inside a reserved shared budget | proposed |
 
 ## Acceptance
@@ -77,8 +83,14 @@ A record moves `proposed -> accepted` when, and only when:
    `deferred (#NNN)`. An item with neither is the reason the record is not
    accepted. Amending a proposed record's contract items to name their tests
    is part of accepting it.
-2. The operator accepts, by a commit that flips frontmatter `status:` to
-   `accepted`. Not the agent that wrote the record, and not the loop.
+2. The authorized decision owner or, for a necessary technical ADR within an
+   explicitly owner-approved outcome, the delegated delivery executor accepts
+   the record by a commit that flips frontmatter `status:` to `accepted`.
+   Delegated technical acceptance requires applicable checks and independent
+   review PASS on the exact final revision, with the authority and reviewed
+   revision recorded under [`AGENT_ROUTING.md`](../../AGENT_ROUTING.md). It is
+   not a claim that a human reviewer or operator personally accepted it. No
+   agent may record operator acceptance on the operator's behalf.
 3. The record carries its own acceptance: date and accepting change (PR
    number or commit) under `# Status`.
 

@@ -14,6 +14,39 @@ are the operational guide and the principles behind it.
 - PRs target `main`. There is no separate `nightly` branch in this fork.
 - Discuss ideas, questions, and proposals via GitHub Issues on this repo.
 
+### Task provenance and completion receipts
+
+For Pi-assisted repository work, make the receipt describe what actually ran; a
+session's current directory or a model-written path is not proof of repository
+identity or authorization. Record the observed cwd, Git top-level, branch, full
+starting and ending HEAD SHAs, task/owner/writer, selected generator and import
+or source provenance, single-writer scope, and admitted baseline-to-final path
+status. State exact completion evidence (for example, focused checks, Lat
+validation, independent review, or CI) and distinguish passed, failed, skipped,
+and not-run work.
+
+Keep receipts outside the product tree in an explicitly approved evidence
+location. Default to path names/status, not content: never read, copy, publish,
+or hash credentials, auth/session state, private files, caches, or whole trees.
+Only inspect or hash content for explicitly admitted non-private paths. Record
+which paths were admitted and why; unknown paths remain uninspected. Do not
+claim a guard blocked writes unless its exact tool coverage and result are
+verified.
+
+The best-effort Pi protected-root guard implementation is maintained in
+[`ozand/pi-config`](https://github.com/ozand/pi-config). The implementation and
+subsequent evidence-journal repair are merged and independently reviewed; the
+exact merged repair is pinned at
+[`ca9dd0c575d67577479a92433a91f7fc6700c1c6` README](https://github.com/ozand/pi-config/blob/ca9dd0c575d67577479a92433a91f7fc6700c1c6/README.md#protected-root-guard-not-activated-by-this-change)
+and [ADR-004](https://github.com/ozand/pi-config/blob/ca9dd0c575d67577479a92433a91f7fc6700c1c6/docs/adr/ADR-004-protect-registered-product-roots-at-the-pi-tool-boundary.md).
+It covers only supported direct Pi `write`/`edit` calls and is not a sandbox.
+The guard has not thereby been installed or activated. Canary/readiness work is
+tracked separately in [pi-config#41](https://github.com/ozand/pi-config/issues/41);
+canary completion and production approval are not claimed here. Check current
+upstream state before relying on protection. Operator-provided environment
+registration is a launch trust assumption, not cryptographic identity; cwd,
+branch, and model-supplied fields alone do not authorize writes.
+
 ## Development setup
 
 ```bash
