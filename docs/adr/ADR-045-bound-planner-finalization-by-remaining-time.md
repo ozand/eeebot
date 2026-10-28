@@ -9,7 +9,7 @@ tags: [runtime, planning, deadlines, budget]
 
 # Status
 
-Accepted — delegated technical acceptance under the owner's explicitly approved #2050 source outcome, recorded 2026-10-28 in accepting commit pending exact-revision review and parent ratification. This narrow repository-source contract is not personal operator acceptance, host/service-capacity approval, unit approval, activation, deployment, rollout, or acceptance of all #2050/#2036 criteria. PR #2071 merged at `43b7fa0d2d6baedeb865c13b67c757358de706a`; its source implementation and tests are on main. Independent exact-revision review of this acceptance candidate and parent ratification remain required before publication.
+Accepted — delegated technical acceptance under the owner's explicitly approved #2050 source outcome, recorded 2026-10-28 by accepting status-change commit `521d9e8b971fed8549ef608a81206404d77d2564`. The implementation merged in PR #2071 at `43b7fa0d2d6baedeb865c13b67c757358de706a`; independent review of the acceptance candidate and parent ratification are required before publication. This narrow repository-source contract is not personal operator acceptance, host/service-capacity approval, unit approval, activation, deployment, rollout, or acceptance of all #2050/#2036 criteria.
 
 # Context
 
