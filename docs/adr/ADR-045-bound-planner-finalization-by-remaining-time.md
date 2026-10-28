@@ -17,11 +17,11 @@ At PR #2071 head `c125c233146e6761c546fd9014b01dde80ab38fc` (base `9ebd3ccebdf73
 
 The bridge shared monotonic deadline is anchored at process start, before planning. At current main `b6a0cc8a52e236b6c80ea36d57491d02e09beaf2`, `session_clock.py` defaults shared wall to 3000s, call p99 budget C to 243s, and final/gate budget F to 300s. The existing guard requires remaining shared time >= configured C+F before a call. C is statistical, not a hard latency guarantee. Planner starts after bridge work, so available time is less than total shared wall. The existing PR branch carries an older unmerged 3600s shared default and 1200s planner wait; the opt-in OFF path must restore main's 3000s/600s behavior, not preserve those unmerged defaults.
 
-The #2050 budget receipt proposes retaining executor allocation E=3000s, already including F=300s, plus planner allowance P=6000s: software bridge budget B=P+E=9000s. No executor-duration or shutdown sample supports reducing E. Additional systemd headroom M=300s (S=9300s) is unmeasured and separately reserved; this ADR does not set S. Current main's planner wait is 600s and shared-wall default is 3000s; the source opt-in must be OFF by default and leave that behavior unchanged. The existing `NANOBOT_SUBAGENT_WALL_SECS` is an explicit total-budget setting; exactly `9000` seconds can serve as the opt-in. This is not proof that the deployed service envelope can support the value.
+The #2050 budget receipt proposes retaining executor allocation E=3000s, already including F=300s, plus planner allowance P=6000s: software bridge budget B=P+E=9000s. No executor-duration or shutdown sample supports reducing E. Additional systemd headroom M=300s (S=9300s) is unmeasured and separately reserved; this ADR does not set S. Current main's planner wait is 600s and shared-wall default is 3000s; a planner-phase opt-in must be OFF by default and leave that behavior unchanged. `NANOBOT_SUBAGENT_WALL_SECS` is an existing total-budget setting, not feature consent, and must retain its legacy semantics for every value. This is not proof that the deployed service envelope can support the proposed value.
 
 # Decision
 
-Propose phase partitioning only when the existing `NANOBOT_SUBAGENT_WALL_SECS` environment setting is explicitly present and parses as the finite numeric value exactly 9000 seconds. Absence, malformed/non-finite/non-positive values, or any other value leave this feature OFF; preserve existing bridge-wall parsing and executor behavior, and preserve current main's 600s planner wait and iteration-based final turn. The implementation must also restore main's 3000s shared-wall default instead of inheriting the old PR branch's unmerged 3600s default. No new flag or framework is added. This source gate does not authorize deployment or prove host capacity; it must not be set by this change, release packaging, or default configuration. When opted in, set `Dshared=t0+9000` from the bridge-start monotonic anchor; at planner start `tp`, `Dplanner=min(tp+P, Dshared-E)`. Pre-planner work reduces planner allowance, never E. Preserve P=6000s, E=3000s (including F=300s), and B=9000s; do not count F twice.
+Propose one dedicated boolean `SELFEVO_PLANNER_PHASE_BUDGET_ENABLED`; no existing setting in the bounded configuration search represents explicit consent to change planner timeout/final-turn behavior. Only exact lowercase `true` enables the feature; absent or exact lowercase `false` leaves it OFF and preserves current main's 600s planner wait, iteration-based final turn, and existing shared wall budget behavior, including any explicit `NANOBOT_SUBAGENT_WALL_SECS` value. Any other value returns a bounded configuration error before provider call or planner spawn and never enables the feature. Do not set this flag in the unit, release scripts, or default configuration. The flag is source behavior selection only, not host approval or evidence of service capacity. When ON, require the existing total-budget setting to parse as a finite value exactly 9000s; absent, malformed, non-finite, or any other value fails closed before provider call/spawn rather than silently raising or weakening the budget. Keep `NANOBOT_SUBAGENT_WALL_SECS` a total-budget setting, never a consent signal. Set `Dshared=t0+B` from the bridge-start monotonic anchor with B=9000s; at planner start `tp`, `Dplanner=min(tp+P, Dshared-E)`. Pre-planner work reduces planner allowance, never E. Preserve P=6000s, E=3000s (including F=300s), and B=9000s; do not count F twice.
 
 Planner finalization is selected by remaining time, not iteration count alone. Let `R=Dplanner-now` and `C=get_call_p99_secs()` (configured value; default 243s). `C` is a local final-call opportunity, not a hard latency bound. Admit the tools-disabled final turn only when `R >= C` and the unchanged shared guard passes (`shared_remaining >= C+F`, where `F=get_final_budget_secs()`, default 300s). Bound its call timeout by the minimum of `C`, `R`, watchdog remaining, and shared remaining; this bounds the call to `Dplanner` but cannot guarantee provider completion, and no F reserve is subtracted from P.
 
@@ -65,10 +65,6 @@ Rejected: finalization is still a model call; bypassing may consume F.
 
 Rejected: no executor/shutdown data supports reducing E; it already includes F=300s.
 
-### Add a separate planner opt-in boolean
-
-Rejected for this proposal: the existing explicit total-budget setting can express the exact 9000s allocation without adding a second variable that could disagree with the budget. The source gate requires that setting to be explicitly present and exactly 9000; it does not imply host approval.
-
 ### Keep the 3600s branch default while planner opt-in is off
 
 Rejected: that default exists only on the unmerged draft branch and is incompatible with current main's published 3000s budget and 3300s source unit limit. The OFF path must match current main; a new release must not silently activate the larger envelope.
@@ -83,13 +79,16 @@ Proposed only; tests below are not claimed to exist or pass. Before acceptance, 
 
 | Decision claim | Planned test | Currently |
 |---|---|---|
-| Absent, malformed, non-finite, non-positive, or non-9000 setting leaves opt-in OFF and preserves main 3000s/600s behavior; exactly 9000 opts in without changing defaults or executor compatibility | `tests/test_session_clock.py::<planner_deadline_opt_in_tests>` | not yet written |
+| Dedicated boolean absent/false leaves planner feature OFF while preserving legacy total-wall setting values including 9000; malformed boolean is a bounded pre-spawn error, never enable | `tests/test_session_clock.py::<planner_deadline_opt_in_tests>` | not yet written |
+| Opt-in true requires finite existing total-budget value exactly 9000; absent, malformed, non-finite, below/above target fail before provider/spawn and never raise/alter total budget | `tests/test_session_clock.py::<planner_deadline_budget_validation_tests>` | not yet written |
 | Shared/planner deadlines use bridge-start clock; P=6000/E=3000 includes F only once in E; pre-planner work reduces planner allowance | `tests/test_session_clock.py::<planner_phase_budget_tests>` | not yet written |
 | Final admission needs local C and shared C+F; at t0=0, B=9000, E=3000, Dplanner=6000, a final call starting at 5757 with C=243 has a 243s timeout bound and leaves E intact | `tests/test_subagent_manager.py::<planner_final_admission_tests>` | not yet written |
 | Old T−120 behavior fails for C=243; configurable C is used; if shared remaining < C+F (including E<C+F at phase boundary), fail closed without bypass | `tests/test_subagent_manager.py::<planner_deadline_boundary_tests>` | not yet written |
 | Normal call/tool timeout preserves local C window; slow work cannot consume it; cancellation/overrun may lose plan without claiming p99 as hard bound | `tests/test_subagent_manager.py::<planner_work_preserves_final_window_tests>` | not yet written |
 | Final turn has tools disabled; only validated JSON persists; expiry/cancel yields existing no-plan/failure; executor behavior unchanged | `tests/test_run_planning_session.py::<planner_final_persistence_and_executor_compatibility_tests>` | not yet written |
 | E includes F once, B=P+E=9000, invalid allocation cannot borrow E or extend B; source opt-in alone is not host activation or proof of deployment acceptance | `tests/test_session_clock.py::<planner_budget_arithmetic_tests>` | not yet written |
+
+The explicit-off test includes `SELFEVO_PLANNER_PHASE_BUDGET_ENABLED=false` with `NANOBOT_SUBAGENT_WALL_SECS=9000` and verifies legacy planner behavior while that shared wall value remains honored.
 
 # References
 
@@ -99,3 +98,5 @@ Proposed only; tests below are not claimed to exist or pass. Before acceptance, 
 - PR #2071 draft head `c125c233146e6761c546fd9014b01dde80ab38fc`, base `9ebd3ccebdf734f8a8e9c7b8553e8c96123f7bda`; historical branch state, not current main.
 - Current main inspected at `b6a0cc8a52e236b6c80ea36d57491d02e09beaf2`: `nanobot/runtime/session_clock.py`, `nanobot/runtime/bridge.py::_run_planning_session`, `nanobot/agent/subagent.py`.
 - ADR-031, ADR-035, and shared wall-clock safety contract from #1899.
+
+The explicit-off test must include `SELFEVO_PLANNER_PHASE_BUDGET_ENABLED=false` with `NANOBOT_SUBAGENT_WALL_SECS=9000` and prove planner behavior remains legacy while the configured shared wall is still honored.
