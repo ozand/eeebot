@@ -9,7 +9,7 @@ tags: [runtime, observability, ledger, privacy]
 
 # Status
 
-Accepted as a necessary technical ADR within the explicitly owner-approved #2076 outcome. The operator approved this decision in #2076 comment 6086959097; source implementation was authorized in comment 6089977778. The published delegated-acceptance authority and staged receipt are recorded in #2076 comment 6508593858, under `AGENT_ROUTING.md` and `docs/adr/README.md` rule 2. The status-transition change is commit `bc05f9bd` (full SHA `bc05f9bd3c19f8861b79a829c75f789453f3e337`); this follow-up records that accepting change without a self-hash. This is delegated technical acceptance, not personal operator acceptance. The exact local candidate revision remains pending independent review; do not treat it as published acceptance until that reviewer passes this exact revision. Host rollout remains excluded and unauthorized.
+Accepted as a necessary technical ADR within the explicitly owner-approved #2076 outcome. The operator approved this decision in #2076 comment 6086959097; source implementation was authorized in comment 6089977778. The published delegated-acceptance authority and staged receipt are recorded in #2076 comment 6508593858, under `AGENT_ROUTING.md` and `docs/adr/README.md` rule 2. The status-transition change is commit `bc05f9bd` (full SHA `bc05f9bdf75f78925e3c9063bbea6860f8629c92`); this follow-up records that accepting change without a self-hash. This is delegated technical acceptance, not personal operator acceptance. The exact local candidate revision remains pending independent review; do not treat it as published acceptance until that reviewer passes this exact revision. Host rollout remains excluded and unauthorized.
 
 # Context
 
