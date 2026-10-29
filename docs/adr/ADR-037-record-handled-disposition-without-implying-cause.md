@@ -9,7 +9,7 @@ tags: [runtime, observability, ledger, privacy]
 
 # Status
 
-Accepted as a necessary technical ADR within the explicitly owner-approved #2076 outcome. The operator approved this decision in #2076 comment 6086959097; source implementation was authorized in comment 6089977778. The published delegated-acceptance authority and staged receipt are recorded in #2076 comment 6508593858, under `AGENT_ROUTING.md` and `docs/adr/README.md` rule 2. The status-transition change is commit `bc05f9bd` (full SHA `bc05f9bdf75f78925e3c9063bbea6860f8629c92`); this follow-up records that accepting change without a self-hash. This is delegated technical acceptance, not personal operator acceptance. The exact local candidate revision remains pending independent review; do not treat it as published acceptance until that reviewer passes this exact revision. Host rollout remains excluded and unauthorized.
+Accepted as a necessary technical ADR within the explicitly owner-approved #2076 outcome. The operator approved this decision in #2076 comment 6086959097; source implementation was authorized in comment 6089977778. The published delegated-acceptance authority and staged receipt are recorded in #2076 comment 6508593858, under `AGENT_ROUTING.md` and `docs/adr/README.md` rule 2. The status-transition change is commit `bc05f9bdf75f78925e3c9063bbea6860f8629c92`, preserved in published merge `6289a4fceedcd82d5887f456b75f42addf9b7e13`. The accepting change remains delegated technical acceptance, not personal operator acceptance. Host rollout remains excluded and unauthorized.
 
 # Context
 
@@ -91,7 +91,7 @@ The source implementation and named tests are merged on main under #2076. All fi
 
 The source/CI implementation is merged under #2076. Exact-head review and PR CI passed before merge; post-merge CI run `38024849555` passed on main merge commit `33c6d3fab8305b2445c3724141b7e586abc38899`. Docs PR #2080 merged reviewed head `7fbf3bcc4ccdd370541f4b0b159789164a1f586e` as `5c0d4b69029e565de2e061307571690c7c157244`; exact-head and post-merge CI passed (`38026400005`, `38027513678`). No host validation or rollout is claimed.
 
-The delegated technical acceptance authority is the published rule in `docs/adr/README.md` and `AGENT_ROUTING.md`, applied to this explicitly owner-approved technical outcome. Owner approval and source authorization are at #2076 comments 6086959097 and 6089977778; the staged acceptance receipt is #2076 comment 6508593858. This records no personal operator acceptance. The local candidate's exact revision requires independent review PASS before publication or treating acceptance as complete. Host rollout is excluded and unauthorized.
+The delegated technical acceptance authority is the published rule in `docs/adr/README.md` and `AGENT_ROUTING.md`, applied to this explicitly owner-approved technical outcome. Owner approval and source authorization are at #2076 comments 6086959097 and 6089977778; the staged acceptance receipt is #2076 comment 6508593858. Independent review artifact `c7ab9535-5857-4a66-a417-0f0b36d8c08f` recorded CLEAN on exact reviewed head `7ff59a64a0abfd055ffa2726accbaded4f6994e7`; this is a review artifact reference, not a GitHub review ID. PR #2132 published that revision as merge `6289a4fceedcd82d5887f456b75f42addf9b7e13`. Main CI run `40964791899` succeeded on that merge, with all six matrix jobs successful. This records delegated technical acceptance, not personal operator acceptance. Host rollout is excluded and unauthorized.
 
 # Rollback
 
