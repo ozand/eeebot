@@ -1,7 +1,7 @@
 ---
 title: Record handled-marker disposition without implying interruption cause
-status: proposed
-date: 2026-10-09
+status: accepted
+date: 2026-10-29
 authors: [ozand, pX]
 related: ["#2068", "#2050", "ADR-035"]
 tags: [runtime, observability, ledger, privacy]
@@ -9,7 +9,7 @@ tags: [runtime, observability, ledger, privacy]
 
 # Status
 
-Proposed under #2076 for source/CI implementation of the owner-approved ADR-037 disposition telemetry. Operator approval is recorded in #2076 comment 6086959097; governance recovery and source authorization are recorded in comment 6089977778. The repository ADR acceptance procedure is not yet satisfied on main, so this ADR remains proposed pending the named test contract on main and the operator's acceptance commit. Owner: ozand; source/test implementer: pX. Target: repository source control and CI only. Host rollout is excluded and unauthorized.
+Accepted as a necessary technical ADR within the explicitly owner-approved #2076 outcome. The operator approved this decision in #2076 comment 6086959097; source implementation was authorized in comment 6089977778. The published delegated-acceptance authority and staged receipt are recorded in #2076 comment 6508593858, under `AGENT_ROUTING.md` and `docs/adr/README.md` rule 2. The status-transition change is commit `bc05f9bd` (full SHA `bc05f9bdf75f78925e3c9063bbea6860f8629c92`); this follow-up records that accepting change without a self-hash. This is delegated technical acceptance, not personal operator acceptance. The exact local candidate revision remains pending independent review; do not treat it as published acceptance until that reviewer passes this exact revision. Host rollout remains excluded and unauthorized.
 
 # Context
 
@@ -77,7 +77,7 @@ No schema risk, but the ledger remains unable to answer which handled-marker res
 
 # Test Contract
 
-Proposed pending the operator's acceptance commit. The source implementation and named tests are merged on main under #2076. Keep this ADR proposed until the operator records acceptance under the procedure in `docs/adr/README.md`. Contract tests cite ADR-037.
+The source implementation and named tests are merged on main under #2076. All five contract rows map to tests that exist on published main and cite ADR-037; no item is deferred. The named tests and mapping are preserved below.
 
 | Decision claim | Test | Currently |
 |---|---|---|
@@ -89,36 +89,16 @@ Proposed pending the operator's acceptance commit. The source implementation and
 
 # Verification and staged delivery boundary
 
-The source/CI implementation is merged under #2076. Exact-head review and PR CI passed before merge; post-merge CI run `38024849555` passed on main merge commit `33c6d3fab8305b2445c3724141b7e586abc38899`. No host validation or rollout is claimed. The staged delivery sequence is:
+The source/CI implementation is merged under #2076. Exact-head review and PR CI passed before merge; post-merge CI run `38024849555` passed on main merge commit `33c6d3fab8305b2445c3724141b7e586abc38899`. Docs PR #2080 merged reviewed head `7fbf3bcc4ccdd370541f4b0b159789164a1f586e` as `5c0d4b69029e565de2e061307571690c7c157244`; exact-head and post-merge CI passed (`38026400005`, `38027513678`). No host validation or rollout is claimed.
 
-1. **Design review (completed):** validate the owner-approved field against the
-   existing helper and ledger source; the bounded read-only governance recovery
-   verified the corrected #2076 scope, approval, and no duplicate/claim conflict.
-2. **Source/CI delivery (merged):** PR #2077 added the optional field and
-   deterministic tests under #2076. Exact-head review was clean and PR CI passed
-   on `2ef727435aa6bb696fc8a1ab487d392b06474d42`; post-merge CI passed on
-   `33c6d3fab8305b2445c3724141b7e586abc38899`. The ADR remains proposed until
-   the operator records acceptance according to `docs/adr/README.md`.
-3. **Operator acceptance (pending):** after verifying every named contract test
-   exists on main and cites ADR-037, the operator may record acceptance by a
-   commit that changes frontmatter and index status to `accepted` and records the
-   acceptance date and commit/PR under `# Status`, as required by
-   `docs/adr/README.md`. This document update does not itself accept the ADR.
-4. **Host rollout:** excluded and unauthorized. It requires a separate issue,
-   named target/environment, rollout evidence, rollback criteria, and explicit
-   owner authorization before any host action. No host rollout is part of the
-   current design or future source/CI stage.
-
-This sequence is a design plan, not evidence that any later stage has occurred.
+The delegated technical acceptance authority is the published rule in `docs/adr/README.md` and `AGENT_ROUTING.md`, applied to this explicitly owner-approved technical outcome. Owner approval and source authorization are at #2076 comments 6086959097 and 6089977778; the staged acceptance receipt is #2076 comment 6508593858. This records no personal operator acceptance. The local candidate's exact revision requires independent review PASS before publication or treating acceptance as complete. Host rollout is excluded and unauthorized.
 
 # Rollback
 
-For the current source/CI stage, stop and revise or revert the writer if mapping,
+For the source/CI stage, stop and revise or revert the writer if mapping,
 compatibility, privacy, independent review, or exact-head CI fails; old rows need
-no migration and readers must tolerate absence. Keep this ADR proposed until the
-operator records acceptance after the named test contract exists on main. Host
-rollout remains excluded; its target and rollback criteria must be decided in a
-separate issue before authorization.
+no migration and readers must tolerate absence. Host rollout remains excluded;
+its target and rollback criteria require separate authorization.
 
 # References
 

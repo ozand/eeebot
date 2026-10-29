@@ -44,7 +44,7 @@ The self-evolving instance workspace is where bounded cycle changes are staged a
 
 Decision records preserve rationale and their own acceptance status.
 
-ADR-035 is marked **Proposed** in [[docs/adr/ADR-035-the-planning-session-chooses-and-closes-hadi.md]] and the [[docs/adr/README.md]] index, although planner-first behavior is present in current code; this page describes observed implementation and does not accept the ADR. [[docs/adr/ADR-037-record-handled-disposition-without-implying-cause.md|ADR-037, “Record handled-marker disposition without implying interruption cause,”]] is also **Proposed**. Do not infer acceptance from implementation, tests, or inclusion in this map.
+ADR-035 is marked **Proposed** in [[docs/adr/ADR-035-the-planning-session-chooses-and-closes-hadi.md]] and the [[docs/adr/README.md]] index, although planner-first behavior is present in current code; this page describes observed implementation and does not accept the ADR. [[docs/adr/ADR-037-record-handled-disposition-without-implying-cause.md|ADR-037, “Record handled-marker disposition without implying interruption cause,”]] has a delegated technical acceptance candidate under #2076; its exact revision awaits independent review before publication. This is not personal operator acceptance.
 
 ## Source precedence
 
