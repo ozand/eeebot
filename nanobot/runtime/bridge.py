@@ -3603,6 +3603,7 @@ async def _run_planning_session(
             role_system_prompt=role_text,
             telemetry_component='planner',
             telemetry_cycle_id=cycle_id,
+            telemetry_root=telemetry_root,
             wall_deadline=_effective_wall_deadline,
             planner_deadline=_planner_deadline,
             planner_phase_budget=planner_phase_budget,
@@ -4491,6 +4492,8 @@ async def _main_impl_body():
     except Exception:
         pass
 
+    from nanobot.observability.llm_telemetry import resolve_llm_calls_dir as _resolve_llm_calls_dir
+    _llm_calls_root = _resolve_llm_calls_dir(STATE_DIR)
     _planner_model = resolve_model('executor', config_fallback=config.tools.subagent.model)
     _planning_denied_paths = {(STATE_DIR / rel).resolve() for rel in _FITNESS_SIDECARS}
     try:
@@ -4498,6 +4501,7 @@ async def _main_impl_body():
             provider=provider, bus=bus, config=config, model=_planner_model,
             state_dir=STATE_DIR, selfevo_repo=_selfevo_repo_for_proposer,
             denied_paths=_planning_denied_paths, cycle_id=_planning_cycle_id,
+            telemetry_root=_llm_calls_root,
             wall_deadline=_bridge_wall_deadline,
             planner_phase_budget=_planner_phase_budget_enabled,
         )
@@ -5233,6 +5237,7 @@ async def _main_impl_body():
             # #939 Part E: suppress loop-irrelevant builtin skills.
             excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
             telemetry_component="executor",
+            telemetry_root=_llm_calls_root,
             # ADR-035 keep-work (#1942 B2): commit checkpoints to the cycle
             # branch as the executor goes, so a kill loses minutes, not the
             # whole attempt.
@@ -5941,6 +5946,7 @@ async def _main_impl_body():
                         skill_fitness_cycle_base_sha=main_sha_before,
                         excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
                         telemetry_component="executor",
+                        telemetry_root=_llm_calls_root,
                         # ADR-035 keep-work (#1942 B2): the repair turn also
                         # writes to the committed cycle-branch repo -- same
                         # per-step checkpointing as the main executor spawn.
@@ -6267,6 +6273,13 @@ async def _main_impl_body():
             _citation_subagent_task_id = _authoritative_subagent_task_id(
                 STATE_DIR, _subagent_task_id, _repair_task_ids,
             )
+            try:
+                from nanobot.observability.llm_telemetry import write_authoritative_attempt
+                write_authoritative_attempt(
+                    _llm_calls_root, _cycle_id, _citation_subagent_task_id or "",
+                )
+            except Exception:
+                pass
             # ─────────────────────────────────────────────────────────────────────
 
             # #678 F1/F3: recompute the changed-file set and violation split across

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from nanobot.runtime import demand, model_registry, reflector
@@ -12,15 +13,78 @@ def _write(path: Path, rows: list[dict] | list[str]) -> None:
     path.write_text("\n".join(x if isinstance(x, str) else json.dumps(x) for x in rows) + "\n", encoding="utf-8")
 
 
+def _seed_prompt(state: Path, cycle: str, messages: list[dict] | None = None) -> None:
+    from nanobot.observability.llm_telemetry import (
+        record_llm_prompt,
+        telemetry_context,
+        write_authoritative_attempt,
+    )
+
+    with telemetry_context(cycle, "executor", attempt_id=f"attempt-{cycle}", root=state / "llm_calls"):
+        record_llm_prompt(
+            messages=messages or [], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert write_authoritative_attempt(state / "llm_calls", cycle, f"attempt-{cycle}")
+
+
 def _seed(state: Path, cycle: str = "c1") -> None:
+    prompt_day = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
     _write(state / "ledger/cycles.jsonl", [
         {"phase": "proposed", "cycle_id": cycle, "task_title": "Do work", "target_path": "scripts/a.py"},
         {"phase": "gate", "cycle_id": cycle, "allowed": True},
-        {"phase": "outcome", "cycle_id": cycle, "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": cycle, "outcome": "success", "ts": f"{prompt_day}T00:00:00Z"},
     ])
-    _write(state / "llm_calls/prompts/2026-08-26.jsonl", [
-        {"cycle_id": cycle, "seq": 1, "messages": [{"role": "assistant", "tool_calls": [{"function": {"name": "read_file", "arguments": {"path": "scripts/a.py"}}}]}]},
+    _seed_prompt(state, cycle, [{"role": "assistant", "tool_calls": [{"function": {"name": "read_file", "arguments": {"path": "scripts/a.py"}}}]}])
+
+
+def test_reflector_selects_resolved_executor_over_higher_sequence_planner(tmp_path: Path):
+    from nanobot.observability.llm_telemetry import (
+        record_llm_prompt,
+        telemetry_context,
+        write_authoritative_attempt,
+    )
+
+    cycle = "cycle-collision"
+    root = tmp_path / "llm_calls"
+    for component, attempt, messages in (
+        ("executor", "executor-attempt", [{"role": "assistant", "content": "executor"}]),
+        ("planner", "planner-attempt", [{"role": "assistant", "content": "planner"}] * 3),
+    ):
+        with telemetry_context(cycle, component, attempt_id=attempt, root=root):
+            for _ in messages:
+                record_llm_prompt(
+                    messages=messages, content=None, reasoning_content=None, finish_reason="stop",
+                    model="test", prompt_tokens=0, completion_tokens=0,
+                )
+    assert write_authoritative_attempt(root, cycle, "executor-attempt")
+    candidate = {"cycle_id": cycle, "ts": f"{(datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()}T00:00:00Z"}
+
+    selected = reflector._prompt_records(tmp_path, [candidate], telemetry_root=root)
+
+    assert selected[cycle]["component"] == "executor"
+    assert selected[cycle]["seq"] == 1
+    assert selected[cycle]["_provenance"] == {
+        "component": "executor", "seq": 1, "selection": "authoritative_attempt",
+    }
+    assert "attempt_id" not in selected[cycle]
+    assert selected[cycle]["messages"] == [{"role": "assistant", "content": "executor"}]
+
+
+def test_reflector_legacy_prompt_without_resolution_is_unavailable(tmp_path: Path):
+    prompt_day = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    root = tmp_path / "llm_calls"
+    _write(root / "prompts" / f"{prompt_day}.jsonl", [
+        {"cycle_id": "legacy", "component": "executor", "seq": 9, "messages": []},
     ])
+
+    selected = reflector._prompt_records(
+        tmp_path,
+        [{"cycle_id": "legacy", "ts": f"{prompt_day}T00:00:00Z"}],
+        telemetry_root=root,
+    )
+
+    assert selected == {}
 
 
 def _answer(cycle: str = "c1") -> str:
@@ -284,19 +348,21 @@ def test_prompt_lookup_opens_only_candidate_date_files(tmp_path: Path, monkeypat
     monkeypatch.setattr(reflector, "_iter_jsonl", tracking)
     opened.clear()
     candidates = reflector._completed_cycles(reflector._ledger_rows(tmp_path), "")
+    opened.clear()
     reflector._prompt_records(tmp_path, candidates)
-    assert opened[-1:] == ["2026-08-26.jsonl"]
+    prompt_names = {name for name in opened if name.endswith(".jsonl") and name != "cycles.jsonl"}
+    assert prompt_names == {next(path.name for path in prompt_dir.glob("*.jsonl") if path.name != "2026-08-20.jsonl")}
     assert "2026-08-20.jsonl" not in opened
 
 
 def test_gz_only_transcript_is_processed_not_skipped(tmp_path: Path):
     _seed(tmp_path)
     prompt_dir = tmp_path / "llm_calls" / "prompts"
-    plain = prompt_dir / "2026-08-26.jsonl"
-    gz = prompt_dir / "2026-08-25.jsonl.gz"
+    plain = next(prompt_dir.glob("*.jsonl"))
+    gz = plain.with_suffix(plain.suffix + ".gz")
+    with plain.open(encoding="utf-8") as source, gzip.open(gz, "wt", encoding="utf-8") as target:
+        target.write(source.read())
     plain.unlink()
-    with gzip.open(gz, "wt", encoding="utf-8") as fh:
-        fh.write(json.dumps({"cycle_id": "c1", "seq": 1, "messages": [{"role": "assistant", "content": "work"}]}) + "\n")
     answer = {"cycle_id": "c1", "summary": "reviewed", "findings": [{"kind": "good_practice", "detail": "clear sequence"}], "recommendations": [], "followed_previous": []}
     result = reflector.run_reflector(tmp_path, llm=lambda *_: json.dumps(answer))
     assert result["processed"] == 1
@@ -322,19 +388,16 @@ def test_prompt_records_substring_prefilter_skips_unmatched_files(tmp_path: Path
 
 
 def test_reflector_caps_consecutive_errors(tmp_path: Path):
+    prompt_day = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
     _write(tmp_path / "ledger/cycles.jsonl", [
-        {"phase": "outcome", "cycle_id": "c0", "outcome": "failed", "ts": "2026-08-25T23:59:00Z"},
-        {"phase": "outcome", "cycle_id": "c1", "outcome": "failed", "ts": "2026-08-26T00:00:00Z"},
-        {"phase": "outcome", "cycle_id": "c2", "outcome": "failed", "ts": "2026-08-26T00:01:00Z"},
-        {"phase": "outcome", "cycle_id": "c3", "outcome": "failed", "ts": "2026-08-26T00:02:00Z"},
-        {"phase": "outcome", "cycle_id": "c4", "outcome": "failed", "ts": "2026-08-26T00:03:00Z"},
+        {"phase": "outcome", "cycle_id": "c0", "outcome": "failed", "ts": f"{prompt_day}T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "failed", "ts": f"{prompt_day}T00:01:00Z"},
+        {"phase": "outcome", "cycle_id": "c2", "outcome": "failed", "ts": f"{prompt_day}T00:02:00Z"},
+        {"phase": "outcome", "cycle_id": "c3", "outcome": "failed", "ts": f"{prompt_day}T00:03:00Z"},
+        {"phase": "outcome", "cycle_id": "c4", "outcome": "failed", "ts": f"{prompt_day}T00:04:00Z"},
     ])
-    _write(tmp_path / "llm_calls/prompts/2026-08-26.jsonl", [
-        {"cycle_id": "c1", "seq": 1, "messages": []},
-        {"cycle_id": "c2", "seq": 1, "messages": []},
-        {"cycle_id": "c3", "seq": 1, "messages": []},
-        {"cycle_id": "c4", "seq": 1, "messages": []},
-    ])
+    for cycle in ("c1", "c2", "c3", "c4"):
+        _seed_prompt(tmp_path, cycle)
     result = reflector.run_reflector(tmp_path, llm=lambda *_: "bad", max_consecutive_errors=2, max_cycles=4)
     assert result["errors"] == 2
     assert result["consecutive_errors"] == 2
@@ -343,14 +406,12 @@ def test_reflector_caps_consecutive_errors(tmp_path: Path):
 
 def test_reflector_wall_clock_guard_stops_before_next_cycle(tmp_path: Path, monkeypatch):
     _seed(tmp_path, "c1")
+    prompt_day = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
     _write(tmp_path / "ledger/cycles.jsonl", [
-        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
-        {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": f"{prompt_day}T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": f"{prompt_day}T00:01:00Z"},
     ])
-    _write(tmp_path / "llm_calls/prompts/2026-08-26.jsonl", [
-        {"cycle_id": "c1", "seq": 1, "messages": []},
-        {"cycle_id": "c2", "seq": 1, "messages": []},
-    ])
+    _seed_prompt(tmp_path, "c2")
     ticks = iter((0.0, 0.0, 0.0, 0.0, 2.0, 2.0))
     monkeypatch.setattr(reflector.time, "monotonic", lambda: next(ticks))
     result = reflector.run_reflector(tmp_path, llm=lambda *_: _answer("c1"), max_runtime_seconds=1)
@@ -469,14 +530,13 @@ def test_error_row_has_structured_fields(tmp_path: Path):
 
 def test_error_row_fields_not_stale_across_consecutive_attempts(tmp_path: Path):
     """Consecutive errors each get their own response/reason; no cross-contamination."""
+    prompt_day = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
     _write(tmp_path / "ledger/cycles.jsonl", [
-        {"phase": "outcome", "cycle_id": "c1", "outcome": "failed", "ts": "2026-08-26T00:00:00Z"},
-        {"phase": "outcome", "cycle_id": "c2", "outcome": "failed", "ts": "2026-08-26T00:01:00Z"},
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "failed", "ts": f"{prompt_day}T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "c2", "outcome": "failed", "ts": f"{prompt_day}T00:01:00Z"},
     ])
-    _write(tmp_path / "llm_calls/prompts/2026-08-26.jsonl", [
-        {"cycle_id": "c1", "seq": 1, "messages": []},
-        {"cycle_id": "c2", "seq": 1, "messages": []},
-    ])
+    _seed_prompt(tmp_path, "c1")
+    _seed_prompt(tmp_path, "c2")
     responses = iter(["prose only", '{"cycle_id": "c2"'])
     result = reflector.run_reflector(tmp_path, llm=lambda *_: next(responses), max_cycles=2, max_consecutive_errors=2)
     assert result["errors"] == 2
@@ -496,14 +556,13 @@ def test_error_row_fields_not_stale_across_consecutive_attempts(tmp_path: Path):
 
 def test_repaired_fence_count_is_visible_in_journal(tmp_path: Path):
     """fenced_json repairs are countable: each success row has parse_reason=fenced_json."""
+    prompt_day = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
     _write(tmp_path / "ledger/cycles.jsonl", [
-        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
-        {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": f"{prompt_day}T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": f"{prompt_day}T00:01:00Z"},
     ])
-    _write(tmp_path / "llm_calls/prompts/2026-08-26.jsonl", [
-        {"cycle_id": "c1", "seq": 1, "messages": []},
-        {"cycle_id": "c2", "seq": 1, "messages": []},
-    ])
+    _seed_prompt(tmp_path, "c1")
+    _seed_prompt(tmp_path, "c2")
 
     def fenced_llm(messages, model):
         cid = messages[1]["content"].split("CYCLE_ID: ")[1].split("\n")[0].strip()

@@ -26,6 +26,12 @@ The append-only check allows additions but blocks deletions under `memory/` and 
 
 Ledger rows and scorecard summaries are evidence with bounded availability, not proof of integration or host health. Fitness verdicts and protected fitness inputs remain harness-owned. [[nanobot/runtime/cycle_ledger.py#append_event]], [[nanobot/runtime/scorecard.py#compute_scorecard]], and [[nanobot/runtime/heldout/__init__.py#run_heldout]] implement distinct evidence paths. See [[evidence#Trust boundary]] and [[tests/test_scorecard.py#TestReaderStatus1179#test_missing_ledger_is_unavailable_not_empty]].
 
+## Reflector transcript provenance
+
+The reflector analyzes only a prompt joined to the bridge-resolved executor attempt; missing or ambiguous correlation is unavailable, never a planner or legacy-row fallback.
+
+[[nanobot/runtime/bridge.py#_authoritative_subagent_task_id]] resolves primary versus successful repair, while [[nanobot/observability/llm_telemetry.py#write_authoritative_attempt]] persists a private attempt-resolution sidecar coupled to prompt retention. Subagent prompt rows carry a private attempt identifier; [[nanobot/runtime/reflector.py#_prompt_records]] joins the exact attempt and exposes only executor component, sequence, and selection disposition in the reflection. Prompt pruning synchronously removes expired or unjoined resolution records. This is application-path privacy, not an OS-role boundary; see proposed [[docs/adr/ADR-040-reflector-selects-authoritative-executor-attempt.md]].
+
 ## State and operator authority
 
 Runtime state, operator documents, and product code are different authority domains.

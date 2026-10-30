@@ -1,17 +1,20 @@
 """Tests for nanobot.observability.llm_telemetry (issue #675)."""
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from nanobot.observability.llm_telemetry import (
+    _rotate_and_prune,
     call_context,
     record_llm_call,
     record_llm_failure,
     record_llm_prompt,
     reset_call_context,
     set_call_context,
+    telemetry_context,
+    write_authoritative_attempt,
 )
 
 
@@ -40,6 +43,27 @@ def test_failure_stream_is_outside_daily_rotation_globs(tmp_path, monkeypatch):
     assert failure_file.exists()
     assert failure_file.read_bytes() == before
     assert not list(failure_dir.glob("*.jsonl.gz"))
+
+
+def test_authoritative_attempt_sidecar_is_pruned_with_prompt(tmp_path, monkeypatch):
+    root = tmp_path / "calls"
+    prompts = root / "prompts"
+    prompts.mkdir(parents=True)
+    day = datetime.now(timezone.utc).date().isoformat()
+    with telemetry_context("cycle-retain", "executor", attempt_id="spawn-retain", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert write_authoritative_attempt(root, "cycle-retain", "spawn-retain")
+    sidecar = next((prompts / "attempt_resolutions").glob("*.json"))
+    expected_expiry = (datetime.fromisoformat(day).date() + timedelta(days=14)).isoformat()
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["expires_at"].startswith(expected_expiry)
+
+    (prompts / f"{day}.jsonl").unlink()
+    _rotate_and_prune(prompts, today=day, retention_days=1)
+
+    assert not sidecar.exists()
 
 
 def test_record_llm_failure_writes_only_bounded_metadata(tmp_path, monkeypatch):
