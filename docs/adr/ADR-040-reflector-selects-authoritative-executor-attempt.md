@@ -33,7 +33,9 @@ reflector runs later and cannot reconstruct that resolution from prompt rows.
 
 ## Decision (proposed; owner acceptance pending)
 
-Use the existing private prompt telemetry as the correlation store. Add a
+Use the existing private prompt telemetry as the correlation store. This is a
+proposed application-path contract for the runtime writer and reflector reader,
+not a claim that filesystem ACLs currently enforce isolation. Add a
 private `attempt_id` field to each prompt row, set from the subagent manager's
 own spawn ID in the existing telemetry-context seam. At cycle completion, the
 bridge persists one private authoritative-resolution record containing the
@@ -132,11 +134,14 @@ revise this design rather than add an unbounded second store.
   on POSIX), write complete records and use same-directory temporary file plus
   flush/fsync and atomic replace for any replace/update operation. Do not
   follow symlinked destination or temporary paths. Keep Windows behavior
-  platform-qualified: test permissions where supported, document that POSIX
-  mode assertions do not establish equivalent Windows ACL isolation, and test
-  atomic-replace behavior on supported platforms. The state directory's
-  existing ownership/ACL remains the outer boundary; file modes alone do not
-  claim role separation.
+  platform-qualified: test POSIX mode bits where supported, but do not claim
+  they establish equivalent Windows ACL isolation; no new OS sandbox or role
+  boundary is implied. The ownership and ACL of the actual resolved telemetry
+  root and its parents are the outer boundary. The `state_dir` ownership/ACL
+  applies only when that directory is actually an ancestor of the selected
+  default telemetry root; it does not protect a separate custom
+  `LLM_CALLS_DIR`. Do not claim effective ACL enforcement without
+  implementation and platform verification.
 
 ### Public provenance and unavailable outcomes
 
@@ -160,8 +165,11 @@ attempt without relying on sequence ordering across components or attempts.
 
 The bridge and prompt writer must share a private attempt-correlation seam, and
 the resolution record's deletion must stay coupled to its exact prompt's
-retention. State-file permissions and atomic-write behavior need platform-aware
-tests. Current readers and older prompt rows remain intentionally unavailable.
+retention. The application-path reader restriction does not confer OS-role
+isolation. Filesystem permissions are governed by the actual resolved
+telemetry-root parent chain; a separate custom root is not protected by
+`state_dir` ACLs. Current readers and older prompt rows remain intentionally
+unavailable.
 
 ### What does not change
 
