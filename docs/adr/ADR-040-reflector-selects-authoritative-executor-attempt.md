@@ -42,11 +42,21 @@ Prompt rows are append-only; because authoritative resolution exists only
 after the attempt loop, mutating a prompt row to mark the authoritative attempt
 would break the existing JSONL writer contract. The smallest additional store
 is therefore one atomic per-cycle resolution sidecar under
-`state/llm_calls/prompts/attempt_resolutions/`, named by SHA-256 of the cycle
-ID (the raw ID remains only inside the private JSON). It is in the existing
-prompt telemetry retention domain, not the 90-day cycle ledger or public
-reflection journal. The resolution record is strictly selection metadata; it
-contains no prompt text, task title, task request, or public identifier.
+`<resolved_llm_calls_root>/prompts/attempt_resolutions/`, named by SHA-256 of
+the cycle ID (the raw ID remains only inside the private JSON). Resolve the
+existing telemetry root once per producer/consumer/prune operation using the
+existing precedence: explicit `LLM_CALLS_DIR` first; otherwise the operation's
+passed `state_dir / "llm_calls"`; otherwise preserve the telemetry resolver's
+existing `STATE_DIR / "llm_calls"` and home default for callers without an
+explicit state dir. Resolve once at the operation/cycle boundary, then pass
+that same root to prompt writing, bridge correlation writing, reflector
+reading, and prompt pruning; the prompt directory is always
+`<resolved_llm_calls_root>/prompts/`. When the selected root is invalid or
+unreadable, fail closed as unavailable; never retry a lower-precedence root.
+Do not independently resolve paths in those stages, read both roots, or
+silently mix an environment root with a passed state root. The resolution record stays in the prompt retention domain,
+not the 90-day cycle ledger or public reflection journal, and contains no
+prompt text, task title, task request, or public identifier.
 
 The reflector accepts a candidate only when exactly one well-formed
 resolution record for its cycle names an attempt and there is at least one
@@ -64,15 +74,23 @@ executor attempt, or cycle-wide maximum sequence.
 ### Storage and retention contract
 
 The exact path seam is
-`state/llm_calls/prompts/attempt_resolutions/<sha256(cycle_id)>.json`, beside
-the existing daily prompt files read by `reflector._prompt_records()` and
-written by `record_llm_prompt()`. Add this state segment and its bridge writer
-to `nanobot/runtime/state_paths.py`; the existing `llm_calls` segment already
-names both prompt and call writers. Each resolution stores the selected prompt's
+`<resolved_llm_calls_root>/prompts/attempt_resolutions/<sha256(cycle_id)>.json`,
+beside the existing daily prompt files written and pruned by telemetry and
+read by `reflector._prompt_records()`. Each operation explicitly passes the
+resolved root to `record_llm_prompt()`, reflector prompt reading, bridge
+attempt-resolution writing, and prompt pruning; none re-resolves it from a
+different state root midway through that operation. Add the resolution subpath and its bridge writer to
+`nanobot/runtime/state_paths.py`; the existing `llm_calls` segment already
+names prompt and call writers. A custom `LLM_CALLS_DIR` configures the
+existing telemetry path; it is not a new access path or feature. When selected,
+correlation metadata does not read, copy, or create files under the passed
+`state_dir/llm_calls` location. Each resolution stores the selected prompt's
 UTC timestamp and expiry, and expires no later than that prompt row. The prompt
-prune operation must also remove a resolution when its exact associated prompt
-is pruned; the reader independently rejects expired resolution or missing
-associated prompt. Bind the sidecar to the selected prompt's exact sequence and
+prune operation under that same resolved root must also remove a resolution
+when its exact associated prompt is pruned; the reader independently rejects
+expired resolution or missing associated prompt. An invalid or unreadable
+resolved root fails closed as unavailable and must not fall back to another
+root or instance. Bind the sidecar to the selected prompt's exact sequence and
 UTC timestamp. Compute expiry from that prompt's UTC daily-file date plus the
 effective retention period (the same date cutoff used by prompt pruning), not
 from bridge completion time. Prompt rows remain the deletion authority; a
@@ -109,9 +127,9 @@ revise this design rather than add an unbounded second store.
   reject booleans as integers. Reject duplicate/conflicting records,
   invalid UTF-8/JSON, oversized rows, and symlinked or escaping input paths.
   No raw IDs, prompts, or private paths appear in public output or logs.
-- **Writes:** use the existing state directory only; create missing files
-  privately with restrictive permissions (directory `0700`, file `0600` on
-  POSIX), write complete records and use same-directory temporary file plus
+- **Writes:** use only the resolved existing telemetry root; create missing
+  files privately with restrictive permissions (directory `0700`, file `0600`
+  on POSIX), write complete records and use same-directory temporary file plus
   flush/fsync and atomic replace for any replace/update operation. Do not
   follow symlinked destination or temporary paths. Keep Windows behavior
   platform-qualified: test permissions where supported, document that POSIX
@@ -180,8 +198,9 @@ or private runtime data.
 | Planner-only, missing, legacy, expired, malformed, unmatched, or unsupported metadata is unavailable | `tests/test_reflector.py::test_missing_attempt_resolution_is_unavailable` | Parameterized absent/legacy/planner-only/malformed/unmatched/expired cases; assert no fallback. |
 | Duplicates, reused IDs, ties, conflicting resolutions, and invalid sequence cannot choose a row | `tests/test_reflector.py::test_ambiguous_attempt_evidence_is_unavailable` | Synthetic collisions and `bool`/negative/non-integer sequence values; explicit unavailable reason. |
 | Private correlation never enters public output | `tests/test_reflector.py::test_reflection_records_safe_provenance_only` | Assert no attempt/task/request IDs, prompt text, or paths in row or logs. |
-| Resolution expires/deletes with associated prompt under effective configured retention | `tests/test_llm_prompt_recording.py::test_attempt_resolution_retention_does_not_outlive_prompt` | Fake clock/files across default, configured, invalid, and minimum retention; exact selected prompt row disappears at prune and no orphan private ID remains. |
-| File safety is bounded and platform-honest | `tests/test_reflector.py::test_attempt_metadata_rejects_symlink_and_invalid_record` | Symlink/escape, schema/size/UTF-8 failures; POSIX mode check when available and atomic replacement behavior; Windows assertions do not claim POSIX ACL equivalence. |
+| Default and custom telemetry roots use one resolved root for prompt writer, bridge resolution, reflector reader, and pruner | `tests/test_reflector.py::test_attempt_correlation_uses_resolved_telemetry_root` | Distinct passed state root and explicit custom `LLM_CALLS_DIR`; exercise writer/resolver/reader/pruner on one fixture root; place a decoy matching prompt under the default root and prove it is not read; repeat for the default-root case. |
+| Resolution expires/deletes with associated prompt under effective configured retention, including a custom root | `tests/test_llm_prompt_recording.py::test_attempt_resolution_retention_does_not_outlive_prompt` | Fake clock/files across default, configured, invalid, and minimum retention; exact selected prompt row disappears at prune under the same resolved custom root and no orphan private ID remains. |
+| File safety is bounded and platform-honest | `tests/test_reflector.py::test_attempt_metadata_rejects_symlink_and_invalid_record` | Symlink/escape and invalid/unreadable resolved root fail closed with no cross-root fallback; schema/size/UTF-8 failures; POSIX mode check when available and atomic replacement behavior; Windows assertions do not claim POSIX ACL equivalence. |
 | Prompt, resolution, and reflection payloads do not leak private identifiers or content | `tests/test_reflector.py::test_attempt_correlation_privacy_boundaries` | Inspect synthetic private prompt/resolution records and public reflection/log output; assert private fields exist only in protected telemetry and never in public output/logs. |
 | Historical post-deployment wrong-component evidence remains unverified without exact-attempt correlation | `tests/test_reflector.py::test_historical_wrong_component_evidence_is_unverified` | Use only the original sanitized/source-checked fixture, if available; no live/private transcript reads. Assert the component mismatch remains `unavailable`/`unverified`, with no inferred attempt identity or fallback. |
 
