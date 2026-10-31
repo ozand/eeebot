@@ -263,41 +263,43 @@ def test_resolution_reader_rejects_prompt_directory_replaced_with_symlink(tmp_pa
             model="test", prompt_tokens=0, completion_tokens=0,
         )
     assert telemetry.write_authoritative_attempt(root, "root-swap", "attempt-root-swap")
-    real_open = telemetry._open_prompt_file_windows
+    if os.name == "posix":
+        import stat
 
-    def swap_prompts_after_root(root_arg, name):
-        if os.name == "posix":
-            import fcntl
-            import stat
+        prompts = root / "prompts"
+        moved = root / "prompts-original"
+        prompt_name = next(prompts.glob("*.jsonl")).name
+        real_os_open = os.open
+        swap_count = []
 
-            real_root = root_arg.resolve()
-            root_fd = os.open(real_root, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                prompts_fd = os.open("prompts", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
-            finally:
-                os.close(root_fd)
-            prompts = real_root / "prompts"
-            moved = real_root / "prompts-original"
-            prompts.rename(moved)
-            os.symlink(outside, prompts, target_is_directory=True)
-            flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
-            fd = os.open(name, flags, dir_fd=prompts_fd)
-            try:
-                assert stat.S_ISREG(os.fstat(fd).st_mode)
-                assert fcntl.fcntl(fd, fcntl.F_GETFD) >= 0
-            finally:
-                os.close(fd)
-                os.close(prompts_fd)
-            raise FileNotFoundError(name)
-        prompts = root_arg / "prompts"
-        moved = root_arg / "prompts-original"
-        if prompts.exists() and not moved.exists():
-            prompts.rename(moved)
-            os.symlink(outside, prompts, target_is_directory=True)
-        yield from real_open(root_arg, name)
+        def swap_after_prompt_directory_handle(path, flags, *args, **kwargs):
+            if path == prompt_name and kwargs.get("dir_fd") is not None and not swap_count:
+                # The production helper has already opened the real prompts
+                # directory descriptor; swap only its pathname before the
+                # final component is opened relative to that descriptor.
+                prompts.rename(moved)
+                os.symlink(outside, prompts, target_is_directory=True)
+                swap_count.append(True)
+            return real_os_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(telemetry, "_open_prompt_file_windows", swap_prompts_after_root)
-    assert telemetry.read_authoritative_attempt(root, "root-swap") is None
+        monkeypatch.setattr(telemetry.os, "open", swap_after_prompt_directory_handle)
+        record = telemetry.read_authoritative_attempt(root, "root-swap")
+        assert swap_count == [True]
+        assert record is not None and record["attempt_id"] == "attempt-root-swap"
+        assert not list(outside.iterdir()), "handle-relative open must not read the replacement target"
+    else:
+        real_open = telemetry._open_prompt_file_windows
+
+        def swap_prompts_after_root(root_arg, name):
+            prompts = root_arg / "prompts"
+            moved = root_arg / "prompts-original"
+            if prompts.exists() and not moved.exists():
+                prompts.rename(moved)
+                os.symlink(outside, prompts, target_is_directory=True)
+            yield from real_open(root_arg, name)
+
+        monkeypatch.setattr(telemetry, "_open_prompt_file_windows", swap_prompts_after_root)
+        assert telemetry.read_authoritative_attempt(root, "root-swap") is None
 
 
 def test_resolution_reader_preserves_metadata_across_plain_to_gzip_rotation(tmp_path, monkeypatch):
