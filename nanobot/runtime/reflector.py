@@ -14,20 +14,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from nanobot.observability.llm_telemetry import (
+    MAX_LLM_PROMPT_PAYLOAD_BYTES,
+    record_llm_call,
+    record_llm_prompt,
+    resolve_llm_calls_dir,
+    telemetry_context,
+)
+from nanobot.providers.model_window import resolve_context_window
+from nanobot.runtime.model_registry import resolve_model
 from nanobot.runtime.role_prompt import (
     CharterTooLargeError,
     RolePromptBuildError,
     build_role_system_prompt_or_refuse,
     system_chars,
 )
-from nanobot.observability.llm_telemetry import (
-    MAX_LLM_PROMPT_PAYLOAD_BYTES,
-    call_context,
-    record_llm_call,
-    record_llm_prompt,
-)
-from nanobot.providers.model_window import resolve_context_window
-from nanobot.runtime.model_registry import resolve_model
 
 _MAX_CYCLES = 3
 _MAX_RECOMMENDATIONS = 3
@@ -144,41 +145,80 @@ def _prompt_records(
     state_dir: Path,
     candidates: list[dict[str, Any]],
     deadline: float | None = None,
+    *,
+    telemetry_root: Path | None = None,
+    unavailable_cycles: set[str] | None = None,
+    pruned_cycles: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Stream only prompt files near the bounded candidates' ledger dates."""
-    directory = state_dir / "llm_calls" / "prompts"
-    candidate_ids = {str(row.get("cycle_id") or "") for row in candidates if row.get("cycle_id")}
-    if not candidate_ids:
+    """Read only the exact bridge-resolved executor attempt from one telemetry root."""
+    from nanobot.observability.llm_telemetry import (
+        _attempt_resolution_path,
+        read_authoritative_attempt,
+    )
+
+    root = Path(telemetry_root) if telemetry_root is not None else resolve_llm_calls_dir(state_dir)
+    directory = root / "prompts"
+    candidate_rows = {str(row.get("cycle_id") or ""): row for row in candidates if row.get("cycle_id")}
+    if not candidate_rows:
+        return {}
+    if root.is_symlink() or directory.is_symlink() or not directory.is_dir():
         return {}
     days: set[str] = set()
-    for row in candidates:
+    for row in candidate_rows.values():
         try:
             date = datetime.fromisoformat(str(row.get("ts")).replace("Z", "+00:00")).date()
-            for offset in (-1, 0, 1):
-                days.add((date + timedelta(days=offset)).isoformat())
+            days.update((date + timedelta(days=offset)).isoformat() for offset in (-1, 0, 1))
         except (TypeError, ValueError):
             continue
-    latest: dict[str, dict[str, Any]] = {}
+    matches: dict[str, list[dict[str, Any]]] = {cycle: [] for cycle in candidate_rows}
     paths = [path for path in _files(directory, "*.jsonl") if path.stem[:10] in days]
-    byte_needles = tuple(needle.encode("utf-8") for needle in candidate_ids)
+    byte_needles = tuple(cycle.encode("utf-8") for cycle in candidate_rows)
     supports_filter = len(inspect.signature(_iter_jsonl).parameters) >= 2
     for path in paths:
-        if deadline is not None and time.monotonic() >= deadline:
-            break
-        if not supports_filter and not _file_contains(path, candidate_ids):
+        if path.is_symlink() or (deadline is not None and time.monotonic() >= deadline):
+            continue
+        if not supports_filter and not _file_contains(path, set(candidate_rows)):
             continue
         records = _iter_jsonl(path, byte_needles) if supports_filter else _iter_jsonl(path)
         for record in records:
             if deadline is not None and time.monotonic() >= deadline:
-                return latest
+                return {}
             cycle_id = str(record.get("cycle_id") or "").strip()
-            if cycle_id not in candidate_ids:
-                continue
-            sequence = record.get("seq") if isinstance(record.get("seq"), int) else -1
-            previous = latest.get(cycle_id)
-            if previous is None or sequence >= int(previous.get("seq") or -1):
-                latest[cycle_id] = record
-    return latest
+            if cycle_id in matches:
+                matches[cycle_id].append(record)
+    selected: dict[str, dict[str, Any]] = {}
+    now = datetime.now(timezone.utc)
+    for cycle_id, records in matches.items():
+        resolution_path = _attempt_resolution_path(root, cycle_id)
+        resolution_was_present = resolution_path.exists()
+        resolution_invalid: list[str] = []
+        resolution = read_authoritative_attempt(root, cycle_id, now=now, invalid=resolution_invalid)
+        if resolution is None:
+            if (not records and resolution_was_present and resolution_invalid == ["prompt_missing"]
+                    and pruned_cycles is not None):
+                pruned_cycles.add(cycle_id)
+            continue
+        attempt_id = resolution["attempt_id"]
+        if not attempt_id:
+            continue
+        selected_rows = [row for row in records if row.get("attempt_id") == attempt_id]
+        prompt_rows = [row for row in selected_rows if row.get("component") == "executor"]
+        if not prompt_rows or len(prompt_rows) != len(selected_rows):
+            continue
+        seqs = [row.get("seq") for row in prompt_rows]
+        if any(type(seq) is not int or seq < 0 for seq in seqs) or len(seqs) != len(set(seqs)):
+            continue
+        match = max(prompt_rows, key=lambda row: row["seq"])
+        if match.get("seq") != resolution.get("prompt_seq") or match.get("ts") != resolution.get("prompt_ts"):
+            continue
+        public_record = {key: value for key, value in match.items() if key != "attempt_id"}
+        public_record["_provenance"] = {
+            "component": "executor", "seq": match["seq"], "selection": "authoritative_attempt",
+        }
+        selected[cycle_id] = public_record
+    if unavailable_cycles is not None:
+        unavailable_cycles.update(set(candidate_rows) - set(selected) - (pruned_cycles or set()))
+    return selected
 
 
 def _watermark_path(state_dir: Path) -> Path:
@@ -530,7 +570,7 @@ def _parse_output(value: Any, cycle_id: str) -> tuple[dict[str, Any] | None, str
     return result, "fenced_json" if parsed_from_fence else "ok"
 
 
-def _default_llm(messages: list[dict[str, str]], model: str, cycle_id: str) -> str:
+def _default_llm(messages: list[dict[str, str]], model: str, cycle_id: str, telemetry_root: Path | None = None) -> str:
     from openai import OpenAI
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
     api_key = os.environ.get("LITELLM_API_KEY", "").strip()
@@ -542,7 +582,7 @@ def _default_llm(messages: list[dict[str, str]], model: str, cycle_id: str) -> s
     content = getattr(getattr(choice, "message", None), "content", "") or ""
     usage_obj = getattr(response, "usage", None)
     usage = {key: int(getattr(usage_obj, key, 0) or 0) for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
-    with call_context(cycle_id, "reflector"):
+    with telemetry_context(cycle_id, "reflector", root=telemetry_root):
         record_llm_call(model=model, duration_ms=(time.monotonic() - started) * 1000, usage=usage, finish_reason=getattr(choice, "finish_reason", ""), retries=0,
                         system_prompt_chars=system_chars(messages),
                         context_window=resolve_context_window(model, base_url, api_key=api_key))
@@ -559,6 +599,7 @@ def run_reflector(
     max_runtime_seconds: float = _MAX_RUNTIME_SECONDS,
 ) -> dict[str, Any]:
     state_dir = Path(state_dir)
+    telemetry_root = resolve_llm_calls_dir(state_dir)
     try:
         build_role_system_prompt_or_refuse("reflector")
     except (CharterTooLargeError, RolePromptBuildError) as exc:
@@ -627,25 +668,61 @@ def run_reflector(
         "candidates": len(candidates),
         "processed": 0,
         "skipped_pruned": 0,
+        "unavailable": 0,
         "errors": 0,
         "consecutive_errors": 0,
         "input_truncated": 0,
     }
-    skipped_ids = {
-        str(row.get("cycle_id") or "")
-        for row in iter_reflection_rows(state_dir, (b"skipped_pruned",))
-        if row.get("status") == "skipped_pruned"
-    }
-    # A previously skipped cycle is eligible again when its retained plain or
-    # gzip transcript is now discoverable; only keep the skip terminal when no
-    # transcript exists in either archive form.
+    retry_counts: dict[str, int] = {}
+    retry_ids: set[str] = set()
+    legacy_skipped_ids: set[str] = set()
+    for row in iter_reflection_rows(state_dir):
+        cycle = str(row.get("cycle_id") or "")
+        if not cycle:
+            continue
+        if row.get("status") == "correlation_unavailable":
+            retry_counts[cycle] = retry_counts.get(cycle, 0) + 1
+            retry_ids.add(cycle)
+            legacy_skipped_ids.discard(cycle)
+        elif row.get("status") == "skipped_pruned":
+            legacy_skipped_ids.add(cycle)
+            retry_ids.discard(cycle)
+        elif (
+            row.get("status") or row.get("attempt_provenance")
+            or ("status" not in row and isinstance(row.get("summary"), str)
+                and isinstance(row.get("findings"), list)
+                and isinstance(row.get("recommendations"), list))
+        ):
+            retry_counts.pop(cycle, None)
+            legacy_skipped_ids.discard(cycle)
+            retry_ids.discard(cycle)
+    retry_ids = {
+        cycle for cycle in retry_ids
+        if retry_counts.get(cycle, 0) < _MAX_CYCLES
+    } | legacy_skipped_ids
     result["candidates"] = len(candidates)
     if reanchor:
         result["reanchor"] = reanchor
-    prompts = _prompt_records(state_dir, candidates, deadline=deadline)
+    candidate_ids = {str(row.get("cycle_id") or "") for row in candidates}
+    retry_candidates = [
+        row for row in rows
+        if row.get("phase") == "outcome"
+        and str(row.get("cycle_id") or "") in retry_ids
+        and str(row.get("cycle_id") or "") not in candidate_ids
+    ]
+    candidates = (retry_candidates + candidates)[:max(1, int(max_cycles))]
+    unavailable_cycles: set[str] = set()
+    pruned_cycles: set[str] = set()
+    try:
+        prompts = _prompt_records(
+            state_dir, candidates, deadline=deadline, telemetry_root=telemetry_root,
+            unavailable_cycles=unavailable_cycles, pruned_cycles=pruned_cycles,
+        )
+    except OSError:
+        prompts = {}
     candidates = [
         row for row in candidates
-        if str(row.get("cycle_id") or "") not in skipped_ids
+        if str(row.get("cycle_id") or "") not in legacy_skipped_ids
         or str(row.get("cycle_id") or "") in prompts
     ]
     result["candidates"] = len(candidates)
@@ -657,9 +734,18 @@ def run_reflector(
         cycle_id = str(outcome["cycle_id"])
         transcript = prompts.get(cycle_id)
         if not transcript:
-            _append_journal(state_dir, {"cycle_id": cycle_id, "timestamp": _now(), "summary": "Transcript already pruned; cycle skipped.", "findings": [], "recommendations": [], "followed_previous": [], "status": "skipped_pruned"})
+            pruned = cycle_id in pruned_cycles
+            _append_journal(state_dir, {
+                "cycle_id": cycle_id, "timestamp": _now(),
+                "summary": (
+                    "The retained prompt was pruned before reflection."
+                    if pruned else "Executor prompt or authoritative-attempt evidence is unavailable."
+                ),
+                "findings": [], "recommendations": [], "followed_previous": [],
+                "status": "skipped_pruned" if pruned else "correlation_unavailable",
+            })
             _save_watermark(state_dir, cycle_id)
-            result["skipped_pruned"] += 1
+            result["skipped_pruned" if pruned else "unavailable"] += 1
             consecutive_errs = 0
             continue
         context_rows = [row for row in rows if str(row.get("cycle_id") or "") == cycle_id]
@@ -673,7 +759,7 @@ def run_reflector(
             if input_fit["status"] != "complete":
                 result["input_truncated"] += 1
             model = resolve_model("reflector", strip_openai=True)
-            response = llm(messages, model) if llm else _default_llm(messages, model, cycle_id)
+            response = llm(messages, model) if llm else _default_llm(messages, model, cycle_id, telemetry_root)
             parsed, parse_reason = _parse_output(response, cycle_id)
             if parsed is None:
                 raise ValueError(f"malformed reflector output: {parse_reason}")
@@ -698,6 +784,7 @@ def run_reflector(
                 "input_fit": input_fit,
                 **({"transcript_coverage": transcript_coverage} if transcript_coverage is not None else {}),
                 "partial_view": partial_view,
+                **({"attempt_provenance": transcript.get("_provenance")} if isinstance(transcript, dict) else {}),
             })
             _save_watermark(state_dir, cycle_id)
             if reanchor:

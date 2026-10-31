@@ -150,11 +150,17 @@ def _subagent_wall_deadline(
 
 
 @contextlib.contextmanager
-def _subagent_telemetry_context(cycle_id: str, component: str):
-    """Bind an explicit caller cycle when supplied; otherwise inherit ambient context."""
-    from nanobot.observability.llm_telemetry import call_context, current_cycle_id
+def _subagent_telemetry_context(
+    cycle_id: str, component: str, attempt_id: str | None = None, root: Path | None = None,
+):
+    """Bind this spawn's identity and optional telemetry root.
 
-    with call_context(cycle_id or current_cycle_id(), component):
+    Legacy callers without an attempt remain unattributed; they must not be
+    assigned a synthetic identity that could correlate private prompt records.
+    """
+    from nanobot.observability.llm_telemetry import current_cycle_id, telemetry_context
+
+    with telemetry_context(cycle_id or current_cycle_id(), component, attempt_id=attempt_id, root=root):
         yield
 
 
@@ -189,6 +195,7 @@ class SubagentManager:
         excluded_skill_names: "list[str] | None" = None,
         telemetry_component: str = "",
         telemetry_cycle_id: str | None = None,
+        telemetry_root: "Path | None" = None,
         web_tools_enabled: bool = False,
         denied_paths: "set[Path] | None" = None,
         release_root: "Path | None" = None,
@@ -302,6 +309,7 @@ class SubagentManager:
         self._excluded_skill_names: list[str] = list(excluded_skill_names or [])
         self._telemetry_component = str(telemetry_component or "").strip()
         self._telemetry_cycle_id = str(telemetry_cycle_id or "").strip()
+        self._telemetry_root = Path(telemetry_root) if telemetry_root is not None else None
         self.web_tools_enabled = bool(web_tools_enabled)
         self._checkpoint_commits = bool(checkpoint_commits)
         self._expected_cycle_branch = (expected_cycle_branch or "").strip() or None
@@ -662,6 +670,7 @@ class SubagentManager:
                     if self._telemetry_component:
                         with _subagent_telemetry_context(
                             self._telemetry_cycle_id, self._telemetry_component,
+                            task_id, self._telemetry_root,
                         ):
                             response = await asyncio.wait_for(
                                 self.provider.chat_with_retry(

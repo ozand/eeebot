@@ -1,17 +1,21 @@
-"""Tests for nanobot.observability.llm_telemetry (issue #675)."""
+"""Tests for nanobot.observability.llm_telemetry (issues #675 and #2034)."""
 
+# ADR-040
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from nanobot.observability.llm_telemetry import (
+    _rotate_and_prune,
     call_context,
     record_llm_call,
     record_llm_failure,
     record_llm_prompt,
     reset_call_context,
     set_call_context,
+    telemetry_context,
+    write_authoritative_attempt,
 )
 
 
@@ -40,6 +44,67 @@ def test_failure_stream_is_outside_daily_rotation_globs(tmp_path, monkeypatch):
     assert failure_file.exists()
     assert failure_file.read_bytes() == before
     assert not list(failure_dir.glob("*.jsonl.gz"))
+
+
+def test_executor_prompt_capture_prunes_resolutions_once_after_append(tmp_path, monkeypatch):
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    prompts = root / "prompts"
+    prompts.mkdir(parents=True)
+    real_prune = telemetry._prune_attempt_resolutions
+    observed = []
+
+    def count_prune(prompts_dir):
+        observed.append(list(prompts_dir.glob("*.jsonl")))
+        return real_prune(prompts_dir)
+
+    monkeypatch.setattr(telemetry, "_prune_attempt_resolutions", count_prune)
+    with telemetry_context("cycle-prune-once", "executor", attempt_id="attempt-prune-once", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+
+    assert len(observed) == 1
+    assert len(observed[0]) == 1
+    assert _read_jsonl(observed[0][0])[0]["attempt_id"] == "attempt-prune-once"
+
+
+def test_authoritative_attempt_sidecar_is_pruned_with_prompt(tmp_path, monkeypatch):
+    root = tmp_path / "calls"
+    prompts = root / "prompts"
+    prompts.mkdir(parents=True)
+    day = datetime.now(timezone.utc).date().isoformat()
+    with telemetry_context("cycle-retain", "executor", attempt_id="spawn-retain", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert write_authoritative_attempt(root, "cycle-retain", "spawn-retain")
+    sidecar = next((prompts / "attempt_resolutions").glob("*.json"))
+    expected_expiry = (datetime.fromisoformat(day).date() + timedelta(days=14)).isoformat()
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["expires_at"].startswith(expected_expiry)
+
+    (prompts / f"{day}.jsonl").unlink()
+    _rotate_and_prune(prompts, today=day, retention_days=1)
+
+    assert not sidecar.exists()
+
+
+# ADR-040: prompt retention does not proceed when associated sidecar cleanup fails.
+def test_attempt_resolution_cleanup_failure_preserves_prompt(tmp_path, monkeypatch):
+    import nanobot.observability.llm_telemetry as telemetry
+
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    old_prompt = prompts / "2020-01-01.jsonl.gz"
+    old_prompt.write_bytes(b"retained until resolution cleanup succeeds")
+    monkeypatch.setattr(telemetry, "_delete_resolutions_for_day", lambda *_: False)
+
+    telemetry._rotate_and_prune(prompts, today="2026-10-30", retention_days=1)
+
+    assert old_prompt.exists()
 
 
 def test_record_llm_failure_writes_only_bounded_metadata(tmp_path, monkeypatch):

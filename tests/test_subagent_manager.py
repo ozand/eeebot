@@ -1,4 +1,64 @@
+import asyncio
+import json
+from unittest.mock import AsyncMock
+
 import pytest
+
+
+# ADR-040: execute a real manager spawn and provider stub to verify spawn-ID propagation into prompt telemetry.
+@pytest.mark.asyncio
+async def test_subagent_spawn_id_reaches_executor_prompt_telemetry(tmp_path, monkeypatch):
+    import json
+
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.bus.queue import MessageBus
+    from nanobot.observability.llm_telemetry import _llm_calls_dir, write_authoritative_attempt
+    from nanobot.providers.base import LLMProvider, LLMResponse
+    from nanobot.runtime import bridge, reflector
+
+    class StubProvider(LLMProvider):
+        def get_default_model(self):
+            return "stub-model"
+
+        async def chat(self, messages, tools=None, model=None, **kwargs):
+            return LLMResponse(content="stub response", finish_reason="stop", usage={"prompt_tokens": 5})
+
+    root = tmp_path / "llm-calls"
+    monkeypatch.setenv("LLM_CALLS_DIR", str(root))
+    manager = SubagentManager(
+        provider=StubProvider(), workspace=tmp_path, bus=MessageBus(), model="stub-model",
+        telemetry_component="executor", telemetry_cycle_id="manager-cycle", telemetry_root=root,
+        max_iterations=1,
+    )
+    await manager.spawn("synthetic task", label="test")
+    task_id = next(iter(manager._running_tasks))
+    await manager._running_tasks[task_id]
+    prompts = list((root / "prompts").glob("*.jsonl"))
+    assert len(prompts) == 1
+    rows = [json.loads(line) for line in prompts[0].read_text(encoding="utf-8").splitlines()]
+    assert rows and all(row["attempt_id"] == task_id and row["component"] == "executor" for row in rows)
+    assert _llm_calls_dir() == root
+    selected_attempt = bridge._authoritative_subagent_task_id(manager._state_root, task_id, [])
+    assert selected_attempt == task_id
+    assert write_authoritative_attempt(root, "manager-cycle", selected_attempt)
+    outcome_day = rows[-1]["ts"][:10]
+    ledger = manager._state_root / "ledger/cycles.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(json.dumps({
+        "phase": "outcome", "cycle_id": "manager-cycle", "outcome": "success",
+        "ts": f"{outcome_day}T00:00:00Z",
+    }) + "\n", encoding="utf-8")
+    result = reflector.run_reflector(
+        manager._state_root,
+        llm=lambda *_: json.dumps({
+            "cycle_id": "manager-cycle", "summary": "stub reflection",
+            "findings": [], "recommendations": [], "followed_previous": [],
+        }),
+    )
+    assert result["processed"] == 1
+    reflection = json.loads((manager._state_root / "reflector/reflections.jsonl").read_text().splitlines()[-1])
+    assert reflection["attempt_provenance"]["component"] == "executor"
+    assert "attempt_id" not in reflection["attempt_provenance"]
 
 
 def test_executor_declared_and_registered_tool_names_match():
@@ -24,6 +84,7 @@ def test_executor_declared_and_registered_tool_names_match():
 def test_runtime_registration_assertion_rejects_declared_tool_divergence(tmp_path, monkeypatch):
     """H2 parity is enforced by the unchanged runtime assertion, not only tuple equality."""
     import asyncio
+
     from nanobot.agent.subagent import SubagentManager
     from nanobot.bus.queue import MessageBus
 
@@ -64,7 +125,6 @@ def test_subagent_manager_accepts_deployed_bridge_compat_kwargs(tmp_path):
     class SubagentCfg:
         max_running = 3
 
-    from unittest.mock import Mock
     manager = SubagentManager(
         provider=Provider(),
         workspace=tmp_path,
@@ -83,7 +143,6 @@ def test_subagent_system_prompt_includes_harness_context(tmp_path):
         def get_default_model(self):
             return 'test-model'
 
-    from unittest.mock import Mock
     manager = SubagentManager(
         provider=Provider(),
         workspace=tmp_path,
@@ -104,7 +163,6 @@ def test_subagent_manager_default_max_iterations_is_15(tmp_path):
         def get_default_model(self):
             return 'test-model'
 
-    from unittest.mock import Mock
     manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus())
     assert manager.max_iterations == 15
 
@@ -119,7 +177,6 @@ def test_subagent_manager_honors_configured_max_iterations(tmp_path):
         def get_default_model(self):
             return 'test-model'
 
-    from unittest.mock import Mock
     manager = SubagentManager(
         provider=Provider(),
         workspace=tmp_path,
@@ -138,7 +195,6 @@ def test_subagent_telemetry_includes_compaction_and_prompt_fields(tmp_path):
         def get_default_model(self):
             return "test-model"
 
-    from unittest.mock import Mock
     manager = SubagentManager(
         provider=Provider(),
         workspace=tmp_path,
@@ -171,7 +227,6 @@ def test_subagent_telemetry_omits_none_prompt_tokens(tmp_path):
         def get_default_model(self):
             return "test-model"
 
-    from unittest.mock import Mock
     manager = SubagentManager(
         provider=Provider(),
         workspace=tmp_path,
@@ -193,20 +248,15 @@ def test_subagent_telemetry_omits_none_prompt_tokens(tmp_path):
     assert "last_prompt_tokens" not in payload
 
 
-import asyncio
-from unittest.mock import AsyncMock
-import uuid
-import json
-
 @pytest.mark.asyncio
 async def test_planner_final_turn_starts_at_local_call_reserve_without_tools(tmp_path, monkeypatch):
     """ADR-045: finalization at Dplanner-C preserves the configured local C window."""
     monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "243")
     monkeypatch.setenv("NANOBOT_PROGRESS_TIMEOUT_SECS", "10000")
     from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
     from nanobot.bus.queue import MessageBus
     from nanobot.providers.base import LLMResponse, ToolCallRequest
-    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
 
     clock = [0.0]
     observed = []
@@ -398,13 +448,13 @@ async def test_subagent_telemetry_tracks_context_usage(tmp_path):
         async def chat_with_retry(self, *args, **kwargs):
             # simulate 1 iteration with 1500 prompt tokens
             return FakeResponse(
-                content="done", 
+                content="done",
                 finish_reason="stop",
                 usage={"prompt_tokens": 1500}
             )
 
+
     from nanobot.agent.subagent import SubagentManager
-    from unittest.mock import Mock
     manager = SubagentManager(
         provider=FakeProvider(),
         workspace=tmp_path,

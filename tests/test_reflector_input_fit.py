@@ -150,19 +150,47 @@ def _write(path: Path, rows: list[dict]) -> None:
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
 
 
+def _freeze_reflection_clock(monkeypatch) -> None:
+    from datetime import datetime, timezone
+
+    from nanobot.runtime import reflector
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = datetime(2026, 8, 27, tzinfo=timezone.utc)
+            return fixed.astimezone(tz) if tz else fixed.replace(tzinfo=None)
+
+    monkeypatch.setattr(llm_telemetry, "datetime", FrozenDateTime)
+    monkeypatch.setattr(reflector, "datetime", FrozenDateTime)
+
+
+def _seed_authoritative_prompt(state: Path) -> None:
+    from nanobot.observability.llm_telemetry import record_llm_prompt, telemetry_context, write_authoritative_attempt
+
+    root = state / "llm_calls"
+    with telemetry_context("c1", "executor", attempt_id="attempt-c1", root=root):
+        record_llm_prompt(
+            messages=[{"role": "user", "content": "task"}], content=None, reasoning_content=None,
+            finish_reason="stop", model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert write_authoritative_attempt(root, "c1", "attempt-c1")
+
+
 def _seed_oversized_ledger(state: Path) -> None:
     rows = [{"phase": "proposed", "cycle_id": "c1", "task_title": "Do work"}]
     rows += [{"phase": f"step-{index}", "cycle_id": "c1", "detail": "y" * 900} for index in range(20)]
     rows.append({"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:00:00Z"})
     _write(state / "ledger/cycles.jsonl", rows)
-    _write(state / "llm_calls/prompts/2026-08-26.jsonl", [{"cycle_id": "c1", "seq": 1, "messages": [{"role": "user", "content": "task"}]}])
+    _seed_authoritative_prompt(state)
 
 
 def _answer() -> str:
     return json.dumps({"cycle_id": "c1", "summary": "good", "findings": [], "recommendations": [], "followed_previous": []})
 
 
-def test_truncation_is_journaled_on_the_success_row(tmp_path: Path):
+def test_truncation_is_journaled_on_the_success_row(tmp_path: Path, monkeypatch):
+    _freeze_reflection_clock(monkeypatch)
     _seed_oversized_ledger(tmp_path)
     seen: list[list[dict[str, str]]] = []
 
@@ -181,7 +209,8 @@ def test_truncation_is_journaled_on_the_success_row(tmp_path: Path):
     assert fit["transcript"]["dropped"] == 0 and fit["journal"]["dropped"] == 0
 
 
-def test_truncation_is_journaled_on_the_error_row_too(tmp_path: Path):
+def test_truncation_is_journaled_on_the_error_row_too(tmp_path: Path, monkeypatch):
+    _freeze_reflection_clock(monkeypatch)
     _seed_oversized_ledger(tmp_path)
     result = reflector.run_reflector(tmp_path, llm=lambda *_: "not json")
     assert result["errors"] == 1 and result["input_truncated"] == 1
@@ -190,9 +219,10 @@ def test_truncation_is_journaled_on_the_error_row_too(tmp_path: Path):
     assert row["input_fit"]["status"] == "truncated" and row["input_fit"]["ledger"]["dropped"] >= 1
 
 
-def test_complete_fit_is_recorded_so_absence_is_distinguishable(tmp_path: Path):
+def test_complete_fit_is_recorded_so_absence_is_distinguishable(tmp_path: Path, monkeypatch):
+    _freeze_reflection_clock(monkeypatch)
     _write(tmp_path / "ledger/cycles.jsonl", [{"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:00:00Z"}])
-    _write(tmp_path / "llm_calls/prompts/2026-08-26.jsonl", [{"cycle_id": "c1", "seq": 1, "messages": [{"role": "user", "content": "task"}]}])
+    _seed_authoritative_prompt(tmp_path)
     result = reflector.run_reflector(tmp_path, llm=lambda *_: _answer())
     assert result["processed"] == 1 and result["input_truncated"] == 0
     row = json.loads((tmp_path / "reflector/reflections.jsonl").read_text().splitlines()[0])
@@ -202,19 +232,24 @@ def test_complete_fit_is_recorded_so_absence_is_distinguishable(tmp_path: Path):
     assert row["partial_view"] is False
 
 
-def test_truncated_transcript_records_coverage_and_partial_view(tmp_path: Path):
+def test_truncated_transcript_records_coverage_and_partial_view(tmp_path: Path, monkeypatch):
+    _freeze_reflection_clock(monkeypatch)
     # ADR-021 Rule 5: A truncated transcript must record transcript_coverage < 1.0 and partial_view: True
     _write(tmp_path / "ledger/cycles.jsonl", [{"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:00:00Z"}])
-    _write(
-        tmp_path / "llm_calls/prompts/2026-08-26.jsonl",
-        [{
-            "cycle_id": "c1",
-            "seq": 1,
-            "messages": [{"role": "user", "content": "x" * 1000}],
-            "truncated": True,
-            "truncated_chars": 3000,
-        }],
-    )
+    from nanobot.observability.llm_telemetry import record_llm_prompt, telemetry_context, write_authoritative_attempt
+
+    root = tmp_path / "llm_calls"
+    with telemetry_context("c1", "executor", attempt_id="attempt-c1", root=root):
+        record_llm_prompt(
+            messages=[{"role": "user", "content": "x" * 1000}], content=None, reasoning_content=None,
+            finish_reason="stop", model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    prompt_path = root / "prompts/2026-08-27.jsonl"
+    record = json.loads(prompt_path.read_text(encoding="utf-8").splitlines()[0])
+    record["truncated"] = True
+    record["truncated_chars"] = 3000
+    prompt_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    assert write_authoritative_attempt(root, "c1", "attempt-c1")
     result = reflector.run_reflector(tmp_path, llm=lambda *_: _answer())
     assert result["processed"] == 1
     row = json.loads((tmp_path / "reflector/reflections.jsonl").read_text().splitlines()[0])
