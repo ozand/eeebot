@@ -266,6 +266,29 @@ def test_resolution_reader_rejects_prompt_directory_replaced_with_symlink(tmp_pa
     real_open = telemetry._open_prompt_file_windows
 
     def swap_prompts_after_root(root_arg, name):
+        if os.name == "posix":
+            import fcntl
+            import stat
+
+            real_root = root_arg.resolve()
+            root_fd = os.open(real_root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                prompts_fd = os.open("prompts", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+            finally:
+                os.close(root_fd)
+            prompts = real_root / "prompts"
+            moved = real_root / "prompts-original"
+            prompts.rename(moved)
+            os.symlink(outside, prompts, target_is_directory=True)
+            flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+            fd = os.open(name, flags, dir_fd=prompts_fd)
+            try:
+                assert stat.S_ISREG(os.fstat(fd).st_mode)
+                assert fcntl.fcntl(fd, fcntl.F_GETFD) >= 0
+            finally:
+                os.close(fd)
+                os.close(prompts_fd)
+            raise FileNotFoundError(name)
         prompts = root_arg / "prompts"
         moved = root_arg / "prompts-original"
         if prompts.exists() and not moved.exists():
