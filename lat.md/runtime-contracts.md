@@ -32,6 +32,8 @@ The reflector analyzes only a prompt joined to the bridge-resolved executor atte
 
 [[nanobot/runtime/bridge.py#_authoritative_subagent_task_id]] resolves primary versus successful repair, while [[nanobot/observability/llm_telemetry.py#write_authoritative_attempt]] persists a private attempt-resolution sidecar coupled to prompt retention. Subagent prompt rows carry a private attempt identifier; [[nanobot/runtime/reflector.py#_prompt_records]] joins the exact attempt and exposes only executor component, sequence, and selection disposition in the reflection. Prompt pruning synchronously removes expired or unjoined resolution records. This is application-path privacy, not an OS-role boundary; see proposed [[docs/adr/ADR-040-reflector-selects-authoritative-executor-attempt.md]].
 
+The verified test seam uses synthetic prompt production, bridge primary/repair resolution, a persisted sidecar, and reflector consumption. [[tests/test_reflector.py#test_reflector_selects_bridge_authoritative_successful_repair_attempt]] proves a successful repair is selected; [[tests/test_reflector.py#test_reflector_selects_resolved_executor_over_higher_sequence_planner]] proves a higher planner sequence cannot override the exact executor attempt. [[tests/test_reflector.py#test_reflector_custom_root_and_decoy_default_root]] checks the custom-root boundary, and [[tests/test_reflector.py#test_reflector_missing_unmatched_cross_cycle_and_expired_resolution_are_unavailable]] checks unavailable evidence without fallback. These tests do not establish post-deployment host mismatch rates.
+
 ## State and operator authority
 
 Runtime state, operator documents, and product code are different authority domains.

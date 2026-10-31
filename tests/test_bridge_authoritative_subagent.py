@@ -994,6 +994,7 @@ class TestHelpers:
             tmp_path, "primary", ["repair-1", "repair-2"],
         ) == "repair-2"
 
+    # ADR-040: reflector correlation consumes this existing primary-fallback resolver.
     def test_authoritative_resolution_falls_back_to_primary_when_no_repair_ok(self, tmp_path):
         _write_telemetry(tmp_path, "primary", "ok", PRIMARY_TEXT)
         _write_telemetry(tmp_path, "repair-1", "error", "Error: boom")

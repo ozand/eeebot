@@ -190,31 +190,24 @@ framework, or new public identifier is part of this design.
   lifetime to reconcile.
 - **Keep max sequence across components:** preserves the identified defect.
 
-## Test Contract (prospective; no tests added in this design task)
+## Test Contract (implementation evidence on this branch; not yet on main)
 
-Each named test is a required prospective contract, not evidence it currently
-exists. Fixture tests must use synthetic prompt and bridge records and exercise
-the actual manager spawn-ID -> prompt writer -> bridge authoritative resolver
--> retained sidecar -> reflector consumer data shape; no live provider, host,
-or private runtime data.
+The named tests below exist in this implementation branch. They use synthetic prompt and bridge records; representative end-to-end fixtures exercise prompt production, bridge resolution, retained sidecar, and reflector consumption. No live provider, host, or private runtime data is used. CI-on-main and independent exact-revision review remain required before any ADR status change.
 
-| Claim | Prospective test | Required fixture/assertion |
+| Claim | Existing branch test | Verified assertion and limitation |
 |---|---|---|
-| Exact attempt defeats a higher-sequence planner and unrelated executor | `tests/test_reflector.py::test_selects_resolved_executor_over_higher_seq_planner` | Use the actual manager context and prompt writer with synthetic attempt IDs; planner and other executor have larger seq; only exact selected executor may be reflected; public output has only allowlisted provenance. |
-| Successful repair is selected after bridge exit | `tests/test_reflector.py::test_selects_persisted_successful_repair_attempt` | Synthetic primary failure and successful repair; bridge's existing resolver selects repair; persisted resolution then joins its prompt. |
-| Primary fallback uses bridge's resolver, not reflector inference | `tests/test_reflector.py::test_selects_primary_fallback_from_bridge_resolution` | No successful repair; exact primary prompt selected. |
-| Planner-only, missing, legacy, expired, malformed, unmatched, or unsupported metadata is unavailable | `tests/test_reflector.py::test_missing_attempt_resolution_is_unavailable` | Parameterized absent/legacy/planner-only/malformed/unmatched/expired cases; assert no fallback. |
-| Duplicates, reused IDs, ties, conflicting resolutions, and invalid sequence cannot choose a row | `tests/test_reflector.py::test_ambiguous_attempt_evidence_is_unavailable` | Synthetic collisions and `bool`/negative/non-integer sequence values; explicit unavailable reason. |
-| Private correlation never enters public output | `tests/test_reflector.py::test_reflection_records_safe_provenance_only` | Assert no attempt/task/request IDs, prompt text, or paths in row or logs. |
-| Default and custom telemetry roots use one resolved root for prompt writer, bridge resolution, reflector reader, and pruner | `tests/test_reflector.py::test_attempt_correlation_uses_resolved_telemetry_root` | Distinct passed state root and explicit custom `LLM_CALLS_DIR`; exercise writer/resolver/reader/pruner on one fixture root; place a decoy matching prompt under the default root and prove it is not read; repeat for the default-root case. |
-| Resolution expires/deletes with associated prompt under effective configured retention, including a custom root | `tests/test_llm_prompt_recording.py::test_attempt_resolution_retention_does_not_outlive_prompt` | Fake clock/files across default, configured, invalid, and minimum retention; exact selected prompt row disappears at prune under the same resolved custom root and no orphan private ID remains. |
-| File safety is bounded and platform-honest | `tests/test_reflector.py::test_attempt_metadata_rejects_symlink_and_invalid_record` | Symlink/escape and invalid/unreadable resolved root fail closed with no cross-root fallback; schema/size/UTF-8 failures; POSIX mode check when available and atomic replacement behavior; Windows assertions do not claim POSIX ACL equivalence. |
-| Prompt, resolution, and reflection payloads do not leak private identifiers or content | `tests/test_reflector.py::test_attempt_correlation_privacy_boundaries` | Inspect synthetic private prompt/resolution records and public reflection/log output; assert private fields exist only in protected telemetry and never in public output/logs. |
-| Historical post-deployment wrong-component evidence remains unverified without exact-attempt correlation | `tests/test_reflector.py::test_historical_wrong_component_evidence_is_unverified` | Use only the original sanitized/source-checked fixture, if available; no live/private transcript reads. Assert the component mismatch remains `unavailable`/`unverified`, with no inferred attempt identity or fallback. |
+| Exact attempt defeats a higher-sequence planner | `tests/test_reflector.py::test_reflector_selects_resolved_executor_over_higher_sequence_planner` | Real telemetry prompt writer and resolver sidecar; returned prompt is executor seq 1 despite planner seq 3; raw attempt ID is not returned. Does not exercise the full manager spawn call. |
+| Successful repair is selected through bridge resolution | `tests/test_reflector.py::test_reflector_selects_bridge_authoritative_successful_repair_attempt` | Synthetic prompt producer + `_authoritative_subagent_task_id()` + persisted sidecar + reflector; primary error and successful repair select repair seq 2. |
+| Primary fallback behavior | `tests/test_bridge_authoritative_subagent.py::TestHelpers::test_authoritative_resolution_falls_back_to_primary_when_no_repair_ok` | Existing bridge resolver unit test; prompt production/reflector join is not exercised in this case. |
+| Missing, legacy, unmatched, cross-cycle and expired evidence does not fall back | `tests/test_reflector.py::test_reflector_missing_unmatched_cross_cycle_and_expired_resolution_are_unavailable`; `tests/test_reflector.py::test_reflector_legacy_prompt_without_resolution_is_unavailable` | Reader returns no usable prompt. This does not separately parameterize every malformed/unsupported case. |
+| Custom root is authoritative over a default-root decoy | `tests/test_reflector.py::test_reflector_custom_root_and_decoy_default_root` | Producer and reader use the resolved custom root; a higher-sequence matching decoy under the passed state root is ignored. Default-root decoy repetition is not separately covered. |
+| Retention couples sidecar deletion and prompt pruning | `tests/test_llm_telemetry.py::test_authoritative_attempt_sidecar_is_pruned_with_prompt`; `tests/test_llm_telemetry.py::test_attempt_resolution_cleanup_failure_preserves_prompt` | Sidecar expires/deletes with selected prompt; failed sidecar cleanup preserves the prompt. Full retention-policy boundary matrix is not covered. |
+| Metadata safety and platform-qualified permissions | `tests/test_reflector.py::test_reflector_rejects_symlinked_attempt_metadata_and_checks_private_mode` | Sidecar symlink fails closed; POSIX directory/file modes checked only on POSIX. Other malformed schema/size/UTF-8 cases and Windows ACL behavior are not claimed. |
 
-The contract is not eligible for ADR acceptance until every item maps to an
-existing test on `main` citing `ADR-040`, or is explicitly deferred under the
-ADR acceptance procedure, and the operator records acceptance by commit.
+Post-deployment mismatch-rate evidence remains unverified. This branch does not
+claim that every design-contract edge case or full manager-to-reader integration
+has test coverage, and ADR acceptance remains gated on independent review and
+test-on-main evidence.
 
 ## References
 

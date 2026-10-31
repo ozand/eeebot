@@ -1,5 +1,6 @@
-"""Tests for nanobot.observability.llm_telemetry (issue #675)."""
+"""Tests for nanobot.observability.llm_telemetry (issues #675 and #2034)."""
 
+# ADR-040
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -64,6 +65,21 @@ def test_authoritative_attempt_sidecar_is_pruned_with_prompt(tmp_path, monkeypat
     _rotate_and_prune(prompts, today=day, retention_days=1)
 
     assert not sidecar.exists()
+
+
+# ADR-040: prompt retention does not proceed when associated sidecar cleanup fails.
+def test_attempt_resolution_cleanup_failure_preserves_prompt(tmp_path, monkeypatch):
+    import nanobot.observability.llm_telemetry as telemetry
+
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    old_prompt = prompts / "2020-01-01.jsonl.gz"
+    old_prompt.write_bytes(b"retained until resolution cleanup succeeds")
+    monkeypatch.setattr(telemetry, "_delete_resolutions_for_day", lambda *_: False)
+
+    telemetry._rotate_and_prune(prompts, today="2026-10-30", retention_days=1)
+
+    assert old_prompt.exists()
 
 
 def test_record_llm_failure_writes_only_bounded_metadata(tmp_path, monkeypatch):
