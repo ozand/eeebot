@@ -46,6 +46,31 @@ def test_failure_stream_is_outside_daily_rotation_globs(tmp_path, monkeypatch):
     assert not list(failure_dir.glob("*.jsonl.gz"))
 
 
+def test_executor_prompt_capture_prunes_resolutions_once_after_append(tmp_path, monkeypatch):
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    prompts = root / "prompts"
+    prompts.mkdir(parents=True)
+    real_prune = telemetry._prune_attempt_resolutions
+    observed = []
+
+    def count_prune(prompts_dir):
+        observed.append(list(prompts_dir.glob("*.jsonl")))
+        return real_prune(prompts_dir)
+
+    monkeypatch.setattr(telemetry, "_prune_attempt_resolutions", count_prune)
+    with telemetry_context("cycle-prune-once", "executor", attempt_id="attempt-prune-once", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+
+    assert len(observed) == 1
+    assert len(observed[0]) == 1
+    assert _read_jsonl(observed[0][0])[0]["attempt_id"] == "attempt-prune-once"
+
+
 def test_authoritative_attempt_sidecar_is_pruned_with_prompt(tmp_path, monkeypatch):
     root = tmp_path / "calls"
     prompts = root / "prompts"

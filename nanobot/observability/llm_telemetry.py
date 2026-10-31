@@ -548,7 +548,9 @@ def _day_str(name: str) -> str | None:
     return candidate
 
 
-def _rotate_and_prune(prompts_dir: Path, today: str, retention_days: int) -> None:
+def _rotate_and_prune(
+    prompts_dir: Path, today: str, retention_days: int, *, prune_resolutions: bool = True,
+) -> None:
     """Rotate prompt files and synchronously prune dependent attempt sidecars."""
     if prompts_dir.is_symlink():
         return
@@ -584,7 +586,8 @@ def _rotate_and_prune(prompts_dir: Path, today: str, retention_days: int) -> Non
                 path.unlink(missing_ok=True)
         except Exception:
             continue
-    _prune_attempt_resolutions(prompts_dir)
+    if prune_resolutions:
+        _prune_attempt_resolutions(prompts_dir)
 
 
 def _delete_resolutions_for_day(prompts_dir: Path, day: str) -> bool:
@@ -941,7 +944,13 @@ def record_llm_prompt(
                 build_action_index(state_root, prompts_dir, max_days=2)
         except Exception:
             pass
-        _rotate_and_prune(prompts_dir, today, _prompts_retention_days())
+        # The final executor prune below must see the newly appended row;
+        # skip the otherwise duplicate full scan during rotation. Other prompt
+        # captures retain the rotation path's regular sidecar cleanup.
+        _rotate_and_prune(
+            prompts_dir, today, _prompts_retention_days(),
+            prune_resolutions=not bool(ctx.get("attempt_id")),
+        )
 
         out_path = prompts_dir / f"{today}.jsonl"
         with open(out_path, "a", encoding="utf-8") as fh:
