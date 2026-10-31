@@ -427,10 +427,20 @@ def read_authoritative_attempt(
     try:
         if Path(root).is_symlink() or (Path(root) / "prompts").is_symlink():
             return None
-        if path.parent.is_symlink() or path.is_symlink() or path.stat().st_size > 2048:
+        if path.parent.is_symlink() or path.is_symlink():
             _remove_authoritative_attempt(path)
             return None
-        value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object)
+        try:
+            size = path.stat().st_size
+            if size > 2048:
+                _remove_authoritative_attempt(path)
+                return None
+            sidecar_text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return None
+        value = json.loads(sidecar_text, object_pairs_hook=_unique_json_object)
         required = {"schema", "cycle_id", "attempt_id", "prompt_seq", "prompt_ts", "created_at", "expires_at"}
         if (not isinstance(value, dict) or set(value) != required
                 or value["schema"] != "authoritative-attempt-v1"
@@ -497,7 +507,9 @@ def read_authoritative_attempt(
             _remove_authoritative_attempt(path)
             return None
         return value
-    except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+    except OSError:
+        return None
+    except (ValueError, UnicodeError, json.JSONDecodeError):
         if invalid is not None:
             invalid.append("malformed")
         _remove_authoritative_attempt(path)

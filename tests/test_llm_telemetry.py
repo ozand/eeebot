@@ -107,6 +107,33 @@ def test_authoritative_attempt_writer_fails_closed_on_active_corrupt_archive(tmp
     assert not write_authoritative_attempt(root, "valid-cycle", "valid-attempt")
 
 
+def test_resolution_reader_preserves_valid_sidecar_on_temporary_sidecar_read_error(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    with telemetry.telemetry_context("sidecar-read-error", "executor", attempt_id="attempt-sidecar-error", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert telemetry.write_authoritative_attempt(root, "sidecar-read-error", "attempt-sidecar-error")
+    sidecar = next((root / "prompts/attempt_resolutions").glob("*.json"))
+    real_read_text = Path.read_text
+
+    def fail_sidecar_read(path, *args, **kwargs):
+        if path == sidecar:
+            raise PermissionError("temporary sidecar read failure")
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_sidecar_read)
+    invalid = []
+    assert telemetry.read_authoritative_attempt(root, "sidecar-read-error", invalid=invalid) is None
+    assert invalid == []
+    assert sidecar.exists()
+
+
 def test_resolution_reader_preserves_metadata_on_plain_prompt_permission_error(tmp_path, monkeypatch):
     from pathlib import Path
 
