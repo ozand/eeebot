@@ -280,27 +280,26 @@ def test_resolution_reader_rejects_prompt_directory_replaced_with_symlink(tmp_pa
             if path == prompt_name and kwargs.get("dir_fd") is not None and not swapped:
                 # The production helper already owns the real prompts
                 # directory descriptor; replace only its pathname before the
-                # final component open.
+                # final component is opened relative to that descriptor.
                 swap_prompt_path()
             return real_os_open(path, flags, *args, **kwargs)
 
         monkeypatch.setattr(telemetry.os, "open", swap_after_prompt_directory_handle)
+        record = telemetry.read_authoritative_attempt(root, "root-swap")
+        assert swapped == [True]
+        assert record is not None and record["attempt_id"] == "attempt-root-swap"
+        assert not list(outside.iterdir()), "handle-relative open must not read the replacement target"
     else:
         real_open = telemetry._open_prompt_file_windows
 
-        def swap_before_windows_relative_open(root_arg, name):
+        def swap_before_windows_open(root_arg, name):
             if not swapped:
                 swap_prompt_path()
             yield from real_open(root_arg, name)
 
-        monkeypatch.setattr(telemetry, "_open_prompt_file_windows", swap_before_windows_relative_open)
-    record = telemetry.read_authoritative_attempt(root, "root-swap")
-    assert swapped == [True]
-    if os.name == "posix":
-        assert record is not None and record["attempt_id"] == "attempt-root-swap"
-        assert not list(outside.iterdir()), "opened prompt handle must not read the replacement target"
-    else:
-        assert record is None
+        monkeypatch.setattr(telemetry, "_open_prompt_file_windows", swap_before_windows_open)
+        assert telemetry.read_authoritative_attempt(root, "root-swap") is None
+        assert swapped == [True]
 
 
 def test_resolution_reader_preserves_metadata_across_plain_to_gzip_rotation(tmp_path, monkeypatch):
