@@ -3865,6 +3865,7 @@ class TestPublishDerivedView:
         assert view["derived_priorities"] == [{
             "number": 19, "label": "Night reflections batch (V1)", "vector": "V1",
             "direction": "reflection", "added_utc": "2026-09-15T21:36:00Z",
+            "provenance": "self-derived",
         }]
         # The ranked list IS the production sort: operator (V2) before self-derived (V1).
         items = view["priority_items"]

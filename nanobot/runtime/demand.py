@@ -915,6 +915,12 @@ def build_derived_view(
     derived_entries: list[dict[str, Any]] = []
     direction_by_number: dict[int, str] = {}
     for e in derived_res.entries:
+        # ADR-036 D1.1 (ozand/eeebot-ops-dashboard#378, review B-F1): the
+        # public projection publishes a priority's label/direction only
+        # under an EXPLICIT self-derived provenance. Every row here is
+        # self-derived by construction: derived_priorities.json has one
+        # writer, goal_review._write_derived_priorities, fed only by the
+        # goal review's accepted candidates.
         derived_entries.append(
             {
                 "number": e.number,
@@ -922,6 +928,7 @@ def build_derived_view(
                 "vector": e.vector,
                 "direction": e.direction,
                 "added_utc": e.added_utc,
+                "provenance": PROVENANCE_SELF_DERIVED,
             }
         )
         direction_by_number[e.number] = e.direction
