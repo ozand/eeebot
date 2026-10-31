@@ -249,8 +249,8 @@ def test_resolution_reader_does_not_block_on_fifo_prompt(tmp_path):
 
 
 def test_resolution_reader_rejects_prompt_directory_replaced_with_symlink(tmp_path, monkeypatch):
+    import contextlib
     import os
-    import shutil
 
     import nanobot.observability.llm_telemetry as telemetry
 
@@ -263,43 +263,44 @@ def test_resolution_reader_rejects_prompt_directory_replaced_with_symlink(tmp_pa
             model="test", prompt_tokens=0, completion_tokens=0,
         )
     assert telemetry.write_authoritative_attempt(root, "root-swap", "attempt-root-swap")
-    if os.name == "posix":
-        import stat
+    prompts = root / "prompts"
+    moved = root / "prompts-original"
+    swapped = []
 
-        prompts = root / "prompts"
-        moved = root / "prompts-original"
+    def swap_prompt_path():
+        prompts.rename(moved)
+        os.symlink(outside, prompts, target_is_directory=True)
+        swapped.append(True)
+
+    if os.name == "posix":
         prompt_name = next(prompts.glob("*.jsonl")).name
         real_os_open = os.open
-        swap_count = []
 
         def swap_after_prompt_directory_handle(path, flags, *args, **kwargs):
-            if path == prompt_name and kwargs.get("dir_fd") is not None and not swap_count:
-                # The production helper has already opened the real prompts
-                # directory descriptor; swap only its pathname before the
-                # final component is opened relative to that descriptor.
-                prompts.rename(moved)
-                os.symlink(outside, prompts, target_is_directory=True)
-                swap_count.append(True)
+            if path == prompt_name and kwargs.get("dir_fd") is not None and not swapped:
+                # The production helper already owns the real prompts
+                # directory descriptor; replace only its pathname before the
+                # final component open.
+                swap_prompt_path()
             return real_os_open(path, flags, *args, **kwargs)
 
         monkeypatch.setattr(telemetry.os, "open", swap_after_prompt_directory_handle)
-        record = telemetry.read_authoritative_attempt(root, "root-swap")
-        assert swap_count == [True]
-        assert record is not None and record["attempt_id"] == "attempt-root-swap"
-        assert not list(outside.iterdir()), "handle-relative open must not read the replacement target"
     else:
         real_open = telemetry._open_prompt_file_windows
 
-        def swap_prompts_after_root(root_arg, name):
-            prompts = root_arg / "prompts"
-            moved = root_arg / "prompts-original"
-            if prompts.exists() and not moved.exists():
-                prompts.rename(moved)
-                os.symlink(outside, prompts, target_is_directory=True)
+        def swap_before_windows_relative_open(root_arg, name):
+            if not swapped:
+                swap_prompt_path()
             yield from real_open(root_arg, name)
 
-        monkeypatch.setattr(telemetry, "_open_prompt_file_windows", swap_prompts_after_root)
-        assert telemetry.read_authoritative_attempt(root, "root-swap") is None
+        monkeypatch.setattr(telemetry, "_open_prompt_file_windows", swap_before_windows_relative_open)
+    record = telemetry.read_authoritative_attempt(root, "root-swap")
+    assert swapped == [True]
+    if os.name == "posix":
+        assert record is not None and record["attempt_id"] == "attempt-root-swap"
+        assert not list(outside.iterdir()), "opened prompt handle must not read the replacement target"
+    else:
+        assert record is None
 
 
 def test_resolution_reader_preserves_metadata_across_plain_to_gzip_rotation(tmp_path, monkeypatch):
