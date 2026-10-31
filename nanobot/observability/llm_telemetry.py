@@ -281,6 +281,7 @@ def _aware_timestamp(value: Any) -> datetime | None:
 
 def read_authoritative_attempt(
     root: Path, cycle_id: str, *, now: datetime | None = None,
+    invalid: list[str] | None = None,
 ) -> dict[str, Any] | None:
     path = _attempt_resolution_path(Path(root), cycle_id)
     try:
@@ -305,6 +306,8 @@ def read_authoritative_attempt(
         created_at = _aware_timestamp(value["created_at"])
         expiry = _aware_timestamp(value["expires_at"])
         if prompt_ts is None or created_at is None or expiry is None:
+            if invalid is not None:
+                invalid.append("malformed")
             _remove_authoritative_attempt(path)
             return None
         expected_expiry = datetime.combine(
@@ -320,6 +323,8 @@ def read_authoritative_attempt(
             return None
         current = current.astimezone(timezone.utc)
         if current >= expiry:
+            if invalid is not None:
+                invalid.append("expired")
             _remove_authoritative_attempt(path)
             return None
         prompts_dir = Path(root) / "prompts"
@@ -345,10 +350,14 @@ def read_authoritative_attempt(
                 _remove_authoritative_attempt(path)
                 return None
         if not prompt_found:
+            if invalid is not None:
+                invalid.append("prompt_missing")
             _remove_authoritative_attempt(path)
             return None
         return value
     except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+        if invalid is not None:
+            invalid.append("malformed")
         _remove_authoritative_attempt(path)
         return None
 

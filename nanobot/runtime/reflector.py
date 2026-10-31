@@ -191,9 +191,11 @@ def _prompt_records(
     for cycle_id, records in matches.items():
         resolution_path = _attempt_resolution_path(root, cycle_id)
         resolution_was_present = resolution_path.exists()
-        resolution = read_authoritative_attempt(root, cycle_id, now=now)
+        resolution_invalid: list[str] = []
+        resolution = read_authoritative_attempt(root, cycle_id, now=now, invalid=resolution_invalid)
         if resolution is None:
-            if not records and resolution_was_present and pruned_cycles is not None:
+            if (not records and resolution_was_present and resolution_invalid == ["prompt_missing"]
+                    and pruned_cycles is not None):
                 pruned_cycles.add(cycle_id)
             continue
         attempt_id = resolution["attempt_id"]
@@ -671,25 +673,32 @@ def run_reflector(
         "consecutive_errors": 0,
         "input_truncated": 0,
     }
-    prior_disposition: dict[str, str] = {}
+    retry_counts: dict[str, int] = {}
+    retry_ids: set[str] = set()
+    legacy_skipped_ids: set[str] = set()
     for row in iter_reflection_rows(state_dir):
         cycle = str(row.get("cycle_id") or "")
-        if cycle and row.get("status"):
-            prior_disposition[cycle] = str(row["status"])
-    retry_counts: dict[str, int] = {}
-    legacy_skipped_ids: set[str] = {
-        cycle for cycle, status in prior_disposition.items() if status == "skipped_pruned"
-    }
-    for cycle, status in prior_disposition.items():
-        if status == "correlation_unavailable":
-            retry_counts[cycle] = sum(
-                1 for row in iter_reflection_rows(state_dir)
-                if str(row.get("cycle_id") or "") == cycle
-                and row.get("status") == "correlation_unavailable"
-            )
+        if not cycle:
+            continue
+        if row.get("status") == "correlation_unavailable":
+            retry_counts[cycle] = retry_counts.get(cycle, 0) + 1
+            retry_ids.add(cycle)
+            legacy_skipped_ids.discard(cycle)
+        elif row.get("status") == "skipped_pruned":
+            legacy_skipped_ids.add(cycle)
+            retry_ids.discard(cycle)
+        elif (
+            row.get("status") or row.get("attempt_provenance")
+            or ("status" not in row and isinstance(row.get("summary"), str)
+                and isinstance(row.get("findings"), list)
+                and isinstance(row.get("recommendations"), list))
+        ):
+            retry_counts.pop(cycle, None)
+            legacy_skipped_ids.discard(cycle)
+            retry_ids.discard(cycle)
     retry_ids = {
-        cycle for cycle, count in retry_counts.items()
-        if count < _MAX_CYCLES
+        cycle for cycle in retry_ids
+        if retry_counts.get(cycle, 0) < _MAX_CYCLES
     } | legacy_skipped_ids
     result["candidates"] = len(candidates)
     if reanchor:

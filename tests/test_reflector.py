@@ -282,6 +282,14 @@ def test_reflector_retries_unavailable_correlation_when_evidence_arrives(tmp_pat
     assert rows[-1]["attempt_provenance"]["component"] == "executor"
     assert "attempt_id" not in rows[-1]["attempt_provenance"]
     assert "private executor text" not in json.dumps(rows[-1])
+    reflection_path = tmp_path / "reflector/reflections.jsonl"
+    before = len(reflection_path.read_text(encoding="utf-8").splitlines())
+    third = reflector.run_reflector(
+        tmp_path,
+        llm=lambda *_: pytest.fail("a successful reflection must be terminal"),
+    )
+    assert third["processed"] == 0
+    assert len(reflection_path.read_text(encoding="utf-8").splitlines()) == before
 
 
 # ADR-040
@@ -298,6 +306,37 @@ def test_reflector_missing_resolution_with_existing_prompt_is_not_pruned(tmp_pat
     result = reflector.run_reflector(tmp_path, llm=lambda *_: pytest.fail("missing resolution must not call model"))
     assert result["unavailable"] == 1
     assert result["skipped_pruned"] == 0
+
+
+@pytest.mark.parametrize("sidecar_kind", ["malformed", "valid_expired"])
+def test_reflector_invalid_sidecar_without_prompt_is_unavailable(tmp_path: Path, sidecar_kind: str):
+    from nanobot.observability.llm_telemetry import _attempt_resolution_path
+
+    cycle = "malformed-without-prompt"
+    day = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    _write(tmp_path / "ledger/cycles.jsonl", [{
+        "phase": "outcome", "cycle_id": cycle, "outcome": "success", "ts": f"{day}T00:00:00Z",
+    }])
+    sidecar = _attempt_resolution_path(tmp_path / "llm_calls", cycle)
+    sidecar.parent.mkdir(parents=True)
+    if sidecar_kind == "malformed":
+        sidecar.write_text("{bad json", encoding="utf-8")
+    else:
+        _seed_prompt(tmp_path, cycle)
+        from nanobot.observability.llm_telemetry import write_authoritative_attempt
+        assert write_authoritative_attempt(tmp_path / "llm_calls", cycle, f"attempt-{cycle}")
+        record = json.loads(sidecar.read_text(encoding="utf-8"))
+        record["expires_at"] = "2000-01-01T00:00:00Z"
+        sidecar.write_text(json.dumps(record), encoding="utf-8")
+        # The valid sidecar itself also needs its exact private prompt row removed.
+        prompt_file = next((tmp_path / "llm_calls/prompts").glob("*.jsonl"))
+        prompt_file.unlink()
+    result = reflector.run_reflector(tmp_path, llm=lambda *_: pytest.fail("invalid sidecar must not call model"))
+    [row] = [json.loads(line) for line in (tmp_path / "reflector/reflections.jsonl").read_text().splitlines()]
+    assert row["status"] == "correlation_unavailable"
+    assert result["unavailable"] == 1
+    assert result["skipped_pruned"] == 0
+    assert not sidecar.exists()
 
 
 def test_reflector_capture_disabled_does_not_claim_prompt_was_pruned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

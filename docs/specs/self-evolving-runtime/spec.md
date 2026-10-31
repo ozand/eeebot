@@ -321,9 +321,10 @@ hooked into the same `chat_with_retry` choke point (right beside
   reflector joins only that attempt and exposes only safe component/sequence
   provenance. Missing, legacy, ambiguous, or expired correlation is
   unavailable, never a fallback to planner or another attempt. The reflector
-  journals this separately from pruned prompts and retries unavailable
-  correlation within its existing bounded cycle limit; legacy `skipped_pruned`
-  rows remain readable. Resolution
+  journals this separately from pruned prompts, retries unavailable
+  correlation within its existing bounded attempt limit, and treats success as
+  terminal; malformed or expired sidecars alone do not prove prompt pruning.
+  Legacy `skipped_pruned` rows remain readable. Resolution
   metadata is removed synchronously with its associated prompt retention; this
   application-level restriction does not claim separate OS-role isolation.
 - **Reader**: `scripts/llm_prompt_inspect.py --dir PATH --cycle ID --date
