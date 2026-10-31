@@ -28,13 +28,16 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import ctypes
 import gzip
+import io
 import json
 import logging
 import math
 import os
 import re
 import shutil
+import stat
 import time
 from contextvars import ContextVar, Token
 from datetime import datetime, timedelta, timezone
@@ -174,13 +177,144 @@ def _attempt_resolution_path(root: Path, cycle_id: str) -> Path:
 def _read_prompt_rows(path: Path):
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rt", encoding="utf-8") as stream:
-        for line in stream:
+        yield from _decode_prompt_rows(stream)
+
+
+def _decode_prompt_rows(stream):
+    for line in stream:
+        try:
+            value = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(value, dict):
+            yield value
+
+
+@contextlib.contextmanager
+def _open_prompt_file(root: Path, name: str):
+    """Open one daily prompt through verified directory/file handles."""
+    if os.name == "nt":
+        yield from _open_prompt_file_windows(root, name)
+        return
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    root_fd = os.open(root, dir_flags)
+    try:
+        prompts_fd = os.open("prompts", dir_flags, dir_fd=root_fd)
+        try:
+            fd = os.open(name, file_flags, dir_fd=prompts_fd)
             try:
-                value = json.loads(line)
-            except (ValueError, TypeError):
-                continue
-            if isinstance(value, dict):
-                yield value
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise OSError("prompt is not a regular file")
+                with os.fdopen(fd, "rb") as stream:
+                    fd = -1
+                    yield stream
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+        finally:
+            os.close(prompts_fd)
+    finally:
+        os.close(root_fd)
+
+
+def _open_prompt_file_windows(root: Path, name: str):
+    """Open validated children relative to Windows directory handles."""
+    from ctypes import wintypes
+    import msvcrt
+
+    class _UnicodeString(ctypes.Structure):
+        _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT), ("Buffer", wintypes.LPWSTR)]
+
+    class _ObjectAttributes(ctypes.Structure):
+        _fields_ = [("Length", wintypes.ULONG), ("RootDirectory", wintypes.HANDLE),
+                    ("ObjectName", ctypes.POINTER(_UnicodeString)), ("Attributes", wintypes.ULONG),
+                    ("SecurityDescriptor", ctypes.c_void_p), ("SecurityQualityOfService", ctypes.c_void_p)]
+
+    class _IoStatusBlock(ctypes.Structure):
+        _fields_ = [("Status", ctypes.c_void_p), ("Information", ctypes.c_size_t)]
+
+    class _FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = [("FileAttributes", wintypes.DWORD), ("ReparseTag", wintypes.DWORD)]
+
+    class _FileStandardInfo(ctypes.Structure):
+        _fields_ = [("AllocationSize", ctypes.c_longlong), ("EndOfFile", ctypes.c_longlong),
+                    ("NumberOfLinks", wintypes.DWORD), ("DeletePending", wintypes.BOOLEAN),
+                    ("Directory", wintypes.BOOLEAN)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                   ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel.GetFileType.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD,
+                                   ctypes.POINTER(_ObjectAttributes), ctypes.POINTER(_IoStatusBlock),
+                                   ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG,
+                                   wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
+    ntdll.NtCreateFile.restype = ctypes.c_long
+
+    def _check_handle(handle, *, directory):
+        if handle == wintypes.HANDLE(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        attrs = _FileAttributeTagInfo()
+        standard = _FileStandardInfo()
+        if (not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(attrs), ctypes.sizeof(attrs))
+                or not kernel.GetFileInformationByHandleEx(handle, 1, ctypes.byref(standard), ctypes.sizeof(standard))):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if (attrs.FileAttributes & 0x400 or bool(standard.Directory) != directory
+                or (not directory and kernel.GetFileType(handle) != 1)):
+            raise OSError("prompt path contains a reparse point or unexpected file type")
+
+    def _open_relative(parent, component, *, directory):
+        name_buf = ctypes.create_unicode_buffer(component)
+        name = _UnicodeString(
+            len(component.encode("utf-16-le")), len(component.encode("utf-16-le")) + 2,
+            ctypes.cast(name_buf, wintypes.LPWSTR),
+        )
+        oa = _ObjectAttributes(ctypes.sizeof(_ObjectAttributes), parent, ctypes.pointer(name), 0x40, None, None)
+        iosb = _IoStatusBlock()
+        handle = wintypes.HANDLE()
+        options = 0x20 | 0x00200000 | (0x1 if directory else 0x40)
+        status = ntdll.NtCreateFile(ctypes.byref(handle), 0x00120089, ctypes.byref(oa), ctypes.byref(iosb),
+                                    None, 0x80, 0x7, 1, options, None, 0)
+        if status < 0:
+            code = status & 0xffffffff
+            if code in {0xC0000034, 0xC000003A}:
+                raise FileNotFoundError(component)
+            if code == 0xC0000022:
+                raise PermissionError(component)
+            raise OSError(f"NtCreateFile failed: 0x{code:08x}")
+        try:
+            _check_handle(handle, directory=directory)
+        except Exception:
+            kernel.CloseHandle(handle)
+            raise
+        return handle
+
+    root_handle = kernel.CreateFileW(str(Path(root).absolute()), 0x80000000, 0x7, None, 3,
+                                     0x02000000 | 0x00200000, None)
+    try:
+        _check_handle(root_handle, directory=True)
+    except Exception:
+        kernel.CloseHandle(root_handle)
+        raise
+    prompts_handle = file_handle = None
+    try:
+        prompts_handle = _open_relative(root_handle, "prompts", directory=True)
+        file_handle = _open_relative(prompts_handle, name, directory=False)
+        fd = msvcrt.open_osfhandle(ctypes.cast(file_handle, ctypes.c_void_p).value, os.O_RDONLY | os.O_BINARY)
+        file_handle = None  # fd now owns the native handle
+        with os.fdopen(fd, "rb") as stream:
+            yield stream
+    finally:
+        if file_handle is not None:
+            kernel.CloseHandle(file_handle)
+        if prompts_handle is not None:
+            kernel.CloseHandle(prompts_handle)
+        kernel.CloseHandle(root_handle)
 
 
 def _remove_authoritative_attempt(path: Path) -> bool:
@@ -340,26 +474,20 @@ def read_authoritative_attempt(
         day = prompt_ts.astimezone(timezone.utc).date().isoformat()
         prompt_found = False
         for prompt_file in (prompts_dir / f"{day}.jsonl", prompts_dir / f"{day}.jsonl.gz"):
-            try:
-                with prompt_file.open("rb") as probe:
-                    probe.read(1)
-            except FileNotFoundError:
-                continue
-            except OSError:
-                if prompt_file.name.endswith(".jsonl"):
-                    continue
-                return None
             if prompt_file.is_symlink():
                 return None
             try:
-                for row in _read_prompt_rows(prompt_file):
-                    if (row.get("cycle_id") == cycle_id and row.get("attempt_id") == value["attempt_id"]
-                            and row.get("component") == "executor" and row.get("seq") == value["prompt_seq"]
-                            and row.get("ts") == value["prompt_ts"]):
-                        prompt_found = True
-                        break
+                with _open_prompt_file(Path(root), prompt_file.name) as binary_stream:
+                    if prompt_file.suffix == ".gz":
+                        binary_stream = gzip.GzipFile(fileobj=binary_stream)
+                    text_stream = io.TextIOWrapper(binary_stream, encoding="utf-8")
+                    for row in _decode_prompt_rows(text_stream):
+                        if (row.get("cycle_id") == cycle_id and row.get("attempt_id") == value["attempt_id"]
+                                and row.get("component") == "executor" and row.get("seq") == value["prompt_seq"]
+                                and row.get("ts") == value["prompt_ts"]):
+                            prompt_found = True
+                            break
             except FileNotFoundError:
-                # Rotation may have replaced the plain file with the gzip archive.
                 continue
             except (OSError, ValueError, UnicodeError):
                 return None

@@ -128,7 +128,14 @@ revise this design rather than add an unbounded second store.
   expiry. Prompt rows independently require a non-negative integer `seq`;
   reject booleans as integers. Reject duplicate/conflicting records,
   invalid UTF-8/JSON, oversized rows, and symlinked or escaping input paths.
-  No raw IDs, prompts, or private paths appear in public output or logs.
+  Prompt readers validate directory and final-file handles before parsing that
+  same opened object: POSIX uses no-follow/nonblocking directory-relative opens
+  plus regular-file checks; Windows uses validated directory handles and
+  relative Native API opens that reject reparse points and non-disk files.
+  This is path validation inside the configured resolved root, not protection
+  against an attacker who can replace the trusted root or its ancestors; their
+  ownership/ACL remains the outer boundary. No raw IDs, prompts, or private
+  paths appear in public output or logs.
 - **Writes:** use only the resolved existing telemetry root; create missing
   files privately with restrictive permissions (directory `0700`, file `0600`
   on POSIX), write complete records and use same-directory temporary file plus
@@ -205,7 +212,7 @@ The named tests below exist in this implementation branch. They use synthetic pr
 | Correlation retries terminate on successful reflection; missing correlation differs from pruning and can recover within bounded attempts | `tests/test_reflector.py::test_reflector_missing_prompt_correlation_is_not_pruned`; `tests/test_reflector.py::test_reflector_retries_unavailable_correlation_when_evidence_arrives`; `tests/test_reflector.py::test_reflector_capture_disabled_does_not_claim_prompt_was_pruned`; `tests/test_reflector.py::test_legacy_skipped_pruned_row_is_reopened_when_prompt_and_resolution_arrive` | A third run after success makes no provider call and adds no row; valid late evidence is retried; unavailable attempts are capped; capture-off is unavailable; legacy skip rows remain compatible. |
 | Real manager spawn propagates its actual ID through prompt writer, authoritative bridge selection, and reflector reader | `tests/test_subagent_manager.py::test_subagent_spawn_id_reaches_executor_prompt_telemetry` | Real `SubagentManager.spawn()` and stub provider persist the actual spawn ID; bridge primary selection writes the sidecar and the reflector consumes it. Successful repair selection remains covered by a separate synthetic bridge/consumer fixture. |
 | Malformed sidecar is not treated as proof of pruning; expiry and deletion evidence stay bounded | `tests/test_reflector.py::test_reflector_invalid_sidecar_without_prompt_is_unavailable` | Malformed or expired metadata without prompt yields correlation-unavailable rather than a false pruned disposition; reader removes invalid private sidecars. |
-| Metadata safety and platform-qualified permissions | `tests/test_reflector.py::test_reflector_rejects_symlinked_attempt_metadata_and_checks_private_mode` | Sidecar symlink fails closed; POSIX directory/file modes checked only on POSIX. Other malformed schema/size/UTF-8 cases and Windows ACL behavior are not claimed. |
+| Prompt/metadata path safety and platform-qualified permissions | `tests/test_reflector.py::test_reflector_rejects_symlinked_attempt_metadata_and_checks_private_mode`; `tests/test_llm_telemetry.py::test_resolution_reader_does_not_open_symlinked_prompt_before_rejection`; `tests/test_llm_telemetry.py::test_resolution_reader_rejects_prompt_directory_symlink`; `tests/test_llm_telemetry.py::test_resolution_reader_rejects_prompt_directory_replaced_with_symlink`; `tests/test_llm_telemetry.py::test_resolution_reader_does_not_block_on_fifo_prompt` | POSIX uses opened directory-relative handles, `O_NOFOLLOW`, `O_NONBLOCK`, and regular-file checks; Windows uses handle-relative opens and handle attribute/type checks. Windows ACL equivalence and protection against replacement of the resolved root/ancestors are not claimed. POSIX FIFO test is platform-gated. |
 
 Post-deployment mismatch-rate evidence remains unverified. The manager-to-primary-bridge-to-reflector path is exercised with a stub provider; successful repair selection uses a synthetic bridge fixture rather than a live manager repair orchestration. ADR acceptance remains gated on independent review and test-on-main evidence.
 

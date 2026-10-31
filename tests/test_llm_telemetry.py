@@ -107,6 +107,149 @@ def test_authoritative_attempt_writer_fails_closed_on_active_corrupt_archive(tmp
     assert not write_authoritative_attempt(root, "valid-cycle", "valid-attempt")
 
 
+def test_resolution_reader_preserves_metadata_on_plain_prompt_permission_error(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    with telemetry.telemetry_context("permission-read", "executor", attempt_id="attempt-permission", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert telemetry.write_authoritative_attempt(root, "permission-read", "attempt-permission")
+    sidecar = next((root / "prompts/attempt_resolutions").glob("*.json"))
+    prompt = next((root / "prompts").glob("*.jsonl"))
+    import nanobot.observability.llm_telemetry as telemetry_module
+    real_open = telemetry_module._open_prompt_file
+
+    def deny_plain_prompt(root_arg, name):
+        if name == prompt.name:
+            raise PermissionError("temporarily unavailable")
+        return real_open(root_arg, name)
+
+    monkeypatch.setattr(telemetry_module, "_open_prompt_file", deny_plain_prompt)
+    invalid = []
+    assert telemetry.read_authoritative_attempt(root, "permission-read", invalid=invalid) is None
+    assert "prompt_missing" not in invalid
+    assert sidecar.exists()
+
+
+def test_resolution_reader_does_not_open_symlinked_prompt_before_rejection(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    with telemetry.telemetry_context("symlink-prompt", "executor", attempt_id="attempt-symlink", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert telemetry.write_authoritative_attempt(root, "symlink-prompt", "attempt-symlink")
+    prompt = next((root / "prompts").glob("*.jsonl"))
+    external = tmp_path / "external.jsonl"
+    external.write_text(prompt.read_text(encoding="utf-8"), encoding="utf-8")
+    prompt.unlink()
+    try:
+        prompt.symlink_to(external)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    real_open = Path.open
+
+    def reject_symlink_open(path, *args, **kwargs):
+        if path == prompt:
+            raise AssertionError("symlinked path was opened before rejection")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", reject_symlink_open)
+    assert telemetry.read_authoritative_attempt(root, "symlink-prompt") is None
+
+
+def test_resolution_reader_rejects_prompt_directory_symlink(tmp_path):
+    import os
+
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with telemetry.telemetry_context("parent-symlink", "executor", attempt_id="attempt-parent", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert telemetry.write_authoritative_attempt(root, "parent-symlink", "attempt-parent")
+    prompts = root / "prompts"
+    for file in prompts.glob("*.jsonl"):
+        file.replace(outside / file.name)
+    import shutil
+    shutil.rmtree(prompts)
+    try:
+        os.symlink(outside, prompts, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlink creation unavailable")
+
+    assert telemetry.read_authoritative_attempt(root, "parent-symlink") is None
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="FIFO open safety is POSIX-specific")
+def test_resolution_reader_does_not_block_on_fifo_prompt(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    with telemetry.telemetry_context("fifo-prompt", "executor", attempt_id="attempt-fifo", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert telemetry.write_authoritative_attempt(root, "fifo-prompt", "attempt-fifo")
+    prompt = next((root / "prompts").glob("*.jsonl"))
+    prompt.unlink()
+    os.mkfifo(prompt)
+
+    code = (
+        "from pathlib import Path; "
+        "from nanobot.observability.llm_telemetry import read_authoritative_attempt; "
+        f"assert read_authoritative_attempt(Path({str(root)!r}), 'fifo-prompt') is None"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=3)
+
+
+def test_resolution_reader_rejects_prompt_directory_replaced_with_symlink(tmp_path, monkeypatch):
+    import os
+    import shutil
+
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with telemetry.telemetry_context("root-swap", "executor", attempt_id="attempt-root-swap", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert telemetry.write_authoritative_attempt(root, "root-swap", "attempt-root-swap")
+    real_open = telemetry._open_prompt_file_windows
+
+    def swap_prompts_after_root(root_arg, name):
+        prompts = root_arg / "prompts"
+        moved = root_arg / "prompts-original"
+        if prompts.exists() and not moved.exists():
+            prompts.rename(moved)
+            os.symlink(outside, prompts, target_is_directory=True)
+        yield from real_open(root_arg, name)
+
+    monkeypatch.setattr(telemetry, "_open_prompt_file_windows", swap_prompts_after_root)
+    assert telemetry.read_authoritative_attempt(root, "root-swap") is None
+
+
 def test_resolution_reader_preserves_metadata_across_plain_to_gzip_rotation(tmp_path, monkeypatch):
     import nanobot.observability.llm_telemetry as telemetry
 
@@ -120,18 +263,19 @@ def test_resolution_reader_preserves_metadata_across_plain_to_gzip_rotation(tmp_
     prompts = root / "prompts"
     plain = next(prompts.glob("*.jsonl"))
     archive = plain.with_suffix(plain.suffix + ".gz")
-    real_iter = telemetry._read_prompt_rows
+    real_decode = telemetry._decode_prompt_rows
+    rotated = []
 
-    def rotate_after_probe(path):
-        if path == plain and plain.exists():
+    def rotate_after_open(stream):
+        if not rotated and plain.exists():
             import gzip
             with plain.open("rb") as source, gzip.open(archive, "wb") as target:
                 target.write(source.read())
             plain.unlink()
-            raise FileNotFoundError(path)
-        yield from real_iter(path)
+            rotated.append(True)
+        yield from real_decode(stream)
 
-    monkeypatch.setattr(telemetry, "_read_prompt_rows", rotate_after_probe)
+    monkeypatch.setattr(telemetry, "_decode_prompt_rows", rotate_after_open)
     record = telemetry.read_authoritative_attempt(root, "rotate-race")
 
     assert record is not None

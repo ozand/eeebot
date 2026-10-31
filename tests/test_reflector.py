@@ -778,6 +778,34 @@ def test_failed_retry_remains_eligible_until_success(tmp_path: Path):
     assert seen == ["older-a"]
 
 
+def test_restored_legacy_skip_errors_are_bounded_and_do_not_starve_new_work(tmp_path: Path):
+    day = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    cycles = ("old-a", "old-b", "old-c", "new-d")
+    _write(tmp_path / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": cycle, "outcome": "success", "ts": f"{day}T00:0{index}:00Z"}
+        for index, cycle in enumerate(cycles)
+    ])
+    _write(tmp_path / "reflector/reflections.jsonl", [
+        {"cycle_id": cycle, "status": "skipped_pruned", "summary": "legacy"}
+        for cycle in cycles[:3]
+    ])
+    _seed_prompt(tmp_path, "old-a")
+    _seed_prompt(tmp_path, "old-b")
+    _seed_prompt(tmp_path, "old-c")
+    _seed_prompt(tmp_path, "new-d")
+
+    for _ in range(reflector._MAX_CYCLES):
+        failed = reflector.run_reflector(tmp_path, llm=lambda *_: "not json")
+        assert failed["errors"] == reflector._MAX_CYCLES
+
+    seen = []
+    result = reflector.run_reflector(
+        tmp_path, llm=lambda _messages, _model: seen.append("new-d") or _answer("new-d"),
+    )
+    assert result["processed"] == 1
+    assert seen == ["new-d"]
+
+
 def test_reflector_caps_consecutive_errors(tmp_path: Path):
     prompt_day = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
     _write(tmp_path / "ledger/cycles.jsonl", [

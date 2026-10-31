@@ -676,6 +676,7 @@ def run_reflector(
     retry_counts: dict[str, int] = {}
     retry_ids: set[str] = set()
     legacy_skipped_ids: set[str] = set()
+    legacy_retry_counts: dict[str, int] = {}
     for row in iter_reflection_rows(state_dir):
         cycle = str(row.get("cycle_id") or "")
         if not cycle:
@@ -687,6 +688,8 @@ def run_reflector(
         elif row.get("status") == "error":
             if cycle in retry_ids:
                 retry_counts[cycle] = retry_counts.get(cycle, 0) + 1
+            if cycle in legacy_skipped_ids:
+                legacy_retry_counts[cycle] = legacy_retry_counts.get(cycle, 0) + 1
         elif row.get("status") == "skipped_pruned":
             legacy_skipped_ids.add(cycle)
             retry_ids.discard(cycle)
@@ -702,7 +705,10 @@ def run_reflector(
     retry_ids = {
         cycle for cycle in retry_ids
         if retry_counts.get(cycle, 0) < _MAX_CYCLES
-    } | legacy_skipped_ids
+    } | {
+        cycle for cycle in legacy_skipped_ids
+        if legacy_retry_counts.get(cycle, 0) < _MAX_CYCLES
+    }
     result["candidates"] = len(candidates)
     if reanchor:
         result["reanchor"] = reanchor
@@ -720,7 +726,8 @@ def run_reflector(
         legacy_prompts = _prompt_records(
             state_dir,
             [row for row in rows if row.get("phase") == "outcome"
-             and str(row.get("cycle_id") or "") in legacy_ids],
+             and str(row.get("cycle_id") or "") in legacy_ids
+             and legacy_retry_counts.get(str(row.get("cycle_id") or ""), 0) < _MAX_CYCLES],
             deadline=deadline, telemetry_root=telemetry_root,
             unavailable_cycles=unavailable_cycles, pruned_cycles=pruned_cycles,
         ) if legacy_ids else {}
@@ -730,6 +737,7 @@ def run_reflector(
         row for row in rows
         if row.get("phase") == "outcome"
         and str(row.get("cycle_id") or "") in legacy_ids
+        and legacy_retry_counts.get(str(row.get("cycle_id") or ""), 0) < _MAX_CYCLES
         and str(row.get("cycle_id") or "") not in candidate_ids
         and str(row.get("cycle_id") or "") in legacy_prompts
     ]
