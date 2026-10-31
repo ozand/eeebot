@@ -322,15 +322,39 @@ def test_reflector_invalid_sidecar_without_prompt_is_unavailable(tmp_path: Path,
     if sidecar_kind == "malformed":
         sidecar.write_text("{bad json", encoding="utf-8")
     else:
-        _seed_prompt(tmp_path, cycle)
-        from nanobot.observability.llm_telemetry import write_authoritative_attempt
+        from nanobot.observability.llm_telemetry import (
+            _prompts_retention_days, read_authoritative_attempt, telemetry_context,
+            record_llm_prompt, write_authoritative_attempt,
+        )
+
+        prompt_day = datetime.now(timezone.utc).date() - timedelta(days=_prompts_retention_days() - 1)
+        prompt_ts = f"{prompt_day.isoformat()}T00:00:00Z"
+        prompts_dir = sidecar.parent.parent
+        prompts_dir.mkdir(parents=True, exist_ok=True)
+        with telemetry_context(cycle, "executor", attempt_id=f"attempt-{cycle}", root=tmp_path / "llm_calls"):
+            record_llm_prompt(messages=[], content=None, reasoning_content=None, finish_reason="stop",
+                              model="test", prompt_tokens=0, completion_tokens=0)
+        prompt_path = prompts_dir / f"{datetime.now(timezone.utc).date().isoformat()}.jsonl"
+        rows = [json.loads(line) for line in prompt_path.read_text(encoding="utf-8").splitlines()]
+        rows[-1]["ts"] = prompt_ts
+        prompt_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+        aged_prompt_path = prompts_dir / f"{prompt_day.isoformat()}.jsonl"
+        prompt_path.replace(aged_prompt_path)
+        prompt_path = aged_prompt_path
         assert write_authoritative_attempt(tmp_path / "llm_calls", cycle, f"attempt-{cycle}")
         record = json.loads(sidecar.read_text(encoding="utf-8"))
-        record["expires_at"] = "2000-01-01T00:00:00Z"
-        sidecar.write_text(json.dumps(record), encoding="utf-8")
-        # The valid sidecar itself also needs its exact private prompt row removed.
-        prompt_file = next((tmp_path / "llm_calls/prompts").glob("*.jsonl"))
-        prompt_file.unlink()
+        expected_expiry = datetime.combine(
+            prompt_day + timedelta(days=_prompts_retention_days()),
+            datetime.min.time(), tzinfo=timezone.utc,
+        )
+        assert record["expires_at"] == expected_expiry.isoformat().replace("+00:00", "Z")
+        assert read_authoritative_attempt(
+            tmp_path / "llm_calls", cycle, now=expected_expiry - timedelta(seconds=1),
+        ) is not None
+        prompt_path.unlink()
+        assert read_authoritative_attempt(
+            tmp_path / "llm_calls", cycle, now=expected_expiry,
+        ) is None
     result = reflector.run_reflector(tmp_path, llm=lambda *_: pytest.fail("invalid sidecar must not call model"))
     [row] = [json.loads(line) for line in (tmp_path / "reflector/reflections.jsonl").read_text().splitlines()]
     assert row["status"] == "correlation_unavailable"
