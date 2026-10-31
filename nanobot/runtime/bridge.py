@@ -26,6 +26,7 @@ import sys
 import uuid
 import time
 from pathlib import Path
+from typing import Any
 
 _BRIDGE_PROCESS_START_MONO = time.monotonic()  # before package imports and bridge housekeeping
 
@@ -3318,7 +3319,7 @@ def _parse_planner_final_response(raw_result: str) -> tuple[dict[str, Any] | Non
 async def _run_planning_session(
     *, provider, bus, config, model: str, state_dir: 'Path', selfevo_repo: 'Path',
     denied_paths: set, cycle_id: str, wall_deadline: float | None = None,
-    planner_phase_budget: bool = False,
+    planner_phase_budget: bool = False, telemetry_root: 'Path | None' = None,
 ) -> dict:
     """#1852 (ADR-031 rule 5, ADR-032 rule 2): the planning session. Between
     cycles, on the executor's own model, in a clean context, bounded at 20
@@ -3353,6 +3354,11 @@ async def _run_planning_session(
 
     from nanobot.runtime import day_diary, no_plan_recovery, planner_rest, role_prompt
     from nanobot.runtime.cycle_ledger import record_planning_session
+    from nanobot.observability.llm_telemetry import resolve_llm_calls_dir
+
+    # Resolve once at the planner operation boundary so the manager and every
+    # prompt writer in its context use the same explicit telemetry root.
+    telemetry_root = Path(telemetry_root) if telemetry_root is not None else resolve_llm_calls_dir(state_dir)
 
     # ADR-035 rest amendment (#1964): the harness pre-check runs before
     # anything else in this function -- before the charter read, before any

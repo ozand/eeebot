@@ -150,8 +150,14 @@ def _subagent_wall_deadline(
 
 
 @contextlib.contextmanager
-def _subagent_telemetry_context(cycle_id: str, component: str, attempt_id: str, root: Path | None):
-    """Bind this spawn's identity and the cycle's resolved telemetry root."""
+def _subagent_telemetry_context(
+    cycle_id: str, component: str, attempt_id: str | None = None, root: Path | None = None,
+):
+    """Bind this spawn's identity and optional telemetry root.
+
+    Legacy callers without an attempt remain unattributed; they must not be
+    assigned a synthetic identity that could correlate private prompt records.
+    """
     from nanobot.observability.llm_telemetry import current_cycle_id, telemetry_context
 
     with telemetry_context(cycle_id or current_cycle_id(), component, attempt_id=attempt_id, root=root):
