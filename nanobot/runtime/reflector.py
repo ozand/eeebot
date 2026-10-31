@@ -657,9 +657,9 @@ def run_reflector(
     # However, when reanchoring from an aged-out cursor that is behind the active ledger,
     # candidates must start at the active ledger horizon, NOT ancient archives from index 0.
     if reanchor:
-        candidates = _completed_cycles(active_rows, "")[:max(1, int(max_cycles))]
+        candidates = _completed_cycles(active_rows, "")
     else:
-        candidates = _completed_cycles(rows, watermark if watermark in known_watermarks else "")[:max(1, int(max_cycles))]
+        candidates = _completed_cycles(rows, watermark if watermark in known_watermarks else "")
     if reanchor:
         reanchor["replacement"] = str(candidates[0].get("cycle_id") or "") if candidates else ""
         reanchor["cycles_covered"] = len(candidates)
@@ -684,11 +684,14 @@ def run_reflector(
             retry_counts[cycle] = retry_counts.get(cycle, 0) + 1
             retry_ids.add(cycle)
             legacy_skipped_ids.discard(cycle)
+        elif row.get("status") == "error":
+            if cycle in retry_ids:
+                retry_counts[cycle] = retry_counts.get(cycle, 0) + 1
         elif row.get("status") == "skipped_pruned":
             legacy_skipped_ids.add(cycle)
             retry_ids.discard(cycle)
         elif (
-            row.get("status") or row.get("attempt_provenance")
+            (row.get("status") and row.get("status") != "error") or row.get("attempt_provenance")
             or ("status" not in row and isinstance(row.get("summary"), str)
                 and isinstance(row.get("findings"), list)
                 and isinstance(row.get("recommendations"), list))
@@ -710,9 +713,32 @@ def run_reflector(
         and str(row.get("cycle_id") or "") in retry_ids
         and str(row.get("cycle_id") or "") not in candidate_ids
     ]
-    candidates = (retry_candidates + candidates)[:max(1, int(max_cycles))]
     unavailable_cycles: set[str] = set()
     pruned_cycles: set[str] = set()
+    legacy_ids = legacy_skipped_ids
+    try:
+        legacy_prompts = _prompt_records(
+            state_dir,
+            [row for row in rows if row.get("phase") == "outcome"
+             and str(row.get("cycle_id") or "") in legacy_ids],
+            deadline=deadline, telemetry_root=telemetry_root,
+            unavailable_cycles=unavailable_cycles, pruned_cycles=pruned_cycles,
+        ) if legacy_ids else {}
+    except OSError:
+        legacy_prompts = {}
+    legacy_candidates = [
+        row for row in rows
+        if row.get("phase") == "outcome"
+        and str(row.get("cycle_id") or "") in legacy_ids
+        and str(row.get("cycle_id") or "") not in candidate_ids
+        and str(row.get("cycle_id") or "") in legacy_prompts
+    ]
+    candidates = [
+        row for row in candidates
+        if str(row.get("cycle_id") or "") not in legacy_skipped_ids
+        or str(row.get("cycle_id") or "") in legacy_prompts
+    ]
+    candidates = (retry_candidates + legacy_candidates + candidates)[:max(1, int(max_cycles))]
     try:
         prompts = _prompt_records(
             state_dir, candidates, deadline=deadline, telemetry_root=telemetry_root,
@@ -720,11 +746,8 @@ def run_reflector(
         )
     except OSError:
         prompts = {}
-    candidates = [
-        row for row in candidates
-        if str(row.get("cycle_id") or "") not in legacy_skipped_ids
-        or str(row.get("cycle_id") or "") in prompts
-    ]
+    prompts.update({str(row.get("cycle_id") or ""): legacy_prompts[str(row.get("cycle_id") or "")]
+                    for row in legacy_candidates if str(row.get("cycle_id") or "") in legacy_prompts})
     result["candidates"] = len(candidates)
     proposed = {str(row.get("cycle_id")): row for row in rows if row.get("phase") == "proposed"}
     consecutive_errs = 0
@@ -744,7 +767,8 @@ def run_reflector(
                 "findings": [], "recommendations": [], "followed_previous": [],
                 "status": "skipped_pruned" if pruned else "correlation_unavailable",
             })
-            _save_watermark(state_dir, cycle_id)
+            if cycle_id not in retry_ids:
+                _save_watermark(state_dir, cycle_id)
             result["skipped_pruned" if pruned else "unavailable"] += 1
             consecutive_errs = 0
             continue
@@ -786,7 +810,8 @@ def run_reflector(
                 "partial_view": partial_view,
                 **({"attempt_provenance": transcript.get("_provenance")} if isinstance(transcript, dict) else {}),
             })
-            _save_watermark(state_dir, cycle_id)
+            if cycle_id not in retry_ids:
+                _save_watermark(state_dir, cycle_id)
             if reanchor:
                 reanchor = None
             result["processed"] += 1

@@ -92,6 +92,96 @@ def test_authoritative_attempt_sidecar_is_pruned_with_prompt(tmp_path, monkeypat
     assert not sidecar.exists()
 
 
+def test_authoritative_attempt_writer_fails_closed_on_active_corrupt_archive(tmp_path):
+    root = tmp_path / "calls"
+    from nanobot.observability.llm_telemetry import telemetry_context
+
+    with telemetry_context("valid-cycle", "executor", attempt_id="valid-attempt", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    (root / "prompts" / f"{day}.jsonl.gz").write_bytes(b"not a gzip stream")
+
+    assert not write_authoritative_attempt(root, "valid-cycle", "valid-attempt")
+
+
+def test_resolution_reader_preserves_metadata_across_plain_to_gzip_rotation(tmp_path, monkeypatch):
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    with telemetry.telemetry_context("rotate-race", "executor", attempt_id="attempt-rotate", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert telemetry.write_authoritative_attempt(root, "rotate-race", "attempt-rotate")
+    prompts = root / "prompts"
+    plain = next(prompts.glob("*.jsonl"))
+    archive = plain.with_suffix(plain.suffix + ".gz")
+    real_iter = telemetry._read_prompt_rows
+
+    def rotate_after_probe(path):
+        if path == plain and plain.exists():
+            import gzip
+            with plain.open("rb") as source, gzip.open(archive, "wb") as target:
+                target.write(source.read())
+            plain.unlink()
+            raise FileNotFoundError(path)
+        yield from real_iter(path)
+
+    monkeypatch.setattr(telemetry, "_read_prompt_rows", rotate_after_probe)
+    record = telemetry.read_authoritative_attempt(root, "rotate-race")
+
+    assert record is not None
+    assert record["attempt_id"] == "attempt-rotate"
+    assert next((prompts / "attempt_resolutions").glob("*.json")).exists()
+
+
+def test_malformed_sidecar_is_discarded_so_expired_prompt_cleanup_continues(tmp_path):
+    import nanobot.observability.llm_telemetry as telemetry
+
+    prompts = tmp_path / "prompts"
+    sidecars = prompts / "attempt_resolutions"
+    sidecars.mkdir(parents=True)
+    expired_prompt = prompts / "2020-01-01.jsonl.gz"
+    expired_prompt.write_bytes(b"expired prompt")
+    malformed = sidecars / "bad.json"
+    malformed.write_text("{bad json", encoding="utf-8")
+
+    telemetry._rotate_and_prune(prompts, today="2026-10-30", retention_days=1)
+
+    assert not expired_prompt.exists()
+    assert not malformed.exists()
+    assert not list(sidecars.glob("*.invalid"))
+
+
+def test_resolution_cleanup_io_failure_preserves_expired_prompt(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import nanobot.observability.llm_telemetry as telemetry
+
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    expired_prompt = prompts / "2020-01-01.jsonl.gz"
+    expired_prompt.write_bytes(b"expired prompt")
+    sidecars = prompts / "attempt_resolutions"
+    sidecars.mkdir()
+    (sidecars / "unreadable.json").write_text("{}", encoding="utf-8")
+    real_read_text = Path.read_text
+
+    def fail_sidecar_read(path, *args, **kwargs):
+        if path.parent.name == "attempt_resolutions":
+            raise OSError("sidecar storage unavailable")
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_sidecar_read)
+    telemetry._rotate_and_prune(prompts, today="2026-10-30", retention_days=1)
+
+    assert expired_prompt.exists()
+
+
 # ADR-040: prompt retention does not proceed when associated sidecar cleanup fails.
 def test_attempt_resolution_cleanup_failure_preserves_prompt(tmp_path, monkeypatch):
     import nanobot.observability.llm_telemetry as telemetry

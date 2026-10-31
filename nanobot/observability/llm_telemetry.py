@@ -201,18 +201,24 @@ def write_authoritative_attempt(root: Path, cycle_id: str, attempt_id: str) -> b
     if prompts_dir.is_symlink() or not prompts_dir.is_dir():
         return False
     selected: dict[str, Any] | None = None
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=_prompts_retention_days())
     for path in sorted((*prompts_dir.glob("*.jsonl"), *prompts_dir.glob("*.jsonl.gz"))):
+        day = _day_str(path.name)
+        if day and datetime.strptime(day, "%Y-%m-%d").date() < cutoff:
+            continue
         if path.is_symlink():
             return False
         try:
             for row in _read_prompt_rows(path):
-                if (row.get("cycle_id") == cycle_id and row.get("attempt_id") == attempt_id
-                        and row.get("component") == "executor"
-                        and type(row.get("seq")) is int and row["seq"] >= 0):
-                    if selected is not None and row.get("seq") == selected.get("seq"):
-                        return False
-                    if selected is None or row["seq"] > selected["seq"]:
-                        selected = row
+                if row.get("cycle_id") != cycle_id or row.get("attempt_id") != attempt_id:
+                    continue
+                if (row.get("component") != "executor" or type(row.get("seq")) is not int
+                        or row["seq"] < 0):
+                    return False
+                if selected is not None and row.get("seq") == selected.get("seq"):
+                    return False
+                if selected is None or row["seq"] > selected["seq"]:
+                    selected = row
         except (OSError, ValueError, UnicodeError):
             return False
     if selected is None:
@@ -334,10 +340,16 @@ def read_authoritative_attempt(
         day = prompt_ts.astimezone(timezone.utc).date().isoformat()
         prompt_found = False
         for prompt_file in (prompts_dir / f"{day}.jsonl", prompts_dir / f"{day}.jsonl.gz"):
-            if not prompt_file.exists():
+            try:
+                with prompt_file.open("rb") as probe:
+                    probe.read(1)
+            except FileNotFoundError:
                 continue
+            except OSError:
+                if prompt_file.name.endswith(".jsonl"):
+                    continue
+                return None
             if prompt_file.is_symlink():
-                _remove_authoritative_attempt(path)
                 return None
             try:
                 for row in _read_prompt_rows(prompt_file):
@@ -346,8 +358,10 @@ def read_authoritative_attempt(
                             and row.get("ts") == value["prompt_ts"]):
                         prompt_found = True
                         break
+            except FileNotFoundError:
+                # Rotation may have replaced the plain file with the gzip archive.
+                continue
             except (OSError, ValueError, UnicodeError):
-                _remove_authoritative_attempt(path)
                 return None
         if not prompt_found:
             if invalid is not None:
@@ -590,6 +604,17 @@ def _rotate_and_prune(
         _prune_attempt_resolutions(prompts_dir)
 
 
+def _discard_invalid_resolution(sidecar: Path) -> bool:
+    """Remove malformed private metadata from the active resolution namespace."""
+    if sidecar.is_symlink():
+        return False
+    try:
+        sidecar.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 def _delete_resolutions_for_day(prompts_dir: Path, day: str) -> bool:
     sidecars = prompts_dir / "attempt_resolutions"
     if sidecars.is_symlink():
@@ -601,12 +626,22 @@ def _delete_resolutions_for_day(prompts_dir: Path, day: str) -> bool:
             continue
         try:
             record = json.loads(sidecar.read_text(encoding="utf-8"))
-            if not isinstance(record, dict) or not isinstance(record.get("prompt_ts"), str):
-                return False
-            if record["prompt_ts"].startswith(day + "T"):
-                sidecar.unlink()
-        except (OSError, ValueError, UnicodeError):
+        except OSError:
             return False
+        except (ValueError, UnicodeError):
+            if not _discard_invalid_resolution(sidecar):
+                return False
+            continue
+        if (not isinstance(record, dict) or not isinstance(record.get("prompt_ts"), str)
+                or _aware_timestamp(record["prompt_ts"]) is None):
+            if not _discard_invalid_resolution(sidecar):
+                return False
+            continue
+        if record["prompt_ts"].startswith(day + "T"):
+            try:
+                sidecar.unlink()
+            except OSError:
+                return False
     return True
 
 
@@ -624,7 +659,8 @@ def _prune_attempt_resolutions(prompts_dir: Path) -> bool:
             if not isinstance(record, dict) or set(record) != {
                 "schema", "cycle_id", "attempt_id", "prompt_seq", "prompt_ts", "created_at", "expires_at",
             }:
-                sidecar.unlink()
+                if not _discard_invalid_resolution(sidecar):
+                    return False
                 continue
             day = datetime.fromisoformat(str(record["prompt_ts"]).replace("Z", "+00:00")).astimezone(timezone.utc).date()
             expiry = datetime.fromisoformat(str(record["expires_at"]).replace("Z", "+00:00"))
@@ -648,8 +684,18 @@ def _prune_attempt_resolutions(prompts_dir: Path) -> bool:
                     break
             if not prompt_found:
                 sidecar.unlink()
-        except (OSError, ValueError, UnicodeError, KeyError, TypeError):
+        except OSError:
             return False
+        except (ValueError, UnicodeError):
+            if not _discard_invalid_resolution(sidecar):
+                return False
+        except (KeyError, TypeError):
+            if not _discard_invalid_resolution(sidecar):
+                return False
+        except Exception:
+            # Third-party malformed filesystem objects are not valid correlation.
+            if not _discard_invalid_resolution(sidecar):
+                return False
     return True
 
 
