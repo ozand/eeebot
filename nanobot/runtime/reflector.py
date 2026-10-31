@@ -147,9 +147,14 @@ def _prompt_records(
     deadline: float | None = None,
     *,
     telemetry_root: Path | None = None,
+    unavailable_cycles: set[str] | None = None,
+    pruned_cycles: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Read only the exact bridge-resolved executor attempt from one telemetry root."""
-    from nanobot.observability.llm_telemetry import read_authoritative_attempt
+    from nanobot.observability.llm_telemetry import (
+        _attempt_resolution_path,
+        read_authoritative_attempt,
+    )
 
     root = Path(telemetry_root) if telemetry_root is not None else resolve_llm_calls_dir(state_dir)
     directory = root / "prompts"
@@ -184,8 +189,12 @@ def _prompt_records(
     selected: dict[str, dict[str, Any]] = {}
     now = datetime.now(timezone.utc)
     for cycle_id, records in matches.items():
+        resolution_path = _attempt_resolution_path(root, cycle_id)
+        resolution_was_present = resolution_path.exists()
         resolution = read_authoritative_attempt(root, cycle_id, now=now)
         if resolution is None:
+            if not records and resolution_was_present and pruned_cycles is not None:
+                pruned_cycles.add(cycle_id)
             continue
         attempt_id = resolution["attempt_id"]
         if not attempt_id:
@@ -205,6 +214,8 @@ def _prompt_records(
             "component": "executor", "seq": match["seq"], "selection": "authoritative_attempt",
         }
         selected[cycle_id] = public_record
+    if unavailable_cycles is not None:
+        unavailable_cycles.update(set(candidate_rows) - set(selected) - (pruned_cycles or set()))
     return selected
 
 
@@ -655,28 +666,54 @@ def run_reflector(
         "candidates": len(candidates),
         "processed": 0,
         "skipped_pruned": 0,
+        "unavailable": 0,
         "errors": 0,
         "consecutive_errors": 0,
         "input_truncated": 0,
     }
-    skipped_ids = {
-        str(row.get("cycle_id") or "")
-        for row in iter_reflection_rows(state_dir, (b"skipped_pruned",))
-        if row.get("status") == "skipped_pruned"
+    prior_disposition: dict[str, str] = {}
+    for row in iter_reflection_rows(state_dir):
+        cycle = str(row.get("cycle_id") or "")
+        if cycle and row.get("status"):
+            prior_disposition[cycle] = str(row["status"])
+    retry_counts: dict[str, int] = {}
+    legacy_skipped_ids: set[str] = {
+        cycle for cycle, status in prior_disposition.items() if status == "skipped_pruned"
     }
-    # A previously skipped cycle is eligible again when its retained plain or
-    # gzip transcript is now discoverable; only keep the skip terminal when no
-    # transcript exists in either archive form.
+    for cycle, status in prior_disposition.items():
+        if status == "correlation_unavailable":
+            retry_counts[cycle] = sum(
+                1 for row in iter_reflection_rows(state_dir)
+                if str(row.get("cycle_id") or "") == cycle
+                and row.get("status") == "correlation_unavailable"
+            )
+    retry_ids = {
+        cycle for cycle, count in retry_counts.items()
+        if count < _MAX_CYCLES
+    } | legacy_skipped_ids
     result["candidates"] = len(candidates)
     if reanchor:
         result["reanchor"] = reanchor
+    candidate_ids = {str(row.get("cycle_id") or "") for row in candidates}
+    retry_candidates = [
+        row for row in rows
+        if row.get("phase") == "outcome"
+        and str(row.get("cycle_id") or "") in retry_ids
+        and str(row.get("cycle_id") or "") not in candidate_ids
+    ]
+    candidates = (retry_candidates + candidates)[:max(1, int(max_cycles))]
+    unavailable_cycles: set[str] = set()
+    pruned_cycles: set[str] = set()
     try:
-        prompts = _prompt_records(state_dir, candidates, deadline=deadline, telemetry_root=telemetry_root)
+        prompts = _prompt_records(
+            state_dir, candidates, deadline=deadline, telemetry_root=telemetry_root,
+            unavailable_cycles=unavailable_cycles, pruned_cycles=pruned_cycles,
+        )
     except OSError:
         prompts = {}
     candidates = [
         row for row in candidates
-        if str(row.get("cycle_id") or "") not in skipped_ids
+        if str(row.get("cycle_id") or "") not in legacy_skipped_ids
         or str(row.get("cycle_id") or "") in prompts
     ]
     result["candidates"] = len(candidates)
@@ -688,9 +725,18 @@ def run_reflector(
         cycle_id = str(outcome["cycle_id"])
         transcript = prompts.get(cycle_id)
         if not transcript:
-            _append_journal(state_dir, {"cycle_id": cycle_id, "timestamp": _now(), "summary": "Transcript already pruned; cycle skipped.", "findings": [], "recommendations": [], "followed_previous": [], "status": "skipped_pruned"})
+            pruned = cycle_id in pruned_cycles
+            _append_journal(state_dir, {
+                "cycle_id": cycle_id, "timestamp": _now(),
+                "summary": (
+                    "The retained prompt was pruned before reflection."
+                    if pruned else "Executor prompt or authoritative-attempt evidence is unavailable."
+                ),
+                "findings": [], "recommendations": [], "followed_previous": [],
+                "status": "skipped_pruned" if pruned else "correlation_unavailable",
+            })
             _save_watermark(state_dir, cycle_id)
-            result["skipped_pruned"] += 1
+            result["skipped_pruned" if pruned else "unavailable"] += 1
             consecutive_errs = 0
             continue
         context_rows = [row for row in rows if str(row.get("cycle_id") or "") == cycle_id]

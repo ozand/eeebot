@@ -141,6 +141,55 @@ def test_reflector_custom_root_and_decoy_default_root(tmp_path: Path, monkeypatc
 
 
 # ADR-040
+@pytest.mark.parametrize("expires_at", [
+    "2026-11-12T00:00:00", None, 7, "not-a-timestamp",
+])
+def test_reflector_invalid_expiry_metadata_is_unavailable(tmp_path: Path, expires_at):
+    from nanobot.observability.llm_telemetry import read_authoritative_attempt
+
+    root = tmp_path / "calls"
+    _seed_prompt(tmp_path, "invalid-expiry", root=root)
+    sidecar = next((root / "prompts/attempt_resolutions").glob("*.json"))
+    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    record["expires_at"] = expires_at
+    sidecar.write_text(json.dumps(record), encoding="utf-8")
+    assert read_authoritative_attempt(root, "invalid-expiry") is None
+
+
+# ADR-040
+def test_reflector_duplicate_sidecar_keys_fail_closed(tmp_path: Path):
+    from nanobot.observability.llm_telemetry import read_authoritative_attempt
+
+    root = tmp_path / "calls"
+    _seed_prompt(tmp_path, "duplicate-sidecar", root=root)
+    sidecar = next((root / "prompts/attempt_resolutions").glob("*.json"))
+    payload = sidecar.read_text(encoding="utf-8")
+    sidecar.write_text(payload.replace('"schema":', '"schema":"unsupported", "schema":', 1), encoding="utf-8")
+    assert read_authoritative_attempt(root, "duplicate-sidecar") is None
+
+
+# ADR-040
+def test_reflector_aware_expiry_accepts_exact_value_and_rejects_at_boundary(tmp_path: Path):
+    from nanobot.observability.llm_telemetry import (
+        _prompts_retention_days,
+        read_authoritative_attempt,
+    )
+
+    root = tmp_path / "calls"
+    _seed_prompt(tmp_path, "aware-expiry", root=root)
+    sidecar = next((root / "prompts/attempt_resolutions").glob("*.json"))
+    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    expected = datetime.combine(
+        datetime.fromisoformat(record["prompt_ts"].replace("Z", "+00:00")).date()
+        + timedelta(days=_prompts_retention_days()),
+        datetime.min.time(), tzinfo=timezone.utc,
+    )
+    record["expires_at"] = expected.isoformat().replace("+00:00", "Z")
+    sidecar.write_text(json.dumps(record), encoding="utf-8")
+    assert read_authoritative_attempt(root, "aware-expiry", now=expected - timedelta(seconds=1)) is not None
+    assert read_authoritative_attempt(root, "aware-expiry", now=expected) is None
+
+
 def test_reflector_missing_unmatched_cross_cycle_and_expired_resolution_are_unavailable(tmp_path: Path):
     from nanobot.observability.llm_telemetry import (
         read_authoritative_attempt,
@@ -200,6 +249,78 @@ def test_reflector_rejects_symlinked_attempt_metadata_and_checks_private_mode(tm
 
 # ADR-040
 # @lat: [[runtime-contracts#Reflector transcript provenance]]
+# ADR-040
+@pytest.mark.parametrize("publish_valid_resolution", [True, False])
+def test_reflector_retries_unavailable_correlation_when_evidence_arrives(tmp_path: Path, publish_valid_resolution: bool):
+    from nanobot.observability.llm_telemetry import (
+        record_llm_prompt,
+        telemetry_context,
+        write_authoritative_attempt,
+    )
+
+    cycle = "late-correlation"
+    _write(tmp_path / "ledger/cycles.jsonl", [{
+        "phase": "outcome", "cycle_id": cycle, "outcome": "success",
+        "ts": f"{(datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()}T00:00:00Z",
+    }])
+    with telemetry_context(cycle, "executor", attempt_id=f"attempt-{cycle}", root=tmp_path / "llm_calls"):
+        record_llm_prompt(messages=[{"role": "assistant", "content": "private executor text"}], content=None,
+                          reasoning_content=None, finish_reason="stop", model="test",
+                          prompt_tokens=0, completion_tokens=0)
+    first = reflector.run_reflector(tmp_path, llm=lambda *_: pytest.fail("unavailable evidence must not call model"))
+    assert first["unavailable"] == 1
+    assert first["skipped_pruned"] == 0
+    assert json.loads((tmp_path / "reflector/reflections.jsonl").read_text().splitlines()[0])["status"] == "correlation_unavailable"
+
+    if not publish_valid_resolution:
+        return
+    assert write_authoritative_attempt(tmp_path / "llm_calls", cycle, f"attempt-{cycle}")
+    second = reflector.run_reflector(tmp_path, llm=lambda *_: _answer(cycle))
+    assert second["processed"] == 1
+    rows = [json.loads(line) for line in (tmp_path / "reflector/reflections.jsonl").read_text().splitlines()]
+    assert "attempt_provenance" in rows[-1]
+    assert rows[-1]["attempt_provenance"]["component"] == "executor"
+    assert "attempt_id" not in rows[-1]["attempt_provenance"]
+    assert "private executor text" not in json.dumps(rows[-1])
+
+
+# ADR-040
+def test_reflector_missing_resolution_with_existing_prompt_is_not_pruned(tmp_path: Path):
+    cycle = "prompt-without-resolution"
+    _write(tmp_path / "ledger/cycles.jsonl", [{
+        "phase": "outcome", "cycle_id": cycle, "outcome": "success",
+        "ts": f"{(datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()}T00:00:00Z",
+    }])
+    from nanobot.observability.llm_telemetry import record_llm_prompt, telemetry_context
+    with telemetry_context(cycle, "executor", attempt_id=f"attempt-{cycle}", root=tmp_path / "llm_calls"):
+        record_llm_prompt(messages=[], content=None, reasoning_content=None, finish_reason="stop", model="test",
+                          prompt_tokens=0, completion_tokens=0)
+    result = reflector.run_reflector(tmp_path, llm=lambda *_: pytest.fail("missing resolution must not call model"))
+    assert result["unavailable"] == 1
+    assert result["skipped_pruned"] == 0
+
+
+def test_reflector_capture_disabled_does_not_claim_prompt_was_pruned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LLM_CAPTURE_PROMPTS", "0")
+    _write(tmp_path / "ledger/cycles.jsonl", [{"phase": "outcome", "cycle_id": "capture-off", "outcome": "success"}])
+    result = reflector.run_reflector(tmp_path, llm=lambda *_: pytest.fail("no prompt means no model call"))
+    assert result["unavailable"] == 1
+    assert result["skipped_pruned"] == 0
+
+
+# ADR-040: existing terminal legacy skip rows remain terminal unless a valid prompt is discoverable.
+def test_legacy_skipped_pruned_row_is_reopened_when_prompt_and_resolution_arrive(tmp_path: Path):
+    cycle = "legacy-skipped"
+    _write(tmp_path / "ledger/cycles.jsonl", [{
+        "phase": "outcome", "cycle_id": cycle, "outcome": "success",
+        "ts": f"{(datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()}T00:00:00Z",
+    }])
+    _write(tmp_path / "reflector/reflections.jsonl", [{"cycle_id": cycle, "status": "skipped_pruned"}])
+    _seed_prompt(tmp_path, cycle)
+    result = reflector.run_reflector(tmp_path, llm=lambda *_: _answer(cycle))
+    assert result["processed"] == 1
+
+
 def test_reflector_legacy_prompt_without_resolution_is_unavailable(tmp_path: Path):
     prompt_day = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
     root = tmp_path / "llm_calls"
@@ -437,10 +558,14 @@ def test_fenced_json_is_repaired_and_reason_is_journaled(tmp_path: Path):
     assert row["parse_reason"] == "fenced_json"
 
 
-def test_pruned_transcript_is_journaled_and_watermarked(tmp_path: Path):
+def test_missing_prompt_correlation_is_unavailable_not_pruned(tmp_path: Path):
     _write(tmp_path / "ledger/cycles.jsonl", [{"phase": "outcome", "cycle_id": "gone", "outcome": "failed"}])
     result = reflector.run_reflector(tmp_path, llm=lambda *_: "bad")
-    assert result["skipped_pruned"] == 1
+    assert result["unavailable"] == 1
+    assert result["skipped_pruned"] == 0
+    [row] = [json.loads(line) for line in (tmp_path / "reflector/reflections.jsonl").read_text().splitlines()]
+    assert row["status"] == "correlation_unavailable"
+    assert "Transcript already pruned" not in row["summary"]
     assert json.loads((tmp_path / "reflector/watermark.json").read_text())["last_processed"] == "gone"
 
 

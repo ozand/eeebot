@@ -258,6 +258,27 @@ def write_authoritative_attempt(root: Path, cycle_id: str, attempt_id: str) -> b
         return False
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate metadata field")
+        value[key] = item
+    return value
+
+
+def _aware_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
 def read_authoritative_attempt(
     root: Path, cycle_id: str, *, now: datetime | None = None,
 ) -> dict[str, Any] | None:
@@ -268,7 +289,7 @@ def read_authoritative_attempt(
         if path.parent.is_symlink() or path.is_symlink() or path.stat().st_size > 2048:
             _remove_authoritative_attempt(path)
             return None
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object)
         required = {"schema", "cycle_id", "attempt_id", "prompt_seq", "prompt_ts", "created_at", "expires_at"}
         if (not isinstance(value, dict) or set(value) != required
                 or value["schema"] != "authoritative-attempt-v1"
@@ -280,16 +301,24 @@ def read_authoritative_attempt(
             with contextlib.suppress(OSError):
                 path.unlink()
             return None
-        prompt_ts = datetime.fromisoformat(value["prompt_ts"].replace("Z", "+00:00"))
-        expiry = datetime.fromisoformat(value["expires_at"].replace("Z", "+00:00"))
+        prompt_ts = _aware_timestamp(value["prompt_ts"])
+        created_at = _aware_timestamp(value["created_at"])
+        expiry = _aware_timestamp(value["expires_at"])
+        if prompt_ts is None or created_at is None or expiry is None:
+            _remove_authoritative_attempt(path)
+            return None
         expected_expiry = datetime.combine(
-            prompt_ts.astimezone(timezone.utc).date() + timedelta(days=_prompts_retention_days()),
+            prompt_ts.date() + timedelta(days=_prompts_retention_days()),
             datetime.min.time(), tzinfo=timezone.utc,
         )
-        if expiry != expected_expiry:
+        if created_at < prompt_ts or created_at >= expected_expiry or expiry != expected_expiry:
             _remove_authoritative_attempt(path)
             return None
         current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None or current.utcoffset() is None:
+            _remove_authoritative_attempt(path)
+            return None
+        current = current.astimezone(timezone.utc)
         if current >= expiry:
             _remove_authoritative_attempt(path)
             return None
