@@ -21,8 +21,11 @@ warning derived from append-only cycle-ledger evidence.
 - A `started` row may persist the bridge's already-computed exact `retry_key`;
   rows without a key remain legacy/incomplete evidence. A cycle later recorded as
   `skipped-duplicate` is excluded from the started-attempt count only when the
-  outcome uniquely joins that cycle's start and any supplied retry key matches;
-  missing, conflicting, or repeated joins yield UNKNOWN.
+  outcome joins an exact cycle/key start unambiguously and any supplied retry key
+  matches. Same-key keep/resume attempts may legitimately repeat a cycle ID and
+  each count as a start; a later keyless duplicate skip for that reused ID is
+  ambiguous and yields UNKNOWN. Conflicting-key reuse, mismatched, unjoined, or
+  repeated skip outcomes also yield UNKNOWN.
 - Count exact-key starts since an exact-key successful terminal outcome. Edited
   self-directed title text may form a new identity; late-push outcomes without
   exact key lineage are not inferred by time, title, or cycle proximity.

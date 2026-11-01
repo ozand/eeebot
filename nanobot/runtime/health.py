@@ -707,7 +707,8 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
             if not isinstance(key, str) or not key:
                 invalidate_streak_coverage()
                 continue
-            if cycle_id in cycle_keys or cycle_id in skipped_cycles:
+            existing_key = cycle_keys.get(cycle_id)
+            if cycle_id in skipped_cycles or (existing_key is not None and existing_key != key):
                 invalidate_streak_coverage()
                 continue
             cycle_keys[cycle_id] = key

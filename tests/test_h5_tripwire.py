@@ -457,6 +457,27 @@ def test_task_warning_includes_rotated_attempts_and_keeps_other_task_warning(tmp
     assert "private-alpha" not in json.dumps(result)
 
 
+def test_task_warning_counts_same_cycle_keep_resume_start_writes(tmp_path):
+    now = datetime.now(timezone.utc)
+    state = tmp_path / "kept-resume"
+    _append(state, "outcome", "prior-success", "private-alpha", "success", _iso_at(now - timedelta(hours=1)))
+
+    results = []
+    for attempt in range(12):
+        record_cycle_started(
+            state, "kept-cycle", f"resume-request-{attempt}", None,
+            retry_key="private-alpha",
+        )
+        results.append(read_task_attempt_warning(state, now=datetime.now(timezone.utc) + timedelta(seconds=1)))
+
+    assert results[10]["status"] == "unknown"
+    assert results[10]["warning"] is None
+    assert results[11]["status"] == "warning"
+    assert results[11]["warning"] is True
+    assert results[11]["warning_tasks"] is None
+    assert "private-alpha" not in json.dumps(results[11])
+
+
 def test_task_warning_mismatched_or_unjoined_duplicate_skip_is_unknown(tmp_path):
     now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
     for case, skip_cycle, skip_key in (
