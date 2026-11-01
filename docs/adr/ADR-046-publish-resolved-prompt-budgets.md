@@ -92,7 +92,8 @@ host remain outside this proposal.
 | Normal-fit row includes the five resolved budget fields and numeric/structured shapes | `tests/test_system_prompt_budget_telemetry.py::test_healthy_system_prompt_row_carries_resolved_budgets` | Present on PR #2048 head; acceptance citation on `main` not yet established |
 | Strict-overflow row includes the same resolved fields and shapes | `tests/test_system_prompt_budget_telemetry.py::test_overflow_system_prompt_row_carries_resolved_budgets` | Present on PR #2048 head; acceptance citation on `main` not yet established |
 | Environment-resolved prompt and compaction values, rather than defaults, are published | `tests/test_system_prompt_budget_telemetry.py::test_healthy_system_prompt_row_carries_resolved_budgets`, `tests/test_system_prompt_budget_telemetry.py::test_overflow_system_prompt_row_carries_resolved_budgets`, `tests/test_system_prompt_budget_telemetry.py::test_builder_budget_reads_compaction_module_at_fit_time` | Present on PR #2048 head; acceptance citation on `main` not yet established |
-| Missing builder budget metadata adds no fabricated fields while existing event behavior remains intact | No matching named test in the reviewed PR test file | Not yet written |
+| Missing builder budget metadata adds no fabricated fields while existing event behavior remains intact on the normal-fit row | `tests/test_system_prompt_budget_telemetry.py::test_healthy_system_prompt_row_without_builder_budget_keeps_existing_fields` | Added in this branch; not yet verified on `main` |
+| Missing builder budget metadata adds no fabricated fields while existing event behavior remains intact on the strict-overflow row | `tests/test_system_prompt_budget_telemetry.py::test_overflow_system_prompt_row_without_builder_budget_keeps_existing_fields` | Added in this branch; not yet verified on `main` |
 
 # References
 

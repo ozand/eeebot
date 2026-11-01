@@ -89,6 +89,7 @@ class _RealBuilderManager(_FakeSubagentManager):
 
     builder_root: Path | None = None
     raise_overflow = False
+    omit_budget = False
     last_builder: ContextBuilder | None = None
 
     def _build_subagent_prompt(self) -> str:
@@ -97,7 +98,11 @@ class _RealBuilderManager(_FakeSubagentManager):
         prompt = builder.build_system_prompt(
             loop_profile=True, degrade_on_overflow=True, iteration=1, max_iterations=20, cycle_id="",
         )
-        self.last_prompt_fit = builder.last_fit
+        self.last_prompt_fit = (
+            {key: value for key, value in builder.last_fit.items() if key != "budget"}
+            if type(self).omit_budget
+            else builder.last_fit
+        )
         if type(self).raise_overflow:
             # the refused-prompt row path: same real fit, then the strict refusal
             raise SystemPromptOverflowError(
@@ -107,7 +112,9 @@ class _RealBuilderManager(_FakeSubagentManager):
         return prompt
 
 
-def _run_cycle(tmp_path, monkeypatch, *, raise_overflow: bool) -> list[dict[str, Any]]:
+def _run_cycle(
+    tmp_path, monkeypatch, *, raise_overflow: bool, omit_budget: bool = False,
+) -> list[dict[str, Any]]:
     state_dir = tmp_path / "state"
     state_dir.mkdir(exist_ok=True)
     _init_selfevo_repo(tmp_path)
@@ -121,6 +128,7 @@ def _run_cycle(tmp_path, monkeypatch, *, raise_overflow: bool) -> list[dict[str,
     builder_root.mkdir()
     monkeypatch.setattr(_RealBuilderManager, "builder_root", builder_root)
     monkeypatch.setattr(_RealBuilderManager, "raise_overflow", raise_overflow)
+    monkeypatch.setattr(_RealBuilderManager, "omit_budget", omit_budget)
     _seed_bridge_request(state_dir, "req-368", "cycle-368", task_title="Extend a skill")
     _stub_planning_session(monkeypatch, "Extend a skill")
     asyncio.run(bridge._main_impl())
@@ -168,6 +176,28 @@ def test_overflow_system_prompt_row_carries_resolved_budgets(tmp_path, monkeypat
     (row,) = _run_cycle(tmp_path, monkeypatch, raise_overflow=True)
     assert row["overflow"] is True
     _assert_budget(row)
+
+
+def test_healthy_system_prompt_row_without_builder_budget_keeps_existing_fields(tmp_path, monkeypatch):
+    (row,) = _run_cycle(tmp_path, monkeypatch, raise_overflow=False, omit_budget=True)
+    assert BUDGET_KEYS.isdisjoint(row)
+    assert row["phase"] == "system_prompt"
+    assert row["chars"] > 0
+    assert row["cap"] == ContextBuilder.MAX_SYSTEM_PROMPT_CHARS
+    assert isinstance(row["sections"], dict)
+    assert isinstance(row["missing"], list)
+    assert isinstance(row["truncated"], list)
+
+
+def test_overflow_system_prompt_row_without_builder_budget_keeps_existing_fields(tmp_path, monkeypatch):
+    (row,) = _run_cycle(tmp_path, monkeypatch, raise_overflow=True, omit_budget=True)
+    assert BUDGET_KEYS.isdisjoint(row)
+    assert row["phase"] == "system_prompt"
+    assert row["overflow"] is True
+    assert row["over_by"] > 0
+    assert row["cap"] == ContextBuilder.MAX_SYSTEM_PROMPT_CHARS
+    assert isinstance(row["sections"], dict)
+    assert "chars" not in row
 
 
 def test_builder_budget_reads_compaction_module_at_fit_time(tmp_path, overridden_env):
