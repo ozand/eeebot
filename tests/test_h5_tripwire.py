@@ -128,14 +128,18 @@ def test_cycle_health_cli_reports_clear_and_unknown_warning_states(tmp_path, mon
     monkeypatch.setattr("nanobot.runtime.health._default_runner", lambda command: subprocess.CompletedProcess(command, 0, "", ""))
 
     runner = CliRunner()
-    clear = runner.invoke(app, ["cycle-health", "--runtime-state-root", str(state), "--json"])
-    clear_payload = json.loads(clear.stdout)
-    assert clear.exit_code == clear_payload["exit_code"]
+    clear = runner.invoke(app, ["cycle-health", "--runtime-state-root", str(state)])
+    assert "Task-attempt warning: clear: 0 task warnings (coverage complete)" in clear.stdout
+    clear_json = runner.invoke(app, ["cycle-health", "--runtime-state-root", str(state), "--json"])
+    clear_payload = json.loads(clear_json.stdout)
+    assert clear_json.exit_code == clear_payload["exit_code"]
     assert clear_payload["task_attempt_warning"]["status"] == "clear"
     assert clear_payload["task_attempt_warning"]["warning"] is False
 
     unknown = tmp_path / "unknown"
     _append(unknown, "started", "legacy", ts="2026-11-01T11:00:00Z")
+    unknown_text = runner.invoke(app, ["cycle-health", "--runtime-state-root", str(unknown)])
+    assert "Task-attempt warning: UNKNOWN (coverage incomplete)" in unknown_text.stdout
     result = runner.invoke(app, ["cycle-health", "--runtime-state-root", str(unknown), "--json"])
     unknown_payload = json.loads(result.stdout)
     assert result.exit_code == unknown_payload["exit_code"]
@@ -147,12 +151,35 @@ def test_cycle_health_cli_reports_clear_and_unknown_warning_states(tmp_path, mon
     _append(warning, "outcome", "reset", "private-warning", "success", "2026-11-01T10:00:00Z")
     for index in range(12):
         _append(warning, "started", f"attempt-{index}", "private-warning", ts=f"2026-11-01T11:{index:02d}:00Z")
+    warning_text = runner.invoke(app, ["cycle-health", "--runtime-state-root", str(warning)])
+    assert "Task-attempt warning: warning: at least one task has 12 evidenced starts" in warning_text.stdout
+    assert "private-warning" not in warning_text.stdout
     result = runner.invoke(app, ["cycle-health", "--runtime-state-root", str(warning), "--json"])
     warning_payload = json.loads(result.stdout)
     assert result.exit_code == warning_payload["exit_code"]
     assert warning_payload["task_attempt_warning"]["status"] == "warning"
     assert warning_payload["task_attempt_warning"]["warning"] is True
     assert "private-warning" not in result.stdout
+
+
+def test_task_warning_empty_or_unanchored_ledger_activity_is_unknown(tmp_path, monkeypatch):
+    now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    monkeypatch.setenv("CYCLE_LEDGER_RETENTION_DAYS", "1")
+
+    empty = tmp_path / "empty"
+    _append(empty, "gate", "recent-gate", ts="2026-11-01T11:00:00Z")
+    assert read_task_attempt_warning(empty, now=now)["status"] == "unknown"
+
+    expired = tmp_path / "expired"
+    _append(expired, "started", "old-start", "private-expired", ts="2026-10-20T11:00:00Z")
+    _append(expired, "gate", "recent-gate", ts="2026-11-01T11:00:00Z")
+    assert read_task_attempt_warning(expired, now=now)["status"] == "unknown"
+
+    mixed = tmp_path / "mixed"
+    _append(mixed, "outcome", "reset", "private-known", "success", "2026-11-01T10:00:00Z")
+    _append(mixed, "started", "one", "private-known", ts="2026-11-01T11:00:00Z")
+    _append(mixed, "started", "legacy", ts="2026-11-01T11:01:00Z")
+    assert read_task_attempt_warning(mixed, now=now)["status"] == "unknown"
 
 
 def test_task_warning_uses_cycle_ledger_retention_not_other_reader_env(tmp_path, monkeypatch):

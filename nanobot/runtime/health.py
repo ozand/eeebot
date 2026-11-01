@@ -656,7 +656,9 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
                     anchored[known_key] = False
 
     proven_warnings = sum(count >= 12 for count in streaks.values())
-    fully_known = not unknown_identity and all(anchored.get(key, False) for key in streaks)
+    fully_known = bool(streaks) and not unknown_identity and all(
+        anchored.get(key, False) for key in streaks
+    )
     if proven_warnings:
         return {
             **base,

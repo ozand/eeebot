@@ -24,10 +24,11 @@ warning derived from append-only cycle-ledger evidence.
   self-directed title text may form a new identity; late-push outcomes without
   exact key lineage are not inferred by time, title, or cycle proximity.
 - Report a warning at 12 evidenced unsuccessful starts. Report clear/zero only
-  when exact success has anchored task history and complete start/reset coverage
-  is available. Missing keys, malformed or partial ledger reads, expired horizon,
-  or unknown resets yield UNKNOWN and no count. Twelve exact starts after an
-  uncertain reset independently prove a warning; task count may remain unknown.
+  when at least one exact-key success has anchored task history and complete
+  start/reset coverage is available. Empty/no-task windows, missing keys,
+  malformed or partial reads, expired horizon, or unknown resets yield UNKNOWN
+  and no count. Twelve exact starts after an uncertain reset independently prove
+  a warning; task count may remain unknown.
 - Use the cycle ledger's `CYCLE_LEDGER_RETENTION_DAYS` effective horizon (90-day
   default); this does not promise physical age-based pruning of the active file.
 - Health JSON and text expose only warning/UNKNOWN status and coverage; known
