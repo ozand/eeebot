@@ -1,6 +1,6 @@
-"""ozand/eeebot-ops-dashboard#368: every ``phase: system_prompt`` ledger row
-carries the budgets the runtime actually resolved for that fit -- release
-pool (limit and used), OPERATING.md reserve, AGENTS.md cap, total system
+"""ADR-046 / #2137: every ``phase: system_prompt`` ledger row carries
+resolved budgets: release pool (limit and used), OPERATING.md reserve,
+AGENTS.md cap, total system
 prompt budget, and the compaction window/reserve/threshold/keep as
 ``context_compaction`` sees them -- numbers only.
 

@@ -1017,7 +1017,7 @@ instead. #1188 measured that `AGENTS.md` only grows and nothing ever removes;
   tag/attribute/`<location>` wrapper (measured 9,225 → 3,567 chars on a
   33-skill fixture); interactive sessions keep the XML form unchanged.
 
-**Resolved prompt-budget telemetry (#2137, Proposed ADR-046):** PR #2048's
+**Resolved prompt-budget telemetry (#2137, Proposed ADR-046):** the
 producer adds the builder-resolved `system_prompt_budget_chars`,
 `release_pool_chars` (`limit`, `used`), `operating_reserve_chars`,
 `agents_md_cap_chars`, and `compaction` (`window_tokens`, `reserve_tokens`,
