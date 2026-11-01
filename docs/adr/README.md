@@ -70,6 +70,7 @@ that acceptance is already effective.
 | [ADR-044](ADR-044-planner-tool-capabilities-are-explicit-and-minimal.md) | Planner tool capabilities are explicit and minimal | accepted |
 | [ADR-045](ADR-045-bound-planner-finalization-by-remaining-time.md) | Bound planner finalization by remaining time inside a reserved shared budget | accepted |
 | [ADR-046](ADR-046-publish-resolved-prompt-budgets.md) | Publish resolved prompt budgets on system_prompt ledger rows | accepted |
+| [ADR-047](ADR-047-accepted-records-admit-only-factual-addenda.md) | Accepted ADRs admit only append-only factual addenda | proposed |
 | [ADR-048](ADR-048-persist-self-derived-provenance-in-public-projection.md) | Persist producer-established provenance on self-derived public rows | accepted |
 | [ADR-049](ADR-049-review-before-effective-ADR-acceptance.md) | Require exact-revision review before ADR acceptance takes effect | proposed |
 
@@ -91,6 +92,27 @@ Each status word has one meaning:
   otherwise left as it was.
 - `deferred (#NNN)` -- a marker on one contract item, not a record status:
   the test is owed and issue #NNN owns it.
+
+### Accepted-record addenda
+
+The accepted decision, status, and all existing historical text in an accepted
+ADR are immutable. The sole in-place exception is a dated, factual,
+non-decision addendum appended after all existing content; it cannot create or
+imply a decision, acceptance, status change, or authority. It cannot change,
+delete, or reorder prior text, and its factual claims must be supported by
+cited evidence.
+
+**Independent review guard:** a reviewer who did not author the change must
+inspect the complete `git diff <base>...<head>` and verify both the placement
+and content of any accepted-ADR addendum against the rules above, including
+source support for each factual claim. Reject edits to existing content,
+undated or non-final append material, new or implied decisions/status/authority,
+and unsupported facts. For example, adding at the end a dated note that
+accurately records a verified event and cites its source is eligible to pass;
+changing an earlier rationale sentence, changing `status: accepted`, or adding
+a claim that a new policy is accepted must be rejected. This is a human review
+guard, not an automated check; a proposed addendum is not accepted merely
+because it follows these rules.
 
 A record moves `proposed -> accepted` as a provisional candidate, not as
 effective acceptance. The status flip prepares the candidate revision; the
