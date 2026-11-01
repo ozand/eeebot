@@ -162,6 +162,29 @@ def test_cycle_health_cli_reports_clear_and_unknown_warning_states(tmp_path, mon
     assert "private-warning" not in result.stdout
 
 
+def test_task_warning_future_dated_starts_are_unknown(tmp_path):
+    """ADR-039: future starts are not current counted evidence."""
+    now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    state = tmp_path / "future"
+    _append(state, "outcome", "reset", "private-future", "success", "2026-11-01T11:00:00Z")
+    for index in range(12):
+        _append(state, "started", f"future-{index}", "private-future", ts=f"2026-11-02T11:{index:02d}:00Z")
+    result = read_task_attempt_warning(state, now=now)
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
+    assert "private-future" not in json.dumps(result)
+
+
+def test_task_warning_extreme_retention_returns_unknown(tmp_path, monkeypatch):
+    """ADR-039: unrepresentable coverage horizons fail closed to UNKNOWN."""
+    monkeypatch.setenv("CYCLE_LEDGER_RETENTION_DAYS", "999999999999")
+    result = read_task_attempt_warning(tmp_path / "state", now=datetime(2026, 11, 1, 12, tzinfo=timezone.utc))
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
+
+
 def test_task_warning_empty_or_unanchored_ledger_activity_is_unknown(tmp_path, monkeypatch):
     now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
     monkeypatch.setenv("CYCLE_LEDGER_RETENTION_DAYS", "1")

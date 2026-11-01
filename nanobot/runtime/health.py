@@ -586,8 +586,8 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
     """
     moment = now or datetime.now(timezone.utc)
     horizon = cycle_ledger_retention_days()
-    since = moment - timedelta(days=horizon)
     try:
+        since = moment - timedelta(days=horizon)
         window = ledger_window(
             state_root,
             since_ts=since.isoformat().replace("+00:00", "Z"),
@@ -596,7 +596,7 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
             retention_days=horizon,
             strict_json=True,
         )
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, OverflowError):
         return {"threshold": 12, "coverage_days": horizon, "status": "unknown", "coverage": "unavailable", "warning": None, "warning_tasks": None}
     base = {"threshold": 12, "coverage_days": horizon}
     if window.status != "complete" or not window.rows:
@@ -617,8 +617,14 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
     anchored: dict[str, bool] = {}
     unknown_identity = False
     for row in active_rows:
-        if _parse_ledger_timestamp(row.get("ts") or row.get("timestamp")) is None:
+        row_timestamp = _parse_ledger_timestamp(row.get("ts") or row.get("timestamp"))
+        if row_timestamp is None:
             unknown_identity = True
+        elif row_timestamp > moment.timestamp():
+            # Future evidence must not increase the current attempt count or
+            # anchor a reset; it can also indicate an incomplete/corrupt window.
+            unknown_identity = True
+            continue
         phase = row.get("phase")
         if phase == "started":
             key = row.get("retry_key")
