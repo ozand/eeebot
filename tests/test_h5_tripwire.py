@@ -390,6 +390,12 @@ def test_task_warning_malformed_phase_success_resets_to_unknown(tmp_path):
         ("ts", {}, "outcome", "success"),
         ("ts", 7, "outcome", "success"),
         ("ts", True, "outcome", "success"),
+        ("timestamp", [], "outcome", "success"),
+        ("timestamp", {}, "outcome", "success"),
+        ("timestamp", 7, "outcome", "success"),
+        ("timestamp", True, "outcome", "success"),
+        ("retry_key", "", "started", None),
+        ("cycle_id", "", "outcome", "skipped-duplicate"),
     ],
 )
 def test_task_warning_malformed_ledger_fields_fail_closed(tmp_path, field, value, phase, outcome):
@@ -406,6 +412,8 @@ def test_task_warning_malformed_ledger_fields_fail_closed(tmp_path, field, value
         "outcome": outcome,
         "ts": _iso_at(now - timedelta(minutes=5)),
     }
+    if field == "timestamp":
+        row.pop("ts")
     row[field] = value
     if field == "phase" and value == "unused":
         row.pop(field)

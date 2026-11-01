@@ -30,8 +30,8 @@ warning derived from append-only cycle-ledger evidence.
   malformed or partial reads, expired horizon, unrepresentably large horizon,
   future-dated or timezone-naive rows, or unknown resets yield UNKNOWN and no
   count. Valid unrelated phases remain ignorable, but success-shaped rows with
-  missing or non-string phase, outcome, retry key, cycle ID, or timestamp is
-  UNKNOWN reset coverage and cannot crash health output. Twelve exact current
+  missing/non-string phase, malformed outcome/key/cycle ID/timestamp, or empty
+  identity is UNKNOWN reset coverage and cannot crash health output. Twelve exact current
   starts after an uncertain reset independently prove a warning; task count may
   remain unknown.
 - Use the cycle ledger's `CYCLE_LEDGER_RETENTION_DAYS` effective horizon (90-day
