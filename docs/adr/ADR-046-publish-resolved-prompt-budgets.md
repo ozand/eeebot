@@ -1,6 +1,6 @@
 ---
 title: Publish resolved prompt budgets on system_prompt ledger rows
-status: proposed
+status: accepted
 date: 2026-11-01
 authors: [eeebot maintainers]
 related: ["#2137", "#2048", "ADR-003", "ADR-022"]
@@ -9,11 +9,26 @@ tags: [runtime, prompt, telemetry, ledger]
 
 # Status
 
-**Proposed.** This proposal is prepared after PR #2048 already contains an
-implementation on its existing branch. It records the rationale prospectively;
-it does not claim the ADR gate preceded that implementation, authorize it
-retroactively, or establish acceptance. The proposal remains editable until
-accepted under `docs/adr/README.md`.
+**Accepted — delegated technical acceptance candidate.** Prepared 2026-11-01
+by the delegated delivery executor under the explicitly owner-approved
+technical outcome in issue #2137. This is not personal operator acceptance.
+The candidate is not published and must not be treated as formally accepted
+until an independent reviewer passes the exact final revision and the
+applicable checks pass, under `docs/adr/README.md` and `AGENT_ROUTING.md`.
+The candidate accepting change is this draft status/index update in PR
+[#2138](https://github.com/ozand/eeebot/pull/2138). Its head at preparation
+is `e44c687b9e6fd5b81c2bc91c177a4e82bc85ab26`; independent review and
+applicable checks of the final PR revision remain pending.
+
+The source implementation merged in PR #2048 at
+`c7b533abe2d788c90374615364ae6004f38a208c`. All six jobs in CI run
+[41274493829](https://github.com/ozand/eeebot/actions/runs/41274493829)
+passed on that exact main SHA. The five contract rows below map to existing
+`main` tests; each named function is defined in
+`tests/test_system_prompt_budget_telemetry.py`, which cites ADR-046. The
+reviewed acceptance-candidate revision and independent review result must be
+recorded in the delivery PR/review evidence before publication; this candidate
+does not claim that review has already occurred.
 
 # Context
 
@@ -33,7 +48,7 @@ knowing which values were emitted and why.
 
 # Decision
 
-**Proposed decision:** append these five top-level fields to existing
+Append these five top-level fields to existing
 `system_prompt` rows, using the builder's effective values for that fit:
 
 - `system_prompt_budget_chars`: numeric character cap.
@@ -51,8 +66,8 @@ a record of exact prompt contents, or evidence that any gate passed.
 
 Out of scope: dashboard consumer/presentation changes, host/runtime access,
 deployment, historical ledger reads, new infrastructure, or changes to gates.
-The prior implementation on PR #2048 is context only; this proposal does not
-accept implementation or assert a verified test state.
+This ADR records the technical contract implemented in PR #2048; it does not
+claim any dashboard rendering, host deployment, or production availability.
 
 # Consequences
 
@@ -89,18 +104,18 @@ host remain outside this proposal.
 
 | Claim in Decision | Test | Currently |
 |---|---|---|
-| Normal-fit row includes the five resolved budget fields and numeric/structured shapes | `tests/test_system_prompt_budget_telemetry.py::test_healthy_system_prompt_row_carries_resolved_budgets` | Present on PR #2048 head; acceptance citation on `main` not yet established |
-| Strict-overflow row includes the same resolved fields and shapes | `tests/test_system_prompt_budget_telemetry.py::test_overflow_system_prompt_row_carries_resolved_budgets` | Present on PR #2048 head; acceptance citation on `main` not yet established |
-| Environment-resolved prompt and compaction values, rather than defaults, are published | `tests/test_system_prompt_budget_telemetry.py::test_healthy_system_prompt_row_carries_resolved_budgets`, `tests/test_system_prompt_budget_telemetry.py::test_overflow_system_prompt_row_carries_resolved_budgets`, `tests/test_system_prompt_budget_telemetry.py::test_builder_budget_reads_compaction_module_at_fit_time` | Present on PR #2048 head; acceptance citation on `main` not yet established |
-| Missing builder budget metadata adds no fabricated fields while existing event behavior remains intact on the normal-fit row | `tests/test_system_prompt_budget_telemetry.py::test_healthy_system_prompt_row_without_builder_budget_keeps_existing_fields` | Added in this branch; not yet verified on `main` |
-| Missing builder budget metadata adds no fabricated fields while existing event behavior remains intact on the strict-overflow row | `tests/test_system_prompt_budget_telemetry.py::test_overflow_system_prompt_row_without_builder_budget_keeps_existing_fields` | Added in this branch; not yet verified on `main` |
+| Normal-fit row includes the five resolved budget fields and numeric/structured shapes | `tests/test_system_prompt_budget_telemetry.py::test_healthy_system_prompt_row_carries_resolved_budgets` | Present on main at c7b533a; test file cites ADR-046 |
+| Strict-overflow row includes the same resolved fields and shapes | `tests/test_system_prompt_budget_telemetry.py::test_overflow_system_prompt_row_carries_resolved_budgets` | Present on main at c7b533a; test file cites ADR-046 |
+| Environment-resolved prompt and compaction values, rather than defaults, are published | `tests/test_system_prompt_budget_telemetry.py::test_healthy_system_prompt_row_carries_resolved_budgets`, `tests/test_system_prompt_budget_telemetry.py::test_overflow_system_prompt_row_carries_resolved_budgets`, `tests/test_system_prompt_budget_telemetry.py::test_builder_budget_reads_compaction_module_at_fit_time` | All three tests present on main at c7b533a; test file cites ADR-046 |
+| Missing builder budget metadata adds no fabricated fields while existing event behavior remains intact on the normal-fit row | `tests/test_system_prompt_budget_telemetry.py::test_healthy_system_prompt_row_without_builder_budget_keeps_existing_fields` | Present on main at c7b533a; test file cites ADR-046 |
+| Missing builder budget metadata adds no fabricated fields while existing event behavior remains intact on the strict-overflow row | `tests/test_system_prompt_budget_telemetry.py::test_overflow_system_prompt_row_without_builder_budget_keeps_existing_fields` | Present on main at c7b533a; test file cites ADR-046 |
 
 # References
 
 - Issue #2137 — `https://github.com/ozand/eeebot/issues/2137`.
-- PR #2048 — `https://github.com/ozand/eeebot/pull/2048`; implementation
-  head cited above is prior to this ADR draft.
+- PR #2048 — `https://github.com/ozand/eeebot/pull/2048`; merged source
+  revision `c7b533abe2d788c90374615364ae6004f38a208c`.
 - ADR-003 — existing prompt-fit ledger fields and ownership.
 - ADR-022 — context ontology and budget units.
 - `nanobot/agent/context.py`, `nanobot/runtime/bridge.py`,
-  `tests/test_system_prompt_budget_telemetry.py` on PR #2048.
+  `tests/test_system_prompt_budget_telemetry.py` on main at `c7b533a`.
