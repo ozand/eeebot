@@ -604,6 +604,10 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
     base = {"threshold": 12, "coverage_days": horizon}
     if window.status == "unavailable" or not window.rows:
         return {**base, "status": "unknown", "coverage": "incomplete", "warning": None, "warning_tasks": None}
+    # A byte-capped ledger read is a prefix, so it cannot exclude a later exact
+    # reset row. Do not emit warning or clear from truncated history.
+    if "cap_bytes" in window.notes:
+        return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
     if any(note.startswith(("permission", "io_error", "gz_corrupt", "malformed_json", "malformed_row")) for note in window.notes):
         return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
     if any(note.startswith("invalid_archive:") for note in window.notes):

@@ -34,8 +34,8 @@ warning derived from append-only cycle-ledger evidence.
   count may remain unknown.
 - Use the cycle ledger's `CYCLE_LEDGER_RETENTION_DAYS` effective horizon (90-day
   default), reading retained archives and active data in timestamp order; this
-  does not promise physical age-based pruning of the active file. Partial reads
-  may prove a warning but must not claim clear.
+  does not promise physical age-based pruning of the active file. A byte-capped
+  prefix is UNKNOWN because a later reset may be unread.
 - Health JSON and text expose only warning/UNKNOWN status and coverage; known
   clear coverage is rendered as clear, and raw retry keys are never shown. The
   warning does not block or alter planner, retry, handled-marker, wake,

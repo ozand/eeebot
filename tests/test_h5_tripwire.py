@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from typer.testing import CliRunner
 
+import nanobot.runtime.health as health
 from nanobot.cli.commands import app
 from nanobot.runtime.bridge import _retry_key_for
 from nanobot.runtime.cycle_ledger import record_cycle_started
@@ -252,6 +253,30 @@ def test_task_warning_empty_or_unanchored_ledger_activity_is_unknown(tmp_path, m
     _append(mixed, "started", "one", "private-known", ts="2026-11-01T11:00:00Z")
     _append(mixed, "started", "legacy", ts="2026-11-01T11:01:00Z")
     assert read_task_attempt_warning(mixed, now=now)["status"] == "unknown"
+
+
+def test_task_warning_capped_prefix_does_not_ignore_later_success_reset(tmp_path, monkeypatch):
+    """ADR-039: prefix truncation cannot prove no later success reset."""
+    now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    state = tmp_path / "capped"
+    _append(state, "outcome", "anchor", "private-alpha", "success", "2026-11-01T10:00:00Z")
+    for index in range(12):
+        _append(state, "started", f"attempt-{index}", "private-alpha", ts=f"2026-11-01T10:{index:02d}:00Z")
+    for index in range(50):
+        _append(state, "gate", f"filler-{index}", ts=f"2026-11-01T11:{index:02d}:00Z")
+    _append(state, "outcome", "late-success", "private-alpha", "success", "2026-11-01T11:59:00Z")
+
+    original_reader = health.ledger_window
+    def capped_reader(*args, **kwargs):
+        kwargs["max_bytes"] = 2400
+        return original_reader(*args, **kwargs)
+
+    monkeypatch.setattr(health, "ledger_window", capped_reader)
+    result = read_task_attempt_warning(state, now=now)
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
+    assert "private-alpha" not in json.dumps(result)
 
 
 def test_task_warning_includes_rotated_attempts_and_keeps_other_task_warning(tmp_path):
