@@ -649,6 +649,15 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
             continue
         phase = row.get("phase")
         cycle_id = row.get("cycle_id")
+        if phase not in {"started", "outcome"}:
+            # Only recognized runtime phases are ignorable. An unrecognized or
+            # missing phase with outcome-shaped data could conceal a reset.
+            if "outcome" in row or "retry_key" in row:
+                unknown_identity = True
+                for known_key in streaks:
+                    streaks[known_key] = 0
+                    anchored[known_key] = False
+            continue
         if phase == "started":
             key = row.get("retry_key")
             if not isinstance(key, str) or not key or not isinstance(cycle_id, str) or not cycle_id:

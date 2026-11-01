@@ -335,6 +335,32 @@ def test_task_warning_unparseable_success_breaks_streak_before_recount(tmp_path)
     assert result["warning_tasks"] is None
 
 
+def test_task_warning_malformed_phase_success_resets_to_unknown(tmp_path):
+    """Malformed/missing phase with success data must invalidate the streak."""
+    """ADR-039: success-shaped rows with missing or invalid phase cannot be ignored."""
+    now = datetime.now(timezone.utc)
+    for malformed_phase in (None, "outcom"):
+        state = tmp_path / ("missing-phase" if malformed_phase is None else "bad-phase")
+        _append(state, "outcome", "anchor", "private-alpha", "success", _iso_at(now - timedelta(minutes=60)))
+        for index in range(12):
+            _append(state, "started", f"before-{index}", "private-alpha", ts=_iso_at(now - timedelta(minutes=50 - index)))
+        row = {
+            "cycle_id": "hidden-success",
+            "retry_key": "private-alpha",
+            "outcome": "success",
+            "ts": _iso_at(now - timedelta(minutes=20)),
+        }
+        if malformed_phase is not None:
+            row["phase"] = malformed_phase
+        with (state / "ledger" / "cycles.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row) + "\n")
+        result = read_task_attempt_warning(state, now=now)
+        assert result["status"] == "unknown"
+        assert result["warning"] is None
+        assert result["warning_tasks"] is None
+        assert "private-alpha" not in json.dumps(result)
+
+
 def test_task_warning_malformed_outcome_does_not_crash(tmp_path, monkeypatch):
     """ADR-039: malformed outcome values fail closed without crashing health."""
     now = datetime.now(timezone.utc)
