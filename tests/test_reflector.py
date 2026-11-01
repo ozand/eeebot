@@ -754,6 +754,37 @@ def test_legacy_skipped_rows_do_not_starve_new_reflection_candidates(tmp_path: P
     assert seen == ["new-d"]
 
 
+def test_restored_legacy_skip_is_not_duplicated_or_starving_new_cycle(tmp_path: Path):
+    day = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    cycles = ("old-a", "anchor", "new-b")
+    _write(tmp_path / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": cycle, "outcome": "success", "ts": f"{day}T00:0{index}:00Z"}
+        for index, cycle in enumerate(cycles)
+    ])
+    _write(tmp_path / "reflector/reflections.jsonl", [
+        {"cycle_id": "old-a", "status": "skipped_pruned", "summary": "legacy"}
+    ])
+    reflector._save_watermark(tmp_path, "anchor")
+    _seed_prompt(tmp_path, "old-a")
+    _seed_prompt(tmp_path, "new-b")
+
+    seen = []
+
+    def llm(messages, _model):
+        cycle = messages[1]["content"].splitlines()[0].removeprefix("CYCLE_ID: ")
+        seen.append(cycle)
+        return _answer(cycle)
+
+    result = reflector.run_reflector(tmp_path, llm=llm, max_cycles=2)
+
+    rows = [json.loads(line) for line in (tmp_path / "reflector/reflections.jsonl").read_text().splitlines()]
+    successful = [row["cycle_id"] for row in rows if row.get("status") is None]
+    assert result["processed"] == 2
+    assert seen == ["old-a", "new-b"]
+    assert successful.count("old-a") == 1
+    assert successful.count("new-b") == 1
+
+
 def test_failed_retry_remains_eligible_until_success(tmp_path: Path):
     day = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
     cycles = ("older-a", "later-b")

@@ -746,7 +746,12 @@ def run_reflector(
         if str(row.get("cycle_id") or "") not in legacy_skipped_ids
         or str(row.get("cycle_id") or "") in legacy_prompts
     ]
-    candidates = (retry_candidates + legacy_candidates + candidates)[:max(1, int(max_cycles))]
+    candidate_by_id: dict[str, dict[str, Any]] = {}
+    for row in retry_candidates + legacy_candidates + candidates:
+        cycle = str(row.get("cycle_id") or "")
+        if cycle:
+            candidate_by_id.setdefault(cycle, row)
+    candidates = list(candidate_by_id.values())[:max(1, int(max_cycles))]
     try:
         prompts = _prompt_records(
             state_dir, candidates, deadline=deadline, telemetry_root=telemetry_root,
