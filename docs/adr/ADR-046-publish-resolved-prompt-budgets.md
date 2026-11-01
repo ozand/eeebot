@@ -15,9 +15,10 @@ technical outcome in issue #2137. This is not personal operator acceptance.
 The candidate is not published and must not be treated as formally accepted
 until an independent reviewer passes the exact final revision and the
 applicable checks pass, under `docs/adr/README.md` and `AGENT_ROUTING.md`.
-The candidate accepting change is the status/index update on branch
-`docs/2137-accept-adr046`; its exact commit SHA and independent-review result
-must be recorded in the delivery/review evidence before publication.
+The candidate accepting change is this draft status/index update in PR
+[#2138](https://github.com/ozand/eeebot/pull/2138). Its head at preparation
+is `e44c687b9e6fd5b81c2bc91c177a4e82bc85ab26`; independent review and
+applicable checks of the final PR revision remain pending.
 
 The source implementation merged in PR #2048 at
 `c7b533abe2d788c90374615364ae6004f38a208c`. All six jobs in CI run
