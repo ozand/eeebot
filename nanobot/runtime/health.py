@@ -573,6 +573,8 @@ def _format_task_attempt_warning(value: Any) -> str:
         return "UNKNOWN (coverage incomplete)"
     if value.get("warning") is True:
         return f"warning: at least one task has {value.get('threshold', 12)} evidenced starts"
+    if value.get("status") == "clear" and value.get("warning") is False:
+        return f"clear: {value.get('warning_tasks', 0)} task warnings (coverage complete)"
     return "UNKNOWN (coverage incomplete)"
 
 

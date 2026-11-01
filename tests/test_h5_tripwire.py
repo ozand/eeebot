@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime, timezone
 
+from typer.testing import CliRunner
+
+from nanobot.cli.commands import app
 from nanobot.runtime.bridge import _retry_key_for
 from nanobot.runtime.cycle_ledger import record_cycle_started
 from nanobot.runtime.health import (
@@ -36,14 +40,41 @@ def test_task_warning_threshold_exact_key_success_reset_and_privacy(tmp_path):
     now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
     state = tmp_path / "state"
     _anchored_attempts(state, "private-alpha", 11)
-    assert read_task_attempt_warning(state, now=now)["status"] == "clear"
-    _append(state, "outcome", "beta-reset", "private-beta", "success", "2026-11-01T11:19:00Z")
-    _append(state, "started", "other-1", "private-beta", ts="2026-11-01T11:20:00Z")
-    _append(state, "started", "alpha-11", "private-alpha", ts="2026-11-01T11:21:00Z")
-    _append(state, "outcome", "alpha-success", "private-alpha", "success", "2026-11-01T11:22:00Z")
+    clear = read_task_attempt_warning(state, now=now)
+    assert clear["status"] == "clear"
+    assert clear["warning"] is False
+    assert clear["warning_tasks"] == 0
+    assert format_cycle_health_summary({"task_attempt_warning": clear})[7] == (
+        "  Task-attempt warning: clear: 0 task warnings (coverage complete)"
+    )
+    _append(state, "started", "alpha-11", "private-alpha", ts="2026-11-01T11:12:00Z")
+    at_twelve = read_task_attempt_warning(state, now=now)
+    assert at_twelve["status"] == "warning"
+    assert at_twelve["warning"] is True
+    assert at_twelve["warning_tasks"] == 1
+    _append(state, "started", "alpha-12", "private-alpha", ts="2026-11-01T11:13:00Z")
+    at_thirteen = read_task_attempt_warning(state, now=now)
+    assert at_thirteen["status"] == "warning"
+    assert at_thirteen["warning_tasks"] == 1
+
+    interleaved = tmp_path / "interleaved"
+    _anchored_attempts(interleaved, "private-alpha", 11)
+    _append(interleaved, "outcome", "beta-reset", "private-beta", "success", "2026-11-01T11:19:00Z")
     for index in range(11):
-        _append(state, "started", f"beta-{index}", "private-beta", ts=f"2026-11-01T11:{23 + index:02d}:00Z")
-    _append(state, "started", "beta-11", "private-beta", ts="2026-11-01T11:35:00Z")
+        _append(interleaved, "started", f"beta-{index}", "private-beta", ts=f"2026-11-01T11:{20 + index:02d}:00Z")
+    before_beta_twelve = read_task_attempt_warning(interleaved, now=now)
+    assert before_beta_twelve["status"] == "clear"
+    _append(interleaved, "started", "beta-11", "private-beta", ts="2026-11-01T11:31:00Z")
+    beta_twelve = read_task_attempt_warning(interleaved, now=now)
+    assert beta_twelve["status"] == "warning"
+    assert beta_twelve["warning_tasks"] == 1
+
+    reset = tmp_path / "reset"
+    _anchored_attempts(reset, "private-alpha", 12)
+    _append(reset, "outcome", "alpha-success", "private-alpha", "success", "2026-11-01T11:22:00Z")
+    after_success = read_task_attempt_warning(reset, now=now)
+    assert after_success["status"] == "clear"
+    assert after_success["warning_tasks"] == 0
 
     result = read_task_attempt_warning(state, now=now)
     assert result == {
@@ -78,6 +109,50 @@ def test_task_warning_unknown_legacy_and_keyless_late_push(tmp_path):
     assert result["warning"] is None
     assert result["warning_tasks"] is None
     assert "private-alpha" not in json.dumps(result)
+
+
+def test_cycle_health_cli_reports_clear_and_unknown_warning_states(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    _append(state, "outcome", "reset", "private-clear", "success", "2026-11-01T10:00:00Z")
+    _append(state, "started", "one", "private-clear", ts="2026-11-01T11:00:00Z")
+    monkeypatch.setattr("nanobot.runtime.health.load_runtime_state_from_root", lambda *a, **k: {})
+    monkeypatch.setattr("nanobot.runtime.health._ledger_age_seconds", lambda *_a, **_k: 0.0)
+    monkeypatch.setattr("nanobot.runtime.health.read_cycle_progress", lambda *_a, **_k: {"state": "healthy", "alert": False})
+    monkeypatch.setattr("nanobot.runtime.health.read_service_status", lambda *_a, **_k: {})
+    monkeypatch.setattr("nanobot.runtime.health.read_failed_units_count", lambda *_a, **_k: 0)
+    monkeypatch.setattr("nanobot.runtime.health._promotion_readiness", lambda *_a, **_k: {"state": "ready"})
+    monkeypatch.setattr("nanobot.runtime.health.read_autonomous_commits_24h", lambda *_a, **_k: 0)
+    monkeypatch.setattr("nanobot.runtime.health.read_checkpoint_commits_24h", lambda *_a, **_k: 0)
+    monkeypatch.setattr("nanobot.runtime.health.read_subagent_queue_depth", lambda *_a, **_k: 0)
+    monkeypatch.setattr("nanobot.runtime.health.read_derived_priorities_queue", lambda *_a, **_k: {"depth": 0, "limit": 10})
+    monkeypatch.setattr("nanobot.runtime.health._default_runner", lambda command: subprocess.CompletedProcess(command, 0, "", ""))
+
+    runner = CliRunner()
+    clear = runner.invoke(app, ["cycle-health", "--runtime-state-root", str(state), "--json"])
+    clear_payload = json.loads(clear.stdout)
+    assert clear.exit_code == clear_payload["exit_code"]
+    assert clear_payload["task_attempt_warning"]["status"] == "clear"
+    assert clear_payload["task_attempt_warning"]["warning"] is False
+
+    unknown = tmp_path / "unknown"
+    _append(unknown, "started", "legacy", ts="2026-11-01T11:00:00Z")
+    result = runner.invoke(app, ["cycle-health", "--runtime-state-root", str(unknown), "--json"])
+    unknown_payload = json.loads(result.stdout)
+    assert result.exit_code == unknown_payload["exit_code"]
+    assert unknown_payload["task_attempt_warning"]["status"] == "unknown"
+    assert unknown_payload["task_attempt_warning"]["warning"] is None
+    assert "private-clear" not in result.stdout
+
+    warning = tmp_path / "warning"
+    _append(warning, "outcome", "reset", "private-warning", "success", "2026-11-01T10:00:00Z")
+    for index in range(12):
+        _append(warning, "started", f"attempt-{index}", "private-warning", ts=f"2026-11-01T11:{index:02d}:00Z")
+    result = runner.invoke(app, ["cycle-health", "--runtime-state-root", str(warning), "--json"])
+    warning_payload = json.loads(result.stdout)
+    assert result.exit_code == warning_payload["exit_code"]
+    assert warning_payload["task_attempt_warning"]["status"] == "warning"
+    assert warning_payload["task_attempt_warning"]["warning"] is True
+    assert "private-warning" not in result.stdout
 
 
 def test_task_warning_uses_cycle_ledger_retention_not_other_reader_env(tmp_path, monkeypatch):

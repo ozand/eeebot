@@ -90,11 +90,11 @@ Indefinite retention could improve historical coverage but increases privacy/sto
 | Claim | Test | Currently |
 |---|---|---|
 | Start row persists the supplied exact retry key while existing callers retain their prior row shape | `tests/test_cycle_ledger.py::test_record_cycle_started_persists_retry_key_when_supplied` | implemented |
-| 11 known starts do not warn; the 12th warns, distinct keys do not combine, and exact-key success resets only its key | `tests/test_h5_tripwire.py::test_task_warning_threshold_exact_key_success_reset_and_privacy` | implemented |
+| 11 known starts do not warn; the 12th warns, distinct keys do not combine, and exact-key success resets only its key; attempt 13 remains permitted | `tests/test_h5_tripwire.py::test_task_warning_threshold_exact_key_success_reset_and_privacy` | implemented |
 | Missing legacy key and keyless late-push do not become zero or inferred success; 12 exact starts after an unknown late reset can prove a warning while 11 remains UNKNOWN | `tests/test_h5_tripwire.py::test_task_warning_unknown_reset_does_not_emit_under_threshold_count`, `tests/test_h5_tripwire.py::test_task_warning_proves_12_after_late_push_unknown_reset` | implemented |
 | Edited self-directed title produces a distinct exact retry key | `tests/test_h5_tripwire.py::test_self_title_edit_creates_distinct_warning_identity` | implemented |
 | The effective horizon honors `CYCLE_LEDGER_RETENTION_DAYS` rather than the unrelated state reader variable; expired and malformed evidence is UNKNOWN | `tests/test_h5_tripwire.py::test_task_warning_uses_cycle_ledger_retention_not_other_reader_env` | implemented |
-| Public cycle-health summary exposes warning/UNKNOWN without raw keys or unproven low counts | `tests/test_h5_tripwire.py::test_cycle_health_summary_includes_warning_without_raw_key` | implemented |
+| Public cycle-health summary exposes warning/UNKNOWN without raw keys or unproven low counts; CLI integration preserves clear, unknown, and warning states | `tests/test_h5_tripwire.py::test_cycle_health_cli_reports_clear_and_unknown_warning_states` | implemented |
 | Health reporting is read-only and warning does not alter global #2050 semantics | `tests/test_2050_r21.py` | existing global regression; health path reads only |
 | Global six-hour/12-cycle H5 semantics remain separate and unchanged | `tests/test_2050_r21.py` | existing test; not modified |
 

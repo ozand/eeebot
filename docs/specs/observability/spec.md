@@ -30,10 +30,10 @@ warning derived from append-only cycle-ledger evidence.
   uncertain reset independently prove a warning; task count may remain unknown.
 - Use the cycle ledger's `CYCLE_LEDGER_RETENTION_DAYS` effective horizon (90-day
   default); this does not promise physical age-based pruning of the active file.
-- Health JSON and text expose only aggregate warning state/count and coverage,
-  never raw retry keys. The warning does not block or alter planner, retry,
-  handled-marker, wake, prioritization, or rollback behavior; #2050's global
-  tripwire remains separate.
+- Health JSON and text expose only warning/UNKNOWN status and coverage; known
+  clear coverage is rendered as clear, and raw retry keys are never shown. The
+  warning does not block or alter planner, retry, handled-marker, wake,
+  prioritization, or rollback behavior; #2050's global tripwire remains separate.
 
 ### Runtime dashboard recovery visibility (#2118)
 
