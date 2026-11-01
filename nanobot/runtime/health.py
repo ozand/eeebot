@@ -604,6 +604,10 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
     base = {"threshold": 12, "coverage_days": horizon}
     if window.status == "unavailable" or not window.rows:
         return {**base, "status": "unknown", "coverage": "incomplete", "warning": None, "warning_tasks": None}
+    # Archived rows cannot prove the active ledger is present: newer resets or
+    # starts may be missing, so archive-only evidence is never current coverage.
+    if "dir_missing" in window.notes:
+        return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
     # A byte-capped ledger read is a prefix, so it cannot exclude a later exact
     # reset row. Do not emit warning or clear from truncated history.
     if "cap_bytes" in window.notes:
@@ -674,9 +678,28 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
             continue
         phase = row.get("phase")
         cycle_id = row.get("cycle_id")
+        unrelated_phases = {
+            "backlog_done_guard", "bridge_activation_self_check", "cycle_cost",
+            "day_boundary_transition", "dedup", "defect_decline_escalated",
+            "demand_cooling", "demand_vector_split", "deploy_behavioral_check",
+            "derived_view", "diary_fitness_error", "diary_open_entry",
+            "error_card_recording", "evolution_tree", "gate", "goal_gap_futile",
+            "goal_review", "guard_key_match", "hypothesis", "idle",
+            "insight_decision", "integrity", "no_plan_recovery", "open_increment",
+            "open_increment_delete_failed", "open_increment_held",
+            "open_increment_operator_flag", "open_increment_operator_flag_cleared",
+            "open_increment_resolve_failed", "open_increment_resolved",
+            "open_increment_running_registered", "plan_amendment", "planner_rest",
+            "planner_rest_held", "planner_rest_review_signal", "planning_session",
+            "proposed", "proposer_reject", "proposer_skip", "ranked_candidates",
+            "reflection_consumption", "rejected_duplicate", "tech_tree",
+        }
+        if phase in unrelated_phases:
+            # These valid phases can carry outcome/retry_key without representing
+            # task terminal events or resets.
+            continue
         if not isinstance(phase, str) or phase not in {"started", "outcome"}:
-            # Only recognized runtime phases are ignorable. An unrecognized or
-            # missing phase with outcome-shaped data could conceal a reset.
+            # Unknown success-shaped or retry-keyed rows may conceal a reset.
             if "outcome" in row or "retry_key" in row:
                 invalidate_streak_coverage()
             continue

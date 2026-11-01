@@ -28,8 +28,9 @@ warning derived from append-only cycle-ledger evidence.
   when at least one exact-key success has anchored task history and complete
   start/reset coverage is available. Empty/no-task windows, missing keys,
   malformed or partial reads, expired horizon, unrepresentably large horizon,
-  future-dated or timezone-naive rows, or unknown resets yield UNKNOWN and no
-  count. Valid unrelated phases remain ignorable, but success-shaped rows with
+  future-dated or timezone-naive rows, missing active ledger with archive-only
+  evidence, or unknown resets yield UNKNOWN and no count. Valid unrelated phases
+  remain ignorable, but success-shaped rows with
   missing/non-string phase, malformed outcome/key/cycle ID/timestamp, or empty
   identity is UNKNOWN reset coverage and cannot crash health output. Twelve exact current
   starts after an uncertain reset independently prove a warning; task count may

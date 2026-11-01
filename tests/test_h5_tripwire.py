@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 import nanobot.runtime.health as health
 from nanobot.cli.commands import app
 from nanobot.runtime.bridge import _retry_key_for
-from nanobot.runtime.cycle_ledger import record_cycle_started
+from nanobot.runtime.cycle_ledger import append_event, record_cycle_started, record_diary_open_entry, record_cycle_outcome
 from nanobot.runtime.health import (
     build_cycle_health_summary,
     format_cycle_health_summary,
@@ -110,10 +110,53 @@ def test_task_warning_threshold_exact_key_success_reset_and_privacy(tmp_path):
     assert "private-beta" not in json.dumps(result)
 
 
+def test_task_warning_ignores_valid_diary_phase_rows_from_real_writer(tmp_path):
+    state = tmp_path / "real-writers"
+    reset_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    _append(state, "outcome", "reset", "private-alpha", "success", _iso_at(reset_at))
+    for index in range(12):
+        cycle = f"real-cycle-{index}"
+        record_cycle_started(state, cycle, f"request-{index}", None, retry_key="private-alpha")
+        record_diary_open_entry(state, cycle, "integrated", None, "recorded before cycle")
+        append_event(state, {
+            "phase": "open_increment", "cycle_id": cycle, "retry_key": "private-alpha",
+            "status": "interrupted_supply", "consecutive_supply_interrupts": index + 1,
+        })
+
+    now = datetime.now(timezone.utc) + timedelta(seconds=1)
+    result = read_task_attempt_warning(state, now=now)
+    assert result["status"] == "warning"
+    assert result["warning"] is True
+    assert result["warning_tasks"] == 1
+    assert "private-alpha" not in json.dumps(result)
+
+
 def test_self_title_edit_creates_distinct_warning_identity():
     first = _retry_key_for(None, "Review ADR design")
     edited = _retry_key_for(None, "Review ADR design revised")
     assert first != edited
+
+
+def test_task_warning_joins_actual_success_outcome_by_cycle_id_and_retry_key(tmp_path):
+    now = datetime.now(timezone.utc)
+    state = tmp_path / "actual-outcome-writer"
+    reset_ts = _iso_at(now - timedelta(hours=2))
+    _append(state, "outcome", "prior-success", "private-alpha", "success", reset_ts)
+    for index in range(11):
+        cycle = f"writer-cycle-{index}"
+        record_cycle_started(state, cycle, f"request-{index}", None, retry_key="private-alpha")
+        record_diary_open_entry(state, cycle, "integrated", None, "real writer row")
+    terminal = "writer-cycle-terminal"
+    record_cycle_started(state, terminal, "terminal-request", None, retry_key="private-alpha")
+    record_cycle_outcome(
+        state, terminal, "success", None, [], None, retry_key="private-alpha",
+    )
+
+    result = read_task_attempt_warning(state, now=now + timedelta(seconds=1))
+    assert result["status"] == "clear"
+    assert result["warning"] is False
+    assert result["warning_tasks"] == 0
+    assert "private-alpha" not in json.dumps(result)
 
 
 def test_task_warning_unknown_legacy_and_keyless_late_push(tmp_path):
@@ -278,6 +321,44 @@ def test_task_warning_capped_prefix_does_not_ignore_later_success_reset(tmp_path
     assert result["warning"] is None
     assert result["warning_tasks"] is None
     assert "private-alpha" not in json.dumps(result)
+
+
+def test_task_warning_archive_only_history_is_unknown_in_reader_and_cli(tmp_path, monkeypatch):
+    now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    state = tmp_path / "archive-only"
+    archive_rows = [
+        {"phase": "outcome", "cycle_id": "reset", "retry_key": "private-alpha", "outcome": "success", "ts": "2026-10-31T23:00:00Z"},
+    ]
+    archive_rows.extend(
+        {"phase": "started", "cycle_id": f"attempt-{index}", "retry_key": "private-alpha", "ts": f"2026-11-01T00:{index:02d}:00Z"}
+        for index in range(12)
+    )
+    _write_archive(state, "cycles-2026-10-31.jsonl.gz", archive_rows)
+
+    direct = read_task_attempt_warning(state, now=now)
+    assert direct["status"] == "unknown"
+    assert direct["warning"] is None
+    assert direct["warning_tasks"] is None
+    assert "private-alpha" not in json.dumps(direct)
+
+    monkeypatch.setattr("nanobot.runtime.health.load_runtime_state_from_root", lambda *a, **k: {})
+    monkeypatch.setattr("nanobot.runtime.health._ledger_age_seconds", lambda *_a, **_k: 0.0)
+    monkeypatch.setattr("nanobot.runtime.health.read_cycle_progress", lambda *_a, **_k: {"state": "healthy", "alert": False})
+    monkeypatch.setattr("nanobot.runtime.health.read_service_status", lambda *_a, **_k: {})
+    monkeypatch.setattr("nanobot.runtime.health.read_failed_units_count", lambda *_a, **_k: 0)
+    monkeypatch.setattr("nanobot.runtime.health._promotion_readiness", lambda *_a, **_k: {"state": "ready"})
+    monkeypatch.setattr("nanobot.runtime.health.read_autonomous_commits_24h", lambda *_a, **_k: 0)
+    monkeypatch.setattr("nanobot.runtime.health.read_checkpoint_commits_24h", lambda *_a, **_k: 0)
+    monkeypatch.setattr("nanobot.runtime.health.read_subagent_queue_depth", lambda *_a, **_k: 0)
+    monkeypatch.setattr("nanobot.runtime.health.read_derived_priorities_queue", lambda *_a, **_k: {"depth": 0, "limit": 10})
+    monkeypatch.setattr("nanobot.runtime.health._default_runner", lambda command: subprocess.CompletedProcess(command, 0, "", ""))
+    result = CliRunner().invoke(app, ["cycle-health", "--runtime-state-root", str(state), "--json"])
+    payload = json.loads(result.stdout)
+    warning = payload["task_attempt_warning"]
+    assert warning["status"] == "unknown"
+    assert warning["warning"] is None
+    assert warning["warning_tasks"] is None
+    assert "private-alpha" not in result.stdout
 
 
 def test_task_warning_includes_rotated_attempts_and_keeps_other_task_warning(tmp_path):
