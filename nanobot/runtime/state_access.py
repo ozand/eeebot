@@ -164,7 +164,8 @@ def _read_ledger_file(
     capped = False
     try:
         opener = gzip.open if path.name.endswith(".gz") else open
-        with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+        decode_errors = "strict" if strict_json else "replace"
+        with opener(path, "rt", encoding="utf-8", errors=decode_errors) as handle:
             for line_no, line in enumerate(handle, start=1):
                 line_bytes = len(line.encode("utf-8", errors="replace"))
                 if used + line_bytes > remaining:
@@ -197,6 +198,8 @@ def _read_ledger_file(
                     row["_source_line"] = line_no
                 rows.append(row)
         return rows, used, _iso(earliest) if earliest else None, _iso(latest) if latest else None, capped, None
+    except UnicodeDecodeError:
+        return [], used, None, None, False, "malformed_utf8"
     except PermissionError:
         return [], used, None, None, False, "permission"
     except (OSError, EOFError, gzip.BadGzipFile):
@@ -258,7 +261,7 @@ def ledger_window(
         if error:
             files_skipped += 1
             notes.append(error)
-            if error == "permission" and files_read == 0:
+            if error in {"permission", "malformed_utf8"} and files_read == 0:
                 return Window((), "unavailable", _iso(requested), None, None, 0, files_skipped, bytes_read, tuple(notes))
             continue
         files_read += 1

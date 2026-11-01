@@ -280,6 +280,47 @@ def test_task_warning_extreme_retention_returns_unknown(tmp_path, monkeypatch):
     assert result["warning_tasks"] is None
 
 
+@pytest.mark.parametrize("compressed", [False, True])
+def test_task_warning_invalid_utf8_retry_key_is_unknown(tmp_path, compressed):
+    now = datetime.now(timezone.utc)
+    state = tmp_path / ("invalid-gzip" if compressed else "invalid-plain")
+    ledger = state / "ledger"
+    ledger.mkdir(parents=True)
+    rows = [
+        {"phase": "outcome", "cycle_id": "reset", "retry_key": "private-alpha", "outcome": "success", "ts": _iso_at(now - timedelta(hours=1))},
+    ]
+    rows.extend(
+        {"phase": "started", "cycle_id": f"attempt-{index}", "retry_key": "private-alpha", "ts": _iso_at(now - timedelta(minutes=50 - index))}
+        for index in range(12)
+    )
+    newline = bytes([10])
+    payload = b"".join(json.dumps(row).encode("utf-8") + newline for row in rows)
+    payload += b'{"phase":"started","cycle_id":"corrupt","retry_key":"bad' + bytes([255]) + b'key","ts":"' + _iso_at(now).encode("ascii") + b'"}' + newline
+    path = ledger / ("cycles-2026-11-01.jsonl.gz" if compressed else "cycles.jsonl")
+    path.write_bytes(gzip.compress(payload) if compressed else payload)
+
+    result = read_task_attempt_warning(state, now=now + timedelta(seconds=1))
+    assert result["status"] == "unknown"
+    assert result["coverage"] == "incomplete"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
+    assert "bad" not in json.dumps(result)
+    assert "private-alpha" not in json.dumps(result)
+
+
+def test_task_warning_valid_unicode_replacement_character_is_not_rejected(tmp_path):
+    now = datetime.now(timezone.utc)
+    state = tmp_path / "valid-unicode"
+    _append(state, "outcome", "reset", "task-�", "success", _iso_at(now - timedelta(hours=1)))
+    for index in range(12):
+        _append(state, "started", f"unicode-{index}", "task-�", ts=_iso_at(now - timedelta(minutes=50 - index)))
+
+    result = read_task_attempt_warning(state, now=now + timedelta(seconds=1))
+    assert result["status"] == "warning"
+    assert result["warning"] is True
+    assert result["warning_tasks"] is None
+
+
 def test_task_warning_expired_and_pruned_other_task_history_never_proves_clear(tmp_path):
     now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
     state = tmp_path / "expired-other-task"

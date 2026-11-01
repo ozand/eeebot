@@ -29,8 +29,10 @@ warning derived from append-only cycle-ledger evidence.
   start/reset coverage is available. Empty/no-task windows, missing keys,
   malformed or partial reads, expired horizon, unrepresentably large horizon,
   future-dated or timezone-naive rows, missing active ledger with archive-only
-  evidence, unknown resets, or absent global-history evidence yield UNKNOWN
-  and no count. The existing ledger has no inception/completeness watermark, so
+  evidence, invalid UTF-8 ledger bytes, unknown resets, or absent global-history
+  evidence yield UNKNOWN and no count. Strict H5 ledger reads reject invalid
+  UTF-8; a valid literal U+FFFD character remains ordinary Unicode data. The
+  existing ledger has no inception/completeness watermark, so
   an apparently complete retained slice cannot justify below-threshold aggregate
   clear when older task keys may have been pruned. Valid unrelated phases remain
   ignorable, but success-shaped rows with

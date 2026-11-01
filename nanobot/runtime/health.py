@@ -612,7 +612,7 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
     # reset row. Do not emit warning or clear from truncated history.
     if "cap_bytes" in window.notes:
         return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
-    if any(note.startswith(("permission", "io_error", "gz_corrupt", "malformed_json", "malformed_row")) for note in window.notes):
+    if any(note.startswith(("permission", "io_error", "gz_corrupt", "malformed_json", "malformed_row", "malformed_utf8")) for note in window.notes):
         return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
     if any(note.startswith("invalid_archive:") for note in window.notes):
         return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
