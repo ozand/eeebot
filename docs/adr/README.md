@@ -96,23 +96,25 @@ Each status word has one meaning:
 ### Accepted-record addenda
 
 The accepted decision, status, and all existing historical text in an accepted
-ADR are immutable. The sole in-place exception is a dated, factual,
-non-decision addendum appended after all existing content; it cannot create or
-imply a decision, acceptance, status change, or authority. It cannot change,
-delete, or reorder prior text, and its factual claims must be supported by
-cited evidence.
+ADR are immutable. **No in-place addendum exception is in force while ADR-047
+is Proposed.** ADR-047 proposes a narrow exception: a dated, factual,
+non-decision addendum appended after all existing content, without creating or
+implying a decision, acceptance, status change, or authority, changing/deleting/
+reordering prior text, or making unsupported factual claims. This proposed
+exception is not an operative rule and must not be used unless ADR-047 is
+accepted by the authorized decision owner. If accepted, this section must be
+updated in the same reviewed acceptance change to state the adopted rule.
 
-**Independent review guard:** a reviewer who did not author the change must
-inspect the complete `git diff <base>...<head>` and verify both the placement
-and content of any accepted-ADR addendum against the rules above, including
-source support for each factual claim. Reject edits to existing content,
+**Proposed independent review guard (not yet operative):** if adopted, a
+reviewer who did not author the change would inspect the complete
+`git diff <base>...<head>` and verify the placement and content of any
+accepted-ADR addendum against the proposed constraints, including source support
+for each factual claim. The reviewer would reject edits to existing content,
 undated or non-final append material, new or implied decisions/status/authority,
-and unsupported facts. For example, adding at the end a dated note that
-accurately records a verified event and cites its source is eligible to pass;
-changing an earlier rationale sentence, changing `status: accepted`, or adding
-a claim that a new policy is accepted must be rejected. This is a human review
-guard, not an automated check; a proposed addendum is not accepted merely
-because it follows these rules.
+and unsupported facts. For example, a dated, sourced factual note appended at
+the end could pass; changing earlier rationale, changing `status: accepted`, or
+claiming the new policy is accepted would fail. This is a proposed human review
+guard, not an automated check or current authorization.
 
 A record moves `proposed -> accepted` as a provisional candidate, not as
 effective acceptance. The status flip prepares the candidate revision; the

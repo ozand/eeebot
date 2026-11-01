@@ -16,13 +16,12 @@ operator acceptance.
 
 ## Context
 
-`docs/adr/README.md` describes accepted records as immutable, while the installed
-ADR lifecycle permits a dated appended clarification that does not alter the
-decision. ADR-030 contains a dated addendum precedent. The policy needs to make
-that narrow exception auditable without making accepted decisions or their
-history editable. Reversing this repository-wide governance rule later would
-require knowing which class of edits was permitted and how it was reviewed, so
-the ADR reversal test is met.
+`docs/adr/README.md` describes accepted records as immutable, while ADR-030
+contains a dated addendum precedent. This repository-wide policy needs to
+clarify whether such non-decision additions are permitted and, if so, how they
+can be reviewed without making accepted decisions or their history editable.
+Reversing this governance choice later would require knowing which class of
+edits was permitted and how it was reviewed, so the ADR reversal test is met.
 
 ## Decision
 
@@ -43,8 +42,9 @@ acceptance criteria, or grant merge/closure authority.
 
 ### What gets easier
 
-Authors and reviewers have a precise test for a permissible post-acceptance
-clarification, consistent with ADR-030 and the installed lifecycle guidance.
+If accepted, authors and reviewers will have a precise test for a permissible
+post-acceptance clarification, consistent with ADR-030's dated addendum
+precedent.
 
 ### What gets harder
 
@@ -60,8 +60,7 @@ policy enforcement is introduced.
 ## Alternatives Considered
 
 - Forbid all additions after acceptance: preserves the README's strictest
-  reading but unnecessarily excludes the existing ADR-030 precedent and the
-  installed lifecycle's non-decision clarification.
+  reading but excludes the existing ADR-030 precedent for a dated addendum.
 - Allow general amendments in place: rejected because it would blur the
   decision's original status and history, contrary to the accepted-record
   immutability rule.
@@ -75,5 +74,4 @@ policy enforcement is introduced.
 ## References
 
 - Issue #2141, including the research record at https://github.com/ozand/eeebot/issues/2141#issuecomment-6557053677
-- ADR-030, dated addendum precedent
-- Installed ADR lifecycle, `references/lifecycle.md`
+- ADR-030, dated addendum precedent.
