@@ -648,6 +648,7 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
             return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
     streaks: dict[str, int] = {}
     cycle_keys: dict[str, str] = {}
+    cycle_start_counts: dict[str, int] = {}
     skipped_cycles: set[str] = set()
 
     def invalidate_streak_coverage() -> None:
@@ -712,6 +713,7 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
                 invalidate_streak_coverage()
                 continue
             cycle_keys[cycle_id] = key
+            cycle_start_counts[cycle_id] = cycle_start_counts.get(cycle_id, 0) + 1
             streaks[key] = streaks.get(key, 0) + 1
         elif phase == "outcome":
             outcome = row.get("outcome")
@@ -725,6 +727,9 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
                     invalidate_streak_coverage()
                     continue
                 if key is not None and (not isinstance(key, str) or key != started_key):
+                    invalidate_streak_coverage()
+                    continue
+                if cycle_start_counts.get(cycle_id) != 1:
                     invalidate_streak_coverage()
                     continue
                 skipped_cycles.add(cycle_id)

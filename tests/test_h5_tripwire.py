@@ -514,6 +514,52 @@ def test_task_warning_duplicate_skip_key_must_match_started_cycle_and_is_unique(
     assert "private-alpha" not in json.dumps(result)
 
 
+@pytest.mark.parametrize("start_count", [12, 13])
+@pytest.mark.parametrize("skip_key", [None, "private-alpha"])
+def test_task_warning_reused_cycle_duplicate_skip_is_unknown(tmp_path, start_count, skip_key):
+    now = datetime.now(timezone.utc)
+    state = tmp_path / f"reused-cycle-{start_count}-{skip_key}"
+    _append(state, "outcome", "prior-success", "private-alpha", "success", _iso_at(now - timedelta(hours=1)))
+
+    for attempt in range(start_count):
+        record_cycle_started(
+            state, "kept-cycle", f"resume-request-{attempt}", None,
+            retry_key="private-alpha",
+        )
+    record_cycle_outcome(
+        state, "kept-cycle", "skipped-duplicate", "already_done", [], None,
+        retry_key=skip_key,
+    )
+
+    result = read_task_attempt_warning(state, now=now + timedelta(seconds=1))
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
+    assert "private-alpha" not in json.dumps(result)
+
+
+def test_task_warning_conflicting_key_reused_cycle_is_unknown(tmp_path):
+    now = datetime.now(timezone.utc)
+    state = tmp_path / "conflicting-cycle-key"
+    _append(state, "outcome", "prior-success", "private-alpha", "success", _iso_at(now - timedelta(hours=1)))
+    for attempt in range(12):
+        record_cycle_started(
+            state, "reused-cycle", f"alpha-request-{attempt}", None,
+            retry_key="private-alpha",
+        )
+    append_event(state, {
+        "phase": "started", "cycle_id": "reused-cycle", "request_id": "beta-request",
+        "retry_key": "private-beta", "ts": _iso_at(now),
+    })
+
+    result = read_task_attempt_warning(state, now=now + timedelta(seconds=1))
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
+    assert "private-alpha" not in json.dumps(result)
+    assert "private-beta" not in json.dumps(result)
+
+
 def test_task_warning_excludes_cycles_ending_in_duplicate_skip(tmp_path):
     """ADR-039: cycles ending as duplicate skips do not count as attempts."""
     now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)

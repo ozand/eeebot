@@ -23,8 +23,9 @@ warning derived from append-only cycle-ledger evidence.
   `skipped-duplicate` is excluded from the started-attempt count only when the
   outcome joins an exact cycle/key start unambiguously and any supplied retry key
   matches. Same-key keep/resume attempts may legitimately repeat a cycle ID and
-  each count as a start; a later keyless duplicate skip for that reused ID is
-  ambiguous and yields UNKNOWN. Conflicting-key reuse, mismatched, unjoined, or
+  each count as a start; a later duplicate skip for that reused ID is ambiguous
+  and yields UNKNOWN whether or not it carries the matching key. Conflicting-key
+  reuse, mismatched, unjoined, or
   repeated skip outcomes also yield UNKNOWN.
 - Count exact-key starts since an exact-key successful terminal outcome. Edited
   self-directed title text may form a new identity; late-push outcomes without
