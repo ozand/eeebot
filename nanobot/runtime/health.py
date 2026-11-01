@@ -649,6 +649,8 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
     streaks: dict[str, int] = {}
     cycle_keys: dict[str, str] = {}
     cycle_start_counts: dict[str, int] = {}
+    cycle_terminal_outcomes: dict[str, str] = {}
+    conflicting_terminal_outcomes = False
     skipped_cycles: set[str] = set()
 
     def invalidate_streak_coverage() -> None:
@@ -721,6 +723,12 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
             if not isinstance(outcome, str):
                 invalidate_streak_coverage()
                 continue
+            previous_terminal = cycle_terminal_outcomes.get(cycle_id)
+            if previous_terminal is not None:
+                conflicting_terminal_outcomes = True
+                invalidate_streak_coverage()
+                continue
+            cycle_terminal_outcomes[cycle_id] = outcome
             if outcome == "skipped-duplicate":
                 started_key = cycle_keys.get(cycle_id)
                 if cycle_id in skipped_cycles or not started_key:
@@ -750,6 +758,9 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
                     invalidate_streak_coverage()
             elif outcome not in {"partial", "failed", "skipped-duplicate", "promotion_candidate", "push_pending", "superseded", "abandoned", "paused-supplier"}:
                 invalidate_streak_coverage()
+
+    if conflicting_terminal_outcomes:
+        return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
 
     proven_warnings = sum(count >= 12 for count in streaks.values())
     if proven_warnings:

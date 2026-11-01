@@ -520,16 +520,9 @@ def test_task_warning_reused_cycle_duplicate_skip_is_unknown(tmp_path, start_cou
     now = datetime.now(timezone.utc)
     state = tmp_path / f"reused-cycle-{start_count}-{skip_key}"
     _append(state, "outcome", "prior-success", "private-alpha", "success", _iso_at(now - timedelta(hours=1)))
-
     for attempt in range(start_count):
-        record_cycle_started(
-            state, "kept-cycle", f"resume-request-{attempt}", None,
-            retry_key="private-alpha",
-        )
-    record_cycle_outcome(
-        state, "kept-cycle", "skipped-duplicate", "already_done", [], None,
-        retry_key=skip_key,
-    )
+        record_cycle_started(state, "kept-cycle", f"resume-request-{attempt}", None, retry_key="private-alpha")
+    record_cycle_outcome(state, "kept-cycle", "skipped-duplicate", "already_done", [], None, retry_key=skip_key)
 
     result = read_task_attempt_warning(state, now=now + timedelta(seconds=1))
     assert result["status"] == "unknown"
@@ -538,7 +531,32 @@ def test_task_warning_reused_cycle_duplicate_skip_is_unknown(tmp_path, start_cou
     assert "private-alpha" not in json.dumps(result)
 
 
-def test_task_warning_conflicting_key_reused_cycle_is_unknown(tmp_path):
+@pytest.mark.parametrize("terminal_order", ["failed-then-skip", "skip-then-failed"])
+def test_task_warning_conflicting_cycle_terminal_outcomes_are_unknown(tmp_path, terminal_order):
+    now = datetime.now(timezone.utc)
+    state = tmp_path / terminal_order
+    _append(state, "outcome", "prior-success", "private-alpha", "success", _iso_at(now - timedelta(hours=1)))
+
+    for attempt in range(13):
+        cycle = f"attempt-{attempt}"
+        record_cycle_started(state, cycle, f"request-{attempt}", None, retry_key="private-alpha")
+        if attempt == 0 and terminal_order == "failed-then-skip":
+            record_cycle_outcome(state, cycle, "failed", "executor_failed", [], None, retry_key="private-alpha")
+            record_cycle_outcome(state, cycle, "skipped-duplicate", "duplicate", [], None, retry_key="private-alpha")
+        elif attempt == 0 and terminal_order == "skip-then-failed":
+            record_cycle_outcome(state, cycle, "skipped-duplicate", "duplicate", [], None, retry_key="private-alpha")
+            record_cycle_outcome(state, cycle, "failed", "executor_failed", [], None, retry_key="private-alpha")
+
+    result = read_task_attempt_warning(state, now=datetime.now(timezone.utc) + timedelta(seconds=1))
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
+    assert "private-alpha" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("start_count", [12, 13])
+@pytest.mark.parametrize("skip_key", [None, "private-alpha"])
+def test_task_warning_conflicting_key_reused_cycle_is_unknown(tmp_path, start_count, skip_key):
     now = datetime.now(timezone.utc)
     state = tmp_path / "conflicting-cycle-key"
     _append(state, "outcome", "prior-success", "private-alpha", "success", _iso_at(now - timedelta(hours=1)))
