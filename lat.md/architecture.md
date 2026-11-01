@@ -28,7 +28,7 @@ The LLM proposer can author bounded candidates through [[nanobot/runtime/llm_pro
 
 ## Evidence, gates, and authority
 
-Cycle and phase evidence is append-oriented in the runtime ledger at [[nanobot/runtime/cycle_ledger.py#append_event]]. Demand collection and ranking provide inputs; they do not establish that work passed a gate or integrated. See [[evidence]] for evidence status and fitness boundaries.
+Cycle and phase evidence is append-oriented in the runtime ledger at [[nanobot/runtime/cycle_ledger.py#append_event]]. Demand collection and ranking provide inputs; they do not establish that work passed a gate or integrated. The existing `cycle-health` summary also reports an aggregate-only task-attempt warning from exact keyed start/outcome ledger evidence; incomplete identity or reset coverage is UNKNOWN. See [[evidence]] for evidence status and fitness boundaries.
 
 A subagent works in a cycle-scoped branch through [[nanobot/runtime/bridge.py#_setup_cycle_branch]]. The bridge applies the bounded smoke and mutation-surface checks before integration. Runtime-slice changes are promotion candidates for operator review rather than ordinary script-tier auto-integration; see [[gates-and-promotion]], [[docs/specs/subagent-bridge/spec.md]], and [[docs/specs/promotion-and-release/spec.md]].
 

@@ -32,9 +32,9 @@ This is a proposed persisted-data contract refined under the delegated technical
 - Add the already-computed canonical `retry_key` to the write-ahead `started` event before execution, without changing event ordering or retry behavior. A missing key on any legacy or future row is not a match.
 - Count only exact `retry_key` equality. A changed self-directed first title line may create a new identity; no lineage is inferred. Planning/rest and duplicate-skip rows are not starts.
 - Establish success reset only from a successful terminal outcome carrying that same exact key. A `pushed_late` success without exact key remains UNKNOWN, never assigned by time/cycle proximity.
-- Emit a warning at 12; 11 does not warn when the count is known. Expose a below-12 count only when start and reset coverage is known. If 12 exact starts since the most recent known reset are evidenced, but any intervening outcome/retention gap could hide a success reset, the result is UNKNOWN rather than a warning. Exact continuous coverage for the 12-start interval can establish the threshold even if older history before that interval is incomplete; a possible unknown reset within the interval cannot.
+- Emit a warning at 12. A result below threshold is clear only when an exact success has anchored relevant task history and complete start/reset coverage is available; otherwise report UNKNOWN and no count. Twelve exact starts after a keyless late-push or other unknown reset independently prove a warning, even though the number of affected tasks may remain unknown. Never infer by nearest time/cycle/title.
 - Treat missing, expired, malformed, or partial ledger coverage as UNKNOWN. The effective coverage horizon is configured by `CYCLE_LEDGER_RETENTION_DAYS` (default 90); do not claim the active file is physically pruned at that age.
-- Extend the existing operator health/reporting surface; do not introduce another notifier/service. Public output is aggregate-only and never includes raw keys.
+- Extend the existing operator health/reporting surface; do not introduce another notifier/service. Public output exposes warning/UNKNOWN and coverage only; it never emits raw keys or guessed per-task counts when continuity is uncertain.
 - Warning is informational only: no denial at 13, block, wake, prioritization, retry/handled-state mutation, or rollback.
 
 ## What this IS NOT
@@ -50,7 +50,7 @@ This is a proposed persisted-data contract refined under the delegated technical
 - Starts for different keys never combine; a success for a key resets only that key's streak.
 - Duplicate skips and planner sessions do not increment the started-attempt count.
 - Missing historical keys, incomplete archive coverage, or ambiguous joins produce UNKNOWN, not a zero/healthy state.
-- Public output contains only aggregate status/count/coverage, with tests proving raw-key non-disclosure.
+- Public output contains only warning/UNKNOWN and coverage, with tests proving raw-key non-disclosure and no guessed count when continuity is uncertain.
 - Warning emission has no effect on planner eligibility, retry counters, marker state, wake behavior, or rollback.
 
 # Consequences
@@ -89,16 +89,14 @@ Indefinite retention could improve historical coverage but increases privacy/sto
 
 | Claim | Test | Currently |
 |---|---|---|
-| Start row carries the same canonical key computed for the request before the write-ahead event; no ordering/retry behavior changes | `tests/test_cycle_ledger.py::<new start retry-key serialization test>` | not yet written |
-| 11 starts do not warn and the 12th warns for one key | `tests/test_h5_tripwire.py::<new per-task threshold boundary test>` | not yet written |
-| Interleaved keys remain isolated and a success resets only its own key | `tests/test_h5_tripwire.py::<new key isolation and reset test>` | not yet written |
-| Planner/rest and duplicate-skip rows do not count as starts; outcome joins require exact key | `tests/test_h5_tripwire.py::<new phase and exact-join test>` | not yet written |
-| Missing start key, incomplete coverage, expired evidence, or possible unknown reset (including keyless late success) yields UNKNOWN rather than zero or an inferred reset | `tests/test_h5_tripwire.py::<new incomplete-coverage and late-push test>` | not yet written |
-| Fully evidenced exact-key starts can establish the 12 threshold despite incomplete earlier history; a possible reset gap within the relevant interval must remain UNKNOWN | `tests/test_h5_tripwire.py::<new threshold under partial-history test>` | not yet written |
-| Operator output aggregates counts/status/coverage and never serializes raw key | `tests/test_h5_tripwire.py::<new public-output privacy test>` | not yet written |
-| Warning does not block/wake/rollback or mutate retry/handled state | `tests/test_h5_tripwire.py::<new non-actioning warning test>` | not yet written |
-| Global six-hour/12-cycle H5 semantics remain separate and unchanged | `tests/test_h5_tripwire.py::<existing or new global H5 regression test>` | not yet written |
-| Retention uses the existing effective `CYCLE_LEDGER_RETENTION_DAYS` horizon (default 90), without claiming active-file physical pruning at that age | `tests/test_cycle_ledger.py::<new effective-retention coverage test>` | not yet written |
+| Start row persists the supplied exact retry key while existing callers retain their prior row shape | `tests/test_cycle_ledger.py::test_record_cycle_started_persists_retry_key_when_supplied` | implemented |
+| 11 known starts do not warn; the 12th warns, distinct keys do not combine, and exact-key success resets only its key | `tests/test_h5_tripwire.py::test_task_warning_threshold_exact_key_success_reset_and_privacy` | implemented |
+| Missing legacy key and keyless late-push do not become zero or inferred success; 12 exact starts after an unknown late reset can prove a warning while 11 remains UNKNOWN | `tests/test_h5_tripwire.py::test_task_warning_unknown_reset_does_not_emit_under_threshold_count`, `tests/test_h5_tripwire.py::test_task_warning_proves_12_after_late_push_unknown_reset` | implemented |
+| Edited self-directed title produces a distinct exact retry key | `tests/test_h5_tripwire.py::test_self_title_edit_creates_distinct_warning_identity` | implemented |
+| The effective horizon honors `CYCLE_LEDGER_RETENTION_DAYS` rather than the unrelated state reader variable; expired and malformed evidence is UNKNOWN | `tests/test_h5_tripwire.py::test_task_warning_uses_cycle_ledger_retention_not_other_reader_env` | implemented |
+| Public cycle-health summary exposes warning/UNKNOWN without raw keys or unproven low counts | `tests/test_h5_tripwire.py::test_cycle_health_summary_includes_warning_without_raw_key` | implemented |
+| Health reporting is read-only and warning does not alter global #2050 semantics | `tests/test_2050_r21.py` | existing global regression; health path reads only |
+| Global six-hour/12-cycle H5 semantics remain separate and unchanged | `tests/test_2050_r21.py` | existing test; not modified |
 
 # Rollback
 

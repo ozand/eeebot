@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from nanobot.runtime.cycle_ledger import _retention_days as cycle_ledger_retention_days
 from nanobot.runtime.schemas import CycleHealth
 from nanobot.runtime.state import _json_files_sorted_by_mtime, load_runtime_state_from_root
 from nanobot.runtime.state_access import ledger_window
@@ -426,7 +427,11 @@ def read_derived_priorities_queue(state_root: Path) -> dict[str, int | str]:
     :func:`operator_documents.resolve_derived_priorities`, the derived
     priorities' one resolver, never a second path to the file."""
     from nanobot.runtime import goal_review
-    from nanobot.runtime.operator_documents import STATE_ABSENT, STATE_TEXT, resolve_derived_priorities
+    from nanobot.runtime.operator_documents import (
+        STATE_ABSENT,
+        STATE_TEXT,
+        resolve_derived_priorities,
+    )
 
     res = resolve_derived_priorities(state_root)
     depth = len(res.entries) if res.state == STATE_TEXT else 0
@@ -455,6 +460,7 @@ def build_cycle_health_summary(
     runtime["runtime_state_unavailable"] = ledger_age is None
     runtime["runtime_state_stale"] = ledger_age is not None and ledger_age > _LEDGER_STALE_AFTER_SECONDS
     runtime["cycle_progress"] = progress
+    runtime["task_attempt_warning"] = read_task_attempt_warning(state_root)
     live = runtime.get("live") if isinstance(runtime.get("live"), dict) else {}
     recent = live.get("recent_outcomes") if isinstance(live.get("recent_outcomes"), list) else []
     latest_cycle_id = recent[0].get("cycle_id") if recent and isinstance(recent[0], dict) else None
@@ -472,6 +478,7 @@ def build_cycle_health_summary(
         "latest_cycle_id": latest_cycle_id,
         "ledger_age_seconds": ledger_age,
         "progress": progress,
+        "task_attempt_warning": runtime["task_attempt_warning"],
         "latest_subagent_telemetry_id": runtime.get("subagent_telemetry_latest_id"),
         "latest_subagent_telemetry_path": runtime.get("subagent_telemetry_path"),
         "service_status": service_status,
@@ -520,6 +527,7 @@ def format_cycle_health_summary(summary: CycleHealth) -> list[str]:
         "  Ledger age: "
         + (f"{summary.get('ledger_age_seconds') / 3600:.1f}h" if isinstance(summary.get('ledger_age_seconds'), (int, float)) else "no ledger"),
         "  Progress: " + _format_progress_line(summary.get("progress")),
+        "  Task-attempt warning: " + _format_task_attempt_warning(summary.get("task_attempt_warning")),
         "  Progress threshold: " + _format_progress_threshold(summary.get("progress")),
         f"  Latest subagent telemetry id: {summary.get('latest_subagent_telemetry_id') or 'unknown'}",
         f"  Latest subagent telemetry path: {summary.get('latest_subagent_telemetry_path') or 'unknown'}",
@@ -558,6 +566,112 @@ def _format_progress_threshold(progress: Any) -> str:
     if not isinstance(progress, dict):
         return "unavailable"
     return f"{progress.get('threshold_hours', _PROGRESS_THRESHOLD_HOURS):.1f}h / {progress.get('threshold_cycles', _PROGRESS_THRESHOLD_CYCLES)} cycles at {progress.get('cadence_minutes', 4):.0f}m cadence"
+
+
+def _format_task_attempt_warning(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "UNKNOWN (coverage incomplete)"
+    if value.get("warning") is True:
+        return f"warning: at least one task has {value.get('threshold', 12)} evidenced starts"
+    return "UNKNOWN (coverage incomplete)"
+
+
+def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) -> dict[str, Any]:
+    """Return aggregate-only H5 evidence; raw retry keys never leave this reader.
+
+    The read is bounded to the cycle ledger's effective retention horizon and
+    treats uncertain boundaries as UNKNOWN rather than claiming low counts.
+    """
+    moment = now or datetime.now(timezone.utc)
+    horizon = cycle_ledger_retention_days()
+    since = moment - timedelta(days=horizon)
+    try:
+        window = ledger_window(
+            state_root,
+            since_ts=since.isoformat().replace("+00:00", "Z"),
+            max_bytes=16 * 2**20,
+            now=moment,
+            retention_days=horizon,
+            strict_json=True,
+        )
+    except (OSError, ValueError, TypeError):
+        return {"threshold": 12, "coverage_days": horizon, "status": "unknown", "coverage": "unavailable", "warning": None, "warning_tasks": None}
+    base = {"threshold": 12, "coverage_days": horizon}
+    if window.status != "complete" or not window.rows:
+        return {**base, "status": "unknown", "coverage": "incomplete", "warning": None, "warning_tasks": None}
+    if any(note.startswith("invalid_archive:") for note in window.notes):
+        return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
+
+    # Older rotated rows can be absent without the legacy reader detecting a
+    # missing archive. Only treat the append-active file as continuous evidence;
+    # older archives may help neither a low count nor a reset assertion.
+    active_rows = sorted(
+        (row for row in window.rows if row.get("_source_file") == "cycles.jsonl"),
+        key=lambda row: row.get("_source_line", 0),
+    )
+    if not active_rows:
+        return {**base, "status": "unknown", "coverage": "incomplete", "warning": None, "warning_tasks": None}
+    streaks: dict[str, int] = {}
+    anchored: dict[str, bool] = {}
+    unknown_identity = False
+    for row in active_rows:
+        if _parse_ledger_timestamp(row.get("ts") or row.get("timestamp")) is None:
+            unknown_identity = True
+        phase = row.get("phase")
+        if phase == "started":
+            key = row.get("retry_key")
+            if not isinstance(key, str) or not key:
+                unknown_identity = True
+                continue
+            streaks[key] = streaks.get(key, 0) + 1
+        elif phase == "outcome":
+            outcome = row.get("outcome")
+            key = row.get("retry_key")
+            if outcome == "success":
+                if not isinstance(key, str) or not key:
+                    unknown_identity = True
+                    for known_key in streaks:
+                        streaks[known_key] = 0
+                        anchored[known_key] = False
+                    continue
+                streaks[key] = 0
+                anchored[key] = True
+            elif outcome == "pushed_late":
+                if isinstance(key, str) and key:
+                    streaks[key] = 0
+                    anchored[key] = True
+                else:
+                    # A keyless late success may reset any task. A subsequent
+                    # exact success re-anchors that task; otherwise twelve
+                    # later exact starts independently prove a warning.
+                    for known_key in streaks:
+                        streaks[known_key] = 0
+                        anchored[known_key] = False
+            elif outcome not in {"partial", "failed", "skipped-duplicate", "promotion_candidate", "push_pending", "superseded", "abandoned", "paused-supplier"}:
+                unknown_identity = True
+                for known_key in streaks:
+                    streaks[known_key] = 0
+                    anchored[known_key] = False
+
+    proven_warnings = sum(count >= 12 for count in streaks.values())
+    fully_known = not unknown_identity and all(anchored.get(key, False) for key in streaks)
+    if proven_warnings:
+        return {
+            **base,
+            "status": "warning",
+            "coverage": "complete" if fully_known else "partial",
+            "warning": True,
+            "warning_tasks": proven_warnings if fully_known else None,
+        }
+    if fully_known:
+        return {
+            **base,
+            "status": "clear",
+            "coverage": "complete",
+            "warning": False,
+            "warning_tasks": 0,
+        }
+    return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
 
 
 def dumps_cycle_health_summary(summary: CycleHealth) -> str:

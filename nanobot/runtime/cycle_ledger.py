@@ -303,12 +303,15 @@ def record_cycle_started(
     cycle_id: str,
     request_id: str,
     branch: str | None,
+    *,
+    retry_key: str | None = None,
 ) -> None:
     """Write-ahead marker: append BEFORE the subagent is spawned (claw0 pattern).
 
     A crashed/timed-out cycle leaves this row with no matching terminal
     ``outcome`` row — a deterministic, queryable recovery signal instead of
-    inference from file mtimes.
+    inference from file mtimes. ``retry_key`` adds exact task identity for
+    aggregate-only H5 health reporting (ADR-039 / #2143).
     """
     append_event(
         state_dir,
@@ -317,6 +320,7 @@ def record_cycle_started(
             "cycle_id": cycle_id or "",
             "request_id": request_id or "",
             "branch": branch or None,
+            **({"retry_key": str(retry_key)} if retry_key else {}),
         },
     )
 

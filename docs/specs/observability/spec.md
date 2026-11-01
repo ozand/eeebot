@@ -1,6 +1,6 @@
 # Observability — spec
 
-_Status: current. Last updated: 2026-06-25._
+_Status: current. Last updated: 2026-11-01._
 
 ## Purpose
 
@@ -12,6 +12,28 @@ as having happened. This spec is the normative contract; `docs/OBSERVABILITY.md`
 remains the explanatory reference (signal map, anti-patterns, walkthroughs).
 
 ## Requirements
+
+### Per-task H5 warning (#2143, ADR-039 Proposed)
+
+The existing cycle-health command exposes a read-only, aggregate-only task-attempt
+warning derived from append-only cycle-ledger evidence.
+
+- A `started` row may persist the bridge's already-computed exact `retry_key`;
+  rows without a key remain legacy/incomplete evidence.
+- Count exact-key starts since an exact-key successful terminal outcome. Edited
+  self-directed title text may form a new identity; late-push outcomes without
+  exact key lineage are not inferred by time, title, or cycle proximity.
+- Report a warning at 12 evidenced unsuccessful starts. Report clear/zero only
+  when exact success has anchored task history and complete start/reset coverage
+  is available. Missing keys, malformed or partial ledger reads, expired horizon,
+  or unknown resets yield UNKNOWN and no count. Twelve exact starts after an
+  uncertain reset independently prove a warning; task count may remain unknown.
+- Use the cycle ledger's `CYCLE_LEDGER_RETENTION_DAYS` effective horizon (90-day
+  default); this does not promise physical age-based pruning of the active file.
+- Health JSON and text expose only aggregate warning state/count and coverage,
+  never raw retry keys. The warning does not block or alter planner, retry,
+  handled-marker, wake, prioritization, or rollback behavior; #2050's global
+  tripwire remains separate.
 
 ### Runtime dashboard recovery visibility (#2118)
 
@@ -44,8 +66,8 @@ The existing runtime dashboard presents a bounded, read-only projection of persi
 ### Material progress
 
 - R5. Material progress SHALL be measured by movement of `origin/main` —
-  integrated commits reaching the working repo's `origin/main` — and SHALL NOT be
-  measured by cycle count.
+  integrated commits reaching the working repo's `origin/main` — and SHALL NOT
+  be measured by cycle count.
 - R6. A cycle that produces no integrated change SHALL NOT be reported as material
   progress; narrative/bookkeeping activity SHALL NOT be presented as a kept
   improvement. A stalled `origin/main` while cycles run SHALL be observable as a

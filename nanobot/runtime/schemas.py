@@ -64,6 +64,7 @@ class CycleHealth(TypedDict, total=False):
     exit_code: int
     next_recommended_action: str
     success_signals: dict[str, Any]
+    task_attempt_warning: dict[str, Any]
 
 
 class LessonV2(TypedDict, total=False):

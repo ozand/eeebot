@@ -154,6 +154,7 @@ def _read_ledger_file(
     since: datetime,
     phases: frozenset[str] | None,
     remaining: int,
+    strict_json: bool = False,
 ) -> tuple[list[dict], int, str | None, str | None, bool, str | None]:
     """Read one source; return rows, bytes, coverage bounds, capped, error."""
     rows: list[dict] = []
@@ -175,8 +176,12 @@ def _read_ledger_file(
                 try:
                     row = json.loads(line)
                 except (TypeError, ValueError, json.JSONDecodeError):
+                    if strict_json:
+                        return rows, used, _iso(earliest) if earliest else None, _iso(latest) if latest else None, False, "malformed_json"
                     continue
                 if not isinstance(row, dict):
+                    if strict_json:
+                        return rows, used, _iso(earliest) if earliest else None, _iso(latest) if latest else None, False, "malformed_row"
                     continue
                 ts = _row_ts(row)
                 if ts is not None:
@@ -206,6 +211,8 @@ def ledger_window(
     max_bytes: int = _DEFAULT_LEDGER_BYTES,
     now: datetime | None = None,
     local_tz: Any = None,
+    retention_days: int | None = None,
+    strict_json: bool = False,
 ) -> Window:
     """Read active and dated ledger archives newest-first, never raising.
 
@@ -244,7 +251,8 @@ def ledger_window(
             capped = True
             break
         file_rows, used, file_covered, file_covered_to, file_capped, error = _read_ledger_file(
-            path, since=requested, phases=phases, remaining=max_bytes - bytes_read
+            path, since=requested, phases=phases, remaining=max_bytes - bytes_read,
+            strict_json=strict_json,
         )
         bytes_read += used
         if error:
@@ -265,7 +273,8 @@ def ledger_window(
             break
         if file_covered and _parse_ts(file_covered) is not None and _parse_ts(file_covered) < requested:
             break
-    retention_days = int(os.environ.get("SELFEVO_LEDGER_RETENTION_DAYS", str(_DEFAULT_RETENTION_DAYS)))
+    if retention_days is None:
+        retention_days = int(os.environ.get("SELFEVO_LEDGER_RETENTION_DAYS", str(_DEFAULT_RETENTION_DAYS)))
     ref = now or datetime.now(timezone.utc)
     if requested < ref - timedelta(days=max(1, retention_days)):
         notes.append("beyond_retention")
