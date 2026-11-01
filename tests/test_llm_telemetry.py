@@ -263,8 +263,9 @@ def test_resolution_reader_rejects_prompt_directory_replaced_with_symlink(tmp_pa
             model="test", prompt_tokens=0, completion_tokens=0,
         )
     assert telemetry.write_authoritative_attempt(root, "root-swap", "attempt-root-swap")
-    sidecar = next((root / "prompts" / "attempt_resolutions").glob("*.json"))
     prompts = root / "prompts"
+    sidecar = next((prompts / "attempt_resolutions").glob("*.json"))
+    sidecar_bytes = sidecar.read_bytes()
     moved = root / "prompts-original"
     swapped = []
 
@@ -290,7 +291,9 @@ def test_resolution_reader_rejects_prompt_directory_replaced_with_symlink(tmp_pa
         assert swapped == [True]
         assert record is None
         assert not list(outside.iterdir()), "handle-relative open must not read the replacement target"
-        assert sidecar.exists(), "temporary prompt-path failure must preserve resolution metadata"
+        moved_sidecar = moved / sidecar.relative_to(prompts)
+        assert moved_sidecar.exists(), "original resolution metadata must remain in the renamed directory"
+        assert moved_sidecar.read_bytes() == sidecar_bytes
     else:
         real_open = telemetry._open_prompt_file_windows
 
