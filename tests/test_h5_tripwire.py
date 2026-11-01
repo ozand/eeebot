@@ -7,6 +7,7 @@ import json
 import subprocess
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from typer.testing import CliRunner
 
 import nanobot.runtime.health as health
@@ -362,6 +363,92 @@ def test_task_warning_malformed_phase_success_resets_to_unknown(tmp_path):
         assert "private-alpha" not in json.dumps(result)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "phase", "outcome"),
+    [
+        ("phase", [], "unused", "success"),
+        ("phase", {}, "unused", "success"),
+        ("phase", 7, "unused", "success"),
+        ("phase", True, "unused", "success"),
+        ("outcome", [], "outcome", "unused"),
+        ("outcome", {}, "outcome", "unused"),
+        ("outcome", 7, "outcome", "unused"),
+        ("outcome", True, "outcome", "unused"),
+        ("retry_key", [], "started", None),
+        ("retry_key", {}, "started", None),
+        ("retry_key", 7, "started", None),
+        ("retry_key", True, "started", None),
+        ("retry_key", [], "outcome", "success"),
+        ("cycle_id", [], "started", None),
+        ("cycle_id", {}, "started", None),
+        ("cycle_id", [], "outcome", "skipped-duplicate"),
+        ("cycle_id", {}, "outcome", "skipped-duplicate"),
+        ("cycle_id", [], "outcome", "success"),
+        ("cycle_id", {}, "outcome", "success"),
+        ("retry_key", 7, "outcome", "pushed_late"),
+        ("ts", [], "outcome", "success"),
+        ("ts", {}, "outcome", "success"),
+        ("ts", 7, "outcome", "success"),
+        ("ts", True, "outcome", "success"),
+    ],
+)
+def test_task_warning_malformed_ledger_fields_fail_closed(tmp_path, field, value, phase, outcome):
+    """ADR-039: malformed JSON field types cannot crash or forge H5 status."""
+    now = datetime.now(timezone.utc)
+    state = tmp_path / "malformed"
+    _append(state, "outcome", "anchor", "private-alpha", "success", _iso_at(now - timedelta(hours=1)))
+    for index in range(12):
+        _append(state, "started", f"attempt-{index}", "private-alpha", ts=_iso_at(now - timedelta(minutes=50 - index)))
+    row = {
+        "phase": phase if phase != "unused" else "started",
+        "cycle_id": "bad-row",
+        "retry_key": "private-alpha",
+        "outcome": outcome,
+        "ts": _iso_at(now - timedelta(minutes=5)),
+    }
+    row[field] = value
+    if field == "phase" and value == "unused":
+        row.pop(field)
+    if field == "outcome" and outcome == "unused":
+        row[field] = value
+    with (state / "ledger" / "cycles.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+    result = read_task_attempt_warning(state, now=now)
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
+    assert "private-alpha" not in json.dumps(result)
+
+
+def test_task_warning_malformed_skip_cycle_id_cli_is_unknown(tmp_path, monkeypatch):
+    """Malformed cycle identity must fail closed through the public CLI."""
+    now = datetime.now(timezone.utc)
+    state = tmp_path / "malformed-skip"
+    _append(state, "outcome", "anchor", "private-alpha", "success", _iso_at(now - timedelta(hours=1)))
+    for index in range(12):
+        _append(state, "started", f"attempt-{index}", "private-alpha", ts=_iso_at(now - timedelta(minutes=50 - index)))
+    row = {"phase": "outcome", "cycle_id": [], "outcome": "skipped-duplicate", "ts": _iso_at(now - timedelta(minutes=1))}
+    with (state / "ledger" / "cycles.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+    monkeypatch.setattr("nanobot.runtime.health.load_runtime_state_from_root", lambda *a, **k: {})
+    monkeypatch.setattr("nanobot.runtime.health._ledger_age_seconds", lambda *_a, **_k: 0.0)
+    monkeypatch.setattr("nanobot.runtime.health.read_cycle_progress", lambda *_a, **_k: {"state": "healthy", "alert": False})
+    monkeypatch.setattr("nanobot.runtime.health.read_service_status", lambda *_a, **_k: {})
+    monkeypatch.setattr("nanobot.runtime.health.read_failed_units_count", lambda *_a, **_k: 0)
+    monkeypatch.setattr("nanobot.runtime.health._promotion_readiness", lambda *_a, **_k: {"state": "ready"})
+    monkeypatch.setattr("nanobot.runtime.health.read_autonomous_commits_24h", lambda *_a, **_k: 0)
+    monkeypatch.setattr("nanobot.runtime.health.read_checkpoint_commits_24h", lambda *_a, **_k: 0)
+    monkeypatch.setattr("nanobot.runtime.health.read_subagent_queue_depth", lambda *_a, **_k: 0)
+    monkeypatch.setattr("nanobot.runtime.health.read_derived_priorities_queue", lambda *_a, **_k: {"depth": 0, "limit": 10})
+    monkeypatch.setattr("nanobot.runtime.health._default_runner", lambda command: subprocess.CompletedProcess(command, 0, "", ""))
+    result = CliRunner().invoke(app, ["cycle-health", "--runtime-state-root", str(state), "--json"])
+    payload = json.loads(result.stdout)
+    assert result.exit_code == payload["exit_code"]
+    assert payload["task_attempt_warning"]["status"] == "unknown"
+    assert payload["task_attempt_warning"]["warning"] is None
+    assert "private-alpha" not in result.stdout
+
+
 def test_task_warning_malformed_outcome_does_not_crash(tmp_path, monkeypatch):
     """ADR-039: malformed outcome values fail closed without crashing health."""
     now = datetime.now(timezone.utc)
@@ -371,7 +458,7 @@ def test_task_warning_malformed_outcome_does_not_crash(tmp_path, monkeypatch):
     _append(state, "started", "attempt", "private-alpha", ts="2026-11-01T11:00:00Z")
     path = state / "ledger" / "cycles.jsonl"
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"phase": "outcome", "cycle_id": "bad", "outcome": [], "ts": _iso_at(now - timedelta(minutes=5))}) + "\n")
+        handle.write(json.dumps({"phase": "outcome", "cycle_id": "bad", "retry_key": "private-alpha", "outcome": [], "ts": _iso_at(now - timedelta(minutes=5))}) + "\n")
     result = read_task_attempt_warning(state, now=now)
     assert result["status"] == "unknown"
     assert result["warning"] is None
