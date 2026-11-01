@@ -647,16 +647,10 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
         if invalidate_row:
             return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
     streaks: dict[str, int] = {}
-    anchored: dict[str, bool] = {}
     cycle_keys: dict[str, str] = {}
-    unknown_identity = window.status != "complete"
-
     def invalidate_streak_coverage() -> None:
-        nonlocal unknown_identity
-        unknown_identity = True
         for known_key in streaks:
             streaks[known_key] = 0
-            anchored[known_key] = False
         cycle_keys.clear()
 
     for row in rows:
@@ -737,11 +731,9 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
                     invalidate_streak_coverage()
                     continue
                 streaks[key] = 0
-                anchored[key] = True
             elif outcome == "pushed_late":
                 if isinstance(key, str) and key:
                     streaks[key] = 0
-                    anchored[key] = True
                 else:
                     # A keyless late success may reset any task. A subsequent
                     # exact success re-anchors that task; otherwise twelve
@@ -751,25 +743,16 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
                 invalidate_streak_coverage()
 
     proven_warnings = sum(count >= 12 for count in streaks.values())
-    fully_known = window.status == "complete" and bool(streaks) and not unknown_identity and all(
-        anchored.get(key, False) for key in streaks
-    )
     if proven_warnings:
         return {
             **base,
             "status": "warning",
-            "coverage": "complete" if fully_known else "partial",
+            "coverage": "partial",
             "warning": True,
-            "warning_tasks": proven_warnings if fully_known else None,
+            "warning_tasks": None,
         }
-    if fully_known:
-        return {
-            **base,
-            "status": "clear",
-            "coverage": "complete",
-            "warning": False,
-            "warning_tasks": 0,
-        }
+    # No existing durable ledger marker proves global history completeness, so
+    # retained per-key evidence cannot establish an aggregate clear or count.
     return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
 
 

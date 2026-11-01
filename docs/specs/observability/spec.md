@@ -29,12 +29,17 @@ warning derived from append-only cycle-ledger evidence.
   start/reset coverage is available. Empty/no-task windows, missing keys,
   malformed or partial reads, expired horizon, unrepresentably large horizon,
   future-dated or timezone-naive rows, missing active ledger with archive-only
-  evidence, or unknown resets yield UNKNOWN and no count. Valid unrelated phases
-  remain ignorable, but success-shaped rows with
+  evidence, unknown resets, or absent global-history evidence yield UNKNOWN
+  and no count. The existing ledger has no inception/completeness watermark, so
+  an apparently complete retained slice cannot justify below-threshold aggregate
+  clear when older task keys may have been pruned. Valid unrelated phases remain
+  ignorable, but success-shaped rows with
   missing/non-string phase, malformed outcome/key/cycle ID/timestamp, or empty
-  identity is UNKNOWN reset coverage and cannot crash health output. Twelve exact current
-  starts after an uncertain reset independently prove a warning; task count may
-  remain unknown.
+  identity is UNKNOWN reset coverage and cannot crash health output. Twelve exact
+  current starts after an uncertain reset may prove a warning only when the suffix
+  since that reset is demonstrably complete; a missing active file, capped read,
+  or other coverage gap yields UNKNOWN. Task count remains unknown without global
+  completeness evidence.
 - Use the cycle ledger's `CYCLE_LEDGER_RETENTION_DAYS` effective horizon (90-day
   default), reading retained archives and active data in timestamp order; this
   does not promise physical age-based pruning of the active file. A byte-capped

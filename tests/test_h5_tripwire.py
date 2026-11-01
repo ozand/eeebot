@@ -56,27 +56,27 @@ def test_task_warning_threshold_exact_key_success_reset_and_privacy(tmp_path):
     state = tmp_path / "state"
     _anchored_attempts(state, "private-alpha", 11)
     clear = read_task_attempt_warning(state, now=now)
-    assert clear["status"] == "clear"
-    assert clear["warning"] is False
-    assert clear["warning_tasks"] == 0
+    assert clear["status"] == "unknown"
+    assert clear["warning"] is None
+    assert clear["warning_tasks"] is None
     assert format_cycle_health_summary({"task_attempt_warning": clear})[7] == (
-        "  Task-attempt warning: clear: 0 task warnings (coverage complete)"
+        "  Task-attempt warning: UNKNOWN (coverage incomplete)"
     )
     _append(state, "started", "alpha-11", "private-alpha", ts="2026-11-01T11:12:00Z")
     at_twelve = read_task_attempt_warning(state, now=now)
     assert at_twelve["status"] == "warning"
     assert at_twelve["warning"] is True
-    assert at_twelve["warning_tasks"] == 1
+    assert at_twelve["warning_tasks"] is None
     _append(state, "started", "alpha-12", "private-alpha", ts="2026-11-01T11:13:00Z")
     at_thirteen = read_task_attempt_warning(state, now=now)
     assert at_thirteen["status"] == "warning"
-    assert at_thirteen["warning_tasks"] == 1
+    assert at_thirteen["warning_tasks"] is None
     for index in range(12):
         _append(state, "started", f"alpha-skip-{index}", "private-alpha", ts=f"2026-11-01T11:{14 + index:02d}:00Z")
         _append(state, "outcome", f"alpha-skip-{index}", "private-alpha", "skipped-duplicate", f"2026-11-01T11:{14 + index:02d}:30Z")
     after_duplicate_skips = read_task_attempt_warning(state, now=now)
     assert after_duplicate_skips["status"] == "warning"
-    assert after_duplicate_skips["warning_tasks"] == 1
+    assert after_duplicate_skips["warning_tasks"] is None
 
     interleaved = tmp_path / "interleaved"
     _anchored_attempts(interleaved, "private-alpha", 11)
@@ -84,27 +84,28 @@ def test_task_warning_threshold_exact_key_success_reset_and_privacy(tmp_path):
     for index in range(11):
         _append(interleaved, "started", f"beta-{index}", "private-beta", ts=f"2026-11-01T11:{20 + index:02d}:00Z")
     before_beta_twelve = read_task_attempt_warning(interleaved, now=now)
-    assert before_beta_twelve["status"] == "clear"
+    assert before_beta_twelve["status"] == "unknown"
     _append(interleaved, "started", "beta-11", "private-beta", ts="2026-11-01T11:31:00Z")
     beta_twelve = read_task_attempt_warning(interleaved, now=now)
     assert beta_twelve["status"] == "warning"
-    assert beta_twelve["warning_tasks"] == 1
+    assert beta_twelve["warning_tasks"] is None
 
     reset = tmp_path / "reset"
     _anchored_attempts(reset, "private-alpha", 12)
     _append(reset, "outcome", "alpha-success", "private-alpha", "success", "2026-11-01T11:22:00Z")
     after_success = read_task_attempt_warning(reset, now=now)
-    assert after_success["status"] == "clear"
-    assert after_success["warning_tasks"] == 0
+    assert after_success["status"] == "unknown"
+    assert after_success["warning"] is None
+    assert after_success["warning_tasks"] is None
 
     result = read_task_attempt_warning(state, now=now)
     assert result == {
         "threshold": 12,
         "coverage_days": 90,
         "status": "warning",
-        "coverage": "complete",
+        "coverage": "partial",
         "warning": True,
-        "warning_tasks": 1,
+        "warning_tasks": None,
     }
     assert "private-alpha" not in json.dumps(result)
     assert "private-beta" not in json.dumps(result)
@@ -127,7 +128,7 @@ def test_task_warning_ignores_valid_diary_phase_rows_from_real_writer(tmp_path):
     result = read_task_attempt_warning(state, now=now)
     assert result["status"] == "warning"
     assert result["warning"] is True
-    assert result["warning_tasks"] == 1
+    assert result["warning_tasks"] is None
     assert "private-alpha" not in json.dumps(result)
 
 
@@ -153,9 +154,9 @@ def test_task_warning_joins_actual_success_outcome_by_cycle_id_and_retry_key(tmp
     )
 
     result = read_task_attempt_warning(state, now=now + timedelta(seconds=1))
-    assert result["status"] == "clear"
-    assert result["warning"] is False
-    assert result["warning_tasks"] == 0
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
     assert "private-alpha" not in json.dumps(result)
 
 
@@ -196,12 +197,12 @@ def test_cycle_health_cli_reports_clear_and_unknown_warning_states(tmp_path, mon
 
     runner = CliRunner()
     clear = runner.invoke(app, ["cycle-health", "--runtime-state-root", str(state)])
-    assert "Task-attempt warning: clear: 0 task warnings (coverage complete)" in clear.stdout
+    assert "Task-attempt warning: UNKNOWN (coverage incomplete)" in clear.stdout
     clear_json = runner.invoke(app, ["cycle-health", "--runtime-state-root", str(state), "--json"])
     clear_payload = json.loads(clear_json.stdout)
     assert clear_json.exit_code == clear_payload["exit_code"]
-    assert clear_payload["task_attempt_warning"]["status"] == "clear"
-    assert clear_payload["task_attempt_warning"]["warning"] is False
+    assert clear_payload["task_attempt_warning"]["status"] == "unknown"
+    assert clear_payload["task_attempt_warning"]["warning"] is None
 
     unknown = tmp_path / "unknown"
     _append(unknown, "started", "legacy", ts="2026-11-01T11:00:00Z")
@@ -277,6 +278,37 @@ def test_task_warning_extreme_retention_returns_unknown(tmp_path, monkeypatch):
     assert result["status"] == "unknown"
     assert result["warning"] is None
     assert result["warning_tasks"] is None
+
+
+def test_task_warning_expired_and_pruned_other_task_history_never_proves_clear(tmp_path):
+    now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    state = tmp_path / "expired-other-task"
+    ledger = state / "ledger"
+    ledger.mkdir(parents=True)
+    expired = [
+        {"phase": "started", "cycle_id": f"beta-{index}", "retry_key": "private-beta", "ts": f"2026-07-23T11:{index:02d}:00Z"}
+        for index in range(12)
+    ]
+    unseen = [
+        {"phase": "started", "cycle_id": f"gamma-{index}", "retry_key": "private-gamma", "ts": f"2026-05-01T11:{index:02d}:00Z"}
+        for index in range(12)
+    ]
+    recent = [
+        {"phase": "outcome", "cycle_id": "alpha-reset", "retry_key": "private-alpha", "outcome": "success", "ts": "2026-10-31T23:00:00Z"},
+        {"phase": "started", "cycle_id": "alpha-start", "retry_key": "private-alpha", "ts": "2026-11-01T11:00:00Z"},
+    ]
+    active = ledger / "cycles.jsonl"
+    active.write_text("".join(json.dumps(row) + "\n" for row in [*expired, *unseen, *recent]), encoding="utf-8")
+
+    for label in ("expired rows retained", "expired rows physically pruned", "unseen prior history"):
+        result = read_task_attempt_warning(state, now=now)
+        assert result["status"] == "unknown"
+        assert result["warning"] is None
+        assert result["warning_tasks"] is None
+        assert "private-beta" not in json.dumps(result)
+        assert "private-gamma" not in json.dumps(result)
+        if label == "expired rows retained":
+            active.write_text("".join(json.dumps(row) + "\n" for row in recent), encoding="utf-8")
 
 
 def test_task_warning_empty_or_unanchored_ledger_activity_is_unknown(tmp_path, monkeypatch):
@@ -380,7 +412,7 @@ def test_task_warning_includes_rotated_attempts_and_keeps_other_task_warning(tmp
     result = read_task_attempt_warning(state, now=now)
     assert result["status"] == "warning"
     assert result["warning"] is True
-    assert result["warning_tasks"] == 1
+    assert result["warning_tasks"] is None
     assert "private-alpha" not in json.dumps(result)
 
 
@@ -395,9 +427,9 @@ def test_task_warning_excludes_cycles_ending_in_duplicate_skip(tmp_path):
         _append(state, "outcome", cycle, "private-alpha", "skipped-duplicate", f"2026-11-01T11:{index:02d}:30Z")
 
     result = read_task_attempt_warning(state, now=now)
-    assert result["status"] == "clear"
-    assert result["warning"] is False
-    assert result["warning_tasks"] == 0
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
 
 
 def test_task_warning_unparseable_success_breaks_streak_before_recount(tmp_path):
@@ -563,7 +595,7 @@ def test_task_warning_uses_cycle_ledger_retention_not_other_reader_env(tmp_path,
     result = read_task_attempt_warning(state, now=now)
     assert result["coverage_days"] == 7
     assert result["status"] == "warning"
-    assert result["warning_tasks"] == 1
+    assert result["warning_tasks"] is None
 
 
 def test_task_warning_unknown_when_retained_window_expires_or_is_malformed(tmp_path, monkeypatch):
