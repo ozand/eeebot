@@ -161,6 +161,33 @@ def test_cycle_health_cli_reports_clear_and_unknown_warning_states(tmp_path, mon
     assert warning_payload["task_attempt_warning"]["warning"] is True
     assert "private-warning" not in result.stdout
 
+    naive = tmp_path / "naive-cli"
+    _append(naive, "outcome", "reset", "private-naive-cli", "success", "2026-11-01T10:00:00")
+    for index in range(12):
+        _append(naive, "started", f"attempt-{index}", "private-naive-cli", ts=f"2026-11-01T11:{index:02d}:00")
+    naive_text = runner.invoke(app, ["cycle-health", "--runtime-state-root", str(naive)])
+    assert "Task-attempt warning: UNKNOWN (coverage incomplete)" in naive_text.stdout
+    assert "private-naive-cli" not in naive_text.stdout
+    naive_json = runner.invoke(app, ["cycle-health", "--runtime-state-root", str(naive), "--json"])
+    naive_payload = json.loads(naive_json.stdout)
+    assert naive_payload["task_attempt_warning"]["status"] == "unknown"
+    assert naive_payload["task_attempt_warning"]["warning"] is None
+    assert "private-naive-cli" not in naive_json.stdout
+
+
+def test_task_warning_naive_ledger_timestamps_are_unknown(tmp_path):
+    """ADR-039: local-time-naive timestamps cannot establish task evidence."""
+    now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    state = tmp_path / "naive"
+    _append(state, "outcome", "reset", "private-naive", "success", "2026-11-01T10:00:00")
+    for index in range(12):
+        _append(state, "started", f"naive-{index}", "private-naive", ts=f"2026-11-01T11:{index:02d}:00")
+    result = read_task_attempt_warning(state, now=now)
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
+    assert "private-naive" not in json.dumps(result)
+
 
 def test_task_warning_future_dated_starts_are_unknown(tmp_path):
     """ADR-039: future starts are not current counted evidence."""

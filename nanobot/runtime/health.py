@@ -164,7 +164,10 @@ def _parse_ledger_timestamp(value: Any) -> float | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.timestamp()
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -620,6 +623,7 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
         row_timestamp = _parse_ledger_timestamp(row.get("ts") or row.get("timestamp"))
         if row_timestamp is None:
             unknown_identity = True
+            continue
         elif row_timestamp > moment.timestamp():
             # Future evidence must not increase the current attempt count or
             # anchor a reset; it can also indicate an incomplete/corrupt window.
