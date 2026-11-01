@@ -613,8 +613,8 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
     if any(note.startswith("invalid_archive:") for note in window.notes):
         return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
 
-    # Preserve archive and active-file chronology. A capped/partial window may
-    # still prove a warning from complete exact rows, but cannot prove clear.
+    # Preserve archive and active-file chronology. A capped/partial window is
+    # already rejected above because a later reset could be hidden by its prefix.
     rows = sorted(
         window.rows,
         key=lambda row: (
@@ -649,7 +649,7 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
             continue
         phase = row.get("phase")
         cycle_id = row.get("cycle_id")
-        if phase not in {"started", "outcome"}:
+        if not isinstance(phase, str) or phase not in {"started", "outcome"}:
             # Only recognized runtime phases are ignorable. An unrecognized or
             # missing phase with outcome-shaped data could conceal a reset.
             if "outcome" in row or "retry_key" in row:

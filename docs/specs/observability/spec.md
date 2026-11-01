@@ -30,9 +30,9 @@ warning derived from append-only cycle-ledger evidence.
   malformed or partial reads, expired horizon, unrepresentably large horizon,
   future-dated or timezone-naive rows, or unknown resets yield UNKNOWN and no
   count. Valid unrelated phases remain ignorable, but success-shaped rows with
-  missing or unrecognized phase create UNKNOWN reset coverage. Twelve exact
-  current starts after an uncertain reset independently prove a warning; task
-  count may remain unknown.
+  missing, unrecognized, or non-string phase create UNKNOWN reset coverage.
+  Twelve exact current starts after an uncertain reset independently prove a
+  warning; task count may remain unknown.
 - Use the cycle ledger's `CYCLE_LEDGER_RETENTION_DAYS` effective horizon (90-day
   default), reading retained archives and active data in timestamp order; this
   does not promise physical age-based pruning of the active file. A byte-capped
