@@ -20,7 +20,9 @@ warning derived from append-only cycle-ledger evidence.
 
 - A `started` row may persist the bridge's already-computed exact `retry_key`;
   rows without a key remain legacy/incomplete evidence. A cycle later recorded as
-  `skipped-duplicate` is excluded from the started-attempt count.
+  `skipped-duplicate` is excluded from the started-attempt count only when the
+  outcome uniquely joins that cycle's start and any supplied retry key matches;
+  missing, conflicting, or repeated joins yield UNKNOWN.
 - Count exact-key starts since an exact-key successful terminal outcome. Edited
   self-directed title text may form a new identity; late-push outcomes without
   exact key lineage are not inferred by time, title, or cycle proximity.

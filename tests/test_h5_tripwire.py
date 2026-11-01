@@ -457,6 +457,42 @@ def test_task_warning_includes_rotated_attempts_and_keeps_other_task_warning(tmp
     assert "private-alpha" not in json.dumps(result)
 
 
+def test_task_warning_mismatched_or_unjoined_duplicate_skip_is_unknown(tmp_path):
+    now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    for case, skip_cycle, skip_key in (
+        ("mismatched", "attempt-0", "private-beta"),
+        ("unjoined", "not-started", "private-alpha"),
+    ):
+        state = tmp_path / case
+        _append(state, "outcome", "anchor", "private-alpha", "success", "2026-11-01T10:00:00Z")
+        for index in range(12):
+            _append(state, "started", f"attempt-{index}", "private-alpha", ts=f"2026-11-01T11:{index:02d}:00Z")
+        _append(state, "outcome", skip_cycle, skip_key, "skipped-duplicate", "2026-11-01T11:30:00Z")
+
+        result = read_task_attempt_warning(state, now=now)
+        assert result["status"] == "unknown"
+        assert result["warning"] is None
+        assert result["warning_tasks"] is None
+        assert "private-alpha" not in json.dumps(result)
+        assert "private-beta" not in json.dumps(result)
+
+
+def test_task_warning_duplicate_skip_key_must_match_started_cycle_and_is_unique(tmp_path):
+    now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    state = tmp_path / "duplicate-key"
+    _append(state, "outcome", "anchor", "private-alpha", "success", "2026-11-01T10:00:00Z")
+    for index in range(12):
+        _append(state, "started", f"attempt-{index}", "private-alpha", ts=f"2026-11-01T11:{index:02d}:00Z")
+    _append(state, "outcome", "attempt-0", "private-alpha", "skipped-duplicate", "2026-11-01T11:30:00Z")
+    _append(state, "outcome", "attempt-0", "private-alpha", "skipped-duplicate", "2026-11-01T11:31:00Z")
+
+    result = read_task_attempt_warning(state, now=now)
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
+    assert "private-alpha" not in json.dumps(result)
+
+
 def test_task_warning_excludes_cycles_ending_in_duplicate_skip(tmp_path):
     """ADR-039: cycles ending as duplicate skips do not count as attempts."""
     now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)

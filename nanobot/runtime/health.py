@@ -648,6 +648,8 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
             return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
     streaks: dict[str, int] = {}
     cycle_keys: dict[str, str] = {}
+    skipped_cycles: set[str] = set()
+
     def invalidate_streak_coverage() -> None:
         for known_key in streaks:
             streaks[known_key] = 0
@@ -705,6 +707,9 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
             if not isinstance(key, str) or not key:
                 invalidate_streak_coverage()
                 continue
+            if cycle_id in cycle_keys or cycle_id in skipped_cycles:
+                invalidate_streak_coverage()
+                continue
             cycle_keys[cycle_id] = key
             streaks[key] = streaks.get(key, 0) + 1
         elif phase == "outcome":
@@ -714,17 +719,15 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
                 invalidate_streak_coverage()
                 continue
             if outcome == "skipped-duplicate":
-                if not isinstance(cycle_id, str) or not cycle_id:
+                started_key = cycle_keys.get(cycle_id)
+                if cycle_id in skipped_cycles or not started_key:
                     invalidate_streak_coverage()
                     continue
-                if isinstance(key, str) and key:
-                    skipped_key = key
-                else:
-                    skipped_key = cycle_keys.get(cycle_id)
-                if not skipped_key:
+                if key is not None and (not isinstance(key, str) or key != started_key):
                     invalidate_streak_coverage()
                     continue
-                streaks[skipped_key] = max(0, streaks.get(skipped_key, 0) - 1)
+                skipped_cycles.add(cycle_id)
+                streaks[started_key] = max(0, streaks.get(started_key, 0) - 1)
                 continue
             if outcome == "success":
                 if not isinstance(key, str) or not key:
