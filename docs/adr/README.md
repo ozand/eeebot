@@ -60,6 +60,7 @@ Conventions:
 | [ADR-043](ADR-043-operator-resume-requires-validated-state-and-shared-lock.md) | Operator resume validates stopped state under the shared bridge lock | accepted |
 | [ADR-044](ADR-044-planner-tool-capabilities-are-explicit-and-minimal.md) | Planner tool capabilities are explicit and minimal | accepted |
 | [ADR-045](ADR-045-bound-planner-finalization-by-remaining-time.md) | Bound planner finalization by remaining time inside a reserved shared budget | accepted |
+| [ADR-046](ADR-046-publish-resolved-prompt-budgets.md) | Publish resolved prompt budgets on system_prompt ledger rows | proposed |
 
 ## Acceptance
 

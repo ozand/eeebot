@@ -1017,6 +1017,18 @@ instead. #1188 measured that `AGENTS.md` only grows and nothing ever removes;
   tag/attribute/`<location>` wrapper (measured 9,225 → 3,567 chars on a
   33-skill fixture); interactive sessions keep the XML form unchanged.
 
+**Resolved prompt-budget telemetry (#2137, Proposed ADR-046):** the
+producer adds the builder-resolved `system_prompt_budget_chars`,
+`release_pool_chars` (`limit`, `used`), `operating_reserve_chars`,
+`agents_md_cap_chars`, and `compaction` (`window_tokens`, `reserve_tokens`,
+`threshold`, `keep_tokens`) values to the existing successful-fit and strict-
+overflow ledger rows. These are additive numeric/structured fit metadata,
+not a current-configuration manifest or prompt-content snapshot. When fit
+metadata has no `budget`, no budget keys are added; the existing row fields
+remain intact. The proposal is still Proposed; tests in this branch cover
+normal-fit, strict-overflow, overrides, and absent budget metadata, but that
+does not establish acceptance or publication on `main`.
+
 **#1725 (ADR-022) update:** the loop profile's `sections` breakdown is now
 nine ADR-022 ontology blocks in assembly order — `identity`, `soul`, `goals`,
 `user`, `operating`, `agents` (the instance `AGENTS.md`, loop-owned through
