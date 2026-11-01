@@ -119,3 +119,23 @@ host remain outside this proposal.
 - ADR-022 — context ontology and budget units.
 - `nanobot/agent/context.py`, `nanobot/runtime/bridge.py`,
   `tests/test_system_prompt_budget_telemetry.py` on main at `c7b533a`.
+
+## Addendum (2026-11-01)
+
+PR [#2138](https://github.com/ozand/eeebot/pull/2138), which merged this
+record, is merged at `bfa961a11d12ab746374c96bdfda58558d6a9a55`. Its exact
+reviewed head was `c7af5ba7ed5ae2724392966a8ebe34048168fadd`; an independent
+review of that revision found no findings. The six checks in [PR CI
+run 41276681261](https://github.com/ozand/eeebot/actions/runs/41276681261)
+passed, and all six checks in [main CI run
+41278244648](https://github.com/ozand/eeebot/actions/runs/41278244648) passed
+on the merge SHA. The source change in PR #2048 merged at
+`c7b533abe2d788c90374615364ae6004f38a208c`, with six passing checks in [CI
+run 41274493829](https://github.com/ozand/eeebot/actions/runs/41274493829).
+
+This records delegated technical acceptance and repository review/check
+outcomes, not personal operator approval. The candidate, unpublished, and
+pending-review/check statements above describe the pre-merge candidate and
+are superseded by this addendum as a report of the later outcome; the accepted
+decision and historical Status text are unchanged. These repository events
+do not establish host deployment or production availability.
