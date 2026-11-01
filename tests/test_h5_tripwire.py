@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from typer.testing import CliRunner
 
@@ -18,6 +19,10 @@ from nanobot.runtime.health import (
 )
 
 
+def _iso_at(value):
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _append(state, phase, cycle, key=None, outcome=None, ts=None):
     path = state / "ledger" / "cycles.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -28,6 +33,14 @@ def _append(state, phase, cycle, key=None, outcome=None, ts=None):
         row["outcome"] = outcome
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row) + "\n")
+
+
+def _write_archive(state, name, rows):
+    path = state / "ledger" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
 
 
 def _anchored_attempts(state, key, count):
@@ -56,6 +69,12 @@ def test_task_warning_threshold_exact_key_success_reset_and_privacy(tmp_path):
     at_thirteen = read_task_attempt_warning(state, now=now)
     assert at_thirteen["status"] == "warning"
     assert at_thirteen["warning_tasks"] == 1
+    for index in range(12):
+        _append(state, "started", f"alpha-skip-{index}", "private-alpha", ts=f"2026-11-01T11:{14 + index:02d}:00Z")
+        _append(state, "outcome", f"alpha-skip-{index}", "private-alpha", "skipped-duplicate", f"2026-11-01T11:{14 + index:02d}:30Z")
+    after_duplicate_skips = read_task_attempt_warning(state, now=now)
+    assert after_duplicate_skips["status"] == "warning"
+    assert after_duplicate_skips["warning_tasks"] == 1
 
     interleaved = tmp_path / "interleaved"
     _anchored_attempts(interleaved, "private-alpha", 11)
@@ -112,9 +131,12 @@ def test_task_warning_unknown_legacy_and_keyless_late_push(tmp_path):
 
 
 def test_cycle_health_cli_reports_clear_and_unknown_warning_states(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    reset_ts = _iso_at(now - timedelta(minutes=60))
+    start_ts = _iso_at(now - timedelta(minutes=30))
     state = tmp_path / "state"
-    _append(state, "outcome", "reset", "private-clear", "success", "2026-11-01T10:00:00Z")
-    _append(state, "started", "one", "private-clear", ts="2026-11-01T11:00:00Z")
+    _append(state, "outcome", "reset", "private-clear", "success", reset_ts)
+    _append(state, "started", "one", "private-clear", ts=start_ts)
     monkeypatch.setattr("nanobot.runtime.health.load_runtime_state_from_root", lambda *a, **k: {})
     monkeypatch.setattr("nanobot.runtime.health._ledger_age_seconds", lambda *_a, **_k: 0.0)
     monkeypatch.setattr("nanobot.runtime.health.read_cycle_progress", lambda *_a, **_k: {"state": "healthy", "alert": False})
@@ -148,9 +170,9 @@ def test_cycle_health_cli_reports_clear_and_unknown_warning_states(tmp_path, mon
     assert "private-clear" not in result.stdout
 
     warning = tmp_path / "warning"
-    _append(warning, "outcome", "reset", "private-warning", "success", "2026-11-01T10:00:00Z")
+    _append(warning, "outcome", "reset", "private-warning", "success", reset_ts)
     for index in range(12):
-        _append(warning, "started", f"attempt-{index}", "private-warning", ts=f"2026-11-01T11:{index:02d}:00Z")
+        _append(warning, "started", f"attempt-{index}", "private-warning", ts=_iso_at(now - timedelta(minutes=12 - index)))
     warning_text = runner.invoke(app, ["cycle-health", "--runtime-state-root", str(warning)])
     assert "Task-attempt warning: warning: at least one task has 12 evidenced starts" in warning_text.stdout
     assert "private-warning" not in warning_text.stdout
@@ -232,6 +254,78 @@ def test_task_warning_empty_or_unanchored_ledger_activity_is_unknown(tmp_path, m
     assert read_task_attempt_warning(mixed, now=now)["status"] == "unknown"
 
 
+def test_task_warning_includes_rotated_attempts_and_keeps_other_task_warning(tmp_path):
+    """ADR-039: archive plus active-file attempts compose across rotation."""
+    now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    state = tmp_path / "rotated"
+    archive_rows = [
+        {"phase": "outcome", "cycle_id": "a-reset", "retry_key": "private-alpha", "outcome": "success", "ts": "2026-10-31T23:00:00Z"},
+    ]
+    archive_rows.extend(
+        {"phase": "started", "cycle_id": f"a-{index}", "retry_key": "private-alpha", "ts": f"2026-10-31T23:{index:02d}:00Z"}
+        for index in range(6)
+    )
+    _write_archive(state, "cycles-2026-10-31.jsonl.gz", archive_rows)
+    for index in range(6):
+        _append(state, "started", f"a-today-{index}", "private-alpha", ts=f"2026-11-01T00:{index:02d}:00Z")
+    _append(state, "outcome", "b-reset", "private-beta", "success", "2026-11-01T01:00:00Z")
+
+    result = read_task_attempt_warning(state, now=now)
+    assert result["status"] == "warning"
+    assert result["warning"] is True
+    assert result["warning_tasks"] == 1
+    assert "private-alpha" not in json.dumps(result)
+
+
+def test_task_warning_excludes_cycles_ending_in_duplicate_skip(tmp_path):
+    """ADR-039: cycles ending as duplicate skips do not count as attempts."""
+    now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    state = tmp_path / "duplicate-skips"
+    _append(state, "outcome", "anchor", "private-alpha", "success", "2026-11-01T10:00:00Z")
+    for index in range(12):
+        cycle = f"skip-{index}"
+        _append(state, "started", cycle, "private-alpha", ts=f"2026-11-01T11:{index:02d}:00Z")
+        _append(state, "outcome", cycle, "private-alpha", "skipped-duplicate", f"2026-11-01T11:{index:02d}:30Z")
+
+    result = read_task_attempt_warning(state, now=now)
+    assert result["status"] == "clear"
+    assert result["warning"] is False
+    assert result["warning_tasks"] == 0
+
+
+def test_task_warning_unparseable_success_breaks_streak_before_recount(tmp_path):
+    """ADR-039: an unjoinable reset invalidates starts on both sides."""
+    now = datetime.now(timezone.utc)
+    state = tmp_path / "unknown-reset"
+    _append(state, "outcome", "anchor", "private-alpha", "success", _iso_at(now - timedelta(hours=1)))
+    for index in range(6):
+        _append(state, "started", f"before-{index}", "private-alpha", ts=_iso_at(now - timedelta(minutes=55 - index)))
+    _append(state, "outcome", "naive-success", "private-alpha", "success", (now - timedelta(minutes=30)).replace(tzinfo=None).isoformat())
+    for index in range(6):
+        _append(state, "started", f"after-{index}", "private-alpha", ts=_iso_at(now - timedelta(minutes=20 - index)))
+
+    result = read_task_attempt_warning(state, now=now)
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
+
+
+def test_task_warning_malformed_outcome_does_not_crash(tmp_path, monkeypatch):
+    """ADR-039: malformed outcome values fail closed without crashing health."""
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr("nanobot.runtime.health.cycle_ledger_retention_days", lambda: 90)
+    state = tmp_path / "malformed-outcome"
+    _append(state, "outcome", "anchor", "private-alpha", "success", "2026-11-01T10:00:00Z")
+    _append(state, "started", "attempt", "private-alpha", ts="2026-11-01T11:00:00Z")
+    path = state / "ledger" / "cycles.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"phase": "outcome", "cycle_id": "bad", "outcome": [], "ts": _iso_at(now - timedelta(minutes=5))}) + "\n")
+    result = read_task_attempt_warning(state, now=now)
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
+
+
 def test_task_warning_uses_cycle_ledger_retention_not_other_reader_env(tmp_path, monkeypatch):
     now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
     state = tmp_path / "state"
@@ -245,10 +339,10 @@ def test_task_warning_uses_cycle_ledger_retention_not_other_reader_env(tmp_path,
 
 
 def test_task_warning_unknown_when_retained_window_expires_or_is_malformed(tmp_path, monkeypatch):
-    now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     monkeypatch.setenv("CYCLE_LEDGER_RETENTION_DAYS", "1")
     state = tmp_path / "state"
-    _append(state, "started", "old", "private-alpha", ts="2026-10-20T11:00:00Z")
+    _append(state, "started", "old", "private-alpha", ts=_iso_at(now - timedelta(days=12)))
     assert read_task_attempt_warning(state, now=now)["status"] == "unknown"
 
     malformed = tmp_path / "malformed"
@@ -259,8 +353,9 @@ def test_task_warning_unknown_when_retained_window_expires_or_is_malformed(tmp_p
 
 
 def test_cycle_health_summary_includes_warning_without_raw_key(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
     state = tmp_path / "state"
-    _append(state, "outcome", "reset", "very-private-key", "success", "2026-11-01T10:00:00Z")
+    _append(state, "outcome", "reset", "very-private-key", "success", _iso_at(now - timedelta(hours=1)))
     for index in range(12):
         record_cycle_started(
             state, f"cycle-{index}", f"request-{index}", None,

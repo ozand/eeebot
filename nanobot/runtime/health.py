@@ -602,43 +602,72 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
     except (OSError, ValueError, TypeError, OverflowError):
         return {"threshold": 12, "coverage_days": horizon, "status": "unknown", "coverage": "unavailable", "warning": None, "warning_tasks": None}
     base = {"threshold": 12, "coverage_days": horizon}
-    if window.status != "complete" or not window.rows:
+    if window.status == "unavailable" or not window.rows:
         return {**base, "status": "unknown", "coverage": "incomplete", "warning": None, "warning_tasks": None}
+    if any(note.startswith(("permission", "io_error", "gz_corrupt", "malformed_json", "malformed_row")) for note in window.notes):
+        return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
     if any(note.startswith("invalid_archive:") for note in window.notes):
         return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
 
-    # Older rotated rows can be absent without the legacy reader detecting a
-    # missing archive. Only treat the append-active file as continuous evidence;
-    # older archives may help neither a low count nor a reset assertion.
-    active_rows = sorted(
-        (row for row in window.rows if row.get("_source_file") == "cycles.jsonl"),
-        key=lambda row: row.get("_source_line", 0),
+    # Preserve archive and active-file chronology. A capped/partial window may
+    # still prove a warning from complete exact rows, but cannot prove clear.
+    rows = sorted(
+        window.rows,
+        key=lambda row: (
+            _parse_ledger_timestamp(row.get("ts") or row.get("timestamp")) or float("inf"),
+            row.get("_source_file", ""),
+            row.get("_source_line", 0),
+        ),
     )
-    if not active_rows:
+    if not rows:
         return {**base, "status": "unknown", "coverage": "incomplete", "warning": None, "warning_tasks": None}
     streaks: dict[str, int] = {}
     anchored: dict[str, bool] = {}
-    unknown_identity = False
-    for row in active_rows:
+    cycle_keys: dict[str, str] = {}
+    unknown_identity = window.status != "complete"
+    for row in rows:
         row_timestamp = _parse_ledger_timestamp(row.get("ts") or row.get("timestamp"))
         if row_timestamp is None:
             unknown_identity = True
+            for known_key in streaks:
+                streaks[known_key] = 0
+                anchored[known_key] = False
+            cycle_keys.clear()
             continue
         elif row_timestamp > moment.timestamp():
             # Future evidence must not increase the current attempt count or
             # anchor a reset; it can also indicate an incomplete/corrupt window.
             unknown_identity = True
+            for known_key in streaks:
+                streaks[known_key] = 0
+                anchored[known_key] = False
+            cycle_keys.clear()
             continue
         phase = row.get("phase")
+        cycle_id = row.get("cycle_id")
         if phase == "started":
             key = row.get("retry_key")
-            if not isinstance(key, str) or not key:
+            if not isinstance(key, str) or not key or not isinstance(cycle_id, str) or not cycle_id:
                 unknown_identity = True
                 continue
+            cycle_keys[cycle_id] = key
             streaks[key] = streaks.get(key, 0) + 1
         elif phase == "outcome":
             outcome = row.get("outcome")
             key = row.get("retry_key")
+            if not isinstance(outcome, str):
+                unknown_identity = True
+                for known_key in streaks:
+                    streaks[known_key] = 0
+                    anchored[known_key] = False
+                continue
+            if outcome == "skipped-duplicate":
+                skipped_key = key if isinstance(key, str) and key else cycle_keys.get(cycle_id)
+                if not skipped_key:
+                    unknown_identity = True
+                    continue
+                streaks[skipped_key] = max(0, streaks.get(skipped_key, 0) - 1)
+                continue
             if outcome == "success":
                 if not isinstance(key, str) or not key:
                     unknown_identity = True
@@ -666,7 +695,7 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
                     anchored[known_key] = False
 
     proven_warnings = sum(count >= 12 for count in streaks.values())
-    fully_known = bool(streaks) and not unknown_identity and all(
+    fully_known = window.status == "complete" and bool(streaks) and not unknown_identity and all(
         anchored.get(key, False) for key in streaks
     )
     if proven_warnings:

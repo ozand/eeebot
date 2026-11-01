@@ -19,7 +19,8 @@ The existing cycle-health command exposes a read-only, aggregate-only task-attem
 warning derived from append-only cycle-ledger evidence.
 
 - A `started` row may persist the bridge's already-computed exact `retry_key`;
-  rows without a key remain legacy/incomplete evidence.
+  rows without a key remain legacy/incomplete evidence. A cycle later recorded as
+  `skipped-duplicate` is excluded from the started-attempt count.
 - Count exact-key starts since an exact-key successful terminal outcome. Edited
   self-directed title text may form a new identity; late-push outcomes without
   exact key lineage are not inferred by time, title, or cycle proximity.
@@ -32,7 +33,9 @@ warning derived from append-only cycle-ledger evidence.
   current starts after an uncertain reset independently prove a warning; task
   count may remain unknown.
 - Use the cycle ledger's `CYCLE_LEDGER_RETENTION_DAYS` effective horizon (90-day
-  default); this does not promise physical age-based pruning of the active file.
+  default), reading retained archives and active data in timestamp order; this
+  does not promise physical age-based pruning of the active file. Partial reads
+  may prove a warning but must not claim clear.
 - Health JSON and text expose only warning/UNKNOWN status and coverage; known
   clear coverage is rendered as clear, and raw retry keys are never shown. The
   warning does not block or alter planner, retry, handled-marker, wake,

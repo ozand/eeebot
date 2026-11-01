@@ -48,7 +48,7 @@ This is a proposed persisted-data contract refined under the delegated technical
 
 - Exactly 11 consecutive starts for one key do not warn; the 12th does.
 - Starts for different keys never combine; a success for a key resets only that key's streak.
-- Duplicate skips and planner sessions do not increment the started-attempt count.
+- Duplicate skips and planner sessions do not increment the started-attempt count; starts are joined to terminal duplicate-skip outcomes before counting.
 - Missing historical keys, incomplete archive coverage, or ambiguous joins produce UNKNOWN, not a zero/healthy state.
 - Public output contains only warning/UNKNOWN and coverage, with tests proving raw-key non-disclosure and no guessed count when continuity is uncertain.
 - Warning emission has no effect on planner eligibility, retry counters, marker state, wake behavior, or rollback.
@@ -90,11 +90,15 @@ Indefinite retention could improve historical coverage but increases privacy/sto
 | Claim | Test | Currently |
 |---|---|---|
 | Start row persists the supplied exact retry key while existing callers retain their prior row shape | `tests/test_cycle_ledger.py::test_record_cycle_started_persists_retry_key_when_supplied` | implemented |
-| 11 known starts do not warn; the 12th warns, distinct keys do not combine, and exact-key success resets only its key; attempt 13 remains permitted | `tests/test_h5_tripwire.py::test_task_warning_threshold_exact_key_success_reset_and_privacy` | implemented |
+| 11 known starts do not warn; the 12th warns, distinct keys do not combine, exact-key success resets only its key, duplicate skips are excluded, and attempt 13 remains permitted | `tests/test_h5_tripwire.py::test_task_warning_threshold_exact_key_success_reset_and_privacy`, `tests/test_h5_tripwire.py::test_task_warning_excludes_cycles_ending_in_duplicate_skip` | implemented |
 | Missing legacy key, keyless late-push, future timestamps, and timezone-naive timestamps do not become known counts or inferred success; 12 exact starts after unknown reset can prove warning while 11 remains UNKNOWN | `tests/test_h5_tripwire.py::test_task_warning_unknown_reset_does_not_emit_under_threshold_count`, `tests/test_h5_tripwire.py::test_task_warning_proves_12_after_late_push_unknown_reset`, `tests/test_h5_tripwire.py::test_task_warning_future_dated_starts_are_unknown`, `tests/test_h5_tripwire.py::test_task_warning_naive_ledger_timestamps_are_unknown` | implemented |
 | Edited self-directed title produces a distinct exact retry key | `tests/test_h5_tripwire.py::test_self_title_edit_creates_distinct_warning_identity` | implemented |
-| The effective horizon honors `CYCLE_LEDGER_RETENTION_DAYS` rather than the unrelated state reader variable; expired, malformed, empty, unanchored, or unrepresentably large horizon evidence is UNKNOWN | `tests/test_h5_tripwire.py::test_task_warning_uses_cycle_ledger_retention_not_other_reader_env`, `tests/test_h5_tripwire.py::test_task_warning_empty_or_unanchored_ledger_activity_is_unknown`, `tests/test_h5_tripwire.py::test_task_warning_extreme_retention_returns_unknown` | implemented |
+| The effective horizon honors `CYCLE_LEDGER_RETENTION_DAYS`; expired, malformed, empty, unanchored, oversized, or capped evidence fails closed unless the read proves a warning | `tests/test_h5_tripwire.py::test_task_warning_uses_cycle_ledger_retention_not_other_reader_env`, `tests/test_h5_tripwire.py::test_task_warning_empty_or_unanchored_ledger_activity_is_unknown`, `tests/test_h5_tripwire.py::test_task_warning_extreme_retention_returns_unknown`, `tests/test_h5_tripwire.py::test_task_warning_includes_rotated_attempts_and_keeps_other_task_warning` | implemented |
 | Public cycle-health summary exposes warning/UNKNOWN without raw keys or unproven low counts; CLI text and JSON preserve clear, unknown, and warning states | `tests/test_h5_tripwire.py::test_cycle_health_cli_reports_clear_and_unknown_warning_states` | implemented |
+| A successful outcome with unjoinable timestamp breaks any prior exact-key streak and yields UNKNOWN until enough current starts follow | `tests/test_h5_tripwire.py::test_task_warning_unparseable_success_breaks_streak_before_recount` | implemented |
+| Ledger rotation preserves bounded multi-file task streaks, and partial reads may prove warnings but never clear | `tests/test_h5_tripwire.py::test_task_warning_includes_rotated_attempts_and_keeps_other_task_warning` | implemented |
+| Malformed typed outcomes cannot crash cycle health reporting | `tests/test_h5_tripwire.py::test_task_warning_malformed_outcome_does_not_crash` | implemented |
+| Malformed typed outcome values and ledger read errors fail closed without crashing health output | `tests/test_h5_tripwire.py::test_task_warning_malformed_outcome_does_not_crash` | implemented |
 | Health reporting is read-only and warning does not alter global #2050 semantics | `tests/test_2050_r21.py` | existing global regression; health path reads only |
 | Global six-hour/12-cycle H5 semantics remain separate and unchanged | `tests/test_2050_r21.py` | existing test; not modified |
 
