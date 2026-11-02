@@ -2,7 +2,7 @@
 
 - **change-id:** `2148-self-derived-public-provenance`
 - **issue:** #2148
-- **capability:** `docs/specs/self-evolving-runtime/spec.md`
+- **capability:** `docs/specs/subagent-bridge/spec.md`
 - **role / workstream:** runtime producer / public state projection
 
 ## Problem
