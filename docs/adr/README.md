@@ -14,6 +14,13 @@ Conventions:
 
 ## Index
 
+The `Status` column mirrors each ADR's frontmatter. An `accepted` row on an
+unmerged candidate branch describes only the provisional status-flip candidate;
+it is not effective acceptance. On published `main`, `accepted` means that the
+unchanged candidate passed independent review and applicable required checks on
+its exact SHA, then was authorized and merged. Do not treat a PR branch's index
+row as evidence that acceptance is already effective.
+
 | ADR | Title | Status |
 |---|---|---|
 | [ADR-001](ADR-001-agent-architecture.md) | Agent architecture — roles, tools, models, and budgets of the eeebot runtime | accepted |
