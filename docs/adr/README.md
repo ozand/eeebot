@@ -70,15 +70,24 @@ Each status word has one meaning:
 
 - `proposed` -- guidance for humans and agents. Its rules are not a gate;
   nothing in CI enforces them yet. A proposed record may still be edited.
-- `accepted` -- binding, and immutable from here on. Every item of the
-  record's `# Test Contract` is enforced by a named test on `main`, or is
-  explicitly deferred.
+- `accepted` -- the candidate record has been prepared for acceptance and is
+  immutable in that candidate revision. It is not yet effective or binding
+  before authorized merge. Effective acceptance requires independent review
+  PASS and all applicable required checks on the exact candidate revision,
+  followed by authorized merge of that unchanged reviewed revision. A later
+  commit or changed candidate SHA is not covered by earlier review/check
+  evidence and requires fresh gates. Every item of the record's `# Test
+  Contract` is enforced by a named test on `main`, or is explicitly deferred.
 - `superseded` -- replaced. The record names the superseding ADR and is
   otherwise left as it was.
 - `deferred (#NNN)` -- a marker on one contract item, not a record status:
   the test is owed and issue #NNN owns it.
 
-A record moves `proposed -> accepted` when, and only when:
+A record moves `proposed -> accepted` as a provisional candidate, not as
+effective acceptance. The status flip prepares the candidate revision; the
+separate review, check, and merge gates below determine when acceptance takes
+effect. Do not describe or index a candidate as effectively accepted before
+its authorized merge.
 
 1. Every item in its `# Test Contract` names a test -- `tests/<file>.py` or
    `tests/<file>.py::<name>` -- that exists on `main` and cites the record
@@ -86,16 +95,18 @@ A record moves `proposed -> accepted` when, and only when:
    `deferred (#NNN)`. An item with neither is the reason the record is not
    accepted. Amending a proposed record's contract items to name their tests
    is part of accepting it.
-2. The authorized decision owner or, for a necessary technical ADR within an
-   explicitly owner-approved outcome, the delegated delivery executor accepts
-   the record by a commit that flips frontmatter `status:` to `accepted`.
-   Delegated technical acceptance requires applicable checks and independent
-   review PASS on the exact final revision, with the authority and reviewed
-   revision recorded under [`AGENT_ROUTING.md`](../../AGENT_ROUTING.md). It is
-   not a claim that a human reviewer or operator personally accepted it. No
-   agent may record operator acceptance on the operator's behalf.
-3. The record carries its own acceptance: date and accepting change (PR
-   number or commit) under `# Status`.
+2. The candidate status-flip commit is the exact revision submitted for
+   independent review and applicable required checks. A different revision
+   requires fresh review and checks. A PASS and successful checks on the exact
+   candidate are necessary but do not themselves authorize acceptance or merge.
+3. Effective acceptance occurs only when an authorized decision owner, or an
+   explicitly delegated delivery executor acting within that delegation,
+   merges that unchanged reviewed candidate. Record the authority, candidate
+   SHA, review, checks, and merge reference under `# Status`; distinguish the
+   candidate status-flip commit from the later effective-acceptance event.
+   Delegated technical acceptance is not a claim that a human reviewer or
+   operator personally accepted it. No agent may record operator acceptance
+   on the operator's behalf.
 
 `tests/test_adr_acceptance.py` enforces rule 1 on every `accepted` record,
 checks this index against each record's frontmatter, and prints contract
