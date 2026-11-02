@@ -1,3 +1,12 @@
+---
+title: Persist producer-established provenance on self-derived public rows
+status: proposed
+date: 2026-11-02
+authors: [ozand, delegated design executor]
+related: ["#2148", "ADR-034", "ADR-036", "ADR-023"]
+tags: [runtime, provenance, public-projection]
+---
+
 # ADR-048: Persist producer-established provenance on self-derived public rows
 
 **Status**: Proposed
