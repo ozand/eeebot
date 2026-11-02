@@ -1,6 +1,6 @@
 ---
 title: Warn operators after twelve unsuccessful started attempts for one task
-status: proposed
+status: accepted
 date: 2026-10-13
 authors: [ozand, pi]
 related: ["#2088", "#2050", "#2052", "ADR-035"]
@@ -9,7 +9,7 @@ tags: [runtime, observability, privacy, h5]
 
 # Status
 
-Proposed under #2088 and refined for the design-only follow-up #2143. This records delegated technical design choices, not personal operator acceptance, ADR acceptance, implementation authority, or rollout. Owner: ozand. Target environment: eeebot runtime and its existing operator-facing health/reporting surfaces; host rollout remains separately authorized.
+Accepted by the delegated delivery executor under the explicit owner-approved technical delegation recorded on #2143, via PR #2147, on 2026-11-02. This is delegated technical acceptance, not personal operator approval. The 12-row test contract was semantically audited against published main `97cc60442ea918d3b63fc2fa6ddb470142936a30` (independent audit artifact `0288e48f-51f8-45e1-ae63-ce5b3721afe1`). Under the ADR acceptance procedure, independent review of this acceptance revision is required before merge; its result must be retained in PR #2147's review record. This acceptance authorizes no host rollout.
 
 # Context
 
@@ -23,9 +23,9 @@ The active cycle ledger is append-driven. `CYCLE_LEDGER_RETENTION_DAYS` defaults
 
 # Decision
 
-**Proposed:** define a task-scoped H5 warning by counting consecutive `started` attempts that carry the same canonical `retry_key` and have no later successful terminal outcome for that key. Emit an operator-facing warning at 12. The warning is informational only: it does not block planning/execution, wake or prioritize work, alter retry/handled state, or trigger rollback.
+Define a task-scoped H5 warning by counting consecutive `started` attempts that carry the same canonical `retry_key` and have no later successful terminal outcome for that key. Emit an operator-facing warning at 12. The warning is informational only: it does not block planning/execution, wake or prioritize work, alter retry/handled state, or trigger rollback.
 
-This is a proposed persisted-data contract refined under the delegated technical direction recorded in #2143; it is not ADR acceptance or host/rollout authority. Implementation must preserve the following conservative evidence rules.
+This persisted-data contract was refined under the delegated technical direction recorded in #2143. Its acceptance grants no host or rollout authority. Implementation must preserve the following conservative evidence rules.
 
 ## What this IS
 
