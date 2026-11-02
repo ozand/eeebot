@@ -872,6 +872,29 @@ def test_task_warning_malformed_skip_cycle_id_cli_is_unknown(tmp_path, monkeypat
     assert "private-alpha" not in result.stdout
 
 
+def test_task_warning_ledger_io_error_does_not_crash(tmp_path, monkeypatch):
+    """ADR-039: active-ledger read errors yield private, fail-closed UNKNOWN."""
+    import builtins
+
+    now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    state = tmp_path / "ledger-io-error"
+    _anchored_attempts(state, "private-alpha", 12)
+    ledger_path = state / "ledger" / "cycles.jsonl"
+    original_open = builtins.open
+
+    def failing_open(file, *args, **kwargs):
+        if str(file) == str(ledger_path):
+            raise OSError("injected ledger read failure")
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", failing_open)
+    result = read_task_attempt_warning(state, now=now)
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
+    assert "private-alpha" not in json.dumps(result)
+
+
 def test_task_warning_malformed_outcome_does_not_crash(tmp_path, monkeypatch):
     """ADR-039: malformed outcome values fail closed without crashing health."""
     now = datetime.now(timezone.utc)
