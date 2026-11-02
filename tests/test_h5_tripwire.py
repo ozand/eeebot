@@ -138,6 +138,49 @@ def test_self_title_edit_creates_distinct_warning_identity():
     assert first != edited
 
 
+@pytest.mark.parametrize(
+    "outcome",
+    ["success", "failed", "partial", "push_pending", "pushed_late", "superseded", "abandoned", "paused-supplier"],
+)
+def test_task_warning_terminal_key_must_match_started_cycle_key(tmp_path, outcome):
+    now = datetime.now(timezone.utc)
+    state = tmp_path / f"terminal-key-{outcome}"
+    _append(state, "outcome", "anchor", "private-alpha", "success", _iso_at(now - timedelta(hours=1)))
+    for index in range(11):
+        cycle = f"prior-{index}"
+        record_cycle_started(state, cycle, f"request-{index}", None, retry_key="private-alpha")
+        record_cycle_outcome(state, cycle, "failed", "attempt_failed", [], None, retry_key="private-alpha")
+
+    cycle = "terminal-key-mismatch"
+    record_cycle_started(state, cycle, "last-request", None, retry_key="private-alpha")
+    record_cycle_outcome(state, cycle, outcome, "test_outcome", [], None, retry_key="private-beta")
+
+    result = read_task_attempt_warning(state, now=now + timedelta(seconds=1))
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
+    assert "private-alpha" not in json.dumps(result)
+    assert "private-beta" not in json.dumps(result)
+
+
+def test_task_warning_terminal_without_exact_cycle_start_is_unknown(tmp_path):
+    now = datetime.now(timezone.utc)
+    state = tmp_path / "unjoined-terminal"
+    _append(state, "outcome", "anchor", "private-alpha", "success", _iso_at(now - timedelta(hours=1)))
+    for index in range(11):
+        cycle = f"prior-{index}"
+        record_cycle_started(state, cycle, f"request-{index}", None, retry_key="private-alpha")
+        record_cycle_outcome(state, cycle, "failed", "attempt_failed", [], None, retry_key="private-alpha")
+    record_cycle_outcome(state, "orphan-cycle", "success", None, [], None, retry_key="private-beta")
+
+    result = read_task_attempt_warning(state, now=now + timedelta(seconds=1))
+    assert result["status"] == "unknown"
+    assert result["warning"] is None
+    assert result["warning_tasks"] is None
+    assert "private-alpha" not in json.dumps(result)
+    assert "private-beta" not in json.dumps(result)
+
+
 def test_task_warning_joins_actual_success_outcome_by_cycle_id_and_retry_key(tmp_path):
     now = datetime.now(timezone.utc)
     state = tmp_path / "actual-outcome-writer"
@@ -448,6 +491,7 @@ def test_task_warning_includes_rotated_attempts_and_keeps_other_task_warning(tmp
     _write_archive(state, "cycles-2026-10-31.jsonl.gz", archive_rows)
     for index in range(6):
         _append(state, "started", f"a-today-{index}", "private-alpha", ts=f"2026-11-01T00:{index:02d}:00Z")
+    _append(state, "started", "b-reset", "private-beta", ts="2026-11-01T00:59:00Z")
     _append(state, "outcome", "b-reset", "private-beta", "success", "2026-11-01T01:00:00Z")
 
     result = read_task_attempt_warning(state, now=now)

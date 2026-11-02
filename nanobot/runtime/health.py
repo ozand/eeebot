@@ -723,6 +723,15 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
             if not isinstance(outcome, str):
                 invalidate_streak_coverage()
                 continue
+            started_key = cycle_keys.get(cycle_id)
+            if started_key is not None and key is not None and key != started_key:
+                invalidate_streak_coverage()
+                continue
+            if key is not None and started_key is None and outcome in {"success", "pushed_late"}:
+                # A keyed reset cannot be assigned to a task if its cycle has
+                # no retained keyed start; keep the suffix boundary unknown.
+                invalidate_streak_coverage()
+                continue
             previous_terminal = cycle_terminal_outcomes.get(cycle_id)
             if previous_terminal is not None:
                 pending_service_only = (
