@@ -1,4 +1,4 @@
-"""Tests for #720: minimal cycle ledger — append-only JSONL with enum outcomes.
+"""Tests for #720 and ADR-039: cycle ledger JSONL and exact-key start evidence.
 
 Covers the standalone ``nanobot.runtime.cycle_ledger`` module (append/read
 round-trip, fail-open behavior, rotation, one-terminal-row-per-cycle
@@ -106,6 +106,14 @@ class TestTypedHelpers:
             "branch": None,
             "ts": rows[0]["ts"],
         }
+
+    def test_record_cycle_started_persists_retry_key_when_supplied(self, tmp_path):
+        cycle_ledger.record_cycle_started(
+            tmp_path, "cycle-1", "req-1", None, retry_key="task-secret",
+        )
+        row = _read_ledger(tmp_path)[0]
+        assert row["phase"] == "started"
+        assert row["retry_key"] == "task-secret"
 
     def test_record_dedup_decision_valid_values(self, tmp_path):
         for decision in cycle_ledger.VALID_DEDUP_DECISIONS:

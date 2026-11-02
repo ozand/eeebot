@@ -39,6 +39,25 @@ def test_ledger_window_reads_archive_and_active_in_order(tmp_path):
     assert result.covered_to == "2026-09-02T10:00:00Z"
 
 
+def test_ledger_window_strict_json_rejects_invalid_utf8_without_changing_default(tmp_path):
+    state = tmp_path / "state"
+    ledger = state / "ledger"
+    ledger.mkdir(parents=True)
+    path = ledger / "cycles.jsonl"
+    path.write_bytes(b'{"phase":"started","cycle_id":"c","retry_key":"bad' + bytes([255]) + b'key","ts":"2026-09-01T10:00:00Z"}' + bytes([10]))
+
+    strict = state_access.ledger_window(
+        state, since_ts="2026-09-01T00:00:00Z", strict_json=True,
+    )
+    assert strict.status == "unavailable"
+    assert "malformed_utf8" in strict.notes
+    assert not strict.rows
+
+    compatible = state_access.ledger_window(state, since_ts="2026-09-01T00:00:00Z")
+    assert compatible.status == "complete"
+    assert compatible.rows[0]["retry_key"] == "bad�key"
+
+
 def test_ledger_window_corrupt_archive_is_partial(tmp_path):
     state = tmp_path / "state"
     d = state / "ledger"

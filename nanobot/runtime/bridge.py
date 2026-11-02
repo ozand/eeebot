@@ -4612,7 +4612,10 @@ async def _main_impl_body():
         # #720 piece 3: write-ahead cycle marker, appended BEFORE any dedup check
         # or subagent spawn — a crashed/timed-out cycle leaves this row with no
         # matching terminal outcome row, a deterministic recovery signal.
-        record_cycle_started(STATE_DIR, _cycle_id, request_id, None)
+        record_cycle_started(
+            STATE_DIR, _cycle_id, request_id, None,
+            retry_key=req.get('retry_key'),
+        )
 
         # #680 defense-in-depth (HEAD-on-main precondition) used to be
         # re-checked here, per request, with its own staged-promotions/

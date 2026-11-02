@@ -154,6 +154,7 @@ def _read_ledger_file(
     since: datetime,
     phases: frozenset[str] | None,
     remaining: int,
+    strict_json: bool = False,
 ) -> tuple[list[dict], int, str | None, str | None, bool, str | None]:
     """Read one source; return rows, bytes, coverage bounds, capped, error."""
     rows: list[dict] = []
@@ -163,7 +164,8 @@ def _read_ledger_file(
     capped = False
     try:
         opener = gzip.open if path.name.endswith(".gz") else open
-        with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+        decode_errors = "strict" if strict_json else "replace"
+        with opener(path, "rt", encoding="utf-8", errors=decode_errors) as handle:
             for line_no, line in enumerate(handle, start=1):
                 line_bytes = len(line.encode("utf-8", errors="replace"))
                 if used + line_bytes > remaining:
@@ -175,8 +177,12 @@ def _read_ledger_file(
                 try:
                     row = json.loads(line)
                 except (TypeError, ValueError, json.JSONDecodeError):
+                    if strict_json:
+                        return rows, used, _iso(earliest) if earliest else None, _iso(latest) if latest else None, False, "malformed_json"
                     continue
                 if not isinstance(row, dict):
+                    if strict_json:
+                        return rows, used, _iso(earliest) if earliest else None, _iso(latest) if latest else None, False, "malformed_row"
                     continue
                 ts = _row_ts(row)
                 if ts is not None:
@@ -192,6 +198,8 @@ def _read_ledger_file(
                     row["_source_line"] = line_no
                 rows.append(row)
         return rows, used, _iso(earliest) if earliest else None, _iso(latest) if latest else None, capped, None
+    except UnicodeDecodeError:
+        return [], used, None, None, False, "malformed_utf8"
     except PermissionError:
         return [], used, None, None, False, "permission"
     except (OSError, EOFError, gzip.BadGzipFile):
@@ -206,6 +214,8 @@ def ledger_window(
     max_bytes: int = _DEFAULT_LEDGER_BYTES,
     now: datetime | None = None,
     local_tz: Any = None,
+    retention_days: int | None = None,
+    strict_json: bool = False,
 ) -> Window:
     """Read active and dated ledger archives newest-first, never raising.
 
@@ -244,13 +254,14 @@ def ledger_window(
             capped = True
             break
         file_rows, used, file_covered, file_covered_to, file_capped, error = _read_ledger_file(
-            path, since=requested, phases=phases, remaining=max_bytes - bytes_read
+            path, since=requested, phases=phases, remaining=max_bytes - bytes_read,
+            strict_json=strict_json,
         )
         bytes_read += used
         if error:
             files_skipped += 1
             notes.append(error)
-            if error == "permission" and files_read == 0:
+            if error in {"permission", "malformed_utf8"} and files_read == 0:
                 return Window((), "unavailable", _iso(requested), None, None, 0, files_skipped, bytes_read, tuple(notes))
             continue
         files_read += 1
@@ -265,7 +276,8 @@ def ledger_window(
             break
         if file_covered and _parse_ts(file_covered) is not None and _parse_ts(file_covered) < requested:
             break
-    retention_days = int(os.environ.get("SELFEVO_LEDGER_RETENTION_DAYS", str(_DEFAULT_RETENTION_DAYS)))
+    if retention_days is None:
+        retention_days = int(os.environ.get("SELFEVO_LEDGER_RETENTION_DAYS", str(_DEFAULT_RETENTION_DAYS)))
     ref = now or datetime.now(timezone.utc)
     if requested < ref - timedelta(days=max(1, retention_days)):
         notes.append("beyond_retention")
