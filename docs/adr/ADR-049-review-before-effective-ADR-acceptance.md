@@ -100,7 +100,7 @@ reserved; existing issues and PRs retain their own scope and chronology.
 
 ## References
 
-- Issue #2152 and research comment https://github.com/ozand/eeebot/issues/2152#issuecomment-6587851209
+- Issue #2152 and initial research comment https://github.com/ozand/eeebot/issues/2152#issuecomment-6587851209; its correction https://github.com/ozand/eeebot/issues/2152#issuecomment-6588007705 clarifies that `ef8453…` and `857fb…` are local review-artifact identifiers, not source commit SHAs. The source context verified here is PR #2150 and published main `2e176812abad12e3e49f5e9270c5655648429992`.
 - #2148 and PR #2150; candidate head `afe0aa55e3d014743f03aa175becaf51df31c5fb`
 - PR #2150 review finding: https://github.com/ozand/eeebot/pull/2150#discussion_r4447256041
 - #2141 / PR #2142 and ADR-047 (adjacent addenda policy)
