@@ -1,6 +1,6 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-10-28 (#2050 H3 planner phase budget: explicit opt-in selects a 6000s planner phase with a reserved 3000s executor/gate phase; feature remains OFF by default and does not authorize host activation; ADR-045 is accepted for the narrow repository-source contract only, not host/service approval or rollout). Previous entry: 2026-10-27 (#2036 capability slice: the planner subagent uses an explicit read/list tool profile; ADR-044 accepted for this narrow slice). Earlier entry: 2026-07-18 (#768: added R45 — the periodic
+_Status: current. Last updated: 2026-11-02 (#2148: producer projections label goal-review-owned derived-priority rows with explicit `self-derived` provenance, as specified by Proposed ADR-048; the typed dashboard projection remains a read-only allowlisted consumer). Previous entry: 2026-10-28 (#2050 H3 planner phase budget: explicit opt-in selects a 6000s planner phase with a reserved 3000s executor/gate phase; feature remains OFF by default and does not authorize host activation; ADR-045 is accepted for the narrow repository-source contract only, not host/service approval or rollout). Earlier entry: 2026-10-27 (#2036 capability slice: the planner subagent uses an explicit read/list tool profile; ADR-044 accepted for this narrow slice). Historical entry: 2026-07-18 (#768: added R45 — the periodic
 goal-review: `nanobot/runtime/goal_review.py`, behind
 `SELFEVO_GOAL_REVIEW_ENABLED` (default OFF) + a daily watermark, formulates
 1-3 bounded priorities from goal vectors + measured evidence (scorecard
@@ -907,6 +907,8 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     create demand or change ranking, gates, fitness, targets, or gaps. Rows
     predating these fields are **unavailable**, never interpreted as an empty
     source set or no Direction.
+
+- R46 (issue #2148). When `build_derived_view` serializes a row from the goal-review-owned `state/goals/derived_priorities.json` into the public `derived_priorities` projection, that row SHALL carry explicit `provenance: self-derived`. The provenance tag is established by the producer, not inferred by a consumer; operator priority text remains private and the dashboard's existing typed allowlist remains read-only. See `docs/adr/ADR-048-persist-self-derived-provenance-in-public-projection.md` and `docs/changes/archive/2148-self-derived-public-provenance/proposal.md`.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor
