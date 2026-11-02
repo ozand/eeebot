@@ -531,8 +531,16 @@ def test_task_warning_reused_cycle_duplicate_skip_is_unknown(tmp_path, start_cou
     assert "private-alpha" not in json.dumps(result)
 
 
-@pytest.mark.parametrize("resolution", ["pushed_late", "superseded", "abandoned"])
-def test_task_warning_accepts_push_pending_resolution_and_counts_later_attempts(tmp_path, resolution):
+@pytest.mark.parametrize(
+    ("resolution", "reason"),
+    [
+        ("pushed_late", "delivery_unknown"),
+        ("superseded", "push_pending_main_moved"),
+        ("abandoned", "push_pending_branch_missing"),
+        ("partial", "service_only"),
+    ],
+)
+def test_task_warning_accepts_push_pending_resolution_and_counts_later_attempts(tmp_path, resolution, reason):
     now = datetime.now(timezone.utc)
     state = tmp_path / f"pending-{resolution}"
     record_cycle_started(state, "pending-cycle", "pending-request", None, retry_key="private-alpha")
@@ -541,7 +549,7 @@ def test_task_warning_accepts_push_pending_resolution_and_counts_later_attempts(
         retry_key="private-alpha",
     )
     record_cycle_outcome(
-        state, "pending-cycle", resolution, "resolved_pending_push", [], None,
+        state, "pending-cycle", resolution, reason, [], None,
     )
 
     for index in range(12):

@@ -725,7 +725,7 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
                 continue
             previous_terminal = cycle_terminal_outcomes.get(cycle_id)
             if previous_terminal is not None:
-                if previous_terminal != "push_pending" or outcome not in {"pushed_late", "superseded", "abandoned"}:
+                if previous_terminal != "push_pending" or outcome not in {"pushed_late", "partial", "superseded", "abandoned"}:
                     conflicting_terminal_outcomes = True
                     invalidate_streak_coverage()
                     continue
@@ -757,6 +757,10 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
                     # exact success re-anchors that task; otherwise twelve
                     # later exact starts independently prove a warning.
                     invalidate_streak_coverage()
+            elif outcome == "partial" and row.get("reason") == "service_only" and key is None:
+                # A late push of a known service-only diff resolves push_pending
+                # as the bridge's normal non-delivery partial outcome; it has no key lineage.
+                invalidate_streak_coverage()
             elif outcome not in {"partial", "failed", "skipped-duplicate", "promotion_candidate", "push_pending", "superseded", "abandoned", "paused-supplier"}:
                 invalidate_streak_coverage()
 
