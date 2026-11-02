@@ -3837,6 +3837,7 @@ class TestPublishDerivedView:
         )
 
     def test_operator_v2_outranks_self_derived_v1_with_provenance_and_direction(self, tmp_path):
+        """ADR-048: producer provenance is explicit without disclosing operator wording."""
         state_dir = _state_dir(tmp_path)
         _write_goal_text(state_dir, self.CHARTER)
         self._write_derived(state_dir, [{

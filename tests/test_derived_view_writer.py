@@ -1,4 +1,4 @@
-"""ADR-036 D1.1 follow-up (ozand/eeebot-ops-dashboard#378): the writer side
+"""ADR-048 / ADR-036 D1.1 follow-up (ozand/eeebot-ops-dashboard#378): the writer side
 of state/public/derived_view.json, which the public dashboard projects.
 
 1. Every derived_priorities row carries provenance "self-derived" (the
