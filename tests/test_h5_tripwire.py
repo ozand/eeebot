@@ -531,6 +531,58 @@ def test_task_warning_reused_cycle_duplicate_skip_is_unknown(tmp_path, start_cou
     assert "private-alpha" not in json.dumps(result)
 
 
+@pytest.mark.parametrize("resolution", ["pushed_late", "superseded", "abandoned"])
+def test_task_warning_accepts_push_pending_resolution_and_counts_later_attempts(tmp_path, resolution):
+    now = datetime.now(timezone.utc)
+    state = tmp_path / f"pending-{resolution}"
+    record_cycle_started(state, "pending-cycle", "pending-request", None, retry_key="private-alpha")
+    record_cycle_outcome(
+        state, "pending-cycle", "push_pending", "push_failed", [], None,
+        retry_key="private-alpha",
+    )
+    record_cycle_outcome(
+        state, "pending-cycle", resolution, "resolved_pending_push", [], None,
+    )
+
+    for index in range(12):
+        record_cycle_started(
+            state, f"later-{index}", f"later-request-{index}", None,
+            retry_key="private-beta",
+        )
+    result = read_task_attempt_warning(state, now=now + timedelta(seconds=1))
+    assert result["status"] == "warning"
+    assert result["warning"] is True
+    assert result["warning_tasks"] is None
+    assert "private-alpha" not in json.dumps(result)
+    assert "private-beta" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("resolution", ["pushed_late", "superseded", "abandoned"])
+def test_task_warning_push_pending_resolution_allows_later_keyed_warning(tmp_path, resolution):
+    now = datetime.now(timezone.utc)
+    state = tmp_path / f"pending-resolution-{resolution}"
+    record_cycle_started(state, "pending-cycle", "pending-request", None, retry_key="private-alpha")
+    record_cycle_outcome(
+        state, "pending-cycle", "push_pending", "push_failed", [], None,
+        retry_key="private-alpha",
+    )
+    record_cycle_outcome(
+        state, "pending-cycle", resolution, "resolved_pending_push", [], None,
+    )
+    for index in range(12):
+        record_cycle_started(
+            state, f"later-{index}", f"later-request-{index}", None,
+            retry_key="private-beta",
+        )
+
+    result = read_task_attempt_warning(state, now=now + timedelta(seconds=1))
+    assert result["status"] == "warning"
+    assert result["warning"] is True
+    assert result["warning_tasks"] is None
+    assert "private-alpha" not in json.dumps(result)
+    assert "private-beta" not in json.dumps(result)
+
+
 @pytest.mark.parametrize("terminal_order", ["failed-then-skip", "skip-then-failed"])
 def test_task_warning_conflicting_cycle_terminal_outcomes_are_unknown(tmp_path, terminal_order):
     now = datetime.now(timezone.utc)

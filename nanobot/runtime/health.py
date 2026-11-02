@@ -725,9 +725,10 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
                 continue
             previous_terminal = cycle_terminal_outcomes.get(cycle_id)
             if previous_terminal is not None:
-                conflicting_terminal_outcomes = True
-                invalidate_streak_coverage()
-                continue
+                if previous_terminal != "push_pending" or outcome not in {"pushed_late", "superseded", "abandoned"}:
+                    conflicting_terminal_outcomes = True
+                    invalidate_streak_coverage()
+                    continue
             cycle_terminal_outcomes[cycle_id] = outcome
             if outcome == "skipped-duplicate":
                 started_key = cycle_keys.get(cycle_id)
