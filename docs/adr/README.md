@@ -62,6 +62,7 @@ Conventions:
 | [ADR-045](ADR-045-bound-planner-finalization-by-remaining-time.md) | Bound planner finalization by remaining time inside a reserved shared budget | accepted |
 | [ADR-046](ADR-046-publish-resolved-prompt-budgets.md) | Publish resolved prompt budgets on system_prompt ledger rows | accepted |
 | [ADR-048](ADR-048-persist-self-derived-provenance-in-public-projection.md) | Persist producer-established provenance on self-derived public rows | proposed |
+| [ADR-049](ADR-049-review-before-effective-ADR-acceptance.md) | Require exact-revision review before ADR acceptance takes effect | proposed |
 
 ## Acceptance
 
