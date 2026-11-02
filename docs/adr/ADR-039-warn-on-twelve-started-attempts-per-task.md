@@ -99,8 +99,8 @@ Indefinite retention could improve historical coverage but increases privacy/sto
 | Ledger rotation preserves bounded multi-file task streaks, and partial reads may prove warnings but never clear | `tests/test_h5_tripwire.py::test_task_warning_includes_rotated_attempts_and_keeps_other_task_warning` | implemented |
 | Malformed JSON field types/empty identifiers for phase, outcome, retry key, cycle ID, and timestamps cannot crash health or forge a warning | `tests/test_h5_tripwire.py::test_task_warning_malformed_ledger_fields_fail_closed`, `tests/test_h5_tripwire.py::test_task_warning_malformed_skip_cycle_id_cli_is_unknown`, `tests/test_h5_tripwire.py::test_task_warning_malformed_outcome_does_not_crash`, `tests/test_h5_tripwire.py::test_task_warning_malformed_phase_success_resets_to_unknown` | implemented |
 | Malformed typed outcome values and ledger read errors fail closed without crashing health output | `tests/test_h5_tripwire.py::test_task_warning_malformed_outcome_does_not_crash` | implemented |
-| Health reporting is read-only and warning does not alter global #2050 semantics | `tests/test_2050_r21.py` | existing global regression; health path reads only |
-| Global six-hour/12-cycle H5 semantics remain separate and unchanged | `tests/test_2050_r21.py` | existing test; not modified |
+| Evaluating the task warning is read-only and does not alter the existing cycle-progress health signal | `tests/test_h5_tripwire.py::test_task_warning_read_is_read_only_and_separate_from_global_cycle_progress` | implemented |
+| The 12-start task-warning threshold remains distinct from the cycle-progress signal's own 20-cycle/8-hour thresholds | `tests/test_h5_tripwire.py::test_task_warning_read_is_read_only_and_separate_from_global_cycle_progress` | implemented |
 
 # Rollback
 

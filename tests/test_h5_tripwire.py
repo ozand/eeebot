@@ -52,6 +52,7 @@ def _anchored_attempts(state, key, count):
 
 
 def test_task_warning_threshold_exact_key_success_reset_and_privacy(tmp_path):
+    """ADR-039: warning evidence is observational and privacy-preserving."""
     now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
     state = tmp_path / "state"
     _anchored_attempts(state, "private-alpha", 11)
@@ -911,6 +912,27 @@ def test_task_warning_unknown_when_retained_window_expires_or_is_malformed(tmp_p
     with (malformed / "ledger" / "cycles.jsonl").open("a", encoding="utf-8") as handle:
         handle.write("not-json\n")
     assert read_task_attempt_warning(malformed, now=now)["status"] == "unknown"
+
+
+def test_task_warning_read_is_read_only_and_separate_from_global_cycle_progress(tmp_path):
+    """ADR-039: task warnings do not mutate the ledger or cycle progress."""
+    now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+    state = tmp_path / "separate-progress"
+    _append(state, "outcome", "success-anchor", "private-alpha", "success", "2026-11-01T10:00:00Z")
+    for index in range(12):
+        _append(state, "started", f"attempt-{index}", "private-alpha", ts=f"2026-11-01T11:{index:02d}:00Z")
+
+    ledger = state / "ledger" / "cycles.jsonl"
+    before = ledger.read_bytes()
+    progress_before = health.read_cycle_progress(state, now=now.timestamp())
+    warning = read_task_attempt_warning(state, now=now)
+    progress_after = health.read_cycle_progress(state, now=now.timestamp())
+
+    assert warning["status"] == "warning"
+    assert ledger.read_bytes() == before
+    assert progress_after == progress_before
+    assert progress_after["threshold_cycles"] == 20
+    assert progress_after["threshold_hours"] == 8.0
 
 
 def test_cycle_health_summary_includes_warning_without_raw_key(tmp_path, monkeypatch):
