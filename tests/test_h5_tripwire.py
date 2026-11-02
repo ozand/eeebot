@@ -167,13 +167,25 @@ def test_task_warning_terminal_without_exact_cycle_start_is_unknown(tmp_path):
     now = datetime.now(timezone.utc)
     state = tmp_path / "unjoined-terminal"
     _append(state, "outcome", "anchor", "private-alpha", "success", _iso_at(now - timedelta(hours=1)))
-    for index in range(11):
+    for index in range(12):
         cycle = f"prior-{index}"
         record_cycle_started(state, cycle, f"request-{index}", None, retry_key="private-alpha")
         record_cycle_outcome(state, cycle, "failed", "attempt_failed", [], None, retry_key="private-alpha")
-    record_cycle_outcome(state, "orphan-cycle", "success", None, [], None, retry_key="private-beta")
-
     result = read_task_attempt_warning(state, now=now + timedelta(seconds=1))
+    assert result["status"] == "warning"
+    assert result["warning"] is True
+    assert result["warning_tasks"] is None
+    assert "private-alpha" not in json.dumps(result)
+
+    orphaned = tmp_path / "orphaned-terminal"
+    _append(orphaned, "outcome", "anchor", "private-alpha", "success", _iso_at(now - timedelta(hours=1)))
+    for index in range(12):
+        cycle = f"prior-{index}"
+        record_cycle_started(orphaned, cycle, f"request-{index}", None, retry_key="private-alpha")
+        record_cycle_outcome(orphaned, cycle, "failed", "attempt_failed", [], None, retry_key="private-alpha")
+    record_cycle_outcome(orphaned, "orphan-cycle", "success", None, [], None, retry_key="private-beta")
+
+    result = read_task_attempt_warning(orphaned, now=now + timedelta(seconds=1))
     assert result["status"] == "unknown"
     assert result["warning"] is None
     assert result["warning_tasks"] is None
