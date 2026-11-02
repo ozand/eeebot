@@ -725,7 +725,17 @@ def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) 
                 continue
             previous_terminal = cycle_terminal_outcomes.get(cycle_id)
             if previous_terminal is not None:
+                pending_service_only = (
+                    previous_terminal == "push_pending"
+                    and outcome == "partial"
+                    and row.get("reason") == "service_only"
+                    and key is None
+                )
                 if previous_terminal != "push_pending" or outcome not in {"pushed_late", "partial", "superseded", "abandoned"}:
+                    conflicting_terminal_outcomes = True
+                    invalidate_streak_coverage()
+                    continue
+                if outcome == "partial" and not pending_service_only:
                     conflicting_terminal_outcomes = True
                     invalidate_streak_coverage()
                     continue
