@@ -9,7 +9,7 @@ tags: [runtime, provenance, public-projection]
 
 # ADR-048: Persist producer-established provenance on self-derived public rows
 
-**Status**: Proposed
+**Status**: Proposed. Test Contract evidence was audited against published main `2e176812abad12e3e49f5e9270c5655648429992` (CI run `41503232318`); independent review of any acceptance revision remains required. No host rollout is claimed.
 **Date**: 2026-11-02
 **Authors**: ozand, delegated design executor
 **Supersedes**: None
@@ -65,9 +65,9 @@ The producer remains the sole source of this metadata; the dashboard remains a r
 
 | Claim | Test | Currently |
 |---|---|---|
-| Every derived-priority row carries explicit self-derived provenance | `tests/test_derived_view_writer.py::test_every_derived_priority_row_carries_self_derived_provenance` | Exists on pre-existing PR #2054 head; must be verified on final implementation head |
-| Existing priority-item output remains correct when derived provenance is serialized | `tests/test_demand.py::TestPublishDerivedView::test_operator_v2_outranks_self_derived_v1_with_provenance_and_direction` | Exists on pre-existing PR #2054 head; must be verified on final implementation head |
-| Charter provenance remains release-root-only and never leaks goal_text | `tests/test_derived_view_writer.py::test_a_release_goals_md_read_is_the_only_release_goals_md_tag`, `test_b_goals_md_absent_with_goal_text_present_is_never_tagged`, `test_c_merged_derived_inputs_without_release_goals_md_are_never_tagged` | Existing tests on pre-existing PR head; regression guards, not newly attributed to this decision |
+| Every derived-priority row carries explicit self-derived provenance | `tests/test_derived_view_writer.py::test_every_derived_priority_row_carries_self_derived_provenance` | Verified on published main `2e176812abad12e3e49f5e9270c5655648429992`; test file cites ADR-048 |
+| Existing priority-item output remains correct when derived provenance is serialized | `tests/test_demand.py::TestPublishDerivedView::test_operator_v2_outranks_self_derived_v1_with_provenance_and_direction` | Verified on published main `2e176812abad12e3e49f5e9270c5655648429992`; test file cites ADR-048 |
+| Charter provenance remains release-root-only and never leaks goal_text | `tests/test_derived_view_writer.py::test_a_release_goals_md_read_is_the_only_release_goals_md_tag`, `test_b_goals_md_absent_with_goal_text_present_is_never_tagged`, `test_c_merged_derived_inputs_without_release_goals_md_are_never_tagged` | Verified on published main `2e176812abad12e3e49f5e9270c5655648429992`; test file cites ADR-048. These are existing regression guards, not newly attributed to this decision |
 
 ## Rollback
 
