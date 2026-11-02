@@ -1,4 +1,4 @@
-# ADR-047: Persist producer-established provenance on self-derived public rows
+# ADR-048: Persist producer-established provenance on self-derived public rows
 
 **Status**: Proposed
 **Date**: 2026-11-02
