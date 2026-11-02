@@ -908,7 +908,7 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     predating these fields are **unavailable**, never interpreted as an empty
     source set or no Direction.
 
-- R46 (issue #2148). When `build_derived_view` serializes a row from the goal-review-owned `state/goals/derived_priorities.json` into the public `derived_priorities` projection, that row SHALL carry explicit `provenance: self-derived`. The provenance tag is established by the producer, not inferred by a consumer; operator priority text remains private and the dashboard's existing typed allowlist remains read-only. See `docs/adr/ADR-048-persist-self-derived-provenance-in-public-projection.md` and `docs/changes/2148-self-derived-public-provenance/proposal.md`.
+- R46 (issue #2148). When `build_derived_view` serializes a row from the goal-review-owned `state/goals/derived_priorities.json` into the public `derived_priorities` projection, that row SHALL carry explicit `provenance: self-derived`. The provenance tag is established by the producer, not inferred by a consumer; operator priority text remains private and the dashboard's existing typed allowlist remains read-only. See `docs/adr/ADR-048-persist-self-derived-provenance-in-public-projection.md` and `docs/changes/archive/2148-self-derived-public-provenance/proposal.md`.
 
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor
