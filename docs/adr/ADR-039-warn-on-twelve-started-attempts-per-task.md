@@ -9,7 +9,7 @@ tags: [runtime, observability, privacy, h5]
 
 # Status
 
-Proposed under #2088 and refined for the design-only follow-up #2143. This records delegated technical design choices, not personal operator acceptance, ADR acceptance, implementation authority, or rollout. Owner: ozand. Target environment: eeebot runtime and its existing operator-facing health/reporting surfaces; host rollout remains separately authorized. An acceptance candidate is being prepared under #2143; the ADR remains Proposed until the delegated technical acceptance is recorded after exact-revision independent review and merge.
+Accepted by the delegated delivery executor under the explicit end-to-end technical delegation recorded on #2143, via accepting change PR #2147, after the test contract was verified at `97cc60442ea918d3b63fc2fa6ddb470142936a30` and the accepted revision passed its required checks and independent review. This is delegated technical acceptance, not personal operator acceptance or a claim that the operator personally approved the ADR. It authorizes no host rollout. The accepted revision of this record is not effective on main until PR #2147 merges.
 
 # Context
 
