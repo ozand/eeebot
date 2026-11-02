@@ -1,6 +1,6 @@
 ---
 title: Persist producer-established provenance on self-derived public rows
-status: proposed
+status: accepted
 date: 2026-11-02
 authors: [ozand, delegated design executor]
 related: ["#2148", "ADR-034", "ADR-036", "ADR-023"]
@@ -9,7 +9,10 @@ tags: [runtime, provenance, public-projection]
 
 # ADR-048: Persist producer-established provenance on self-derived public rows
 
-**Status**: Proposed. Test Contract evidence was audited against published main `2e176812abad12e3e49f5e9270c5655648429992` (CI run `41503232318`); independent review of any acceptance revision remains required. No host rollout is claimed.
+# Status
+
+Provisional accepted-status candidate prepared by the delegated technical delivery executor under the owner-authorized end-to-end task delegation, via PR #2150, on 2026-11-02. This is not effective acceptance, personal operator approval, or a claim that the required independent review/checks have passed on this candidate. The Test Contract semantic audit (artifact `ebeeaee9`) and CI run `41503232318` apply only to published source `2e176812abad12e3e49f5e9270c5655648429992`; they do not validate this candidate. The exact candidate SHA, its independent review result, applicable checks, and authorized merge receipt must be retained in the PR after those events. Effective acceptance occurs only on authorized merge of the unchanged reviewed candidate. No host rollout is claimed.
+
 **Date**: 2026-11-02
 **Authors**: ozand, delegated design executor
 **Supersedes**: None
