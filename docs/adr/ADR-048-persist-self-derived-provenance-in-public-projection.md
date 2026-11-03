@@ -1,6 +1,6 @@
 ---
 title: Persist producer-established provenance on self-derived public rows
-status: proposed
+status: accepted
 date: 2026-11-02
 authors: [ozand, delegated design executor]
 related: ["#2148", "ADR-034", "ADR-036", "ADR-023"]
@@ -9,7 +9,10 @@ tags: [runtime, provenance, public-projection]
 
 # ADR-048: Persist producer-established provenance on self-derived public rows
 
-**Status**: Proposed
+# Status
+
+Provisional accepted-status candidate prepared by the delegated technical delivery executor under the owner-authorized end-to-end task delegation, via PR #2150, on 2026-11-02. This is not effective acceptance, personal operator approval, or a claim that the required independent review/checks have passed on this candidate. The Test Contract semantic audit (artifact `ebeeaee9`) and CI run `41503232318` apply only to published source `2e176812abad12e3e49f5e9270c5655648429992`; they do not validate this candidate. The exact candidate SHA, its independent review result, applicable checks, and authorized merge receipt must be retained in the PR after those events. Effective acceptance occurs only on authorized merge of the unchanged reviewed candidate. No host rollout is claimed.
+
 **Date**: 2026-11-02
 **Authors**: ozand, delegated design executor
 **Supersedes**: None
@@ -17,7 +20,7 @@ tags: [runtime, provenance, public-projection]
 
 ## Context
 
-Issue #2148 follows an already-open draft PR #2054. The PR was created 2026-09-29, with head `727802fac74504e68552220dabc634d996da4f3e` based on `6d476b715aa5989d5036e1385f6262d0f2a70f4b`; issue #2148 was created later, 2026-11-02. The PR's producer field predates the issue and is not evidence of prior ADR approval. Current main at review time is `51653e771fae5cf4476af14da2df8751fd18df0e`.
+Issue #2148 follows an already-open draft PR #2054. The PR was created 2026-09-29, with head `727802fac74504e68552220dabc634d996da4f3e` based on `6d476b715aa5989d5036e1385f6262d0f2a70f4b`; issue #2148 was created later, 2026-11-02. The PR's producer field predates the issue and is not evidence of prior ADR approval. The original design-review snapshot of main was `51653e771fae5cf4476af14da2df8751fd18df0e`; it is historical context, not the base for this acceptance candidate. The acceptance candidate was rebased on published main `9555c0fe60228d4d1e2ec6d8d684e52f82d83563`; the audited producer source and source CI remain specific to published main `2e176812abad12e3e49f5e9270c5655648429992`.
 
 The proposed change adds `provenance: self-derived` to persisted rows emitted in `state/public/derived_view.json`. That is a public persisted data contract and a trust claim: a consumer may use the tag to decide whether to reveal row label/direction. ADR-036 is still Proposed, ADR-034 is still Proposed, and neither specifies this exact producer-to-public-projection field contract. ADR-023 establishes the general principle that facts shown to the loop require provenance, but does not define this public dashboard field. No accepted ADR explicitly covers this exact field, scope, and trust boundary.
 
@@ -65,9 +68,9 @@ The producer remains the sole source of this metadata; the dashboard remains a r
 
 | Claim | Test | Currently |
 |---|---|---|
-| Every derived-priority row carries explicit self-derived provenance | `tests/test_derived_view_writer.py::test_every_derived_priority_row_carries_self_derived_provenance` | Exists on pre-existing PR #2054 head; must be verified on final implementation head |
-| Existing priority-item output remains correct when derived provenance is serialized | `tests/test_demand.py::TestPublishDerivedView::test_operator_v2_outranks_self_derived_v1_with_provenance_and_direction` | Exists on pre-existing PR #2054 head; must be verified on final implementation head |
-| Charter provenance remains release-root-only and never leaks goal_text | `tests/test_derived_view_writer.py::test_a_release_goals_md_read_is_the_only_release_goals_md_tag`, `test_b_goals_md_absent_with_goal_text_present_is_never_tagged`, `test_c_merged_derived_inputs_without_release_goals_md_are_never_tagged` | Existing tests on pre-existing PR head; regression guards, not newly attributed to this decision |
+| Every derived-priority row carries explicit self-derived provenance | `tests/test_derived_view_writer.py::test_every_derived_priority_row_carries_self_derived_provenance` | Verified on published main `2e176812abad12e3e49f5e9270c5655648429992`; test file cites ADR-048 |
+| Existing priority-item output remains correct when derived provenance is serialized | `tests/test_demand.py::TestPublishDerivedView::test_operator_v2_outranks_self_derived_v1_with_provenance_and_direction` | Verified on published main `2e176812abad12e3e49f5e9270c5655648429992`; test file cites ADR-048 |
+| Charter provenance remains release-root-only and never leaks goal_text | `tests/test_derived_view_writer.py::test_a_release_goals_md_read_is_the_only_release_goals_md_tag`, `test_b_goals_md_absent_with_goal_text_present_is_never_tagged`, `test_c_merged_derived_inputs_without_release_goals_md_are_never_tagged` | Verified on published main `2e176812abad12e3e49f5e9270c5655648429992`; test file cites ADR-048. These are existing regression guards, not newly attributed to this decision |
 
 ## Rollback
 
