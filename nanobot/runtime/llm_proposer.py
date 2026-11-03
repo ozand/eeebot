@@ -811,8 +811,8 @@ def _recent_proposed_titles(rows: list[dict[str, Any]], n: int = _RECENT_PROPOSE
     return titles
 
 
-# Non-delivery outcomes include supplier outages and incomplete model calls.
-_NOT_DELIVERED_OUTCOMES = frozenset({"failed", "partial", "timeout", "model_call_incomplete", "paused-supplier"})
+# Supplier interruptions are not evidence that an approach failed.
+_NOT_DELIVERED_OUTCOMES = frozenset({"failed", "partial", "timeout"})
 
 # #716: gate rollback reasons that mean the cycle produced real work but it
 # was blocked from delivery — same "not delivered" bucket as the outcome set,
