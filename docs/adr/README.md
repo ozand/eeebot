@@ -14,12 +14,14 @@ Conventions:
 
 ## Index
 
-The `Status` column mirrors each ADR's frontmatter. An `accepted` row on an
-unmerged candidate branch describes only the provisional status-flip candidate;
-it is not effective acceptance. On published `main`, `accepted` means that the
-unchanged candidate passed independent review and applicable required checks on
-its exact SHA, then was authorized and merged. Do not treat a PR branch's index
-row as evidence that acceptance is already effective.
+The `Status` column mirrors each ADR's frontmatter. For acceptances completed
+under this procedure, an `accepted` row on an unmerged candidate branch
+describes only the provisional status-flip candidate; it is not effective
+acceptance. On published `main`, `accepted` means that this procedure's exact-
+SHA review/check and authorized-merge gates were completed. Older records keep
+their recorded history; their `accepted` status does not imply retroactive
+compliance with this procedure. Do not treat a PR branch's index row as evidence
+that acceptance is already effective.
 
 | ADR | Title | Status |
 |---|---|---|
@@ -108,11 +110,16 @@ its authorized merge.
    candidate are necessary but do not themselves authorize acceptance or merge.
 3. Effective acceptance occurs only when an authorized decision owner, or an
    explicitly delegated delivery executor acting within that delegation,
-   merges that unchanged reviewed candidate. Record the authority, candidate
-   SHA, review, checks, and merge reference under `# Status`; distinguish the
-   candidate status-flip commit from the later effective-acceptance event.
-   Delegated technical acceptance is not a claim that a human reviewer or
-   operator personally accepted it. No agent may record operator acceptance
+   merges that unchanged reviewed candidate. Record the authority and planned
+   accepting change in the candidate's `# Status`, and distinguish the
+   candidate status-flip commit from the later effective-acceptance event. The
+   exact candidate SHA, independent review result, applicable check results,
+   and merge reference must be retained in a durable linked acceptance record,
+   such as the PR or governing issue, after those events. The record must point
+   to the exact reviewed and merged SHA; do not edit the ADR after review to add
+   post-review evidence, since that would create a new revision requiring fresh
+   gates. Delegated technical acceptance is not a claim that a human reviewer
+   or operator personally accepted it. No agent may record operator acceptance
    on the operator's behalf.
 
 `tests/test_adr_acceptance.py` enforces rule 1 on every `accepted` record,

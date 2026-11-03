@@ -12,9 +12,16 @@
 3. Effective acceptance occurs only when the unchanged reviewed candidate is
    merged with authorization. If content changes, derive a new SHA and repeat
    review/check gates before merge. Do not rewrite historical chronology.
-4. Preserve operator-reserved authority. This proposal does not amend or
+4. Before the candidate review, its `# Status` may identify the delegated
+   authority and planned accepting change. After review/checks and authorized
+   merge, retain exact candidate SHA, review result, applicable check results,
+   and merge reference in a durable linked PR or issue acceptance record. Do
+   not amend the ADR after review to add those results; any new SHA needs fresh
+   gates.
+5. Preserve operator-reserved authority. This proposal does not amend or
    retroactively reinterpret #2148/#2150, #2141/#2142, #2139, or prior ADR
-   status changes.
+   status changes. Older accepted ADRs retain their recorded history and are
+   not retroactively asserted to meet this new procedure.
 
 ## Affected components
 
