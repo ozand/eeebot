@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from nanobot.agent.context import ContextBuilder, SystemPromptOverflowError
+from nanobot.agent.subagent import SubagentManager
 from nanobot.runtime import bridge, context_compaction
 from tests.test_bridge_executor_llm_error import _stub_planning_session
 from tests.test_cycle_ledger import (
@@ -61,6 +62,7 @@ def overridden_env():
 
 @pytest.fixture(autouse=True)
 def _bridge_fixture_repo(monkeypatch, tmp_path):
+    monkeypatch.setenv(ContextBuilder.SYSTEM_PROMPT_CAP_ENV, str(ContextBuilder.MAX_SYSTEM_PROMPT_CHARS))
     monkeypatch.setattr(bridge, "_CORE_SMOKE_TESTS", ("tests/test_smoke.py",))
     release_root = tmp_path / "_release_root"
     release_root.mkdir(exist_ok=True)
@@ -112,16 +114,27 @@ class _RealBuilderManager(_FakeSubagentManager):
         return prompt
 
 
+class _ObservedSubagentManager(SubagentManager):
+    instances: list[SubagentManager] = []
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        type(self).instances.append(self)
+
+
 def _run_cycle(
     tmp_path, monkeypatch, *, raise_overflow: bool, omit_budget: bool = False,
+    manager_class: type = _RealBuilderManager,
 ) -> list[dict[str, Any]]:
+    _ObservedSubagentManager.instances = []
+    _RealBuilderManager.last_builder = None
     state_dir = tmp_path / "state"
     state_dir.mkdir(exist_ok=True)
     _init_selfevo_repo(tmp_path)
     monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
     monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
     monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "target_workspace")
-    monkeypatch.setattr(bridge, "SubagentManager", _RealBuilderManager)
+    monkeypatch.setattr(bridge, "SubagentManager", manager_class)
     monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
     monkeypatch.setenv("SELFEVO_DUMP_PROMPTS", "0")
     builder_root = tmp_path / "builder"
@@ -145,19 +158,25 @@ def _assert_numbers_only(value: Any, path: str = "budget") -> None:
         assert value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)), (path, value)
 
 
-def _assert_budget(row: dict[str, Any]) -> None:
+def _assert_budget(row: dict[str, Any], *, prompt_cap: int = 41000) -> None:
     builder = _RealBuilderManager.last_builder
-    assert builder is not None
+    if builder is None:
+        managers = [m for m in _ObservedSubagentManager.instances if m._telemetry_component == "executor"]
+        assert len(managers) == 1
+        assert managers[0].last_prompt_fit["budget"] == {
+            "system_prompt_budget_chars": prompt_cap,
+            "release_pool_chars": row["release_pool_chars"],
+            "operating_reserve_chars": row["operating_reserve_chars"],
+            "agents_md_cap_chars": row["agents_md_cap_chars"],
+            "compaction": row["compaction"],
+        }
     assert BUDGET_KEYS <= set(row), sorted(BUDGET_KEYS - set(row))
     # env-overridden values, not the defaults (98,304 / 8,192 / 0.8 / 20,000 / 35,000)
     assert row["compaction"] == EXPECTED_COMPACTION
-    assert row["system_prompt_budget_chars"] == 41000 == row["cap"]
+    assert row["system_prompt_budget_chars"] == prompt_cap == row["cap"]
     # the pool as this very build drew from it
-    assert row["release_pool_chars"] == {
-        "limit": ContextBuilder._RELEASE_POOL_CHARS,
-        "used": builder.last_fit["release_pool"]["used"],
-    }
-    assert row["release_pool_chars"]["used"] > 0
+    assert row["release_pool_chars"]["limit"] == ContextBuilder._RELEASE_POOL_CHARS
+    assert 0 < row["release_pool_chars"]["used"] <= row["release_pool_chars"]["limit"]
     assert row["operating_reserve_chars"] == ContextBuilder._RELEASE_BLOCK_FLOORS["OPERATING.md"]
     assert row["agents_md_cap_chars"] == next(
         cap for kind, name, cap, _ in ContextBuilder.BOOTSTRAP_FILES if kind == "workspace"
@@ -173,9 +192,19 @@ def test_healthy_system_prompt_row_carries_resolved_budgets(tmp_path, monkeypatc
 
 
 def test_overflow_system_prompt_row_carries_resolved_budgets(tmp_path, monkeypatch, overridden_env):
-    (row,) = _run_cycle(tmp_path, monkeypatch, raise_overflow=True)
+    # A one-character cap makes even the real builder's names-only fallback
+    # impossible. The real SubagentManager builds the prompt and forwards the
+    # strict exception's last_fit to bridge; no test-created exception or fit.
+    with monkeypatch.context() as cap_env:
+        cap_env.setenv(ContextBuilder.SYSTEM_PROMPT_CAP_ENV, "1")
+        (row,) = _run_cycle(
+            tmp_path, monkeypatch, raise_overflow=False, manager_class=_ObservedSubagentManager,
+        )
     assert row["overflow"] is True
-    _assert_budget(row)
+    assert row["cap"] == row["system_prompt_budget_chars"] == 1
+    assert row["over_by"] > 0
+    assert row["droppable_reserve_chars"] == 0
+    _assert_budget(row, prompt_cap=1)
 
 
 def test_healthy_system_prompt_row_without_builder_budget_keeps_existing_fields(tmp_path, monkeypatch):
