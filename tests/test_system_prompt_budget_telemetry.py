@@ -163,20 +163,26 @@ def _assert_budget(row: dict[str, Any], *, prompt_cap: int = 41000) -> None:
     if builder is None:
         managers = [m for m in _ObservedSubagentManager.instances if m._telemetry_component == "executor"]
         assert len(managers) == 1
-        assert managers[0].last_prompt_fit["budget"] == {
+        fit = managers[0].last_prompt_fit
+        assert fit["budget"] == {
             "system_prompt_budget_chars": prompt_cap,
             "release_pool_chars": row["release_pool_chars"],
             "operating_reserve_chars": row["operating_reserve_chars"],
             "agents_md_cap_chars": row["agents_md_cap_chars"],
             "compaction": row["compaction"],
         }
+    else:
+        fit = builder.last_fit
     assert BUDGET_KEYS <= set(row), sorted(BUDGET_KEYS - set(row))
     # env-overridden values, not the defaults (98,304 / 8,192 / 0.8 / 20,000 / 35,000)
     assert row["compaction"] == EXPECTED_COMPACTION
     assert row["system_prompt_budget_chars"] == prompt_cap == row["cap"]
     # the pool as this very build drew from it
-    assert row["release_pool_chars"]["limit"] == ContextBuilder._RELEASE_POOL_CHARS
-    assert 0 < row["release_pool_chars"]["used"] <= row["release_pool_chars"]["limit"]
+    assert row["release_pool_chars"] == {
+        "limit": ContextBuilder._RELEASE_POOL_CHARS,
+        "used": fit["release_pool"]["used"],
+    }
+    assert row["release_pool_chars"]["used"] > 0
     assert row["operating_reserve_chars"] == ContextBuilder._RELEASE_BLOCK_FLOORS["OPERATING.md"]
     assert row["agents_md_cap_chars"] == next(
         cap for kind, name, cap, _ in ContextBuilder.BOOTSTRAP_FILES if kind == "workspace"
