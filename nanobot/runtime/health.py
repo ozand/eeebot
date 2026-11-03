@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from nanobot.runtime.cycle_ledger import _retention_days as cycle_ledger_retention_days
 from nanobot.runtime.schemas import CycleHealth
 from nanobot.runtime.state import _json_files_sorted_by_mtime, load_runtime_state_from_root
 from nanobot.runtime.state_access import ledger_window
@@ -163,7 +164,10 @@ def _parse_ledger_timestamp(value: Any) -> float | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.timestamp()
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -426,7 +430,11 @@ def read_derived_priorities_queue(state_root: Path) -> dict[str, int | str]:
     :func:`operator_documents.resolve_derived_priorities`, the derived
     priorities' one resolver, never a second path to the file."""
     from nanobot.runtime import goal_review
-    from nanobot.runtime.operator_documents import STATE_ABSENT, STATE_TEXT, resolve_derived_priorities
+    from nanobot.runtime.operator_documents import (
+        STATE_ABSENT,
+        STATE_TEXT,
+        resolve_derived_priorities,
+    )
 
     res = resolve_derived_priorities(state_root)
     depth = len(res.entries) if res.state == STATE_TEXT else 0
@@ -455,6 +463,7 @@ def build_cycle_health_summary(
     runtime["runtime_state_unavailable"] = ledger_age is None
     runtime["runtime_state_stale"] = ledger_age is not None and ledger_age > _LEDGER_STALE_AFTER_SECONDS
     runtime["cycle_progress"] = progress
+    runtime["task_attempt_warning"] = read_task_attempt_warning(state_root)
     live = runtime.get("live") if isinstance(runtime.get("live"), dict) else {}
     recent = live.get("recent_outcomes") if isinstance(live.get("recent_outcomes"), list) else []
     latest_cycle_id = recent[0].get("cycle_id") if recent and isinstance(recent[0], dict) else None
@@ -472,6 +481,7 @@ def build_cycle_health_summary(
         "latest_cycle_id": latest_cycle_id,
         "ledger_age_seconds": ledger_age,
         "progress": progress,
+        "task_attempt_warning": runtime["task_attempt_warning"],
         "latest_subagent_telemetry_id": runtime.get("subagent_telemetry_latest_id"),
         "latest_subagent_telemetry_path": runtime.get("subagent_telemetry_path"),
         "service_status": service_status,
@@ -520,6 +530,7 @@ def format_cycle_health_summary(summary: CycleHealth) -> list[str]:
         "  Ledger age: "
         + (f"{summary.get('ledger_age_seconds') / 3600:.1f}h" if isinstance(summary.get('ledger_age_seconds'), (int, float)) else "no ledger"),
         "  Progress: " + _format_progress_line(summary.get("progress")),
+        "  Task-attempt warning: " + _format_task_attempt_warning(summary.get("task_attempt_warning")),
         "  Progress threshold: " + _format_progress_threshold(summary.get("progress")),
         f"  Latest subagent telemetry id: {summary.get('latest_subagent_telemetry_id') or 'unknown'}",
         f"  Latest subagent telemetry path: {summary.get('latest_subagent_telemetry_path') or 'unknown'}",
@@ -558,6 +569,235 @@ def _format_progress_threshold(progress: Any) -> str:
     if not isinstance(progress, dict):
         return "unavailable"
     return f"{progress.get('threshold_hours', _PROGRESS_THRESHOLD_HOURS):.1f}h / {progress.get('threshold_cycles', _PROGRESS_THRESHOLD_CYCLES)} cycles at {progress.get('cadence_minutes', 4):.0f}m cadence"
+
+
+def _format_task_attempt_warning(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "UNKNOWN (coverage incomplete)"
+    if value.get("warning") is True:
+        return f"warning: at least one task has {value.get('threshold', 12)} evidenced starts"
+    if value.get("status") == "clear" and value.get("warning") is False:
+        return f"clear: {value.get('warning_tasks', 0)} task warnings (coverage complete)"
+    return "UNKNOWN (coverage incomplete)"
+
+
+def read_task_attempt_warning(state_root: Path, *, now: datetime | None = None) -> dict[str, Any]:
+    """Return aggregate-only H5 evidence; raw retry keys never leave this reader.
+
+    The read is bounded to the cycle ledger's effective retention horizon and
+    treats uncertain boundaries as UNKNOWN rather than claiming low counts.
+    """
+    moment = now or datetime.now(timezone.utc)
+    horizon = cycle_ledger_retention_days()
+    try:
+        since = moment - timedelta(days=horizon)
+        window = ledger_window(
+            state_root,
+            since_ts=since.isoformat().replace("+00:00", "Z"),
+            max_bytes=16 * 2**20,
+            now=moment,
+            retention_days=horizon,
+            strict_json=True,
+        )
+    except (OSError, ValueError, TypeError, OverflowError):
+        return {"threshold": 12, "coverage_days": horizon, "status": "unknown", "coverage": "unavailable", "warning": None, "warning_tasks": None}
+    base = {"threshold": 12, "coverage_days": horizon}
+    if window.status == "unavailable" or not window.rows:
+        return {**base, "status": "unknown", "coverage": "incomplete", "warning": None, "warning_tasks": None}
+    # Archived rows cannot prove the active ledger is present: newer resets or
+    # starts may be missing, so archive-only evidence is never current coverage.
+    if "dir_missing" in window.notes:
+        return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
+    # A byte-capped ledger read is a prefix, so it cannot exclude a later exact
+    # reset row. Do not emit warning or clear from truncated history.
+    if "cap_bytes" in window.notes:
+        return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
+    if any(note.startswith(("permission", "io_error", "gz_corrupt", "malformed_json", "malformed_row", "malformed_utf8")) for note in window.notes):
+        return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
+    if any(note.startswith("invalid_archive:") for note in window.notes):
+        return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
+
+    # A malformed timestamp has no trustworthy chronological position; do not
+    # sort around it and accidentally count evidence on both sides.
+    for row in window.rows:
+        if "ts" in row and not isinstance(row.get("ts"), str):
+            return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
+        if "timestamp" in row and not isinstance(row.get("timestamp"), str):
+            return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
+        timestamp_value = row.get("ts") or row.get("timestamp")
+        if _parse_ledger_timestamp(timestamp_value) is None:
+            return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
+
+    # ledger_window already returns timestamp-ordered rows. Preserve that stable
+    # order without sorting on untrusted source metadata.
+    rows = list(window.rows)
+    if not rows:
+        return {**base, "status": "unknown", "coverage": "incomplete", "warning": None, "warning_tasks": None}
+    for row in rows:
+        if "phase" not in row:
+            invalidate_row = True
+        else:
+            invalidate_row = not isinstance(row["phase"], str)
+        if "retry_key" in row and not isinstance(row["retry_key"], str):
+            invalidate_row = True
+        if "cycle_id" in row and not isinstance(row["cycle_id"], str):
+            invalidate_row = True
+        if "outcome" in row and not isinstance(row["outcome"], str):
+            invalidate_row = True
+        if invalidate_row:
+            return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
+    streaks: dict[str, int] = {}
+    cycle_keys: dict[str, str] = {}
+    cycle_start_counts: dict[str, int] = {}
+    cycle_terminal_outcomes: dict[str, str] = {}
+    conflicting_terminal_outcomes = False
+    skipped_cycles: set[str] = set()
+
+    def invalidate_streak_coverage() -> None:
+        for known_key in streaks:
+            streaks[known_key] = 0
+        cycle_keys.clear()
+
+    for row in rows:
+        if "ts" in row and not isinstance(row.get("ts"), str):
+            invalidate_streak_coverage()
+            continue
+        if "timestamp" in row and not isinstance(row.get("timestamp"), str):
+            invalidate_streak_coverage()
+            continue
+        timestamp_value = row.get("ts") or row.get("timestamp")
+        row_timestamp = _parse_ledger_timestamp(timestamp_value)
+        if row_timestamp is None:
+            invalidate_streak_coverage()
+            continue
+        elif row_timestamp > moment.timestamp():
+            # Future evidence must not increase the current attempt count or
+            # anchor a reset; it can also indicate an incomplete/corrupt window.
+            invalidate_streak_coverage()
+            continue
+        phase = row.get("phase")
+        cycle_id = row.get("cycle_id")
+        unrelated_phases = {
+            "backlog_done_guard", "bridge_activation_self_check", "cycle_cost",
+            "day_boundary_transition", "dedup", "defect_decline_escalated",
+            "demand_cooling", "demand_vector_split", "deploy_behavioral_check",
+            "derived_view", "diary_fitness_error", "diary_open_entry",
+            "error_card_recording", "evolution_tree", "gate", "goal_gap_futile",
+            "goal_review", "guard_key_match", "hypothesis", "idle",
+            "insight_decision", "integrity", "no_plan_recovery", "open_increment",
+            "open_increment_delete_failed", "open_increment_held",
+            "open_increment_operator_flag", "open_increment_operator_flag_cleared",
+            "open_increment_resolve_failed", "open_increment_resolved",
+            "open_increment_running_registered", "plan_amendment", "planner_rest",
+            "planner_rest_held", "planner_rest_review_signal", "planning_session",
+            "proposed", "proposer_reject", "proposer_skip", "ranked_candidates",
+            "reflection_consumption", "rejected_duplicate", "tech_tree",
+        }
+        if phase in unrelated_phases:
+            # These valid phases can carry outcome/retry_key without representing
+            # task terminal events or resets.
+            continue
+        if not isinstance(phase, str) or phase not in {"started", "outcome"}:
+            # Unknown success-shaped or retry-keyed rows may conceal a reset.
+            if "outcome" in row or "retry_key" in row:
+                invalidate_streak_coverage()
+            continue
+        if not isinstance(cycle_id, str) or not cycle_id:
+            invalidate_streak_coverage()
+            continue
+        if phase == "started":
+            key = row.get("retry_key")
+            if not isinstance(key, str) or not key:
+                invalidate_streak_coverage()
+                continue
+            existing_key = cycle_keys.get(cycle_id)
+            if cycle_id in skipped_cycles or (existing_key is not None and existing_key != key):
+                invalidate_streak_coverage()
+                continue
+            cycle_keys[cycle_id] = key
+            cycle_start_counts[cycle_id] = cycle_start_counts.get(cycle_id, 0) + 1
+            streaks[key] = streaks.get(key, 0) + 1
+        elif phase == "outcome":
+            outcome = row.get("outcome")
+            key = row.get("retry_key")
+            if not isinstance(outcome, str):
+                invalidate_streak_coverage()
+                continue
+            started_key = cycle_keys.get(cycle_id)
+            if started_key is not None and key is not None and key != started_key:
+                invalidate_streak_coverage()
+                continue
+            if key is not None and started_key is None and outcome in {"success", "pushed_late"}:
+                # A keyed reset cannot be assigned to a task if its cycle has
+                # no retained keyed start; keep the suffix boundary unknown.
+                invalidate_streak_coverage()
+                continue
+            previous_terminal = cycle_terminal_outcomes.get(cycle_id)
+            if previous_terminal is not None:
+                pending_service_only = (
+                    previous_terminal == "push_pending"
+                    and outcome == "partial"
+                    and row.get("reason") == "service_only"
+                    and key is None
+                )
+                if previous_terminal != "push_pending" or outcome not in {"pushed_late", "partial", "superseded", "abandoned"}:
+                    conflicting_terminal_outcomes = True
+                    invalidate_streak_coverage()
+                    continue
+                if outcome == "partial" and not pending_service_only:
+                    conflicting_terminal_outcomes = True
+                    invalidate_streak_coverage()
+                    continue
+            cycle_terminal_outcomes[cycle_id] = outcome
+            if outcome == "skipped-duplicate":
+                started_key = cycle_keys.get(cycle_id)
+                if cycle_id in skipped_cycles or not started_key:
+                    invalidate_streak_coverage()
+                    continue
+                if key is not None and (not isinstance(key, str) or key != started_key):
+                    invalidate_streak_coverage()
+                    continue
+                if cycle_start_counts.get(cycle_id) != 1:
+                    invalidate_streak_coverage()
+                    continue
+                skipped_cycles.add(cycle_id)
+                streaks[started_key] = max(0, streaks.get(started_key, 0) - 1)
+                continue
+            if outcome == "success":
+                if not isinstance(key, str) or not key:
+                    invalidate_streak_coverage()
+                    continue
+                streaks[key] = 0
+            elif outcome == "pushed_late":
+                if isinstance(key, str) and key:
+                    streaks[key] = 0
+                else:
+                    # A keyless late success may reset any task. A subsequent
+                    # exact success re-anchors that task; otherwise twelve
+                    # later exact starts independently prove a warning.
+                    invalidate_streak_coverage()
+            elif outcome == "partial" and row.get("reason") == "service_only" and key is None:
+                # A late push of a known service-only diff resolves push_pending
+                # as the bridge's normal non-delivery partial outcome; it has no key lineage.
+                invalidate_streak_coverage()
+            elif outcome not in {"partial", "failed", "skipped-duplicate", "promotion_candidate", "push_pending", "superseded", "abandoned", "paused-supplier"}:
+                invalidate_streak_coverage()
+
+    if conflicting_terminal_outcomes:
+        return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
+
+    proven_warnings = sum(count >= 12 for count in streaks.values())
+    if proven_warnings:
+        return {
+            **base,
+            "status": "warning",
+            "coverage": "partial",
+            "warning": True,
+            "warning_tasks": None,
+        }
+    # No existing durable ledger marker proves global history completeness, so
+    # retained per-key evidence cannot establish an aggregate clear or count.
+    return {**base, "status": "unknown", "coverage": "partial", "warning": None, "warning_tasks": None}
 
 
 def dumps_cycle_health_summary(summary: CycleHealth) -> str:

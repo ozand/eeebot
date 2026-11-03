@@ -1,6 +1,6 @@
 # Observability — spec
 
-_Status: current. Last updated: 2026-06-25._
+_Status: current. Last updated: 2026-11-01._
 
 ## Purpose
 
@@ -12,6 +12,58 @@ as having happened. This spec is the normative contract; `docs/OBSERVABILITY.md`
 remains the explanatory reference (signal map, anti-patterns, walkthroughs).
 
 ## Requirements
+
+### Per-task H5 warning (#2143, ADR-039 Proposed)
+
+The existing cycle-health command exposes a read-only, aggregate-only task-attempt
+warning derived from append-only cycle-ledger evidence.
+
+- A `started` row may persist the bridge's already-computed exact `retry_key`;
+  rows without a key remain legacy/incomplete evidence. A cycle later recorded as
+  `skipped-duplicate` is excluded from the started-attempt count only when the
+  outcome joins an exact cycle/key start unambiguously and any supplied retry key
+  matches. Same-key keep/resume attempts may legitimately repeat a cycle ID and
+  each count as a start; a later duplicate skip for that reused ID is ambiguous
+  and yields UNKNOWN whether or not it carries the matching key. Conflicting-key
+  reuse, mismatched, unjoined, or
+  repeated skip outcomes also yield UNKNOWN.
+- Count exact-key starts since an exact-key successful terminal outcome. Edited
+  self-directed title text may form a new identity; late-push outcomes without
+  exact key lineage are not inferred by time, title, or cycle proximity.
+- Report a warning at 12 evidenced unsuccessful starts. Report clear/zero only
+  when at least one exact-key success has anchored task history and complete
+  start/reset coverage is available. Empty/no-task windows, missing keys,
+  malformed or partial reads, expired horizon, unrepresentably large horizon,
+  future-dated or timezone-naive rows, missing active ledger with archive-only
+  evidence, invalid UTF-8 ledger bytes, unknown resets, or absent global-history
+  evidence yield UNKNOWN and no count. Strict H5 ledger reads reject invalid
+  UTF-8; a valid literal U+FFFD character remains ordinary Unicode data. The
+  existing ledger has no inception/completeness watermark, so
+  an apparently complete retained slice cannot justify below-threshold aggregate
+  clear when older task keys may have been pruned. Valid unrelated phases remain
+  ignorable, but success-shaped rows with
+  missing/non-string phase, malformed outcome/key/cycle ID/timestamp, or empty
+  identity is UNKNOWN reset coverage and cannot crash health output. Twelve exact
+  current starts after an uncertain reset may prove a warning only when the suffix
+  since that reset is demonstrably complete; a missing active file, capped read,
+  or other coverage gap yields UNKNOWN. Task count remains unknown without global
+  completeness evidence.
+- Use the cycle ledger's `CYCLE_LEDGER_RETENTION_DAYS` effective horizon (90-day
+  default), reading retained archives and active data in timestamp order; this
+  does not promise physical age-based pruning of the active file. A byte-capped
+  prefix is UNKNOWN because a later reset may be unread.
+- Health JSON and text expose only warning/UNKNOWN status and coverage; known
+  clear coverage is rendered as clear, and raw retry keys are never shown. The
+  warning does not block or alter planner, retry, handled-marker, wake,
+  prioritization, or rollback behavior; #2050's global tripwire remains separate.
+
+### Runtime dashboard recovery visibility (#2118)
+
+The existing runtime dashboard presents a bounded, read-only projection of persisted planner recovery state.
+
+- The existing metrics, health, and rendered HTML surfaces SHALL label availability and expose only validated recovery flags and consecutive counts; missing, malformed (including invalid UTF-8), or unreadable state is not healthy zero and SHALL NOT break GET rendering.
+- Health status and the HTML recovery badge SHALL reflect stopped/degraded severity separately from source availability: stopped is critical, degraded is caution, and valid normal state is nominal.
+- The projection SHALL omit deferred verdict identifiers and arbitrary state payload fields and SHALL NOT trigger recovery writes, resume, cycle execution, or publisher actions.
 
 ### Seven operator questions
 
@@ -36,8 +88,8 @@ remains the explanatory reference (signal map, anti-patterns, walkthroughs).
 ### Material progress
 
 - R5. Material progress SHALL be measured by movement of `origin/main` —
-  integrated commits reaching the working repo's `origin/main` — and SHALL NOT be
-  measured by cycle count.
+  integrated commits reaching the working repo's `origin/main` — and SHALL NOT
+  be measured by cycle count.
 - R6. A cycle that produces no integrated change SHALL NOT be reported as material
   progress; narrative/bookkeeping activity SHALL NOT be presented as a kept
   improvement. A stalled `origin/main` while cycles run SHALL be observable as a

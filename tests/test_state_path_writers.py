@@ -83,6 +83,10 @@ def test_every_read_segment_declares_a_writer() -> None:
 def test_every_declared_writer_still_exists() -> None:
     """The load-bearing half: a deleted writer module fails here even if the
     reader scan never saw its readers."""
+    assert state_paths.STATE_PATH_WRITERS["planner"] == (
+        "nanobot.runtime.no_plan_recovery:_save_state",
+        "nanobot.runtime.operator_recovery:resume_operator",
+    )
     failures = [
         f"state/{segment}: {reason}"
         for segment, writers in sorted(state_paths.STATE_PATH_WRITERS.items())

@@ -71,6 +71,9 @@ CUTOVER_UTC: "datetime | None" = None
 #: has no cutover yet) -- ``None`` itself cannot mean both.
 _UNSET = object()
 
+#: Sentinel for a ledger with genuinely no cutover marker yet.
+_MISSING = object()
+
 #: Filename of the per-ledger marker recording the one cutover instant.
 CUTOVER_MARKER_FILENAME = "day_key_cutover.json"
 
@@ -84,11 +87,29 @@ def cutover_marker_path(ledger_dir: "Path | str") -> Path:
     return Path(ledger_dir) / CUTOVER_MARKER_FILENAME
 
 
+def _decode_cutover(raw: Any) -> datetime:
+    if not isinstance(raw, dict) or set(raw) != {"cutover_utc"}:
+        raise ValueError("invalid cutover marker shape")
+    value = raw["cutover_utc"]
+    if not isinstance(value, str):
+        raise ValueError("invalid cutover timestamp")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("cutover timestamp must be timezone-aware")
+    return parsed
+
+
+def _strict_marker_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate cutover marker key")
+        result[key] = value
+    return result
+
+
 def load_cutover(marker_path: "Path | str") -> "datetime | None":
-    """Read the recorded cutover instant, or ``None`` if no marker exists
-    yet (this ledger's writer has not migrated) or it is unreadable
-    (fail-open: a corrupt marker reads the same as "not migrated yet",
-    never crashes a caller)."""
+    """Best-effort compatibility reader: any unavailable/corrupt marker is absent."""
     try:
         raw = json.loads(Path(marker_path).read_text(encoding="utf-8"))
         value = raw["cutover_utc"]
@@ -99,7 +120,7 @@ def load_cutover(marker_path: "Path | str") -> "datetime | None":
 
 
 def record_cutover_if_absent(
-    marker_path: "Path | str", now: "datetime | None" = None
+    marker_path: "Path | str", now: "datetime | None" = None, *, strict: bool = False
 ) -> "tuple[datetime, bool]":
     """Idempotently record the cutover instant for one ledger directory.
 
@@ -114,17 +135,34 @@ def record_cutover_if_absent(
     day's transition marker (see ``cycle_ledger.append_event``) -- exactly
     once, ever, for that ledger.
 
-    Fail-open and best-effort: on any write error, still returns
-    ``(now, True)`` for THIS call (the caller can still act on the
-    transition), but the marker itself may not have been durably written --
-    a acceptable trade-off matching every other best-effort writer in this
-    codebase (see :mod:`nanobot.runtime.cycle_ledger`'s own module
-    docstring) since losing this one marker only means a later call
-    retries the same detection, not silent data loss.
+    By default this remains fail-open and best-effort for existing callers.
+    With ``strict=True``, only a genuinely absent marker may be created;
+    unreadable, malformed, or invalid existing marker data and write failures
+    propagate rather than being treated as absence.
     """
-    existing = load_cutover(marker_path)
-    if existing is not None:
-        return existing, False
+    """Idempotently record one ledger cutover instant; optionally fail on write errors."""
+    path = Path(marker_path)
+    try:
+        raw = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_strict_marker_object if strict else None,
+        )
+    except FileNotFoundError:
+        raw = _MISSING
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
+        if strict:
+            raise
+        raw = None
+    if raw is _MISSING:
+        raw = None
+    elif raw is None and strict:
+        raise ValueError("invalid cutover marker shape")
+    if raw is not None:
+        try:
+            return _decode_cutover(raw), False
+        except (TypeError, ValueError, OverflowError):
+            if strict:
+                raise
     moment = now if now is not None else datetime.now(timezone.utc)
     try:
         path = Path(marker_path)
@@ -134,7 +172,8 @@ def record_cutover_if_absent(
         tmp.write_text(payload, encoding="utf-8")
         os.replace(tmp, path)
     except Exception:
-        pass
+        if strict:
+            raise
     return moment, True
 
 

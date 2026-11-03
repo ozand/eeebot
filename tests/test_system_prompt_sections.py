@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+from datetime import datetime as real_datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,14 @@ from tests.test_cycle_ledger import (
 #: (was the five-section list identity/bootstrap/active_skills/
 #: skills_catalogue/memory before ADR-022's loader).
 SECTION_NAMES = list(LOOP_SECTION_NAMES)
+
+
+class _FrozenDatetime(real_datetime):
+    @classmethod
+    def now(cls, tz=None):
+        frozen = cls(2026, 10, 20, 12, tzinfo=timezone.utc)
+        return frozen if tz is None else frozen.astimezone(tz)
+
 
 DASHBOARD_PATH = Path(__file__).resolve().parents[1] / "scripts" / "eeebot_dashboard.py"
 _SPEC = importlib.util.spec_from_file_location("eeebot_dashboard", DASHBOARD_PATH)
@@ -455,7 +464,7 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
             fh.write(json.dumps(row) + "\n")
 
 
-def test_dashboard_scan_tolerates_pre_1379_ledger_rows(tmp_path):
+def test_dashboard_scan_tolerates_pre_1379_ledger_rows(tmp_path, monkeypatch):
     """``scan_prompt_fit_ledger`` (scripts/eeebot_dashboard.py:~1279) must
     parse both live pre-#1379 row shapes without error: a healthy row that
     never had a ``sections`` key at all, and a pre-``chars``-removal
@@ -473,6 +482,9 @@ def test_dashboard_scan_tolerates_pre_1379_ledger_rows(tmp_path):
         "sections": {"identity": 100, "bootstrap": 20000, "skills_catalogue": 3000, "memory": 900},
         "dropped": [], "droppable_reserve_chars": 0,
     }
+    from nanobot.runtime import prompt_fit
+
+    monkeypatch.setattr(prompt_fit, "datetime", _FrozenDatetime)
     _write_jsonl(tmp_path / "ledger" / "cycles.jsonl", [healthy_pre_1379, overflow_pre_chars_removal])
 
     result = DASHBOARD.scan_prompt_fit_ledger(tmp_path)

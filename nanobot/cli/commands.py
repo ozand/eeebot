@@ -838,6 +838,32 @@ def plugins_list():
 # ============================================================================
 
 
+@app.command("recovery-resume")
+def recovery_resume(
+    runtime_state_root: Path = typer.Option(..., "--runtime-state-root", help="Explicit runtime state root"),
+) -> None:
+    """Resume a stopped no-plan recovery state under the bridge lock."""
+    import json
+
+    from nanobot.runtime.operator_recovery import ResumeRefusedError, resume_operator
+
+    try:
+        result = resume_operator(runtime_state_root)
+        exit_code = 0
+    except ResumeRefusedError as exc:
+        result = {
+            "result": exc.result,
+            "state_status": exc.state,
+            "state_durability": exc.durability,
+            "audit_status": exc.audit,
+            "category": exc.category,
+        }
+        exit_code = 1
+    typer.echo(json.dumps(result, sort_keys=True))
+    if exit_code:
+        raise typer.Exit(exit_code)
+
+
 @app.command("cycle-health")
 def cycle_health(
     runtime_state_source: str = typer.Option(

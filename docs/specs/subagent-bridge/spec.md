@@ -1,8 +1,6 @@
 # Subagent Bridge — spec
 
-_Status: current. Last updated: 2026-09-27 (#1765: distinguish supplier outages,
-incomplete model calls, and request failures; bounded incomplete retries and
-matching attempt diagnostics). Previous entry: 2026-07-18 (#768: added R45 — the periodic
+_Status: current. Last updated: 2026-11-02 (#2148: producer projections label goal-review-owned derived-priority rows with explicit `self-derived` provenance, as specified by Proposed ADR-048; the typed dashboard projection remains a read-only allowlisted consumer). Previous entry: 2026-10-28 (#2050 H3 planner phase budget: explicit opt-in selects a 6000s planner phase with a reserved 3000s executor/gate phase; feature remains OFF by default and does not authorize host activation; ADR-045 is accepted for the narrow repository-source contract only, not host/service approval or rollout). Earlier entry: 2026-10-27 (#2036 capability slice: the planner subagent uses an explicit read/list tool profile; ADR-044 accepted for this narrow slice). Historical entry: 2026-07-18 (#768: added R45 — the periodic
 goal-review: `nanobot/runtime/goal_review.py`, behind
 `SELFEVO_GOAL_REVIEW_ENABLED` (default OFF) + a daily watermark, formulates
 1-3 bounded priorities from goal vectors + measured evidence (scorecard
@@ -171,6 +169,22 @@ passes — so a broken or unverified cycle never reaches `main`.
 > thin wrapper kept for the unchanged systemd/deploy contract).
 
 ## Requirements
+
+### Planner capability profile (#2036, ADR-044 accepted 2026-10-27)
+
+The planning subagent SHALL receive the closed `planner` capability profile:
+`read_file` and `list_dir` only, with the profile's declared read/list
+operations, existing workspace-relative and unrestricted absolute path behavior,
+and generated allowed-actions text. The planner SHALL NOT receive write, edit,
+command, memory-index search, web, or delegation tools. Invalid profile values
+SHALL fail before spawn without falling back to the executor profile. The legacy
+executor profile remains the default and preserves its existing tool and path
+behavior. This is an application tool-registration boundary, not OS-level
+filesystem isolation. See `docs/adr/ADR-044-planner-tool-capabilities-are-explicit-and-minimal.md`.
+
+### Append-only memory and lesson changes (#1768)
+
+The cycle gate SHALL allow additions under `memory/` and `lessons/`, reject deletions under those prefixes and any rename with either endpoint under those prefixes, and reject removal of existing lines from `memory/HISTORY.md`. For the history comparison, a file genuinely absent from the base revision has no prior lines to preserve and may be added; a baseline lookup that is unavailable or unreadable is unknown, not absent, and SHALL block with a deterministic violation. The full diff-status check SHALL use NUL-delimited records to preserve pathnames containing quotes, tabs, newlines, or non-ASCII characters. If the lookup fails or records are malformed, the gate SHALL block because protected-path changes cannot be verified, even when the name-only changed-path list contains no protected path; a successful empty result is distinct from an unavailable lookup. Readable baselines retain the existing no-shrink comparison. This rule applies to executor cycle gating; it does not change the intentional fail-open test-guard policy or curator promotion path.
 
 ### Skill mutation and first-hand usage fitness (#939)
 
@@ -894,6 +908,8 @@ next bounded task from an LLM instead of idling. Design + go/no-go evidence:
     predating these fields are **unavailable**, never interpreted as an empty
     source set or no Direction.
 
+- R46 (issue #2148). When `build_derived_view` serializes a row from the goal-review-owned `state/goals/derived_priorities.json` into the public `derived_priorities` projection, that row SHALL carry explicit `provenance: self-derived`. The provenance tag is established by the producer, not inferred by a consumer; operator priority text remains private and the dashboard's existing typed allowlist remains read-only. See `docs/adr/ADR-048-persist-self-derived-provenance-in-public-projection.md` and `docs/changes/archive/2148-self-derived-public-provenance/proposal.md`.
+
 ### Executor model
 - R4. The bridge SHALL run the bounded subagent on the mandatory local executor
   model `un/qwen3.6-27b-mtp` (logical alias `gpt-5.3-codex`), configured
@@ -1002,6 +1018,18 @@ instead. #1188 measured that `AGENTS.md` only grows and nothing ever removes;
   header instead of an XML `<skill>` block, dropping the ~200-char-per-skill
   tag/attribute/`<location>` wrapper (measured 9,225 → 3,567 chars on a
   33-skill fixture); interactive sessions keep the XML form unchanged.
+
+**Resolved prompt-budget telemetry (#2137, Proposed ADR-046):** the
+producer adds the builder-resolved `system_prompt_budget_chars`,
+`release_pool_chars` (`limit`, `used`), `operating_reserve_chars`,
+`agents_md_cap_chars`, and `compaction` (`window_tokens`, `reserve_tokens`,
+`threshold`, `keep_tokens`) values to the existing successful-fit and strict-
+overflow ledger rows. These are additive numeric/structured fit metadata,
+not a current-configuration manifest or prompt-content snapshot. When fit
+metadata has no `budget`, no budget keys are added; the existing row fields
+remain intact. The proposal is still Proposed; tests in this branch cover
+normal-fit, strict-overflow, overrides, and absent budget metadata, but that
+does not establish acceptance or publication on `main`.
 
 **#1725 (ADR-022) update:** the loop profile's `sections` breakdown is now
 nine ADR-022 ontology blocks in assembly order — `identity`, `soul`, `goals`,

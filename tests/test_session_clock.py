@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pytest
 
 from nanobot.agent.subagent import SubagentManager
 from nanobot.bus.queue import MessageBus
@@ -23,6 +24,7 @@ from nanobot.runtime.session_clock import (
     DEFAULT_PROGRESS_TIMEOUT_SECS,
     ProgressWatchdog,
     compute_cycle_max_call_gap,
+    get_bridge_wall_secs,
     get_call_p99_secs,
     get_final_budget_secs,
     get_progress_timeout_secs,
@@ -49,6 +51,69 @@ class _MockProvider(LLMProvider):
         if self.responses:
             return self.responses.pop(0)
         return LLMResponse(content="done", tool_calls=[])
+
+
+def test_default_bridge_wall_budget_is_3000_seconds(monkeypatch):
+    """ADR-045: the planner-phase feature does not change current-main defaults."""
+    monkeypatch.delenv("NANOBOT_SUBAGENT_WALL_SECS", raising=False)
+
+    from nanobot.runtime.session_clock import DEFAULT_WALL_SECS
+
+    assert get_bridge_wall_secs() == DEFAULT_WALL_SECS == 3000.0
+
+
+def test_planner_phase_opt_in_validation_and_deadline_partition(monkeypatch):
+    """ADR-045: explicit opt-in is separate from the legacy total-wall setting."""
+    from nanobot.runtime.session_clock import (
+        PlannerBudgetConfigurationError,
+        planner_phase_budget_enabled,
+        planner_phase_deadline,
+    )
+
+    monkeypatch.delenv("SELFEVO_PLANNER_PHASE_BUDGET_ENABLED", raising=False)
+    monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "9000")
+    assert planner_phase_budget_enabled() is False
+    monkeypatch.setenv("SELFEVO_PLANNER_PHASE_BUDGET_ENABLED", "false")
+    assert planner_phase_budget_enabled() is False
+    monkeypatch.delenv("NANOBOT_SUBAGENT_WALL_SECS", raising=False)
+    assert get_bridge_wall_secs() == 3000.0
+    monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "9000")
+    assert planner_phase_budget_enabled() is False
+    assert get_bridge_wall_secs() == 9000.0
+    monkeypatch.setenv("SELFEVO_PLANNER_PHASE_BUDGET_ENABLED", "TRUE")
+    with pytest.raises(PlannerBudgetConfigurationError):
+        planner_phase_budget_enabled()
+    monkeypatch.setenv("SELFEVO_PLANNER_PHASE_BUDGET_ENABLED", "true")
+    assert planner_phase_budget_enabled() is True
+    assert planner_phase_deadline(1000.0, 9000.0) == 6000.0
+    assert planner_phase_deadline(3500.0, 9000.0) == 6000.0
+    assert planner_phase_deadline(3500.0, 12000.0) == 9000.0
+    assert planner_phase_deadline(1500.0, 9000.0) == 6000.0
+    for invalid in (None, "bad", "nan", "inf", "8999", "9001"):
+        if invalid is None:
+            monkeypatch.delenv("NANOBOT_SUBAGENT_WALL_SECS", raising=False)
+        else:
+            monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", invalid)
+        with pytest.raises(PlannerBudgetConfigurationError):
+            planner_phase_budget_enabled()
+    monkeypatch.setenv("NANOBOT_SUBAGENT_WALL_SECS", "9000")
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "9000")
+    monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "300")
+    with pytest.raises(PlannerBudgetConfigurationError):
+        planner_phase_budget_enabled()
+
+
+def test_planner_wall_guard_uses_local_call_c_while_shared_guard_stays_c_plus_f(monkeypatch):
+    from nanobot.runtime.session_clock import should_stop_for_wall_clock
+
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "243")
+    monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "300")
+    # A planner-local C=243s remaining window is eligible for its final call;
+    # the shared C+F=543s guard remains independently enforced by the manager.
+    assert should_stop_for_wall_clock(9000.0, clock=lambda: 5757.0, planner_phase=True) is False
+    assert should_stop_for_wall_clock(9000.0, clock=lambda: 8757.1, planner_phase=True) is True
+    assert should_stop_for_wall_clock(9000.0, clock=lambda: 8456.9, planner_phase=False) is False
+    assert should_stop_for_wall_clock(9000.0, clock=lambda: 8457.1, planner_phase=False) is True
 
 
 class TestWallClockSafetyMargin:

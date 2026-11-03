@@ -8,12 +8,14 @@ import json
 import os
 import re
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from loguru import logger
 
 from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.web_transport import PinnedAddressTransport
+from nanobot.security.network import resolve_public_addresses
 
 if TYPE_CHECKING:
     from nanobot.config.schema import WebSearchConfig
@@ -182,7 +184,7 @@ class WebSearchTool(Tool):
             headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
             async with httpx.AsyncClient(proxy=self.proxy) as client:
                 r = await client.get(
-                    f"https://s.jina.ai/",
+                    "https://s.jina.ai/",
                     params={"q": query},
                     headers=headers,
                     timeout=15.0,
@@ -244,16 +246,25 @@ class WebFetchTool(Tool):
         self.max_chars = max_chars
         self.proxy = proxy
 
-    async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
+    async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:  # noqa: N803
         max_chars = maxChars or self.max_chars
-        is_valid, error_msg = _validate_url_safe(url)
-        if not is_valid:
-            return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False)
+        proxy_error = self._proxy_error()
+        if proxy_error:
+            return json.dumps({"error": proxy_error, "url": url}, ensure_ascii=False)
+        try:
+            return await self._fetch_readability(url, extractMode, max_chars)
+        except Exception as exc:
+            logger.error("WebFetch error for {}: {}", url, exc)
+            message = str(exc)
+            return json.dumps({"error": message, "url": url}, ensure_ascii=False)
 
-        result = await self._fetch_jina(url, max_chars)
-        if result is None:
-            result = await self._fetch_readability(url, extractMode, max_chars)
-        return result
+    def _proxy_error(self) -> str | None:
+        if self.proxy:
+            return "Explicit proxy configuration is unsupported"
+        names = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+        if any(os.environ.get(name) for name in names):
+            return "Environment proxy configuration is unsupported"
+        return None
 
     async def _fetch_jina(self, url: str, max_chars: int) -> str | None:
         """Try fetching via Jina Reader API. Returns None on failure."""
@@ -289,61 +300,127 @@ class WebFetchTool(Tool):
             logger.debug("Jina Reader failed for {}, falling back to readability: {}", url, e)
             return None
 
+    @staticmethod
+    def _resolve_hop(url: str) -> tuple[tuple[str, ...], str]:
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                return (), "Only absolute http/https URLs are allowed"
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            return resolve_public_addresses(parsed.hostname, port)
+        except (TypeError, ValueError) as exc:
+            return (), str(exc)
+
+    @staticmethod
+    async def _close_response(response: httpx.Response) -> None:
+        """Attempt response cleanup again if closing raises or is cancelled."""
+        stream = getattr(response, "stream", None)
+        try:
+            await response.aclose()
+        except BaseException:
+            try:
+                if stream is not None:
+                    await stream.aclose()
+                else:
+                    await response.aclose()
+            except BaseException:
+                logger.warning("WebFetch response cleanup retry failed", exc_info=True)
+            cleanup = getattr(stream, "cleanup_after_close_failure", None)
+            if cleanup is not None:
+                try:
+                    await cleanup()
+                except BaseException:
+                    logger.warning("WebFetch pool cleanup failed", exc_info=True)
+            raise
+
     async def _fetch_readability(self, url: str, extract_mode: str, max_chars: int) -> str:
-        """Local fallback using readability-lxml."""
+        """Fetch manually validated redirects through a pinned, direct transport."""
         try:
             from readability import Document
         except ModuleNotFoundError:
-            Document = None
+            Document = None  # noqa: N806
 
-        try:
-            async with httpx.AsyncClient(
-                follow_redirects=True,
-                max_redirects=MAX_REDIRECTS,
-                timeout=30.0,
-                proxy=self.proxy,
-            ) as client:
-                r = await client.get(url, headers={"User-Agent": USER_AGENT})
-                r.raise_for_status()
+        current = url
+        cookies = httpx.Cookies()
+        for hop in range(MAX_REDIRECTS + 1):
+            addresses, error = self._resolve_hop(current)
+            if error:
+                prefix = "URL validation failed" if hop == 0 else "Redirect blocked"
+                return json.dumps({"error": f"{prefix}: {error}", "url": url}, ensure_ascii=False)
+            parsed = urlparse(current)
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            transport = PinnedAddressTransport(addresses, parsed.hostname, port)
+            try:
+                async with httpx.AsyncClient(transport=transport, cookies=cookies, trust_env=False,
+                                             follow_redirects=False, timeout=30.0) as client:
+                    response = await client.get(current, headers={"User-Agent": USER_AGENT})
+                    if hasattr(client, "cookies"):
+                        cookies.jar = client.cookies.jar
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        location = response.headers.get("location") or response.headers.get("Location")
+                        try:
+                            await self._close_response(response)
+                        except Exception as exc:
+                            logger.error("WebFetch redirect response close failed for {}: {}", current, exc)
+                            return json.dumps({"error": str(exc), "url": url}, ensure_ascii=False)
+                        if hop >= MAX_REDIRECTS:
+                            return json.dumps({"error": "Too many redirects", "url": url}, ensure_ascii=False)
+                        if not location:
+                            return json.dumps({"error": "Redirect response missing Location", "url": url}, ensure_ascii=False)
+                        current = urljoin(current, location)
+                        continue
+                    try:
+                        response.raise_for_status()
+                        if hasattr(response, "aread"):
+                            content = await response.aread()
+                        else:
+                            content = response.text.encode("utf-8")
+                        status, headers = response.status_code, response.headers
+                    except BaseException:
+                        if hasattr(response, "aclose"):
+                            try:
+                                await self._close_response(response)
+                            except BaseException:
+                                logger.warning("WebFetch response cleanup failed", exc_info=True)
+                        raise
+                    else:
+                        if hasattr(response, "aclose"):
+                            try:
+                                await self._close_response(response)
+                            except Exception as exc:
+                                logger.error("WebFetch response close failed for {}: {}", current, exc)
+                                return json.dumps({"error": str(exc), "url": url}, ensure_ascii=False)
+            except Exception as exc:
+                logger.error("WebFetch error for {}: {}", current, exc)
+                return json.dumps({"error": str(exc), "url": url}, ensure_ascii=False)
+            break
 
-            from nanobot.security.network import validate_resolved_url
-            redir_ok, redir_err = validate_resolved_url(str(r.url))
-            if not redir_ok:
-                return json.dumps({"error": f"Redirect blocked: {redir_err}", "url": url}, ensure_ascii=False)
-
-            ctype = r.headers.get("content-type", "")
-
-            if "application/json" in ctype:
-                text, extractor = json.dumps(r.json(), indent=2, ensure_ascii=False), "json"
-            elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
-                if Document is not None:
-                    doc = Document(r.text)
-                    content = self._to_markdown(doc.summary()) if extract_mode == "markdown" else _strip_tags(doc.summary())
-                    text = f"# {doc.title()}\n\n{content}" if doc.title() else content
-                    extractor = "readability"
-                else:
-                    title_match = re.search(r'<title[^>]*>([\s\S]*?)</title>', r.text, flags=re.I)
-                    title = _normalize(_strip_tags(title_match.group(1))) if title_match else ""
-                    content = self._to_markdown(r.text) if extract_mode == "markdown" else _strip_tags(r.text)
-                    text = f"# {title}\n\n{content}" if title else content
-                    extractor = "html-fallback"
+        ctype = headers.get("content-type", "")
+        decoded_response = httpx.Response(200, headers=headers, content=content)
+        decoded = decoded_response.text
+        if "application/json" in ctype:
+            text, extractor = json.dumps(json.loads(decoded), indent=2, ensure_ascii=False), "json"
+        elif "text/html" in ctype or decoded[:256].lower().startswith(("<!doctype", "<html")):
+            if Document is not None:
+                doc = Document(decoded)
+                body = doc.summary()
+                body = self._to_markdown(body) if extract_mode == "markdown" else _strip_tags(body)
+                text = f"# {doc.title()}\n\n{body}" if doc.title() else body
+                extractor = "readability"
             else:
-                text, extractor = r.text, "raw"
-
-            truncated = len(text) > max_chars
-            if truncated:
-                text = text[:max_chars]
-            return json.dumps({
-                "url": url, "finalUrl": str(r.url), "status": r.status_code,
-                "extractor": extractor, "truncated": truncated, "length": len(text),
-                "untrusted": True, "text": text,
-            }, ensure_ascii=False)
-        except httpx.ProxyError as e:
-            logger.error("WebFetch proxy error for {}: {}", url, e)
-            return json.dumps({"error": f"Proxy error: {e}", "url": url}, ensure_ascii=False)
-        except Exception as e:
-            logger.error("WebFetch error for {}: {}", url, e)
-            return json.dumps({"error": str(e), "url": url}, ensure_ascii=False)
+                title_match = re.search(r'<title[^>]*>([\s\S]*?)</title>', decoded, flags=re.I)
+                title = _normalize(_strip_tags(title_match.group(1))) if title_match else ""
+                body = self._to_markdown(decoded) if extract_mode == "markdown" else _strip_tags(decoded)
+                text = f"# {title}\n\n{body}" if title else body
+                extractor = "html-fallback"
+        else:
+            text, extractor = decoded, "raw"
+        truncated = len(text) > max_chars
+        if truncated:
+            text = text[:max_chars]
+        return json.dumps({"url": url, "finalUrl": current, "status": status,
+            "extractor": extractor, "truncated": truncated, "length": len(text),
+            "untrusted": True, "text": text}, ensure_ascii=False)
 
     def _to_markdown(self, html_content: str) -> str:
         """Convert HTML to markdown."""

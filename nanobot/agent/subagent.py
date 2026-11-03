@@ -17,7 +17,15 @@ from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTo
 from nanobot.agent.tools.memory_search import MemorySearchTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
-from nanobot.agent.tools.toolsets import EXECUTOR_TOOL_NAMES as EXECUTOR_TOOLSET
+from nanobot.agent.tools.toolsets import (
+    EXECUTOR_PROFILE,
+    PLANNER_PROFILE,
+    ToolProfile,
+    resolve_tool_profile,
+)
+from nanobot.agent.tools.toolsets import (
+    EXECUTOR_TOOL_NAMES as EXECUTOR_TOOLSET,
+)
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ExecToolConfig
@@ -164,6 +172,7 @@ class SubagentManager:
         exec_config: "ExecToolConfig | None" = None,
         subagent_config: Any | None = None,
         restrict_to_workspace: bool = False,
+        tool_profile: str | ToolProfile | None = None,
         max_running: int | None = None,
         max_iterations: int | None = None,
         system_context: str = "",
@@ -202,6 +211,8 @@ class SubagentManager:
         # is True; `None` skips checkpointing entirely rather than guessing.
         expected_cycle_branch: str | None = None,
         wall_deadline: float | None = None,
+        planner_deadline: float | None = None,
+        planner_phase_budget: bool = False,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -213,6 +224,8 @@ class SubagentManager:
         self.web_proxy = web_proxy
         self.exec_config = exec_config or ExecToolConfig()
         self._wall_deadline = wall_deadline
+        self._planner_deadline = planner_deadline
+        self._planner_phase_budget = planner_phase_budget
         self.last_max_call_gap_s: float | None = None
         self.subagent_config = subagent_config
         configured_max_running = getattr(subagent_config, "max_running", None)
@@ -222,7 +235,20 @@ class SubagentManager:
         # should now pass the same value through so subagents aren't cut off earlier
         # than the coordinator's budget allows.
         self.max_iterations = int(max_iterations) if max_iterations else 15
+        self.tool_profile = resolve_tool_profile(tool_profile)
+        self._explicit_tool_profile = tool_profile is not None
+        if self.tool_profile is PLANNER_PROFILE and web_tools_enabled:
+            raise ValueError("planner profile cannot enable web tools")
         self.restrict_to_workspace = restrict_to_workspace
+        # Explicit profile path policy wins over the legacy boolean. The
+        # planner profile deliberately preserves its existing unrestricted
+        # absolute-path behavior; executor callers retain the old switch.
+        workspace_restricted = (
+            restrict_to_workspace
+            if self.tool_profile.workspace_restricted is None
+            else self.tool_profile.workspace_restricted
+        )
+        self._allowed_dir = self.workspace if workspace_restricted else None
         self.denied_paths = {p.resolve() for p in denied_paths} if denied_paths else set()
         self.prevented_access_attempts: list[str] = []
         self.system_context = system_context.strip()
@@ -243,6 +269,8 @@ class SubagentManager:
         #: (every caller before this) leaves :meth:`_build_subagent_prompt`
         #: unchanged.
         self._role_system_prompt = role_system_prompt.strip() if role_system_prompt else None
+        if self._explicit_tool_profile and self._role_system_prompt and "{{TOOL_CAPABILITIES}}" not in self._role_system_prompt:
+            raise ValueError("explicit tool profile requires role prompt capability placeholder")
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
         from nanobot.runtime.state import resolve_runtime_state_location
@@ -356,7 +384,7 @@ class SubagentManager:
         try:
             # Build subagent tools (no message tool, no spawn tool)
             tools = ToolRegistry()
-            allowed_dir = self.workspace if self.restrict_to_workspace else None
+            allowed_dir = self._allowed_dir
             # ADR-033: package skills include release-owned operator instructions.
             extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
             # #939 Part C: wire SKILL.md read instrumentation callback.
@@ -425,43 +453,49 @@ class SubagentManager:
 
                 def _on_day_file_read(day: str) -> None:  # noqa: E301
                     self._day_file_reads_this_cycle.append({"day": day, "position": iteration})
-            tools.register(ReadFileTool(
-                workspace=self.workspace,
-                allowed_dir=allowed_dir,
-                extra_allowed_dirs=extra_read,
-                on_skill_read=_on_skill_read,
-                on_complete_skill_read=_on_complete_skill_read,
-                on_skill_read_failed=_on_skill_read_failed,
-                on_day_file_read=_on_day_file_read,
-            ))
             def _record_prevented_access(p: Path) -> None:
                 self.prevented_access_attempts.append(str(p))
 
-            tools.register(WriteFileTool(
-                workspace=self.workspace,
-                allowed_dir=allowed_dir,
-                denied_paths=self.denied_paths,
-                on_prevent_write=_record_prevented_access,
-            ))
-            tools.register(EditFileTool(
-                workspace=self.workspace,
-                allowed_dir=allowed_dir,
-                denied_paths=self.denied_paths,
-                on_prevent_write=_record_prevented_access,
-            ))
-            tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
-            tools.register(ExecTool(
-                working_dir=str(self.workspace),
-                timeout=self.exec_config.timeout,
-                restrict_to_workspace=self.restrict_to_workspace,
-                path_append=self.exec_config.path_append,
-                denied_paths=self.denied_paths,
-                on_prevent_access=_record_prevented_access,
-            ))
-            tools.register(MemorySearchTool(
-                workspace=self.workspace,
-                state_dir=self._state_root,
-            ))
+            if "read_file" in self.tool_profile.tool_names:
+                tools.register(ReadFileTool(
+                    workspace=self.workspace,
+                    allowed_dir=allowed_dir,
+                    extra_allowed_dirs=extra_read,
+                    on_skill_read=_on_skill_read,
+                    on_complete_skill_read=_on_complete_skill_read,
+                    on_skill_read_failed=_on_skill_read_failed,
+                    on_day_file_read=_on_day_file_read,
+                ))
+            if "write_file" in self.tool_profile.tool_names:
+                tools.register(WriteFileTool(
+                    workspace=self.workspace,
+                    allowed_dir=allowed_dir,
+                    denied_paths=self.denied_paths,
+                    on_prevent_write=_record_prevented_access,
+                ))
+            if "edit_file" in self.tool_profile.tool_names:
+                tools.register(EditFileTool(
+                    workspace=self.workspace,
+                    allowed_dir=allowed_dir,
+                    denied_paths=self.denied_paths,
+                    on_prevent_write=_record_prevented_access,
+                ))
+            if "list_dir" in self.tool_profile.tool_names:
+                tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
+            if "exec" in self.tool_profile.tool_names:
+                tools.register(ExecTool(
+                    working_dir=str(self.workspace),
+                    timeout=self.exec_config.timeout,
+                    restrict_to_workspace=(allowed_dir is not None),
+                    path_append=self.exec_config.path_append,
+                    denied_paths=self.denied_paths,
+                    on_prevent_access=_record_prevented_access,
+                ))
+            if "search_memory" in self.tool_profile.tool_names:
+                tools.register(MemorySearchTool(
+                    workspace=self.workspace,
+                    state_dir=self._state_root,
+                ))
             if self.web_tools_enabled:
                 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 
@@ -501,12 +535,20 @@ class SubagentManager:
                 if self._wall_deadline is not None
                 else _subagent_wall_deadline(_monotonic=_clock)
             )
-            from nanobot.runtime.session_clock import ProgressWatchdog, should_stop_for_wall_clock
+            from nanobot.runtime.session_clock import (
+                ProgressWatchdog,
+                get_call_p99_secs,
+                get_wall_safety_margin_secs,
+                should_stop_for_wall_clock,
+            )
             _watchdog = ProgressWatchdog(clock=_clock)
 
             while iteration < max_iterations:
                 # #1101/#1899: wall-clock deadline check with safety margin
-                if _wall_deadline is not None and should_stop_for_wall_clock(_wall_deadline, clock=_clock):
+                if _wall_deadline is not None and should_stop_for_wall_clock(
+                    _wall_deadline, clock=_clock,
+                    planner_phase=self._planner_phase_budget and self._telemetry_component == "planner",
+                ):
                     logger.warning("Subagent [{}] wall-clock deadline safety margin reached", task_id)
                     stop_reason = "wall_clock_deadline"
                     break
@@ -549,8 +591,27 @@ class SubagentManager:
                     if not _prev_content.endswith(_step_tail):
                         messages[-1]["content"] = f"{_prev_content}{_step_tail}"
 
-                # Reserve the last iteration for a final answer and disable tools.
-                _is_final_turn = iteration == max_iterations
+                # #1893/#1775: the subagent's last tick belongs to its final answer,
+                # not another tool call. The opted-in planner may also transition
+                # by remaining time while preserving a configured local call reserve.
+                _planner_final_reserve = (
+                    get_call_p99_secs()
+                    if self._planner_phase_budget and self._telemetry_component == "planner"
+                    else 0.0
+                )
+                _is_final_turn = iteration == max_iterations or (
+                    _planner_final_reserve > 0
+                    and self._planner_deadline is not None
+                    and _clock() >= self._planner_deadline - _planner_final_reserve
+                )
+                if (
+                    _is_final_turn
+                    and _planner_final_reserve > 0
+                    and self._planner_deadline is not None
+                    and self._planner_deadline - _clock() < _planner_final_reserve
+                ):
+                    stop_reason = "planner_deadline_before_final_call"
+                    break
                 if _is_final_turn:
                     if self._telemetry_component == "planner":
                         messages.append({
@@ -571,9 +632,34 @@ class SubagentManager:
                 model_call_stage = "model_call"
                 try:
                     _call_timeout = _watchdog.remaining_time()
+                    _planner_remaining = None
+                    if self._planner_deadline is not None and self._telemetry_component == "planner":
+                        _planner_remaining = self._planner_deadline - _clock()
+                        if self._planner_phase_budget and not _is_final_turn:
+                            _call_timeout = min(
+                                _call_timeout,
+                                get_call_p99_secs(),
+                                _planner_remaining - _planner_final_reserve,
+                            )
+                        else:
+                            _call_timeout = min(_call_timeout, _planner_remaining)
+                    if _wall_deadline is not None:
+                        _call_timeout = min(_call_timeout, _wall_deadline - _clock())
+                    if (
+                        _wall_deadline is not None
+                        and _wall_deadline - _clock() < get_wall_safety_margin_secs()
+                    ):
+                        _call_timeout = 0.0
                     if _call_timeout <= 0:
-                        logger.warning("Subagent [{}] progress timeout before model call", task_id)
-                        stop_reason = "progress_watchdog_timeout"
+                        logger.warning("Subagent [{}] deadline reached before model call", task_id)
+                        stop_reason = (
+                            "wall_clock_deadline"
+                            if _wall_deadline is not None and should_stop_for_wall_clock(
+                                _wall_deadline, clock=_clock,
+                                planner_phase=self._planner_phase_budget and self._telemetry_component == "planner",
+                            )
+                            else "progress_watchdog_timeout"
+                        )
                         break
                     if self._telemetry_component:
                         with _subagent_telemetry_context(
@@ -693,8 +779,26 @@ class SubagentManager:
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.debug("Subagent [{}] executing: {} with arguments: {}", task_id, tool_call.name, args_str)
                         _tool_timeout = _watchdog.remaining_time()
+                        if self._planner_deadline is not None and self._telemetry_component == "planner":
+                            _phase_remaining = self._planner_deadline - _clock()
+                            if self._planner_phase_budget:
+                                _tool_timeout = min(
+                                    _tool_timeout,
+                                    get_call_p99_secs(),
+                                    _phase_remaining - _planner_final_reserve,
+                                    _wall_deadline - _clock() - get_wall_safety_margin_secs()
+                                    if _wall_deadline is not None else _phase_remaining,
+                                )
+                            else:
+                                _tool_timeout = min(_tool_timeout, _phase_remaining)
+                        if _wall_deadline is not None:
+                            _tool_timeout = min(_tool_timeout, _wall_deadline - _clock())
                         if _tool_timeout <= 0:
-                            stop_reason = "progress_watchdog_timeout"
+                            stop_reason = (
+                                "wall_clock_deadline"
+                                if _wall_deadline is not None and _clock() >= _wall_deadline
+                                else "progress_watchdog_timeout"
+                            )
                             break
                         try:
                             result = await asyncio.wait_for(
@@ -707,6 +811,10 @@ class SubagentManager:
                                 task_id, _watchdog.timeout_secs,
                             )
                             stop_reason = "progress_watchdog_timeout"
+                            break
+                        if _wall_deadline is not None and _clock() >= _wall_deadline:
+                            logger.warning("Subagent [{}] wall-clock deadline safety margin reached", task_id)
+                            stop_reason = "wall_clock_deadline"
                             break
                         if _watchdog.is_stalled():
                             # A tool may suppress cancellation and return late; do not
@@ -989,7 +1097,9 @@ class SubagentManager:
         import subprocess as _sp_ckpt
 
         from nanobot.runtime.commit_markers import (
-            CHECKPOINT_SUBJECT_PREFIX, CHECKPOINT_TRAILER, is_blocked_checkpoint_filename,
+            CHECKPOINT_SUBJECT_PREFIX,
+            CHECKPOINT_TRAILER,
+            is_blocked_checkpoint_filename,
         )
 
         expected_branch = self._expected_cycle_branch
@@ -1289,10 +1399,17 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         return cls.EXECUTOR_TOOL_NAMES
 
     def registered_tool_names(self) -> tuple[str, ...]:
-        """Names registered for this manager's configured execution role."""
-        if self.web_tools_enabled:
-            return self.EXECUTOR_TOOL_NAMES + ("web_search", "web_fetch")
-        return self.EXECUTOR_TOOL_NAMES
+        """Names registered for the resolved role capability profile."""
+        profile = getattr(self, "tool_profile", EXECUTOR_PROFILE)
+        names = profile.tool_names
+        if self.web_tools_enabled and profile is EXECUTOR_PROFILE:
+            return names + ("web_search", "web_fetch")
+        return names
+
+    def allowed_actions_text(self) -> str:
+        """Description derived from the same profile that controls registration."""
+        profile = getattr(self, "tool_profile", EXECUTOR_PROFILE)
+        return profile.allowed_actions(web_tools_enabled=self.web_tools_enabled)
 
     def _build_subagent_prompt(self) -> str:
         """Build the system prompt for the subagent.
@@ -1324,6 +1441,12 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         # means "no override" exactly like the real ``__init__`` default.
         if getattr(self, '_role_system_prompt', None) is not None:
             prompt = self._role_system_prompt
+            if getattr(self, "_explicit_tool_profile", False):
+                prompt = prompt.replace(
+                    "{{TOOL_CAPABILITIES}}", self.allowed_actions_text(),
+                )
+                if "{{TOOL_CAPABILITIES}}" in prompt:
+                    raise ValueError("role prompt omitted tool capability placeholder")
             if self.system_context:
                 prompt += "\n\n---\n\n" + self.system_context
             return prompt

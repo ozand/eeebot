@@ -144,6 +144,10 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
     "planning_fitness": (
         "nanobot.runtime.planning_fitness:record_cycle_overhead",
     ),
+    "planner": (
+        "nanobot.runtime.no_plan_recovery:_save_state",
+        "nanobot.runtime.operator_recovery:resume_operator",
+    ),
     "bridge": (
         "nanobot.crash_record:record_exit",
         "nanobot.crash_record:_start_run_marker",

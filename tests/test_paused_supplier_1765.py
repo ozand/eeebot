@@ -379,7 +379,7 @@ def test_distinct_proposer_and_planner_outage_preserves_next_offer(tmp_path, mon
     monkeypatch.setattr(bridge, "_run_planning_session", observe_plan)
     assert asyncio.run(bridge._main_impl()) == 0
     assert offers and offers[0] is not None and offers[0]["plan_text"] == title
-    # The same independent selection occurs in the matched no-outage control.
+    # The same independent selection occurs in the selector-only control.
     assert selected == [control_selected] == ["y-planner"]
     assert rotation_at_planner[0]["y-planner"] != "2020-01-01T00:00:00+00:00"
 

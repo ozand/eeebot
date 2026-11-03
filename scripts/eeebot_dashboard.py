@@ -212,6 +212,8 @@ def read_json_state(path: Path) -> tuple[Any, str]:
         return None, "permission"
     except OSError:
         return None, "unreadable"
+    except UnicodeDecodeError:
+        return None, "malformed"
     try:
         value = json.loads(text)
     except json.JSONDecodeError:
@@ -219,6 +221,58 @@ def read_json_state(path: Path) -> tuple[Any, str]:
     if value is None or value == {} or value == [] or value == "":
         return value, "valid-empty"
     return value, "valid"
+
+
+def read_no_plan_recovery(state_dir: Path) -> dict[str, Any]:
+    """Return only the validated, operator-safe recovery projection."""
+    raw, status = read_json_state(state_dir / "planner" / "no_plan_recovery.json")
+    projection: dict[str, Any] = {"source_status": status}
+    if status == "valid-empty":
+        status = "malformed"
+        projection["source_status"] = status
+    if status != "valid" or not isinstance(raw, dict):
+        if status == "valid":
+            projection["source_status"] = "malformed"
+        return projection
+    counts = (raw.get("consecutive_planner"), raw.get("consecutive_supply"))
+    flags = tuple(raw.get(key) for key in (
+        "minimal_mode", "stopped", "planner_degraded", "model_supply_degraded",
+    ))
+    if (
+        raw.get("schema") != "no-plan-recovery-v1"
+        or any(type(value) is not int or value < 0 for value in counts)
+        or any(type(value) is not bool for value in flags)
+    ):
+        projection["source_status"] = "malformed"
+        return projection
+    projection.update(dict(zip(
+        ("consecutive_planner", "consecutive_supply", "minimal_mode", "stopped", "planner_degraded", "model_supply_degraded"),
+        (*counts, *flags),
+    )))
+    return projection
+
+
+def format_no_plan_recovery(state: dict[str, Any]) -> str:
+    status = state["source_status"]
+    labels = {
+        "missing": "недоступно: файл отсутствует",
+        "permission": "недоступно: нет доступа",
+        "unreadable": "недоступно: ошибка чтения",
+        "malformed": "недоступно: неверный формат",
+    }
+    if status != "valid":
+        return labels.get(status, "недоступно")
+    if state["stopped"]:
+        mode = "остановлен"
+    elif state["planner_degraded"] or state["model_supply_degraded"]:
+        mode = "деградация"
+    else:
+        mode = "норма"
+    return (
+        f"{mode}; планировщик={state['consecutive_planner']}, "
+        f"поставка модели={state['consecutive_supply']}; "
+        f"минимальный режим={'да' if state['minimal_mode'] else 'нет'}"
+    )
 
 
 def source_status_for_directory(directory: Path, pattern: str) -> str:
@@ -1951,6 +2005,7 @@ def collect_metrics_uncached() -> dict[str, Any]:
     _lessons_resolved_status = artifact_status(_lessons_age, lessons_scan.get("source_status", "missing"))
     _lessons_index_resolved_status = artifact_status(_lessons_index_age, lessons_scan.get("index_status", "missing"))
 
+    no_plan_recovery = read_no_plan_recovery(STATE_DIR)
     goal_value = selected_source.get("goal_id", "unknown")
     active_task_value = selected_source.get("feedback_decision", {}).get(
         "selected_task_label",
@@ -2158,6 +2213,8 @@ def collect_metrics_uncached() -> dict[str, Any]:
         "mem_pct": mem_pct,
         "disk_pct": disk_pct,
         "cycle_progress": cycle_progress,
+        "no_plan_recovery": no_plan_recovery,
+        "no_plan_recovery_text": format_no_plan_recovery(no_plan_recovery),
         # Knowledge plane (#1347)
         "prompt_fit_source": artifact_metadata(_prompt_fit_age, "valid" if _prompt_fit_status in {"valid", "valid-empty"} else _prompt_fit_status),
         **format_prompt_fit_tile(prompt_fit, _prompt_fit_resolved_status),
@@ -2352,6 +2409,15 @@ def _build_health_dimensions(m: dict[str, Any]) -> list[tuple[str, str, str]]:
         reason = progress.get("dominant_reason") or "none"
         progress_detail = f"{hours_str} since success; {cycles} non-integrating cycles; dominant={reason}"
     dims.append(("cycle_progress", progress_health, progress_detail))
+
+    recovery = m.get("no_plan_recovery", {"source_status": "missing"})
+    recovery_status = recovery.get("source_status", "unavailable") if isinstance(recovery, dict) else "unavailable"
+    recovery_health = (
+        "CRIT" if recovery_status == "valid" and recovery.get("stopped")
+        else "WARN" if recovery_status != "valid" or recovery.get("planner_degraded") or recovery.get("model_supply_degraded")
+        else "OK"
+    )
+    dims.append(("planner_recovery", recovery_health, m.get("no_plan_recovery_text", "недоступно")))
 
     return dims
 
@@ -3004,6 +3070,15 @@ def _build_html_context(m: dict[str, Any]) -> dict[str, str]:
     ctx["prompt_fit_rung_html"] = escape_html_text(str(m.get("prompt_fit_rung") or "unavailable"))
     ctx["skills_status"] = escape_html_text(m.get("skills_status", "unavailable"))
     ctx["lessons_status"] = escape_html_text(m.get("lessons_status", "unavailable"))
+    recovery = m.get("no_plan_recovery", {})
+    recovery_status = recovery.get("source_status", "unavailable") if isinstance(recovery, dict) else "unavailable"
+    if recovery_status == "valid":
+        if recovery.get("stopped"):
+            recovery_status = "critical"
+        elif recovery.get("planner_degraded") or recovery.get("model_supply_degraded"):
+            recovery_status = "caution"
+    ctx["no_plan_recovery_status"] = html.escape(str(recovery_status), quote=True)
+    ctx["no_plan_recovery_text"] = escape_html_text(m.get("no_plan_recovery_text", "недоступно"))
 
     return ctx
 
@@ -3249,6 +3324,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                     <div class="metric-item">
                         <span class="metric-label">Cycle Progress:</span>
                         <span class="metric-value" data-cycle-progress="true">{cycle_progress_html}</span>
+                    </div>
+                    <div class="metric-item">
+                        <span class="metric-label">Восстановление планировщика:</span>
+                        <span class="status-badge" data-status="{no_plan_recovery_status}">{no_plan_recovery_text}</span>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Last Cleanup Count:</span>
