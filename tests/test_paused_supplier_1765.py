@@ -311,6 +311,79 @@ class TestDecideHandledMarkerSupplierPaused:
 # ─── end-to-end: the same request survives an outage, unchanged ───────────
 
 
+def test_distinct_proposer_and_planner_outage_preserves_next_offer(tmp_path, monkeypatch):
+    """AC4: exercise real proposer rotation before a distinct planner outage."""
+    from nanobot.runtime import demand, llm_proposer, open_increment
+
+    state_dir = _wire(tmp_path, monkeypatch, _LLMDeadSubagentManager)
+    title = "Fix the selected planner work item without changing its identity"
+    _seed_bridge_request(state_dir, "req-distinct", "cycle-distinct", task_title=title)
+    items = [
+        {"id": "x-proposer", "provenance": "derived", "summary": "candidate X"},
+        {"id": "y-planner", "provenance": "derived", "summary": "candidate Y"},
+    ]
+    llm_proposer._write_rotation(state_dir, {
+        "schema_version": "demand-rotation-v1",
+        "served": {"y-planner": "2020-01-01T00:00:00+00:00"},
+    })
+    monkeypatch.setattr(llm_proposer, "should_propose", lambda *_: True)
+    monkeypatch.setattr(demand, "demand_driven_enabled", lambda: True)
+    monkeypatch.setattr(demand, "collect_demand", lambda *_a, **_k: items)
+    monkeypatch.setattr(llm_proposer, "build_context", lambda *_a, **_k: "test context")
+    monkeypatch.setattr(llm_proposer, "propose", lambda *_a, **_k: {
+        "no_valuable_task": True, "reason": "no useful proposal",
+    })
+    snapshots = []
+    class ObservedOutage(_LLMDeadSubagentManager):
+        async def spawn(self, **kwargs):
+            snapshots.append(llm_proposer._load_rotation(state_dir)["served"])
+            return await super().spawn(**kwargs)
+    monkeypatch.setattr(bridge, "SubagentManager", ObservedOutage)
+    _stub_planning_session(monkeypatch, title, candidate_id="y-planner")
+    assert asyncio.run(bridge._main_impl()) == bridge.EXIT_SUPPLIER_PAUSED
+    rotation = llm_proposer._load_rotation(state_dir)["served"]
+    assert snapshots == [rotation]  # outage did not change rotation after spawn
+    assert "x-proposer" in rotation
+    assert rotation["y-planner"] == "2020-01-01T00:00:00+00:00"
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is not None and pending["plan_text"] == title
+    assert bridge._recent_failure_match(title, state_dir) is None
+    assert not list((state_dir / "subagent_bridge").glob("handled_*.txt"))
+    assert not list((state_dir / "subagent_bridge").glob("retry_*.json"))
+    assert "y-planner" not in futility.futile_gap_ids(state_dir, [
+        {"id": "y-planner", "kind": "priority", "summary": title},
+    ])
+
+    oi = open_increment.load_state(state_dir)
+    oi.hold["deadline"] = "2000-01-01T00:00:00Z"
+    open_increment._save_state(state_dir, oi)
+    # Selector-only control: identical pre-selection rotation and demand.
+    # This does not reproduce a complete no-outage bridge cycle.
+    control = tmp_path / "control-state"
+    llm_proposer._write_rotation(control, {"schema_version": "demand-rotation-v1", "served": rotation})
+    control_selected = llm_proposer._select_assigned_demand(control, items)[0]["id"]
+    selected = []
+    actual_select = llm_proposer._select_assigned_demand
+    def observe_selection(*args, **kwargs):
+        result = actual_select(*args, **kwargs)
+        selected.append(result[0]["id"])
+        return result
+    monkeypatch.setattr(llm_proposer, "_select_assigned_demand", observe_selection)
+    offers = []
+    rotation_at_planner = []
+    async def observe_plan(**kwargs):
+        rotation_at_planner.append(llm_proposer._load_rotation(state_dir)["served"])
+        offers.append(open_increment.pending_open_increment(kwargs["state_dir"]))
+        return {"ran": True, "iterations_used": 1, "iterations_planned": 1,
+                "tampered_files": [], "plan": None}
+    monkeypatch.setattr(bridge, "_run_planning_session", observe_plan)
+    assert asyncio.run(bridge._main_impl()) == 0
+    assert offers and offers[0] is not None and offers[0]["plan_text"] == title
+    # The same independent selection occurs in the matched no-outage control.
+    assert selected == [control_selected] == ["y-planner"]
+    assert rotation_at_planner[0]["y-planner"] != "2020-01-01T00:00:00+00:00"
+
+
 class TestOutageCycleOffersTheSameItemAgainUnchanged:
     def test_paused_supplier_cycle_records_outcome_and_never_retires(self, tmp_path, monkeypatch):
         """Architect resolution 2026-09-25 (ADR-035 rule 3 / ADR-031 rule 2):
