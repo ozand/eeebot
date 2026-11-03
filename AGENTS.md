@@ -4,6 +4,10 @@ For agent routing and responsibility/capability/authority boundaries, read [`AGE
 
 How we develop the **eeebot** product. This is the operational guide for development sessions and the operator; read [`CONSTITUTION.md`](CONSTITUTION.md) first for principles and guardrails.
 
+## Instruction precedence
+
+Follow applicable higher-priority system and developer instructions, then applicable owner and workspace instructions. Within this repository, `CONSTITUTION.md` states principles and guardrails; `AGENT_ROUTING.md` and `REPO_GITHUB_WORKFLOW_RULES.md` govern their respective authority and workflow boundaries. This guide and its linked workflow provide operational detail. If applicable instructions conflict and cannot be reconciled, stop the affected action and seek clarification; do not choose the more permissive instruction.
+
 > This guide is about **developing the product**. It is not the operating contract for the autonomous runtime that runs on the eeepc host — that product behavior lives under [`docs/specs/`](docs/specs/) (start with [`docs/specs/self-evolving-runtime/spec.md`](docs/specs/self-evolving-runtime/spec.md)).
 
 ## What this project is
@@ -14,7 +18,7 @@ How we develop the **eeebot** product. This is the operational guide for develop
 
 ## Source of truth
 
-- **Tasks/status/priority:** GitHub Issues + Project (see [task tracking](docs/agents/development-workflow.md#task-tracking-github-issues--labels)) — the single backlog. No `todo.md`/`backlog.md` second backlog.
+- **Tasks/status/priority:** GitHub Issues and their existing labels are the single backlog and status source (see [task tracking](docs/agents/development-workflow.md#task-tracking-github-issues--labels)); priority metadata uses existing labels. No `todo.md`/`backlog.md` second backlog.
 - **Current product truth:** `docs/specs/<capability>/spec.md`. Index: [`docs/README.md`](docs/README.md).
 - **Executable truth wins:** trust `pyproject.toml`, `.github/workflows/ci.yml`, runtime code, and git state over prose. When docs and code disagree, follow running behavior, then fix the doc in the same task.
 - **Past failures:** check `lessons/` before deploying (git permissions, systemd timers, release-metadata bugs).
