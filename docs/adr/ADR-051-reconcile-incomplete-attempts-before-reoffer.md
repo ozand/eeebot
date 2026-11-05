@@ -1,6 +1,6 @@
 ---
 title: Reconcile incomplete attempts before reoffer under the bridge lock
-status: proposed
+status: accepted
 date: 2026-11-05
 authors: [delegated delivery]
 related: ["#2162", "#1765", "#1919", "ADR-043", "ADR-050"]
@@ -9,7 +9,7 @@ tags: [runtime, recovery, planning, idempotency]
 
 # Status
 
-Proposed, not implemented or binding. Runtime changes and tests remain in #1765. This source-only decision does not authorize host access, deployment or state surgery. The #1765 draft predates identification of its ADR gate; later acceptance cannot retroactively cure that chronology.
+Provisional acceptance candidate prepared 2026-11-05 under the owner's delegated technical authority for #2162. The Proposed design at `4584053b2e84483bc3d0d8c0c90694970e11e261` received independent PASS. This candidate becomes effective only after independent PASS and applicable checks on this exact revision followed by authorized merge of the unchanged revision; retain those receipts in the linked PR or issue. This is not personal operator acceptance. Runtime changes and tests remain in #1765. This source-only decision does not authorize host access, deployment or state surgery. The #1765 draft predates identification of its ADR gate; later acceptance cannot retroactively cure that chronology.
 
 # Context
 
