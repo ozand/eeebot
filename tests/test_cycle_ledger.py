@@ -262,6 +262,18 @@ class TestTypedHelpers:
         assert "message" not in failure
         assert "secret-value" not in json.dumps(failure)
 
+    def test_legacy_model_call_row_is_readable(self, tmp_path):
+        # ADR-050: a pre-change on-disk row lacks call_stage entirely.
+        legacy = {"phase": "outcome", "cycle_id": "legacy", "outcome": "model_call_incomplete", "model_call_failure": {"stage": "response_handling", "error_type": "provider_error"}}
+        ledger = tmp_path / "ledger" / "cycles.jsonl"
+        ledger.parent.mkdir(parents=True)
+        original = json.dumps(legacy) + "\n"
+        ledger.write_text(original, encoding="utf-8")
+        rows = cycle_ledger.read_events(tmp_path)
+        assert rows == [legacy]
+        assert "call_stage" not in rows[0]["model_call_failure"]
+        assert ledger.read_text(encoding="utf-8") == original
+
     def test_planning_outcome_allowlist_and_invalid_fallback(self, tmp_path):
         # ADR-050 preserves known outcomes and the old conservative fallback.
         for outcome in ("supplier_error", "model_call_incomplete", "unrecognized"):
