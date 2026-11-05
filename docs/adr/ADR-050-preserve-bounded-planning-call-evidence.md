@@ -1,6 +1,6 @@
 ---
 title: Preserve bounded planning-call evidence without inventing cause
-status: proposed
+status: accepted
 date: 2026-11-05
 authors: [delegated delivery]
 related: ["#2160", "#1765", "#1919", "ADR-035"]
@@ -9,13 +9,13 @@ tags: [runtime, planning, ledger, recovery]
 
 # Status
 
-Proposed; not binding or implemented by this record. The local #1765 implementation draft preceded identification of the ADR gate; later review cannot retroactively make that edit compliant. Technical acceptance is delegated within the approved scope, not personal operator acceptance. Runtime implementation and its acceptance remain in #1765.
+Provisional acceptance candidate, prepared 2026-11-05 for the #2160 documentation PR under the owner's delegated technical authority. It becomes effective only after independent PASS and applicable checks on this exact candidate followed by authorized merge of the unchanged revision; the linked PR or issue retains those receipts. This is not personal operator acceptance or runtime implementation. The local #1765 implementation draft preceded identification of the ADR gate; later review cannot retroactively make that edit compliant. Runtime implementation and its acceptance remain in #1765.
 
 # Context
 
 At main `b7c041950b9a00bed7dcffa81d5f7092d074c490`, planning can report `supplier_error` and `no_plan_recovery` classifies it as supply, but `cycle_ledger.record_planning_session` coerces it to `malformed`. These observations do not prove a supplier caused any particular incomplete call.
 
-Unmerged #1919 candidate `848827b4` proposes a structured `model_call_failure` in the cycle outcome. Its response error producer emits `stage=response_handling` and `call_stage=model_call`; its ledger projection omits `call_stage` and message. Its classifier needs that provenance for the response-handling path, in addition to other inputs. This candidate is not published main. A separate existing `llm_error_classification.raw_error` contract is not changed here.
+Unmerged #1919 candidate `848827b48471a514f67ac904fe426f544f31313a` proposes a structured `model_call_failure` in the cycle outcome. Its response error producer emits `stage=response_handling` and `call_stage=model_call`; its ledger projection omits `call_stage` and message. Its classifier needs that provenance for the response-handling path, in addition to other inputs. This candidate is not published main. A separate existing `llm_error_classification.raw_error` contract is not changed here.
 
 # Decision
 
@@ -60,4 +60,4 @@ All rows are deferred to the separate implementation issue #1765; the names belo
 - Governing issue and pre-edit research: https://github.com/ozand/eeebot/issues/2160#issuecomment-6651817991
 - Implementation and remaining criteria: https://github.com/ozand/eeebot/issues/1765 ; candidate https://github.com/ozand/eeebot/pull/1919
 - Main producer and consumers: `nanobot/runtime/bridge.py`, `nanobot/runtime/cycle_ledger.py`, `nanobot/runtime/no_plan_recovery.py`, `nanobot/runtime/planner_rest.py`; `scripts/measure_package_1903.py` reports the last planning outcome. Health reads planning phase; scorecard terminal outcomes are separate. This bounded inventory does not establish compatibility of external consumers.
-- Candidate structured producer/classifier: `nanobot/agent/subagent.py`, `nanobot/runtime/llm_error_classification.py`; decision remains proposed until the repository acceptance gates complete.
+- Candidate structured producer/classifier: `nanobot/agent/subagent.py`, `nanobot/runtime/llm_error_classification.py`; decision remains provisional until the repository acceptance gates complete.
