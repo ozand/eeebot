@@ -4703,7 +4703,7 @@ def test_planner_supplier_error_classified_as_supply(tmp_path: Path, monkeypatch
     monkeypatch.setattr(bridge, "SubagentManager", _PlannerSupplierErrorManager)
 
     rc = asyncio.run(bridge._main_impl())
-    assert rc == 0
+    assert rc == (bridge.EXIT_MODEL_CALL_INCOMPLETE if incomplete is True else 0)
 
     no_plan_state = no_plan_recovery.load_state(state_dir)
     # ADR-050: supplier, unknown call failure, and request defect remain distinct.

@@ -209,6 +209,11 @@ class TestClassifyLlmError:
             model_call_failure=failure,
         ) == "failed"
 
+    def test_not_found_invalid_model_is_not_supplier_outage(self):
+        for text in ("litellm.NotFoundError: model not found", "litellm.NotFoundError: deployment not found", "litellm.NotFoundError: unauthorized"):
+            assert bridge._classify_llm_error(text) == "failed"
+        assert bridge._classify_llm_error("litellm.NotFoundError: model route not found") == "paused-supplier"
+
     @pytest.mark.parametrize("error_type", ["RateLimitError", "InternalServerError", "ServiceUnavailableError"])
     def test_affirmative_provider_error_types_are_supplier_pauses(self, error_type):
         failure = {"stage": "response_handling", "call_stage": "model_call", "error_type": error_type, "message": "gateway response"}

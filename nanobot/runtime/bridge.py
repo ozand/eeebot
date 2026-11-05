@@ -3404,7 +3404,7 @@ async def _run_planning_session(
         print(f'planning-session: {outcome} ({reason[:200]})')
         return {
             'ran': False, 'iterations_used': None, 'iterations_planned': None,
-            'tampered_files': tampered_files or [], 'plan': None,
+            'tampered_files': tampered_files or [], 'plan': None, 'outcome': outcome,
         }
 
     # ADR-034 rule 3: a missing/unreadable release charter stops the
@@ -4532,6 +4532,8 @@ async def _main_impl_body():
         # fallback lane, no rotation pickup. _run_planning_session already
         # journalled why (no_plan/malformed/refused/rest/rest_unchanged).
         print('bridge: no plan produced this cycle; no task chosen, no subagent spawned')
+        if _planning_result.get('outcome') == 'model_call_incomplete':
+            return EXIT_MODEL_CALL_INCOMPLETE
         return 0
 
     # "The executor receives this plan as its task" -- req/task are built

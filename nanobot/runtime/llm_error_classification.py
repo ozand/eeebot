@@ -43,7 +43,7 @@ SUPPLIER_UNAVAILABLE_RX = re.compile(
     r'|internalservererror'
     r'|serviceunavailableerror'
     r'|apiconnectionerror'
-    r'|notfounderror'
+    r'|model route not found'
     r'|no deployments available'
     r'|no healthy deployment'
     r'|try again in \d'
