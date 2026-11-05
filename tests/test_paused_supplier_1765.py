@@ -323,6 +323,8 @@ class TestDecideHandledMarkerSupplierPaused:
 def test_distinct_proposer_and_planner_outage_preserves_next_offer(tmp_path, monkeypatch):
     """AC4: exercise real proposer rotation before a distinct planner outage."""
     from nanobot.runtime import demand, llm_proposer, open_increment
+    from tests.test_bridge_recent_failure_suppress import _write_result
+    from tests.test_goal_gap_futility import _gap, _row
 
     state_dir = _wire(tmp_path, monkeypatch, _LLMDeadSubagentManager)
     title = "Fix the selected planner work item without changing its identity"
@@ -335,6 +337,25 @@ def test_distinct_proposer_and_planner_outage_preserves_next_offer(tmp_path, mon
         "schema_version": "demand-rotation-v1",
         "served": {"y-planner": "2020-01-01T00:00:00+00:00"},
     })
+    # Pre-existing unrelated cooling, futility and retry evidence must survive
+    # the outage, without forbidding independent proposer rotation changes.
+    other_title = "Refactor coordinator materializer split logic"
+    _write_result(state_dir / "subagents" / "results", "unrelated.json",
+                  backlog_title=other_title, result_status="blocked")
+    other_gap = _gap(gap_id="other-gap")
+    futility.futile_gap_ids(state_dir, [other_gap])
+    _row(state_dir, "other-gap", "previous-attempt", datetime.now(timezone.utc).isoformat())
+    futility.futile_gap_ids(state_dir, [other_gap])
+    retry_marker = state_dir / "subagent_bridge" / "handled_unrelated.txt"
+    retry_marker.parent.mkdir(parents=True, exist_ok=True)
+    assert bridge._decide_handled_marker(retry_marker, "unrelated", llm_error=True) == "retry"
+    retry_path = retry_marker.with_name("retry_unrelated.json")
+    retry_before = json.loads(retry_path.read_text(encoding="utf-8"))
+    assert retry_before["count"] == 1
+    cooling_before = bridge._recent_failure_match(other_title, state_dir)
+    assert cooling_before == other_title
+    futility_before = futility._load(state_dir)["other-gap"]["attempt_count"]
+    assert futility_before == 1
     monkeypatch.setattr(llm_proposer, "should_propose", lambda *_: True)
     monkeypatch.setattr(demand, "demand_driven_enabled", lambda: True)
     monkeypatch.setattr(demand, "collect_demand", lambda *_a, **_k: items)
@@ -358,9 +379,11 @@ def test_distinct_proposer_and_planner_outage_preserves_next_offer(tmp_path, mon
     assert pending is not None and pending["plan_text"] == title
     assert bridge._recent_failure_match(title, state_dir) is None
     assert not list((state_dir / "subagent_bridge").glob("handled_*.txt"))
-    assert not list((state_dir / "subagent_bridge").glob("retry_*.json"))
+    assert json.loads(retry_path.read_text(encoding="utf-8")) == retry_before
+    assert bridge._recent_failure_match(other_title, state_dir) == cooling_before
+    assert futility._load(state_dir)["other-gap"]["attempt_count"] == futility_before
     assert "y-planner" not in futility.futile_gap_ids(state_dir, [
-        {"id": "y-planner", "kind": "priority", "summary": title},
+        other_gap, {"id": "y-planner", "kind": "priority", "summary": title},
     ])
 
     oi = open_increment.load_state(state_dir)
@@ -387,7 +410,13 @@ def test_distinct_proposer_and_planner_outage_preserves_next_offer(tmp_path, mon
                 "tampered_files": [], "plan": None}
     monkeypatch.setattr(bridge, "_run_planning_session", observe_plan)
     assert asyncio.run(bridge._main_impl()) == 0
-    assert offers and offers[0] is not None and offers[0]["plan_text"] == title
+    # The entire persisted interrupted increment (not only its text) reaches
+    # the next planning boundary without changing identity or evidence.
+    assert offers == [pending]
+    assert pending["candidate_id"] == "y-planner"
+    assert json.loads(retry_path.read_text(encoding="utf-8")) == retry_before
+    assert bridge._recent_failure_match(other_title, state_dir) == cooling_before
+    assert futility._load(state_dir)["other-gap"]["attempt_count"] == futility_before
     # The same independent selection occurs in the selector-only control.
     assert selected == [control_selected] == ["y-planner"]
     assert rotation_at_planner[0]["y-planner"] != "2020-01-01T00:00:00+00:00"

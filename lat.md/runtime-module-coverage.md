@@ -117,7 +117,7 @@ These modules have focused reusable duties; a helper's proximity to a subsystem 
 - [[nanobot/runtime/context_compaction.py]] — bounds subagent context and compaction; exact test mapping unknown.
 - [[nanobot/runtime/session_clock.py]] — call percentile/final-budget/progress-timeout safety timing; exact test mapping unknown.
 - [[nanobot/runtime/model_registry.py]] — resolves runtime model routing; distinct from provider construction; exact test mapping unknown.
-- [[nanobot/runtime/llm_error_classification.py]] — classifies supplier outage versus other LLM errors. [[tests/test_paused_supplier_1765.py#test_distinct_proposer_and_planner_outage_preserves_next_offer]] exercises distinct proposer/planner identities, interrupted-plan visibility, and a selector-only rotation control; it does not establish all #1765 AC4 cases or live behavior.
+- [[nanobot/runtime/llm_error_classification.py]] — classifies supplier outage versus other LLM errors. [[tests/test_paused_supplier_1765.py#test_distinct_proposer_and_planner_outage_preserves_next_offer]] exercises distinct proposer/planner identities, the complete persisted interrupted increment at the next planning boundary, pre-existing unrelated cooling/futility/retry evidence, and a selector-only rotation control; it does not establish live behavior.
 - [[nanobot/runtime/persona_harness.py]] — persona self-consistency harness and statements; exact test mapping unknown.
 - [[nanobot/runtime/role_prompt.py]] — builds role prompts from files and release root; exact test mapping unknown.
 - [[nanobot/runtime/commit_markers.py]] — identifies/sanitizes harness commit markers and trailers; exact test mapping unknown.
