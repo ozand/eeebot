@@ -570,6 +570,23 @@ def test_incomplete_then_new_invocation_can_satisfy_no_crash(repo, tmp_path, moc
     assert "health gate: pass" not in combined and "health gate: clean-exit" not in combined
 
 
+def test_retry_start_resets_existing_hold_before_clearing_incomplete(repo, mock_bin):
+    # Replay two polls with a sleep that advances time; no real host is contacted.
+    early = f"2026-09-27T20:00:00+00:00 {STARTING_TEXT}"
+    exit6 = f"2026-09-27T20:01:00+00:00 eeepc systemd[1]: {BRIDGE_UNIT}: Main process exited, code=exited, status=6/NOTIMPLEMENTED"
+    later = f"2026-09-27T20:02:00+00:00 {STARTING_TEXT}"
+    marker = str(mock_bin / "second-poll").replace('\\', '/')
+    _write_mock(mock_bin / "sleep", f"touch '{marker}'; /bin/sleep 2")
+    replay_first = _journal_replay_mock(early)
+    replay_retry = _journal_replay_mock(early, exit6, later)
+    set_ssh_mock(mock_bin, f"if [ -f '{marker}' ]; then\n{replay_retry}\nelse\n{replay_first}\nfi")
+    res = run_deploy(repo, mock_bin, ["--health-timeout", "1", "--no-crash-hold", "1", "--ref", "HEAD"])
+    text = (res.stdout + res.stderr).lower()
+    assert res.returncode == 0, text
+    assert "restarting no-crash hold" in text
+    assert text.index("restarting no-crash hold") < text.index("health gate: no-crash")
+
+
 def test_n_invocation_then_crash_within_the_hold_rolls_back(repo, tmp_path, mock_bin):
     """The FAIL branches keep their authority over the hold: Starting + a non-zero exit -> rollback."""
     set_ssh_mock(mock_bin, _journal_replay_mock(

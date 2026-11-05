@@ -901,7 +901,14 @@ while :; do
   if [ -n "$INCOMPLETE_EXIT" ] && [ -n "$LATEST_STARTING" ]; then
     INCOMPLETE_TS=${INCOMPLETE_EXIT%% *}
     STARTING_TS=${LATEST_STARTING%% *}
-    if [[ "$STARTING_TS" > "$INCOMPLETE_TS" ]]; then INCOMPLETE_EXIT=""; fi
+    if [[ "$STARTING_TS" > "$INCOMPLETE_TS" ]]; then
+      if [ "$LATEST_STARTING" != "${LAST_INCOMPLETE_RETRY_START:-}" ]; then
+        INVOKED_AT=$SECONDS
+        LAST_INCOMPLETE_RETRY_START="$LATEST_STARTING"
+        log "New bridge invocation after incomplete call; restarting no-crash hold: $LATEST_STARTING"
+      fi
+      INCOMPLETE_EXIT=""
+    fi
   fi
   if [ -n "$INCOMPLETE_EXIT" ] && [ -z "${INCOMPLETE_EXIT_LOGGED:-}" ]; then
     log "Health gate: model call did not complete (${BRIDGE_EXIT_MODEL_CALL_INCOMPLETE}) after flip; this cycle is inconclusive, release stays active while waiting for a clean run."

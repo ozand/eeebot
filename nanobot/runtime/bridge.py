@@ -3725,9 +3725,13 @@ async def _run_planning_session(
     # "looks like a supplier outage" means.
     if str(telem.get('status') or '').strip().lower() == 'error':
         _planner_error_text = str(telem.get('summary') or telem.get('result') or '').strip()
-        _planner_error_class = _classify_llm_error(_planner_error_text)
+        _planner_error_class = _classify_llm_error(
+            _planner_error_text, model_call_failure=telem.get('model_call_failure')
+        )
         if _planner_error_class == 'paused-supplier':
             return _fail('supplier_error', f'planner supplier error: {_planner_error_text[:200]}')
+        if _planner_error_class == 'model_call_incomplete':
+            return _fail('model_call_incomplete', f'planner model call incomplete: {_planner_error_text[:200]}')
         # Our own defect (a genuine planner-side exception, not a
         # supplier outage) still keeps the existing 'malformed' shape --
         # D10 only fixes the misclassification of supplier errors.
@@ -7316,7 +7320,14 @@ async def _main_impl_body():
     _verdict, _verdict_reason = _derive_cycle_verdict(_cycle_outcome, _verdict_reason_hint)
     try:
         from nanobot import crash_record as _run_record
-        if _cycle_outcome == 'model_call_incomplete':
+        _bounded_classes = {
+            'identical_call_loop': 'loop_breaker_abort',
+            'wall_clock_deadline': 'wall_clock_abort',
+            'progress_watchdog_timeout': 'progress_watchdog_abort',
+        }
+        if _res.get('run_stop_reason') in _bounded_classes:
+            run_classification = _bounded_classes[_res['run_stop_reason']]
+        elif _cycle_outcome == 'model_call_incomplete':
             run_classification = 'model_call_incomplete'
         elif _cycle_outcome == 'paused-supplier':
             run_classification = 'paused_supplier'
@@ -7326,7 +7337,7 @@ async def _main_impl_body():
             run_classification = 'failed'
         _run_record.set_run_metadata(
             classification=run_classification,
-            reason=_rollback_reason or _cycle_outcome,
+            reason=_res.get('run_stop_reason') if _res.get('run_stop_reason') in _bounded_classes else (_rollback_reason or _cycle_outcome),
         )
     except Exception:
         pass

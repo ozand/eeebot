@@ -428,7 +428,7 @@ def record_diary_open_entry(
 #:   title/target -- not `no_plan`, not counted in `no_plan_recovery`.
 VALID_PLANNING_OUTCOMES = frozenset({
     "integrated", "refused", "malformed", "no_plan", "spawn_failed", "commit_failed", "timed_out",
-    "rest", "rest_unchanged", "rejected_duplicate",
+    "rest", "rest_unchanged", "rejected_duplicate", "supplier_error", "model_call_incomplete",
 })
 
 
@@ -724,6 +724,7 @@ def record_cycle_outcome(
             "prompt_size_chars": model_call_failure.get("prompt_size_chars"),
             "limit": model_call_failure.get("limit"),
             "stage": str(model_call_failure.get("stage") or "unknown")[:40],
+            **({"call_stage": "model_call"} if model_call_failure.get("call_stage") == "model_call" else {}),
         }
     if isinstance(llm_error_classification, dict) and llm_error_classification:
         # #1765: the classifier's decision AND the raw error text it read,

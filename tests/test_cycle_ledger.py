@@ -249,6 +249,25 @@ class TestTypedHelpers:
         assert row["outcome"] == "model_call_incomplete"
         assert row["model_call_failure"] == {"error_type": "ReadTimeout", "model": "local/model", "prompt_size_chars": 1234, "limit": 60, "stage": "model_call"}
 
+    @pytest.mark.parametrize("call_stage", ["model_call", "secret-value", None])
+    def test_model_call_stage_allowlist_and_legacy_rows(self, tmp_path, call_stage):
+        # ADR-050: only a bounded provenance token is persisted, never message.
+        cycle_ledger.record_cycle_outcome(
+            tmp_path, "response", "model_call_incomplete", "model_call_incomplete", [], None,
+            model_call_failure={"stage": "response_handling", "call_stage": call_stage, "message": "secret-value"},
+        )
+        failure = _read_ledger(tmp_path)[0]["model_call_failure"]
+        assert failure["stage"] == "response_handling"
+        assert failure.get("call_stage") == ("model_call" if call_stage == "model_call" else None)
+        assert "message" not in failure
+        assert "secret-value" not in json.dumps(failure)
+
+    def test_planning_outcome_allowlist_and_invalid_fallback(self, tmp_path):
+        # ADR-050 preserves known outcomes and the old conservative fallback.
+        for outcome in ("supplier_error", "model_call_incomplete", "unrecognized"):
+            cycle_ledger.record_planning_session(tmp_path, outcome, outcome, iterations_used=None, iterations_planned=None)
+        assert [r["outcome"] for r in _read_ledger(tmp_path)] == ["supplier_error", "model_call_incomplete", "malformed"]
+
     # ─── #1748: real_result carries bridge._is_real_result's own inputs ───
 
     def test_record_cycle_outcome_without_real_result_omits_the_key(self, tmp_path):

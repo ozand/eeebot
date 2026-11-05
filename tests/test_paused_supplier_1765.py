@@ -214,6 +214,15 @@ class TestClassifyLlmError:
         failure = {"stage": "response_handling", "call_stage": "model_call", "error_type": error_type, "message": "gateway response"}
         assert bridge._classify_llm_error("gateway response", model_call_failure=failure) == "paused-supplier"
 
+    def test_response_handling_call_stage_roundtrip(self, tmp_path):
+        # ADR-050: same other decision inputs; provenance alone is insufficient.
+        failure = {"stage": "response_handling", "call_stage": "model_call", "error_type": "provider_error"}
+        cycle_ledger.record_cycle_outcome(tmp_path, "roundtrip", "model_call_incomplete", None, [], None, model_call_failure=failure)
+        saved = _read_ledger(tmp_path)[0]["model_call_failure"]
+        assert bridge._classify_llm_error("request timed out", model_call_failure=saved) == "model_call_incomplete"
+        saved.pop("call_stage")
+        assert bridge._classify_llm_error("request timed out", model_call_failure=saved) == "failed"
+
     def test_default_is_conservative_not_a_catch_all(self):
         """An error text mentioning neither class's vocabulary at all stays
         'failed' -- the default direction the issue specifies, and the proof
@@ -382,6 +391,39 @@ def test_distinct_proposer_and_planner_outage_preserves_next_offer(tmp_path, mon
     # The same independent selection occurs in the selector-only control.
     assert selected == [control_selected] == ["y-planner"]
     assert rotation_at_planner[0]["y-planner"] != "2020-01-01T00:00:00+00:00"
+
+
+@pytest.mark.parametrize("stop_reason, expected", [
+    ("identical_call_loop", "loop_breaker_abort"),
+    ("wall_clock_deadline", "wall_clock_abort"),
+    ("progress_watchdog_timeout", "progress_watchdog_abort"),
+])
+def test_bounded_stop_classification_survives_cycle(tmp_path, monkeypatch, stop_reason, expected):
+    from nanobot import crash_record
+
+    class StoppedManager(_LLMDeadSubagentManager):
+        async def spawn(self, **kwargs):
+            result = await super().spawn(**kwargs)
+            path = bridge.STATE_DIR / "subagents" / f"{self.task_id}.json"
+            telemetry = json.loads(path.read_text(encoding="utf-8"))
+            telemetry["stop_reason"] = stop_reason
+            path.write_text(json.dumps(telemetry), encoding="utf-8")
+            return result
+
+    state = _wire(tmp_path, monkeypatch, StoppedManager)
+    title = "Preserve bounded stop classification"
+    _seed_bridge_request(state, "bounded", "bounded-cycle", task_title=title)
+    _stub_planning_session(monkeypatch, title)
+    seen = []
+    real_set = crash_record.set_run_metadata
+    def capture(*args, **kwargs):
+        seen.append(kwargs.copy())
+        return real_set(*args, **kwargs)
+    monkeypatch.setattr(crash_record, "set_run_metadata", capture)
+    asyncio.run(bridge._main_impl())
+    classified = [entry for entry in seen if "classification" in entry]
+    assert classified[-1]["classification"] == expected
+    assert classified[-1]["reason"] == stop_reason
 
 
 class TestOutageCycleOffersTheSameItemAgainUnchanged:
