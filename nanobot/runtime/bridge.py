@@ -3404,7 +3404,8 @@ async def _run_planning_session(
         print(f'planning-session: {outcome} ({reason[:200]})')
         return {
             'ran': False, 'iterations_used': None, 'iterations_planned': None,
-            'tampered_files': tampered_files or [], 'plan': None, 'outcome': outcome,
+            'tampered_files': tampered_files or [], 'plan': None,
+            **({'outcome': outcome} if outcome == 'model_call_incomplete' else {}),
         }
 
     # ADR-034 rule 3: a missing/unreadable release charter stops the
