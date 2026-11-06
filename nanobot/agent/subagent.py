@@ -672,27 +672,29 @@ class SubagentManager:
                         )
                         break
 
-                    if self._telemetry_component:
+                    async def _call_provider():
+                        return await self.provider.chat_with_retry(
+                            messages=messages, tools=_tools_def, model=self.model,
+                        )
+                    if _bounded_planner and not self._planner_phase_budget:
+                        async with asyncio.timeout(_call_timeout) as timeout_scope:
+                            if self._telemetry_component:
+                                with _subagent_telemetry_context(
+                                    self._telemetry_cycle_id, self._telemetry_component,
+                                ):
+                                    response = await _call_provider()
+                            else:
+                                response = await _call_provider()
+                        if timeout_scope.expired():
+                            stop_reason = "progress_watchdog_timeout"
+                            break
+                    elif self._telemetry_component:
                         with _subagent_telemetry_context(
                             self._telemetry_cycle_id, self._telemetry_component,
                         ):
-                            response = await asyncio.wait_for(
-                                self.provider.chat_with_retry(
-                                    messages=messages,
-                                    tools=_tools_def,
-                                    model=self.model,
-                                ),
-                                timeout=_call_timeout,
-                            )
+                            response = await asyncio.wait_for(_call_provider(), timeout=_call_timeout)
                     else:
-                        response = await asyncio.wait_for(
-                            self.provider.chat_with_retry(
-                                messages=messages,
-                                tools=_tools_def,
-                                model=self.model,
-                            ),
-                            timeout=_call_timeout,
-                        )
+                        response = await asyncio.wait_for(_call_provider(), timeout=_call_timeout)
                 except asyncio.TimeoutError:
                     logger.warning(
                         "Subagent [{}] model call timed out by progress watchdog ({:.1f}s)",
