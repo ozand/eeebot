@@ -1,6 +1,6 @@
 ---
 title: Finalize planning within the existing 600-second budget
-status: proposed
+status: accepted
 date: 2026-11-06
 authors: [delegated delivery]
 related: ["#2050", "#2102", "ADR-045"]
@@ -9,7 +9,7 @@ tags: [runtime, planning, deadlines]
 
 # Status
 
-Proposed; not implemented or effective. This follow-on would amend only ADR-045's OFF-path iteration-only finalization decision after independent review and effective acceptance. ADR-045's opt-in 6000/9000 contract remains unchanged. No host rollout is authorized here.
+Provisional acceptance candidate under the owner's delegated technical authority; not implemented or effective. Proposed design revision `571e106cef45537b87903b51df720ce9982d9371` received independent design PASS. This candidate becomes effective only after independent PASS and applicable checks on the exact final status revision followed by authorized merge unchanged. Its PR or issue must retain those receipts. This follow-on amends only ADR-045's OFF-path iteration-only finalization decision; ADR-045's opt-in 6000/9000 contract remains unchanged. No host rollout is authorized here.
 
 # Context
 
@@ -53,7 +53,7 @@ ADR-045's 6000/9000 opt-in, executor allocation, shared guard, tool profile, mod
 | OFF path preserves the 600-second deadline while allowing a time-admitted final turn | `tests/test_run_planning_session.py::test_planning_session_uses_600_second_legacy_timeout_by_default` plus new fake-clock final-admission regression | deferred (#2050) |
 | Ordinary calls require `R >= 2C`; final calls require `R >= C`; equality and below-boundary cases are explicit | `tests/test_subagent_manager.py::test_planner_current_budget_final_admission_boundaries` | deferred (#2050) |
 | Tool steps preserve the final reserve; a completed tool reaching `R=C` transitions to a final call, and timeout/cancellation drains without a later call or unvalidated plan | `tests/test_subagent_manager.py::test_planner_current_budget_tool_and_cancel_guards` | deferred (#2050) |
-| ADR-045 opt-in and executor behavior remain unchanged | existing ADR-045 tests in `tests/test_session_clock.py`, `tests/test_subagent_manager.py`, and `tests/test_run_planning_session.py` | passing on main |
+| ADR-045 opt-in and executor behavior remain unchanged | existing ADR-045 tests in `tests/test_session_clock.py`, `tests/test_subagent_manager.py`, and `tests/test_run_planning_session.py` (these files currently cite ADR-045; the ADR-052 compatibility claim remains deferred until an implementation revision adds a direct citation) | deferred (#2050) |
 
 # References
 
