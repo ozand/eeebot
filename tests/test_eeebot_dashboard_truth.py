@@ -96,7 +96,9 @@ def test_skill_read_metric_labels_delivered_scope_and_zero() -> None:
     missing = _health_metrics(report_status="fresh", materialized_status="fresh")
     missing["skills_status"] = "missing"
     page = DASHBOARD.render_html(_render_ready(missing))
-    assert 'Skills <span class="status-badge"' in page and ">missing</span>" in page
+    skills_heading = page.split("<h2>Skills ", 1)[1].split("</h2>", 1)[0]
+    assert 'class="status-badge"' in skills_heading
+    assert ">missing</span>" in skills_heading
 
 
 def test_format_rate_preserves_unavailable_zero_and_percentage() -> None:
