@@ -3407,12 +3407,13 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                 <h2>Skills <span class="status-badge" {skills_source_attrs}>{skills_status}</span></h2>
                 <div class="metric">
                     <div class="metric-item">
-                        <span class="metric-label">Total / Read / Never Read:</span>
+                        <span class="metric-label">Total / Read in delivered cycles / No recorded delivered read:</span>
                         <span class="metric-value">{skills_total_html} / {skills_distinct_read_html} / {skills_never_read_count_html}</span>
                     </div>
                     <div class="metric-item">
-                        <span class="metric-label">Reads in window:</span>
+                        <span class="metric-label">Recorded reads from delivered cycles in window:</span>
                         <span class="metric-value">{skills_reads_in_window_html}</span>
+                        <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">Zero does not mean the skill was never read outside delivered cycles.</div>
                     </div>
                     <div class="metric-item">
                         <span class="metric-label">Top skills:</span>
