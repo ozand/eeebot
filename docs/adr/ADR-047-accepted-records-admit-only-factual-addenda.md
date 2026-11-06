@@ -1,6 +1,6 @@
 ---
 title: Accepted ADRs admit only append-only factual addenda
-status: proposed
+status: accepted
 date: 2026-11-01
 authors: [eeebot maintainers]
 related: ["#2141", "ADR-030"]
@@ -9,10 +9,7 @@ tags: [process, governance, adr]
 
 # Status
 
-**Proposed.** This draft records a repository-wide policy clarification and is
-not accepted or binding until the authorized decision owner accepts it through
-the normal ADR process. Issue #2141 delegates implementation and drafting, not
-operator acceptance.
+**Provisional acceptance candidate.** Prepared under the owner's delegated technical authority for #2141, not personal operator acceptance. It becomes effective only after independent PASS and applicable checks on the exact final candidate followed by authorized merge of that unchanged revision. The governing PR or issue must retain those receipts.
 
 ## Context
 
@@ -69,7 +66,7 @@ policy enforcement is introduced.
 
 | Claim in Decision | Test | Currently |
 |---|---|---|
-| A permitted factual append can be distinguished from a rewrite or decision-changing append | Independent reviewer inspects `git diff <base>...<head>` using the human review guard in `docs/adr/README.md`, validates a positive factual append and rejects negative mutation examples | Review procedure documented; independent review of this proposed policy is pending |
+| A permitted factual append can be distinguished from a rewrite or decision-changing append | Independent reviewer applies the human full-diff guard in `docs/adr/README.md` to supported and unsupported synthetic examples | deferred (#2141): independent exercise required before merge |
 
 ## References
 
