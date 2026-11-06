@@ -26,9 +26,13 @@ The planning session is implemented by [[nanobot/runtime/bridge.py#_run_planning
 
 The LLM proposer can author bounded candidates through [[nanobot/runtime/llm_proposer.py#maybe_propose]]. It is a candidate/request source, not the planner. Planner selection and proposer authoring are related but distinct steps, and an idle, failed, rested, blocked, or unplanned cycle is not an executed task.
 
+The public derived-view producer serializes goal-review-owned derived-priority rows with explicit `self-derived` provenance; operator priority wording remains private and the external typed dashboard allowlist is a read-only consumer. See [[nanobot/runtime/demand.py#build_derived_view]], [[docs/specs/subagent-bridge/spec.md]], and [[docs/adr/ADR-048-persist-self-derived-provenance-in-public-projection.md]] (Proposed).
+
 ## Evidence, gates, and authority
 
-Cycle and phase evidence is append-oriented in the runtime ledger at [[nanobot/runtime/cycle_ledger.py#append_event]]. Demand collection and ranking provide inputs; they do not establish that work passed a gate or integrated. See [[evidence]] for evidence status and fitness boundaries.
+Cycle and phase evidence is append-oriented in the runtime ledger at [[nanobot/runtime/cycle_ledger.py#append_event]]. Demand collection and ranking provide inputs; they do not establish that work passed a gate or integrated.
+
+The existing `cycle-health` summary reports warning or UNKNOWN from exact keyed start/outcome ledger evidence. Empty windows, malformed JSON field types or empty identifiers, future-dated/naive timestamps, byte-capped reads, missing active ledger with archive-only evidence, expired history, and incomplete reset coverage are UNKNOWN; valid unrelated phases are ignored without weakening malformed success-shaped-row checks. Because the ledger has no global inception/completeness watermark, a retained window cannot prove no older task keys were pruned, so below-threshold aggregate status remains UNKNOWN. Strict H5 ledger reads reject invalid UTF-8 rather than replacing corrupted key bytes; valid Unicode U+FFFD remains accepted. Same-key keep/resume attempts may repeat a cycle ID and each started row counts; a later duplicate skip for that reused ID is ambiguous even with a supplied matching key and produces UNKNOWN. Duplicate-skip subtraction otherwise requires an exact unique cycle/key join; mismatched, unjoined, or repeated joins produce UNKNOWN. See [[evidence]] for evidence status and fitness boundaries.
 
 A subagent works in a cycle-scoped branch through [[nanobot/runtime/bridge.py#_setup_cycle_branch]]. The bridge applies the bounded smoke and mutation-surface checks before integration. Runtime-slice changes are promotion candidates for operator review rather than ordinary script-tier auto-integration; see [[gates-and-promotion]], [[docs/specs/subagent-bridge/spec.md]], and [[docs/specs/promotion-and-release/spec.md]].
 

@@ -14,6 +14,15 @@ Conventions:
 
 ## Index
 
+The `Status` column mirrors each ADR's frontmatter. For acceptances completed
+under this procedure, an `accepted` row on an unmerged candidate branch
+describes only the provisional status-flip candidate; it is not effective
+acceptance. On published `main`, `accepted` means that this procedure's exact-
+SHA review/check and authorized-merge gates were completed. Older records keep
+their recorded history; their `accepted` status does not imply retroactive
+compliance with this procedure. Do not treat a PR branch's index row as evidence
+that acceptance is already effective.
+
 | ADR | Title | Status |
 |---|---|---|
 | [ADR-001](ADR-001-agent-architecture.md) | Agent architecture — roles, tools, models, and budgets of the eeebot runtime | accepted |
@@ -53,7 +62,7 @@ Conventions:
 | [ADR-035](ADR-035-the-planning-session-chooses-and-closes-hadi.md) | The agent's planning session chooses the work and closes the HADI loop; the outer contour diagnoses and never assigns | proposed |
 | [ADR-036](ADR-036-one-dashboard-two-places.md) | One dashboard, two places — the published generator also serves the LAN, and only the LAN sees what the agents said | proposed |
 | [ADR-037](ADR-037-record-handled-disposition-without-implying-cause.md) | Record handled-marker disposition without implying interruption cause | accepted |
-| [ADR-039](ADR-039-warn-on-twelve-started-attempts-per-task.md) | Warn operators after twelve unsuccessful started attempts for one task | proposed |
+| [ADR-039](ADR-039-warn-on-twelve-started-attempts-per-task.md) | Warn operators after twelve unsuccessful started attempts for one task | accepted |
 | [ADR-040](ADR-040-reflector-selects-authoritative-executor-attempt.md) | Reflector selects the authoritative executor attempt | proposed |
 | [ADR-041](ADR-041-bind-web-fetch-connections-to-validated-addresses.md) | Bind each web fetch connection to its validated address snapshot | proposed |
 | [ADR-042](ADR-042-accept-bounded-delivery-deviations-with-truthful-evidence.md) | Accept bounded process deviations only with truthful evidence | accepted |
@@ -61,6 +70,11 @@ Conventions:
 | [ADR-044](ADR-044-planner-tool-capabilities-are-explicit-and-minimal.md) | Planner tool capabilities are explicit and minimal | accepted |
 | [ADR-045](ADR-045-bound-planner-finalization-by-remaining-time.md) | Bound planner finalization by remaining time inside a reserved shared budget | accepted |
 | [ADR-046](ADR-046-publish-resolved-prompt-budgets.md) | Publish resolved prompt budgets on system_prompt ledger rows | accepted |
+| [ADR-047](ADR-047-accepted-records-admit-only-factual-addenda.md) | Accepted ADRs admit only append-only factual addenda | accepted |
+| [ADR-048](ADR-048-persist-self-derived-provenance-in-public-projection.md) | Persist producer-established provenance on self-derived public rows | accepted |
+| [ADR-049](ADR-049-review-before-effective-ADR-acceptance.md) | Require exact-revision review before ADR acceptance takes effect | proposed |
+| [ADR-050](ADR-050-preserve-bounded-planning-call-evidence.md) | Preserve bounded planning-call evidence without inventing cause | accepted |
+| [ADR-052](ADR-052-finalize-planning-within-current-budget.md) | Finalize planning within the existing 600-second budget | accepted |
 
 ## Acceptance
 
@@ -68,15 +82,42 @@ Each status word has one meaning:
 
 - `proposed` -- guidance for humans and agents. Its rules are not a gate;
   nothing in CI enforces them yet. A proposed record may still be edited.
-- `accepted` -- binding, and immutable from here on. Every item of the
-  record's `# Test Contract` is enforced by a named test on `main`, or is
-  explicitly deferred.
+- `accepted` -- the candidate record has been prepared for acceptance and is
+  immutable in that candidate revision. It is not yet effective or binding
+  before authorized merge. Effective acceptance requires independent review
+  PASS and all applicable required checks on the exact candidate revision,
+  followed by authorized merge of that unchanged reviewed revision. A later
+  commit or changed candidate SHA is not covered by earlier review/check
+  evidence and requires fresh gates. Every item of the record's `# Test
+  Contract` is enforced by a named test on `main`, or is explicitly deferred.
 - `superseded` -- replaced. The record names the superseding ADR and is
   otherwise left as it was.
 - `deferred (#NNN)` -- a marker on one contract item, not a record status:
   the test is owed and issue #NNN owns it.
 
-A record moves `proposed -> accepted` when, and only when:
+### Accepted-record addenda
+
+The accepted decision, status, and all existing historical text in an accepted
+ADR are immutable. ADR-047 permits only a dated, factual, non-decision addendum
+appended after all existing content. It must not create or imply a decision,
+acceptance, status change or authority; change, delete or reorder prior text; or
+make unsupported factual claims. This rule becomes operative only upon effective
+acceptance of ADR-047 under the exact-review/check and authorized-merge gates above.
+
+**Independent full-diff review guard:** a reviewer who did not author the change
+inspects the complete `git diff <base>...<head>` and verifies placement and content
+against these constraints, including source support for every factual claim. The
+reviewer rejects edits to existing content, undated or non-final append material,
+new or implied decisions/status/authority, and unsupported facts. For example, a
+dated, sourced factual note appended at the end can pass; changing earlier
+rationale or `status: accepted`, or an unsupported claim, fails. This is a human
+review guard, not an automated test of factual truth.
+
+A record moves `proposed -> accepted` as a provisional candidate, not as
+effective acceptance. The status flip prepares the candidate revision; the
+separate review, check, and merge gates below determine when acceptance takes
+effect. Do not describe or index a candidate as effectively accepted before
+its authorized merge.
 
 1. Every item in its `# Test Contract` names a test -- `tests/<file>.py` or
    `tests/<file>.py::<name>` -- that exists on `main` and cites the record
@@ -84,16 +125,23 @@ A record moves `proposed -> accepted` when, and only when:
    `deferred (#NNN)`. An item with neither is the reason the record is not
    accepted. Amending a proposed record's contract items to name their tests
    is part of accepting it.
-2. The authorized decision owner or, for a necessary technical ADR within an
-   explicitly owner-approved outcome, the delegated delivery executor accepts
-   the record by a commit that flips frontmatter `status:` to `accepted`.
-   Delegated technical acceptance requires applicable checks and independent
-   review PASS on the exact final revision, with the authority and reviewed
-   revision recorded under [`AGENT_ROUTING.md`](../../AGENT_ROUTING.md). It is
-   not a claim that a human reviewer or operator personally accepted it. No
-   agent may record operator acceptance on the operator's behalf.
-3. The record carries its own acceptance: date and accepting change (PR
-   number or commit) under `# Status`.
+2. The candidate status-flip commit is the exact revision submitted for
+   independent review and applicable required checks. A different revision
+   requires fresh review and checks. A PASS and successful checks on the exact
+   candidate are necessary but do not themselves authorize acceptance or merge.
+3. Effective acceptance occurs only when an authorized decision owner, or an
+   explicitly delegated delivery executor acting within that delegation,
+   merges that unchanged reviewed candidate. Record the authority and planned
+   accepting change in the candidate's `# Status`, and distinguish the
+   candidate status-flip commit from the later effective-acceptance event. The
+   exact candidate SHA, independent review result, applicable check results,
+   and merge reference must be retained in a durable linked acceptance record,
+   such as the PR or governing issue, after those events. The record must point
+   to the exact reviewed and merged SHA; do not edit the ADR after review to add
+   post-review evidence, since that would create a new revision requiring fresh
+   gates. Delegated technical acceptance is not a claim that a human reviewer
+   or operator personally accepted it. No agent may record operator acceptance
+   on the operator's behalf.
 
 `tests/test_adr_acceptance.py` enforces rule 1 on every `accepted` record,
 checks this index against each record's frontmatter, and prints contract
