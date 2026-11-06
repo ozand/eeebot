@@ -8,6 +8,8 @@ Demand and proposer requests are candidate inputs, not assignments to the execut
 
 [[nanobot/runtime/demand.py#collect_demand]] assembles eligible demand in trust order from operator priorities, defects, goal gaps, skills, hypotheses, decay, and reflection. Stable demand IDs and completion/exhaustion evidence let the runtime fold, suppress, or re-present items without treating every ledger row as a new task. The proposer exposes live requests through [[nanobot/runtime/llm_proposer.py#proposer_candidate_items]] and can author bounded candidates through [[nanobot/runtime/llm_proposer.py#maybe_propose]]. These inputs do not themselves authorize execution.
 
+[[nanobot/runtime/llm_proposer.py#_recent_failed_titles]] excludes supplier-paused and incomplete model calls from negative-performance hints, while retaining ordinary failed, partial, timeout and gate-failure feedback. [[tests/test_llm_proposer.py#TestBuildContext#test_outage_does_not_mark_unrelated_proposal_as_failed]] exercises both interrupted outcomes; this does not establish complete #1765 acceptance.
+
 ## Planner choice
 
 The planner chooses or declines candidate work and supplies the executor's task.

@@ -59,14 +59,21 @@ def _wire(tmp_path, monkeypatch, manager_cls):
 
 class TestClassifyLlmError:
     @pytest.mark.parametrize("text", [
+        "Error code: 429 - rate limited",
+        "HTTP 503 Service Unavailable",
+        "received status code 500 from upstream",
+    ])
+    def test_http_contextual_supplier_status_remains_paused(self, text):
+        assert bridge._classify_llm_error(text) == "paused-supplier"
+
+    @pytest.mark.parametrize("text", [
         "Error: LLM execution failed: Error calling LLM: litellm.InternalServerError: "
         "OpenAIException - Connection error.",
         "litellm.APIConnectionError: connection refused",
         "connection reset by peer",
-        "Request timed out after 60s",
-        "litellm.Timeout: Read timeout",
         "Error code: 429 - {'error': 'rate limited'}",
         "Error code: 503 - Service Unavailable",
+        "HTTP 502 Bad Gateway",
         "litellm.RateLimitError: Error code: 429",
         "litellm.ServiceUnavailableError: Error code: 502",
         "No deployments available for selected model",
@@ -87,6 +94,14 @@ class TestClassifyLlmError:
     def test_supplier_side_signals_classify_as_paused_supplier(self, text):
         assert bridge._classify_llm_error(text) == "paused-supplier"
 
+    @pytest.mark.parametrize("text", [
+        "maximum output is 500 tokens",
+        "requested 500 tokens but the model allows 400",
+        "limit is 429 tokens",
+    ])
+    def test_bare_numeric_data_does_not_claim_supplier_outage(self, text):
+        assert bridge._classify_llm_error(text) == "failed"
+
     def test_bare_400_status_code_alone_is_not_a_supplier_signal(self):
         """The classifier keys on the MESSAGE, not the HTTP status -- a 400
         with no supplier-shaped phrasing must still default to 'failed'."""
@@ -105,6 +120,113 @@ class TestClassifyLlmError:
     ])
     def test_our_own_defect_signals_stay_failed(self, text):
         assert bridge._classify_llm_error(text) == "failed"
+
+    @pytest.mark.parametrize("text, expected", [
+        ("HTTP 502 Bad Gateway", "paused-supplier"),
+        ("HTTP 503 Service Unavailable", "paused-supplier"),
+        ("http 429", "paused-supplier"),
+        ("HTTP 404 Not Found", "failed"),       # a client status stays ours
+        ("maximum output is 500 tokens", "failed"),  # a bare number is not a status line
+    ])
+    def test_rx_http_status_line_alternative(self, text, expected):
+        """#1919: pins the one alternative added to main's list -- "http",
+        whitespace, then 429/500/502/503/504. Main's verbatim regex does not
+        match an HTTP status line."""
+        assert bridge._classify_llm_error(text) == expected
+
+    @pytest.mark.parametrize("text, expected", [
+        ("received status code 500 from upstream", "paused-supplier"),
+        ("gateway: status code 503 returned by upstream", "paused-supplier"),
+        ("status code 500", "failed"),              # no upstream relay named
+        ("status code 404 from upstream", "failed"),  # a client status stays ours
+    ])
+    def test_rx_upstream_status_code_alternative(self, text, expected):
+        """#1919: pins the second alternative added to main's list -- "status
+        code" + 429/500/502/503/504 followed within 30 chars by "upstream"."""
+        assert bridge._classify_llm_error(text) == expected
+
+    @pytest.mark.parametrize("text", [
+        # the local gateway's own text during the 2026-09-29 incident, verbatim
+        "No deployments available for selected model, Try again in 8355 seconds",
+        "Error code: 503 - Service Unavailable",
+        "Connection error.",
+    ])
+    def test_supplier_outage_text_wins_over_generic_call_site_evidence(self, text):
+        """#1919 review P1: the executor records error_type="provider_error"
+        whenever a response carries none (subagent.py). An affirmative
+        outage match must still classify as paused-supplier, never fall
+        through to the structured branch's model_call_incomplete fallback --
+        that would spend the incomplete-retry budget on the supplier's
+        uptime, which #1765 exists to prevent."""
+        failure = {"stage": "model_call", "call_stage": "model_call", "error_type": "provider_error", "message": text}
+        assert bridge._classify_llm_error(text, model_call_failure=failure) == "paused-supplier"
+
+    def test_gateway_connection_timeout_is_an_outage(self):
+        """#1919 (architect decision): a connection timeout to the gateway
+        is supplier-side -- main's connect-timeout alternative is kept."""
+        assert bridge._classify_llm_error("Connection timed out") == "paused-supplier"
+        assert bridge._classify_llm_error(
+            "Connection timed out",
+            model_call_failure={"stage": "model_call", "error_type": "provider_error", "message": "Connection timed out"},
+        ) == "paused-supplier"
+
+    def test_generic_request_timeout_with_model_call_evidence_is_incomplete(self):
+        """#1919 (architect decision): main's generic timeout alternatives are
+        dropped, so a request timeout with model_call evidence is
+        model_call_incomplete, never promoted to paused-supplier by text."""
+        assert bridge._classify_llm_error(
+            "Request timed out",
+            model_call_failure={"stage": "model_call", "message": "Request timed out"},
+        ) == "model_call_incomplete"
+
+    @pytest.mark.parametrize("text", ["socket timeout", "Request timed out after 60s", "litellm.Timeout: Read timeout"])
+    def test_model_call_timeout_needs_call_site_evidence(self, text):
+        assert bridge._classify_llm_error(text) == "failed"
+        assert bridge._classify_llm_error(text, model_call_failure={"stage": "model_call"}) == "model_call_incomplete"
+        assert bridge._classify_llm_error(text, model_call_failure={"stage": "tool_execution"}) == "failed"
+        assert bridge._classify_llm_error(text, model_call_failure={"stage": "response_handling"}) == "failed"
+        assert bridge._classify_llm_error(text, model_call_failure={"stage": "response_handling", "call_stage": "model_call"}) == "model_call_incomplete"
+
+    @pytest.mark.parametrize("error_type, message", [
+        ("BadRequestError", "Azure OpenAI API Error 400: invalid temperature"),
+        ("BadRequestError", "Azure OpenAI API Error 404: deployment not found"),
+        ("BadRequestError", "invalid temperature"),
+        ("AuthenticationError", "Incorrect API key provided"),
+        ("PermissionDeniedError", "model access denied"),
+        ("provider_error", "Azure OpenAI API Error 401: Incorrect API key"),
+        ("provider_error", "Azure OpenAI API Error 404: Deployment not found"),
+        ("provider_error", "Error calling Codex: Invalid API key"),
+    ])
+    def test_definitive_client_rejection_with_model_call_telemetry_stays_failed(self, error_type, message):
+        failure = {
+            "stage": "response_handling",
+            "call_stage": "model_call",
+            "error_type": error_type,
+            "message": message,
+        }
+        assert bridge._classify_llm_error(
+            f"litellm.{error_type}: {message}",
+            model_call_failure=failure,
+        ) == "failed"
+
+    def test_not_found_invalid_model_is_not_supplier_outage(self):
+        for text in ("litellm.NotFoundError: model not found", "litellm.NotFoundError: deployment not found", "litellm.NotFoundError: unauthorized"):
+            assert bridge._classify_llm_error(text) == "failed"
+        assert bridge._classify_llm_error("litellm.NotFoundError: model route not found") == "paused-supplier"
+
+    @pytest.mark.parametrize("error_type", ["RateLimitError", "InternalServerError", "ServiceUnavailableError"])
+    def test_affirmative_provider_error_types_are_supplier_pauses(self, error_type):
+        failure = {"stage": "response_handling", "call_stage": "model_call", "error_type": error_type, "message": "gateway response"}
+        assert bridge._classify_llm_error("gateway response", model_call_failure=failure) == "paused-supplier"
+
+    def test_response_handling_call_stage_roundtrip(self, tmp_path):
+        # ADR-050: same other decision inputs; provenance alone is insufficient.
+        failure = {"stage": "response_handling", "call_stage": "model_call", "error_type": "provider_error"}
+        cycle_ledger.record_cycle_outcome(tmp_path, "roundtrip", "model_call_incomplete", None, [], None, model_call_failure=failure)
+        saved = _read_ledger(tmp_path)[0]["model_call_failure"]
+        assert bridge._classify_llm_error("request timed out", model_call_failure=saved) == "model_call_incomplete"
+        saved.pop("call_stage")
+        assert bridge._classify_llm_error("request timed out", model_call_failure=saved) == "failed"
 
     def test_default_is_conservative_not_a_catch_all(self):
         """An error text mentioning neither class's vocabulary at all stays
@@ -146,6 +268,39 @@ def _read_ledger(state_dir: Path) -> list[dict]:
 
 
 class TestDecideHandledMarkerSupplierPaused:
+    def test_model_call_incomplete_has_separate_bounded_retry_stop(self, tmp_path):
+        marker = tmp_path / "handled_req.txt"
+        retry = tmp_path / "retry_incomplete_req.json"
+        for attempt in range(1, bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES + 1):
+            result = bridge._decide_handled_marker(
+                marker, "req.json", llm_error=True, model_call_incomplete=True,
+            )
+            if attempt < bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES:
+                assert result == "incomplete_retry"
+                assert not marker.exists()
+            else:
+                assert result == "incomplete_retries_paused"
+                assert marker.exists()
+        state = json.loads(retry.read_text(encoding="utf-8"))
+        assert state["count"] == bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES
+        assert state["operator_check"] == "check request size / budget"
+        assert not (tmp_path / "retry_req.json").exists()
+
+    def test_error_card_retry_attempt_reads_incomplete_counter(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", tmp_path)
+        (tmp_path / "retry_incomplete_req.json").write_text(
+            json.dumps({"count": 3, "max": 3}), encoding="utf-8",
+        )
+        request_id = "req"
+        retry_path = bridge._model_call_incomplete_retry_path(request_id)
+        attempt = None
+        if retry_path is not None and retry_path.exists():
+            retry_data = json.loads(retry_path.read_text(encoding="utf-8"))
+            retry_count = int(retry_data.get("count") or 0)
+            if retry_count:
+                attempt = f"{retry_count}/{retry_data.get('max') or bridge.LLM_ERROR_MAX_RETRIES}"
+        assert attempt == "3/3"
+
     def test_supplier_paused_writes_no_marker_and_no_retry_counter(self, tmp_path):
         marker = tmp_path / "handled_req.txt"
         result = bridge._decide_handled_marker(
@@ -170,6 +325,141 @@ class TestDecideHandledMarkerSupplierPaused:
 # ─── end-to-end: the same request survives an outage, unchanged ───────────
 
 
+def test_distinct_proposer_and_planner_outage_preserves_next_offer(tmp_path, monkeypatch):
+    """AC4: exercise real proposer rotation before a distinct planner outage."""
+    from nanobot.runtime import demand, llm_proposer, open_increment
+    from tests.test_bridge_recent_failure_suppress import _write_result
+    from tests.test_goal_gap_futility import _gap, _row
+
+    state_dir = _wire(tmp_path, monkeypatch, _LLMDeadSubagentManager)
+    title = "Fix the selected planner work item without changing its identity"
+    _seed_bridge_request(state_dir, "req-distinct", "cycle-distinct", task_title=title)
+    items = [
+        {"id": "x-proposer", "provenance": "derived", "summary": "candidate X"},
+        {"id": "y-planner", "provenance": "derived", "summary": "candidate Y"},
+    ]
+    llm_proposer._write_rotation(state_dir, {
+        "schema_version": "demand-rotation-v1",
+        "served": {"y-planner": "2020-01-01T00:00:00+00:00"},
+    })
+    # Pre-existing unrelated cooling, futility and retry evidence must survive
+    # the outage, without forbidding independent proposer rotation changes.
+    other_title = "Refactor coordinator materializer split logic"
+    _write_result(state_dir / "subagents" / "results", "unrelated.json",
+                  backlog_title=other_title, result_status="blocked")
+    other_gap = _gap(gap_id="other-gap")
+    futility.futile_gap_ids(state_dir, [other_gap])
+    _row(state_dir, "other-gap", "previous-attempt", datetime.now(timezone.utc).isoformat())
+    futility.futile_gap_ids(state_dir, [other_gap])
+    retry_marker = state_dir / "subagent_bridge" / "handled_unrelated.txt"
+    retry_marker.parent.mkdir(parents=True, exist_ok=True)
+    assert bridge._decide_handled_marker(retry_marker, "unrelated", llm_error=True) == "retry"
+    retry_path = retry_marker.with_name("retry_unrelated.json")
+    retry_before = json.loads(retry_path.read_text(encoding="utf-8"))
+    assert retry_before["count"] == 1
+    cooling_before = bridge._recent_failure_match(other_title, state_dir)
+    assert cooling_before == other_title
+    futility_before = futility._load(state_dir)["other-gap"]["attempt_count"]
+    assert futility_before == 1
+    monkeypatch.setattr(llm_proposer, "should_propose", lambda *_: True)
+    monkeypatch.setattr(demand, "demand_driven_enabled", lambda: True)
+    monkeypatch.setattr(demand, "collect_demand", lambda *_a, **_k: items)
+    monkeypatch.setattr(llm_proposer, "build_context", lambda *_a, **_k: "test context")
+    monkeypatch.setattr(llm_proposer, "propose", lambda *_a, **_k: {
+        "no_valuable_task": True, "reason": "no useful proposal",
+    })
+    snapshots = []
+    class ObservedOutage(_LLMDeadSubagentManager):
+        async def spawn(self, **kwargs):
+            snapshots.append(llm_proposer._load_rotation(state_dir)["served"])
+            return await super().spawn(**kwargs)
+    monkeypatch.setattr(bridge, "SubagentManager", ObservedOutage)
+    _stub_planning_session(monkeypatch, title, candidate_id="y-planner")
+    assert asyncio.run(bridge._main_impl()) == bridge.EXIT_SUPPLIER_PAUSED
+    rotation = llm_proposer._load_rotation(state_dir)["served"]
+    assert snapshots == [rotation]  # outage did not change rotation after spawn
+    assert "x-proposer" in rotation
+    assert rotation["y-planner"] == "2020-01-01T00:00:00+00:00"
+    pending = open_increment.pending_open_increment(state_dir)
+    assert pending is not None and pending["plan_text"] == title
+    assert bridge._recent_failure_match(title, state_dir) is None
+    assert not list((state_dir / "subagent_bridge").glob("handled_*.txt"))
+    assert json.loads(retry_path.read_text(encoding="utf-8")) == retry_before
+    assert bridge._recent_failure_match(other_title, state_dir) == cooling_before
+    assert futility._load(state_dir)["other-gap"]["attempt_count"] == futility_before
+    assert "y-planner" not in futility.futile_gap_ids(state_dir, [
+        other_gap, {"id": "y-planner", "kind": "priority", "summary": title},
+    ])
+
+    oi = open_increment.load_state(state_dir)
+    oi.hold["deadline"] = "2000-01-01T00:00:00Z"
+    open_increment._save_state(state_dir, oi)
+    # Selector-only control: identical pre-selection rotation and demand.
+    # This does not reproduce a complete no-outage bridge cycle.
+    control = tmp_path / "control-state"
+    llm_proposer._write_rotation(control, {"schema_version": "demand-rotation-v1", "served": rotation})
+    control_selected = llm_proposer._select_assigned_demand(control, items)[0]["id"]
+    selected = []
+    actual_select = llm_proposer._select_assigned_demand
+    def observe_selection(*args, **kwargs):
+        result = actual_select(*args, **kwargs)
+        selected.append(result[0]["id"])
+        return result
+    monkeypatch.setattr(llm_proposer, "_select_assigned_demand", observe_selection)
+    offers = []
+    rotation_at_planner = []
+    async def observe_plan(**kwargs):
+        rotation_at_planner.append(llm_proposer._load_rotation(state_dir)["served"])
+        offers.append(open_increment.pending_open_increment(kwargs["state_dir"]))
+        return {"ran": True, "iterations_used": 1, "iterations_planned": 1,
+                "tampered_files": [], "plan": None}
+    monkeypatch.setattr(bridge, "_run_planning_session", observe_plan)
+    assert asyncio.run(bridge._main_impl()) == 0
+    # The entire persisted interrupted increment (not only its text) reaches
+    # the next planning boundary without changing identity or evidence.
+    assert offers == [pending]
+    assert pending["candidate_id"] == "y-planner"
+    assert json.loads(retry_path.read_text(encoding="utf-8")) == retry_before
+    assert bridge._recent_failure_match(other_title, state_dir) == cooling_before
+    assert futility._load(state_dir)["other-gap"]["attempt_count"] == futility_before
+    # The same independent selection occurs in the selector-only control.
+    assert selected == [control_selected] == ["y-planner"]
+    assert rotation_at_planner[0]["y-planner"] != "2020-01-01T00:00:00+00:00"
+
+
+@pytest.mark.parametrize("stop_reason, expected", [
+    ("identical_call_loop", "loop_breaker_abort"),
+    ("wall_clock_deadline", "wall_clock_abort"),
+    ("progress_watchdog_timeout", "progress_watchdog_abort"),
+])
+def test_bounded_stop_classification_survives_cycle(tmp_path, monkeypatch, stop_reason, expected):
+    from nanobot import crash_record
+
+    class StoppedManager(_LLMDeadSubagentManager):
+        async def spawn(self, **kwargs):
+            result = await super().spawn(**kwargs)
+            path = bridge.STATE_DIR / "subagents" / f"{self.task_id}.json"
+            telemetry = json.loads(path.read_text(encoding="utf-8"))
+            telemetry["stop_reason"] = stop_reason
+            path.write_text(json.dumps(telemetry), encoding="utf-8")
+            return result
+
+    state = _wire(tmp_path, monkeypatch, StoppedManager)
+    title = "Preserve bounded stop classification"
+    _seed_bridge_request(state, "bounded", "bounded-cycle", task_title=title)
+    _stub_planning_session(monkeypatch, title)
+    seen = []
+    real_set = crash_record.set_run_metadata
+    def capture(*args, **kwargs):
+        seen.append(kwargs.copy())
+        return real_set(*args, **kwargs)
+    monkeypatch.setattr(crash_record, "set_run_metadata", capture)
+    asyncio.run(bridge._main_impl())
+    classified = [entry for entry in seen if "classification" in entry]
+    assert classified[-1]["classification"] == expected
+    assert classified[-1]["reason"] == stop_reason
+
+
 class TestOutageCycleOffersTheSameItemAgainUnchanged:
     def test_paused_supplier_cycle_records_outcome_and_never_retires(self, tmp_path, monkeypatch):
         """Architect resolution 2026-09-25 (ADR-035 rule 3 / ADR-031 rule 2):
@@ -184,6 +474,22 @@ class TestOutageCycleOffersTheSameItemAgainUnchanged:
         title = "Add markdown catalog link path resolver to workspace_validation_helpers.py"
         _seed_bridge_request(state_dir, "req-outage", "cycle-outage", task_title=title)
         _stub_planning_session(monkeypatch, title)
+        # Seed a genuine rotation record via its production selector. A supply
+        # interruption/held tick must not consume another presentation turn.
+        from nanobot.runtime import llm_proposer
+        rotation_item = {"id": "priority-rotation-canary", "provenance": "derived"}
+        llm_proposer._select_assigned_demand(state_dir, [rotation_item])
+        rotation_path = state_dir / "demand" / "rotation.json"
+        rotation_before = rotation_path.read_bytes()
+        selector_calls = 0
+        real_select = llm_proposer._select_assigned_demand
+
+        def _track_rotation_selection(*args, **kwargs):
+            nonlocal selector_calls
+            selector_calls += 1
+            return real_select(*args, **kwargs)
+
+        monkeypatch.setattr(llm_proposer, "_select_assigned_demand", _track_rotation_selection)
         bridge_state = state_dir / "subagent_bridge"
 
         rc = asyncio.run(bridge._main_impl())
@@ -197,6 +503,8 @@ class TestOutageCycleOffersTheSameItemAgainUnchanged:
         assert outcome["llm_error_classification"]["class"] == "paused-supplier"
         assert "Connection error" in outcome["llm_error_classification"]["raw_error"]
         assert bridge._classify_llm_error(TRANSPORT_ERROR) == "paused-supplier"
+        assert selector_calls == 0
+        assert rotation_path.read_bytes() == rotation_before
 
         # (2) no error card: no error_card_recording ledger row at all.
         assert not any(r["phase"] == "error_card_recording" for r in _read_ledger(state_dir))
@@ -225,6 +533,8 @@ class TestOutageCycleOffersTheSameItemAgainUnchanged:
         # (started/dedup/gate/outcome) at all, since no session ran.
         new_rows = rows_after[len(rows_before):]
         assert [r["phase"] for r in new_rows] == ["open_increment_held"]
+        assert selector_calls == 0
+        assert rotation_path.read_bytes() == rotation_before
         assert list(bridge_state.glob("handled_*.txt")) == []
         assert list(bridge_state.glob("retry_*.json")) == []
 
@@ -312,6 +622,63 @@ class TestOutageCycleOffersTheSameItemAgainUnchanged:
         assert (state_dir / "subagent_bridge" / f"handled_{key}.txt").exists()
 
 
+class _IncompleteCallManager(_LLMDeadSubagentManager):
+    """The executor's model call ended without a usable response and without
+    any supplier-outage wording: call-site evidence says model_call, the
+    error type is not a supplier one -> model_call_incomplete."""
+
+    error_text = "Error: LLM execution failed: ValueError: provider response ended before the final chunk"
+
+    async def spawn(self, **kwargs):
+        result = await super().spawn(**kwargs)
+        path = bridge.STATE_DIR / "subagents" / f"{self.task_id}.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["model_call_failure"] = {
+            "stage": "model_call", "call_stage": "model_call",
+            "error_type": "ValueError", "message": self.error_text,
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return result
+
+
+class TestIncompleteRetryCounterIsReadUnderTheWritersKey:
+    def test_both_readers_find_the_counter_the_real_writer_wrote(self, tmp_path, monkeypatch):
+        """#1919 review P1: after #1942 every cycle mints a fresh request_id
+        and the handled/retry bookkeeping keys on the stable retry_key. The
+        counter is written by the real _decide_handled_marker inside a real
+        cycle, and must be found by the attempt label (error_card_recording)
+        and by the recent-failure suppression -- neither may look it up
+        under the per-cycle request_id."""
+        state_dir = _wire(tmp_path, monkeypatch, _IncompleteCallManager)
+        title = "Add retry-key regression coverage for incomplete model calls"
+        _seed_bridge_request(state_dir, "req-incomplete", "cycle-incomplete", task_title=title)
+        _stub_planning_session(monkeypatch, title)
+        key = bridge._retry_key_for(None, title)
+
+        asyncio.run(bridge._main_impl())
+
+        outcome = [r for r in _read_ledger(state_dir) if r["phase"] == "outcome"][-1]
+        assert outcome["reason"] == "model_call_incomplete", outcome
+        bridge_state = state_dir / "subagent_bridge"
+        assert (bridge_state / f"retry_incomplete_{key}.json").exists(), sorted(p.name for p in bridge_state.iterdir())
+        results = [
+            json.loads(p.read_text(encoding="utf-8"))
+            for p in (state_dir / "subagents" / "results").rglob("*.json")
+        ]
+        assert results and all(r.get("retry_key") == key and r.get("request_id") != key for r in results), results
+
+        # reader 1: the attempt label on the error-card row
+        card_rows = [r for r in _read_ledger(state_dir) if r["phase"] == "error_card_recording"]
+        assert card_rows and card_rows[-1].get("attempt") == f"1/{bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES}", card_rows
+
+        # reader 2: recent-failure suppression, before and after exhaustion
+        assert bridge._recent_failure_match(title, state_dir) is None
+        marker = bridge_state / f"handled_{key}.txt"
+        for _ in range(bridge.MODEL_CALL_INCOMPLETE_MAX_RETRIES - 1):
+            bridge._decide_handled_marker(marker, "req.json", llm_error=True, model_call_incomplete=True)
+        assert bridge._recent_failure_match(title, state_dir) is not None
+
+
 # ─── the exit-code consumers: crash_record's exit_streak, health.py ───────
 
 
@@ -327,6 +694,16 @@ class TestExitStreakAndHealthDoNotCountAnOutage:
 
     def test_supplier_paused_exit_code_is_distinct_from_executor_llm_error(self):
         assert bridge.EXIT_SUPPLIER_PAUSED not in (0, bridge.EXIT_EXECUTOR_LLM_ERROR, bridge.EXIT_SYSTEM_PROMPT_OVERFLOW)
+
+    def test_incomplete_model_call_has_distinct_nonzero_exit_code(self):
+        assert bridge.EXIT_MODEL_CALL_INCOMPLETE not in (
+            0, bridge.EXIT_EXECUTOR_LLM_ERROR, bridge.EXIT_SYSTEM_PROMPT_OVERFLOW,
+            bridge.EXIT_SUPPLIER_PAUSED,
+        )
+
+    def test_crash_record_mirrors_model_call_incomplete_exit_code(self):
+        from nanobot import crash_record
+        assert crash_record.MODEL_CALL_INCOMPLETE_EXIT_CODE == bridge.EXIT_MODEL_CALL_INCOMPLETE
 
     def test_crash_record_mirrors_the_same_exit_code_value(self):
         """crash_record.py must not import bridge.py (module docstring) --
@@ -350,10 +727,43 @@ class TestExitStreakAndHealthDoNotCountAnOutage:
         guard = tree.body[-1]
         assert isinstance(guard, ast.If) and "__main__" in ast.dump(guard.test)
         body_src = ast.get_source_segment(src, guard)
-        assert "_exit_code == EXIT_SUPPLIER_PAUSED" in body_src
+        assert "_exit_code == EXIT_MODEL_CALL_INCOMPLETE" in body_src
+        assert "outcome=\"model_call_incomplete\"" in body_src
+        assert "outcome_classification=\"model_call_incomplete\"" in body_src
+        assert "update_streak=False" in body_src
         assert "if not _skip_exit_record:" in body_src
         assert "_crash_record.record_exit(" in body_src
         assert "if BRIDGE_ENABLED:" in body_src
+
+    def test_systemd_cli_records_model_call_incomplete_without_streak_mutation(self, tmp_path):
+        from nanobot import crash_record
+
+        state = tmp_path / "state"
+        crash_record._start_run_marker(state)
+        crash_record.record_exit(state, outcome="failure", exit_status=1, error="NameError: x")
+        crash_record._start_run_marker(state)
+        before = crash_record._load_streak(state / "bridge" / "exit_streak.json")
+        assert before["consecutive_failures"] == 1
+
+        rc = crash_record.main([
+            "--source", "systemd",
+            "--exit-status", str(bridge.EXIT_MODEL_CALL_INCOMPLETE),
+            "--exit-code", "exited",
+            "--service-result", "exit-code",
+            "--state-dir", str(state),
+        ])
+        assert rc == 0
+        after = crash_record._load_streak(state / "bridge" / "exit_streak.json")
+        assert after["consecutive_failures"] == before["consecutive_failures"]
+        assert after["last_failure_ts"] == before["last_failure_ts"]
+        rows = [json.loads(line) for line in (state / "bridge" / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert rows[-1]["classification"] == "model_call_incomplete"
+        assert rows[-1]["outcome"] == "model_call_incomplete"
+        exit_rows = [json.loads(line) for line in (state / "bridge" / "exits.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert exit_rows[-1]["outcome"] == "model_call_incomplete"
+        assert exit_rows[-1]["classification"] == "model_call_incomplete"
+        assert exit_rows[-1]["streak_updated"] is False
+        assert after["total_records"] == before["total_records"]
 
     def test_systemd_cli_skips_record_exit_for_supplier_paused_and_streak_is_unchanged(self, tmp_path):
         from nanobot import crash_record
@@ -402,8 +812,36 @@ class TestExitStreakAndHealthDoNotCountAnOutage:
         )
         progress = health.read_cycle_progress(state, since_ts="2026-08-01T00:00:00Z")
         assert progress["consecutive_non_integrating_cycles"] == 0
-        assert progress["state"] != "stalled"
+        # The count threshold is exempt, but the independent time-based alert
+        # still fires because the last successful cycle is older than 8 hours.
+        assert progress["state"] == "stalled"
+        assert progress["alert"] is True
         assert progress["dominant_reason"] is None
+
+    def test_incomplete_calls_still_trigger_time_based_stall_alert(self, tmp_path):
+        from nanobot.runtime import health
+
+        state = tmp_path / "state"
+        ledger_dir = state / "ledger"
+        ledger_dir.mkdir(parents=True)
+        rows = [{"phase": "outcome", "cycle_id": "c-success", "outcome": "success",
+                 "ts": "2026-09-01T00:00:00Z"}]
+        for i in range(3):
+            rows.append({
+                "phase": "outcome", "cycle_id": f"c-incomplete-{i}",
+                "outcome": "model_call_incomplete", "reason": "model_call_incomplete",
+                "ts": f"2026-09-01T00:{i + 1:02d}:00Z",
+            })
+        (ledger_dir / "cycles.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8",
+        )
+        progress = health.read_cycle_progress(
+            state, since_ts="2026-08-01T00:00:00Z",
+            now=datetime(2026, 9, 3, tzinfo=timezone.utc).timestamp(),
+        )
+        assert progress["state"] == "stalled"
+        assert progress["alert"] is True
+        assert progress["consecutive_non_integrating_cycles"] == 0
 
     def test_health_a_real_failure_streak_of_the_same_length_still_alerts(self, tmp_path):
         """Control: this is not a change to the threshold itself -- a
@@ -506,8 +944,30 @@ class TestScorecardPausedSupplierCounters:
         assert loop["repeat_failure_rate"] == round(1 / 4, 4)
         assert loop["repeat_failure_rate_new"] == round(2 / 4, 4)
         assert loop["repeat_failure_rate"] == round(1 / 4, 4)
-        assert loop["model_call_incomplete_events"] == "unavailable"
+        assert loop["model_call_incomplete_events"] == 0
+        assert loop["model_call_incomplete_tasks"] == 0
+        assert loop["model_call_incomplete_share"] == 0.0
         assert loop["unknown_failure_cause_events"] == "unavailable"
+
+    def test_model_call_incomplete_fields_are_populated_from_ledger(self):
+        rows = [
+            {"phase": "proposed", "cycle_id": "c-incomplete", "demand_id": "task-a"},
+            {"phase": "outcome", "cycle_id": "c-incomplete", "outcome": "model_call_incomplete"},
+        ]
+        loop = scorecard._loop_section(rows, ledger_status="complete")
+        assert loop["model_call_incomplete_events"] == 1
+        assert loop["model_call_incomplete_tasks"] == 1
+        assert loop["model_call_incomplete_share"] == 1.0
+        assert loop["execution_failure_and_incomplete_events"] == 1
+        assert loop["execution_failure_tasks"] == 0
+        assert loop["execution_failure_events"] == 0
+        assert loop["wasted_attempts"] == 0
+
+    def test_model_call_incomplete_fields_stay_unavailable_if_ledger_unavailable(self):
+        loop = scorecard._loop_section([], ledger_status="unavailable")
+        assert loop["model_call_incomplete_events"] == "unavailable"
+        assert loop["model_call_incomplete_tasks"] == "unavailable"
+        assert loop["model_call_incomplete_share"] == "unavailable"
 
     def test_paused_supplier_counted_and_timed_separately_from_failed(self):
         loop = scorecard._loop_section(self._rows(paused=2, failed=1, success=1), ledger_status="complete")

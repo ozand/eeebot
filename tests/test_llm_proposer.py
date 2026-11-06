@@ -758,6 +758,15 @@ class TestBuildContext:
         assert "Add a memory-leak detector script" in context
         assert len(context) <= llm_proposer._MAX_CONTEXT_CHARS
 
+    @pytest.mark.parametrize("outcome", ["paused-supplier", "model_call_incomplete"])
+    def test_outage_does_not_mark_unrelated_proposal_as_failed(self, tmp_path, outcome):
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, "some real goal text")
+        _append_proposed(state_dir, "cycle-x", "Unrelated proposer candidate X")
+        _append_outcome(state_dir, "cycle-x", outcome)
+        context = llm_proposer.build_context(state_dir, None)
+        assert "Recently attempted but NOT integrated" not in context
+
     def test_no_recent_failures_omits_new_section_entirely(self, tmp_path):
         """#716 acceptance: with no recent non-integrated attempts,
         build_context's output is byte-identical to pre-#716 — the new

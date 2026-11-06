@@ -83,6 +83,23 @@ def test_evaluate_daily_movement_appearance_of_work() -> None:
     assert res.productive_ratio == 0.1
 
 
+def test_model_call_incomplete_is_separate_daily_non_success_category() -> None:
+    w_start = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)
+    w_end = datetime(2026, 9, 21, 0, 0, tzinfo=timezone.utc)
+    rows = [
+        {"phase": "outcome", "outcome": "success", "files_changed": ["scripts/tool.py"]},
+        {"phase": "outcome", "outcome": "model_call_incomplete", "reason": "model_call_incomplete"},
+    ]
+
+    result = evaluate_daily_movement(rows, window_start=w_start, window_end=w_end)
+
+    assert result.total_attempts == 2
+    assert result.successful_cycles == 1
+    assert result.failed_cycles == 0
+    assert result.model_call_incomplete_cycles == 1
+    assert "model_call_incomplete cycle(s) counted separately" in result.reason
+
+
 def test_evaluate_daily_movement_true_movement() -> None:
     w_start = datetime(2026, 9, 20, 0, 0, tzinfo=timezone.utc)
     w_end = datetime(2026, 9, 21, 0, 0, tzinfo=timezone.utc)

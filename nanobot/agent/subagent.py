@@ -378,6 +378,8 @@ class SubagentManager:
         logger.info("Subagent [{}] starting task: {}", task_id, label)
         correlation_context = correlation_context or self._build_subagent_correlation_context()
         context_usage = {"peak_tokens": 0, "iterations": []}
+        model_call_failure: dict[str, Any] | None = None
+        model_call_stage = "initialization"
 
         try:
             # Build subagent tools (no message tool, no spawn tool)
@@ -508,6 +510,7 @@ class SubagentManager:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": task},
             ]
+            generation_limit = getattr(getattr(self.provider, "generation", None), "max_tokens", None)
 
             # Run agent loop (limited iterations)
             max_iterations = self.max_iterations
@@ -626,8 +629,8 @@ class SubagentManager:
                             ),
                         })
                 _tools_def = [] if _is_final_turn else tools.get_definitions()
+                model_call_stage = "model_call"
                 try:
-                    # #1899: bound in-flight model call by remaining progress watchdog time
                     _call_timeout = _watchdog.remaining_time()
                     _planner_remaining = None
                     if self._planner_deadline is not None and self._telemetry_component == "planner":
@@ -658,26 +661,17 @@ class SubagentManager:
                             else "progress_watchdog_timeout"
                         )
                         break
-
                     if self._telemetry_component:
                         with _subagent_telemetry_context(
                             self._telemetry_cycle_id, self._telemetry_component,
                         ):
                             response = await asyncio.wait_for(
-                                self.provider.chat_with_retry(
-                                    messages=messages,
-                                    tools=_tools_def,
-                                    model=self.model,
-                                ),
+                                self.provider.chat_with_retry(messages=messages, tools=_tools_def, model=self.model),
                                 timeout=_call_timeout,
                             )
                     else:
                         response = await asyncio.wait_for(
-                            self.provider.chat_with_retry(
-                                messages=messages,
-                                tools=_tools_def,
-                                model=self.model,
-                            ),
+                            self.provider.chat_with_retry(messages=messages, tools=_tools_def, model=self.model),
                             timeout=_call_timeout,
                         )
                 except asyncio.TimeoutError:
@@ -687,8 +681,8 @@ class SubagentManager:
                     )
                     stop_reason = "progress_watchdog_timeout"
                     break
-
                 _watchdog.record_call_completed()
+                model_call_stage = "response_handling"
                 usage = getattr(response, "usage", None)
                 prompt_tokens = (
                     usage.get("prompt_tokens")
@@ -704,7 +698,20 @@ class SubagentManager:
                         context_usage["peak_tokens"] = prompt_tokens
 
                 if response.finish_reason == "error":
+                    model_call_failure = {
+                        "error_type": str(getattr(response, "error_type", None) or "provider_error"),
+                        "stage": model_call_stage,
+                        "call_stage": "model_call",
+                        "model": str(self.model or ""),
+                        "prompt_size_chars": sum(
+                            len(str(message.get("content") or ""))
+                            for message in messages if isinstance(message, dict)
+                        ),
+                        "limit": generation_limit,
+                        "message": str(response.content or "")[:300],
+                    }
                     raise RuntimeError(f"LLM execution failed: {response.content}")
+                model_call_stage = "agent_turn"
 
                 # #1774: a response cut at the completion ceiling is a
                 # CONTINUATION SIGNAL, not a final answer. It is cut mid-stream,
@@ -956,6 +963,7 @@ class SubagentManager:
                     correlation_context=correlation_context,
                     stop_reason=stop_reason,
                     context_usage=context_usage,
+                    model_call_failure=model_call_failure,
                     truncation={
                         "count": _truncation["count"],
                         "continued": _truncation["continued"],
@@ -1011,6 +1019,7 @@ class SubagentManager:
                     session_key=session_key,
                     correlation_context=correlation_context,
                     context_usage=context_usage,
+                    model_call_failure=model_call_failure,
                     max_call_gap_s=_error_call_gap,
                 ),
             )
@@ -1310,6 +1319,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         stop_reason: str | None = None,
         context_usage: dict[str, Any] | None = None,
         truncation: dict[str, Any] | None = None,
+        model_call_failure: dict[str, Any] | None = None,
         max_call_gap_s: float | None = None,
     ) -> dict[str, Any]:
         payload = {
@@ -1329,6 +1339,8 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         }
         if stop_reason:
             payload["stop_reason"] = stop_reason
+        if model_call_failure:
+            payload["model_call_failure"] = dict(model_call_failure)
         if max_call_gap_s is not None:
             payload["max_call_gap_s"] = round(float(max_call_gap_s), 1)
         if correlation_context:

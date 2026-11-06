@@ -270,7 +270,7 @@ def _gate_fail_breakdown(cycles: dict[str, dict[str, Any]]) -> list[dict[str, An
                 counts[("gate", reason)] += 1
 
         outcome_row = data["outcome"]
-        if outcome_row and outcome_row["outcome"] in ("failed", "timeout"):
+        if outcome_row and outcome_row["outcome"] in ("failed", "timeout", "model_call_incomplete"):
             # Only attribute to "outcome" stage if no gate row already explains
             # the failure — avoids double counting the same terminal failure.
             has_gate_fail = any(g.get("allowed") is False for g in data["gate"])

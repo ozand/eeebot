@@ -336,6 +336,7 @@ class LiteLLMProvider(LLMProvider):
                 content=f"Error calling LLM: {type(e).__name__}: {str(e)}",
                 finish_reason="error",
                 usage={"_http_status": status, "_retry_after_s": retry_after},
+                error_type=type(e).__name__,
             )
 
     def _parse_response(self, response: Any) -> LLMResponse:

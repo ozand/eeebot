@@ -16,6 +16,8 @@
 # Keep the value equal to nanobot/runtime/bridge.py::EXIT_EXECUTOR_LLM_ERROR;
 # tests/test_deploy_activation_exit_class.py pins the two together.
 BRIDGE_EXIT_EXECUTOR_LLM_ERROR=3
+# Incomplete provider response is not a code defect and must not roll back a release.
+BRIDGE_EXIT_MODEL_CALL_INCOMPLETE=6
 # #1300: the strict ContextBuilder could not fit every critical AGENTS.md
 # section under the system-prompt cap. A property of the release plus the
 # instance's AGENTS.md, not a transient: stays a genuine activation failure
@@ -28,6 +30,8 @@ describe_bridge_exit_status() {
   case "${1:-}" in
     "$BRIDGE_EXIT_EXECUTOR_LLM_ERROR")
       echo "EXIT_EXECUTOR_LLM_ERROR: the executor could not reach its model this cycle (#1280)" ;;
+    "$BRIDGE_EXIT_MODEL_CALL_INCOMPLETE")
+      echo "EXIT_MODEL_CALL_INCOMPLETE: provider/model call did not complete this cycle (#1765)" ;;
     "$BRIDGE_EXIT_SYSTEM_PROMPT_OVERFLOW")
       echo "EXIT_SYSTEM_PROMPT_OVERFLOW: the executor prompt cannot hold every critical AGENTS.md section (#1300) — the instance AGENTS.md must carry '<!-- prompt-fit: droppable -->' markers (ozand/eeebot-self-evolving#186) before this release can run; details in the cycle's system_prompt ledger row and the bridge journal" ;;
     *) echo "" ;;
@@ -49,6 +53,10 @@ classify_bridge_run() {
   fi
   if [ "$result" = "exit-code" ] && [ "$status" = "$BRIDGE_EXIT_EXECUTOR_LLM_ERROR" ]; then
     echo transport
+    return 0
+  fi
+  if [ "$result" = "exit-code" ] && [ "$status" = "$BRIDGE_EXIT_MODEL_CALL_INCOMPLETE" ]; then
+    echo incomplete
     return 0
   fi
   echo failed

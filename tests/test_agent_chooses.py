@@ -1633,7 +1633,11 @@ def test_keep_continuation_after_genuine_failure_is_suppressed(tmp_path: Path, m
     monkeypatch.setattr(bridge, "SubagentManager", _NoExecutor)
     assert asyncio.run(bridge._main_impl()) == 0
     assert len(planning_calls) == 1
-    assert _failure_hits == [title]
+    assert len(_failure_hits) == 1
+    evidence = _failure_hits[0]
+    assert isinstance(evidence, dict)
+    assert evidence["title"] == title
+    assert evidence["error_class"] == "mutation_surface_violation"
     assert spawned == []
     assert any(
         row.get("decision") == "skipped_recent_failure"
@@ -4643,7 +4647,8 @@ def test_stopped_and_minimal_mode_are_enforced(tmp_path: Path, monkeypatch):
     )
 
 
-def test_planner_supplier_error_classified_as_supply(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("incomplete", [False, True, "request"])
+def test_planner_supplier_error_classified_as_supply(tmp_path: Path, monkeypatch, incomplete):
     """D10 (ADR-035 Test Contract, external review finding #10): a
     terminal supplier error in the PLANNER's own telemetry must be
     classified BEFORE any attempt to JSON-parse its (nonexistent) final
@@ -4681,8 +4686,9 @@ def test_planner_supplier_error_classified_as_supply(tmp_path: Path, monkeypatch
             (state_dir / "subagents" / f"{task_id}.json").write_text(
                 json.dumps({
                     "status": "error",
-                    "summary": "Error: LLM execution failed: litellm.APIConnectionError (error code: 503)",
-                    "result": "Error: LLM execution failed: litellm.APIConnectionError (error code: 503)",
+                    "summary": "invalid temperature" if incomplete == "request" else ("litellm.Timeout: Read timeout" if incomplete else "Error: LLM execution failed: litellm.APIConnectionError (error code: 503)"),
+                    "result": "invalid temperature" if incomplete == "request" else ("litellm.Timeout: Read timeout" if incomplete else "Error: LLM execution failed: litellm.APIConnectionError (error code: 503)"),
+                    **({"model_call_failure": {"stage": "response_handling", "call_stage": "model_call"}} if incomplete else {}),
                     "context_usage": {"iterations": [{}]},
                 }),
                 encoding="utf-8",
@@ -4697,16 +4703,24 @@ def test_planner_supplier_error_classified_as_supply(tmp_path: Path, monkeypatch
     monkeypatch.setattr(bridge, "SubagentManager", _PlannerSupplierErrorManager)
 
     rc = asyncio.run(bridge._main_impl())
-    assert rc == 0
+    assert rc == (bridge.EXIT_MODEL_CALL_INCOMPLETE if incomplete is True else 0)
 
     no_plan_state = no_plan_recovery.load_state(state_dir)
-    assert no_plan_state.consecutive_supply >= 1, (
-        "a terminal supplier error in planner telemetry must count as the supply family"
-    )
-    assert no_plan_state.consecutive_planner == 0, (
-        "a supplier error must never be counted toward the planner family "
-        "(malformed/no_plan/refused), which drives stopped/minimal_mode"
-    )
+    # ADR-050: supplier, unknown call failure, and request defect remain distinct.
+    assert no_plan_state.consecutive_supply == (0 if incomplete else 1)
+    assert no_plan_state.consecutive_planner == (1 if incomplete == "request" else 0)
+    rows = [json.loads(line) for line in (state_dir / "ledger" / "cycles.jsonl").read_text(encoding="utf-8").splitlines()]
+    planning = [row for row in rows if row.get("phase") == "planning_session"]
+    expected = "malformed" if incomplete == "request" else ("model_call_incomplete" if incomplete else "supplier_error")
+    assert planning[-1]["outcome"] == expected
+
+
+def test_planner_incomplete_and_request_rejection_recovery(tmp_path: Path, monkeypatch):
+    # ADR-050 named contract uses the same producer-to-ledger integration fixture.
+    for value in (True, "request"):
+        case = tmp_path / str(value)
+        case.mkdir()
+        test_planner_supplier_error_classified_as_supply(case, monkeypatch, value)
 
 
 def test_planner_rest_resets_supply_streak(tmp_path: Path, monkeypatch):
