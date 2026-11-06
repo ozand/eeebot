@@ -539,6 +539,11 @@ class SubagentManager:
                 should_stop_for_wall_clock,
             )
             _watchdog = ProgressWatchdog(clock=_clock)
+            # ADR-052: direct planner callers receive one anchored local budget;
+            # bridge callers pass their already-anchored deadline explicitly.
+            if self._telemetry_component == "planner" and self._planner_deadline is None:
+                self._planner_deadline = min(_clock() + 600.0, _wall_deadline) if _wall_deadline is not None else _clock() + 600.0
+            _bounded_planner = self._telemetry_component == "planner" and self._planner_deadline is not None
 
             while iteration < max_iterations:
                 # #1101/#1899: wall-clock deadline check with safety margin
@@ -593,13 +598,12 @@ class SubagentManager:
                 # by remaining time while preserving a configured local call reserve.
                 _planner_final_reserve = (
                     get_call_p99_secs()
-                    if self._planner_phase_budget and self._telemetry_component == "planner"
-                    else 0.0
+                    if _bounded_planner else 0.0
                 )
                 _is_final_turn = iteration == max_iterations or (
                     _planner_final_reserve > 0
                     and self._planner_deadline is not None
-                    and _clock() >= self._planner_deadline - _planner_final_reserve
+                    and _clock() > self._planner_deadline - 2 * _planner_final_reserve
                 )
                 if (
                     _is_final_turn
@@ -632,14 +636,14 @@ class SubagentManager:
                     _planner_remaining = None
                     if self._planner_deadline is not None and self._telemetry_component == "planner":
                         _planner_remaining = self._planner_deadline - _clock()
-                        if self._planner_phase_budget and not _is_final_turn:
+                        if _bounded_planner and not _is_final_turn:
                             _call_timeout = min(
                                 _call_timeout,
                                 get_call_p99_secs(),
                                 _planner_remaining - _planner_final_reserve,
                             )
                         else:
-                            _call_timeout = min(_call_timeout, _planner_remaining)
+                            _call_timeout = min(_call_timeout, get_call_p99_secs(), _planner_remaining)
                     if _wall_deadline is not None:
                         _call_timeout = min(_call_timeout, _wall_deadline - _clock())
                     if (
@@ -774,7 +778,7 @@ class SubagentManager:
                         _tool_timeout = _watchdog.remaining_time()
                         if self._planner_deadline is not None and self._telemetry_component == "planner":
                             _phase_remaining = self._planner_deadline - _clock()
-                            if self._planner_phase_budget:
+                            if _bounded_planner:
                                 _tool_timeout = min(
                                     _tool_timeout,
                                     get_call_p99_secs(),
