@@ -90,9 +90,13 @@ def test_skill_read_metric_labels_delivered_scope_and_zero() -> None:
         metrics = _health_metrics(report_status="fresh", materialized_status="fresh")
         metrics["skills_reads_in_window"] = count
         page = DASHBOARD.render_html(_render_ready(metrics))
-        assert "Recorded reads from delivered cycles in window:" in page
-        assert f'<span class="metric-value">{count}</span>' in page
+        assert ('<span class="metric-label">Recorded reads from delivered cycles (retained records):</span>'
+                f'\n                        <span class="metric-value">{count}</span>') in page
         assert "Zero does not mean the skill was never read outside delivered cycles." in page
+    missing = _health_metrics(report_status="fresh", materialized_status="fresh")
+    missing["skills_status"] = "missing"
+    page = DASHBOARD.render_html(_render_ready(missing))
+    assert 'Skills <span class="status-badge"' in page and ">missing</span>" in page
 
 
 def test_format_rate_preserves_unavailable_zero_and_percentage() -> None:

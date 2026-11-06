@@ -59,7 +59,7 @@ warning derived from append-only cycle-ledger evidence.
 
 ### Runtime dashboard skill-read scope (#2170)
 
-The canonical runtime dashboard labels the existing skill-read count as recorded reads from delivered cycles, not all reads. It explains that zero does not prove a skill was never read outside delivered cycles. This is a presentation clarification; collection, count, schema and missing-data behavior are unchanged.
+The canonical runtime dashboard labels the existing skill-read count as retained recorded reads from delivered cycles, not all reads or a time-window count. It explains that zero does not prove a skill was never read outside delivered cycles. This is a presentation clarification; collection, count, schema and missing-data behavior are unchanged.
 
 ### Runtime dashboard recovery visibility (#2118)
 

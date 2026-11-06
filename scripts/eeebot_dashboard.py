@@ -1379,7 +1379,7 @@ def scan_skill_fitness(state_dir: Path) -> dict[str, Any]:
     """Read skill_fitness/reads.json (schema skill-fitness-v1) plus the
     instance repo's skills/*/SKILL.md enumeration (same
     skills_root.glob("*/SKILL.md") pattern as demand.py's repair-unused-skill
-    scan) to report total skills, distinct skills read, reads-in-window, top
+    scan) to report total skills, distinct skills read, retained reads, top
     skills by read count, and never-read count.
 
     Fail-open: a missing/unreadable/malformed reads.json reports its real
@@ -3411,7 +3411,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
                         <span class="metric-value">{skills_total_html} / {skills_distinct_read_html} / {skills_never_read_count_html}</span>
                     </div>
                     <div class="metric-item">
-                        <span class="metric-label">Recorded reads from delivered cycles in window:</span>
+                        <span class="metric-label">Recorded reads from delivered cycles (retained records):</span>
                         <span class="metric-value">{skills_reads_in_window_html}</span>
                         <div class="metric-value" style="font-size: 13px; font-weight: normal; color: var(--text-muted);">Zero does not mean the skill was never read outside delivered cycles.</div>
                     </div>

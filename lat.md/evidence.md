@@ -16,7 +16,9 @@ Scorecard summaries and held-out checks provide fitness evidence distinct from t
 
 ## Skill-read display scope
 
-The canonical [[scripts/eeebot_dashboard.py#render_html]] labels recorded skill reads as delivered-cycle evidence and states that zero does not prove no reads outside delivered cycles. [[tests/test_eeebot_dashboard_truth.py#test_skill_read_metric_labels_delivered_scope_and_zero]] covers zero and nonzero display; collection and missing-data behavior are unchanged.
+The canonical dashboard labels retained skill reads as delivered-cycle evidence, not a time-window count. Zero does not prove no reads outside delivered cycles.
+
+[[scripts/eeebot_dashboard.py#render_html]] presents this scope. [[tests/test_eeebot_dashboard_truth.py#test_skill_read_metric_labels_delivered_scope_and_zero]] covers zero and nonzero display; collection and missing-data behavior are unchanged.
 
 ## Trust boundary
 
