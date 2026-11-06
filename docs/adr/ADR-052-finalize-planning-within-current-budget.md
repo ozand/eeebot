@@ -21,7 +21,7 @@ On current main `4d642aba0b8ff64e47c465468a09f6cc89cd5e06`, ADR-045 supplies rem
 
 For planner sessions with ADR-045's larger phase opt-in OFF, reuse the existing remaining-time final-turn machinery within `D = min(planner_start + 600s, shared_deadline)`; direct calls without a shared deadline use `planner_start + 600s`. Anchor once before spawn and pass the same deadline through the manager and outer wait; retries, re-entry and cancellation do not extend it. Keep the configured shared wall budget and its independent guard. The 20-iteration ceiling remains an independent earlier final-turn trigger.
 
-Let `R = D - now`, `C = get_call_p99_secs()` (default 243s), and `F = get_final_budget_secs()`. Start an ordinary planner model call only with `R >= 2C` and shared remaining `>= C+F`; bound its timeout to `min(C, R-C, watchdog_remaining, shared_remaining)`. Bound each tool operation to the same local reserve, watchdog and shared deadline; re-evaluate after each operation. At `C <= R < 2C`, request a single tools-disabled final turn only if the unchanged shared `C+F` guard passes. At `R < C`, or when the shared guard fails, stop without another call; never borrow time or bypass the guard. Equality is admitted. An iteration-limit final turn obeys the same final-call guard and timeout.
+Let `R = D - now`, `C = get_call_p99_secs()` (default 243s), and `F = get_final_budget_secs()`. Start an ordinary planner model call only with `R >= 2C` and shared remaining `>= C+F`; bound its timeout to `min(C, R-C, watchdog_remaining, shared_remaining)`. Bound each tool operation to the same local reserve, watchdog and shared deadline; re-evaluate after each operation. At `C <= R < 2C`, request a single tools-disabled final turn only if the unchanged shared `C+F` guard passes. Bound the final call to `min(C, R, watchdog_remaining, shared_remaining)`. At `R < C`, or when the shared guard fails, stop without another call; never borrow time or bypass the guard. Equality is admitted. An iteration-limit final turn obeys the same final-call guard and timeout. If a call or tool is cancelled or times out, cancel and drain cooperatively, admit no subsequent call for that session, and retain the existing bounded no-plan/timed-out fallback without persisting an unvalidated plan; cancellation-resistant code can still finish late.
 
 This replaces only ADR-045's OFF-path iteration-only finalization clause; ADR-045 remains otherwise accepted and immutable, and this proposal does not supersede it until effective acceptance. The executor profile, model, tokens, tools, larger opt-in, rest behavior, plan validation, persistence and host/service settings do not change. Cancellation remains cooperative and a final call is not a guarantee of a valid plan.
 
@@ -33,7 +33,7 @@ Planner time is used for a bounded final response instead of ending solely becau
 
 ### Harder
 
-A final response may be attempted before twenty iterations, and provider cancellation can still be late or incomplete. The change cannot prove that all existing timed-out sessions would have produced a valid plan.
+A final response may be attempted well before twenty iterations. With the defaults `D=600s` and `C=243s`, an ordinary call is admitted only while `R >= 486s`: at most roughly 114 seconds after the planner starts, before other guards. This deliberately trades investigation time for a final-call opportunity. Provider cancellation can still be late or incomplete. The change cannot prove that all existing timed-out sessions would have produced a valid plan.
 
 ### What does not change
 
@@ -52,7 +52,7 @@ ADR-045's 6000/9000 opt-in, executor allocation, shared guard, tool profile, mod
 |---|---|---|
 | OFF path preserves the 600-second deadline while allowing a time-admitted final turn | `tests/test_run_planning_session.py::test_planning_session_uses_600_second_legacy_timeout_by_default` plus new fake-clock final-admission regression | deferred (#2050) |
 | Ordinary calls require `R >= 2C`; final calls require `R >= C`; equality and below-boundary cases are explicit | `tests/test_subagent_manager.py::test_planner_current_budget_final_admission_boundaries` | deferred (#2050) |
-| Tool steps cannot consume the final reserve and no call starts after cancellation/deadline | `tests/test_subagent_manager.py::test_planner_current_budget_tool_and_cancel_guards` | deferred (#2050) |
+| Tool steps preserve the final reserve; a completed tool reaching `R=C` transitions to a final call, and timeout/cancellation drains without a later call or unvalidated plan | `tests/test_subagent_manager.py::test_planner_current_budget_tool_and_cancel_guards` | deferred (#2050) |
 | ADR-045 opt-in and executor behavior remain unchanged | existing ADR-045 tests in `tests/test_session_clock.py`, `tests/test_subagent_manager.py`, and `tests/test_run_planning_session.py` | passing on main |
 
 # References
