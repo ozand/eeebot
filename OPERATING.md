@@ -23,7 +23,7 @@ Before your final response, add one line on what you tried and what happened (no
 
 ## Before editing: skip check
 
-Before editing, check Recent activity and the codebase. If already done or not applicable, immediately report `outcome: "skipped"`; do not edit the diary, make a bookkeeping commit, or call more tools. Skip is complete, not a failure. The harness attempts an opening diary entry before branch creation and executor spawn; it records the task, not its later outcome. A pre-spawn skip has no executor call or final response.
+Before editing, check Recent activity and the codebase. If already done or not applicable, immediately report `outcome: "skipped"`; do not edit the diary, make a bookkeeping commit, or call more tools. Skip is complete, not a failure. The harness attempts an opening diary entry before branch creation and executor start; it records the task, not its later outcome. A skip before executor start has no executor call or final response.
 
 ## Execution
 
