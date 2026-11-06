@@ -2080,6 +2080,10 @@ class TestProposeMockedClient:
         assert (root / "goals.md").stat().st_size <= DOCUMENT_SIZE_CAP_BYTES
         assert llm_proposer.propose("context") is None
         assert llm_proposer._last_propose_failure.startswith("RolePromptBuildFailed:")
+        rejects = _reject_rows(tmp_path / "state")
+        assert len(rejects) == 1
+        assert rejects[0]["reason"] == "charter_too_large"
+        assert "RolePromptBuildFailed:" in rejects[0]["detail"]
 
     def test_garbage_reply_returns_none(self, monkeypatch):
         self._patch_client(monkeypatch, "not json at all, sorry")
