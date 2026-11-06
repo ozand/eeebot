@@ -56,9 +56,11 @@ class _PrimaryManager:
     task_id = PRIMARY_TASK_ID
     last_max_call_gap_s = 17.5
 
-    def __init__(self, *, workspace, telemetry_component="", **_kwargs):
+    def __init__(self, *, workspace, telemetry_component="", telemetry_cycle_id="", telemetry_root=None, **_kwargs):
         self.workspace = workspace
         self.telemetry_component = telemetry_component
+        self.telemetry_cycle_id = telemetry_cycle_id
+        self.telemetry_root = telemetry_root
         self._running_tasks: dict = {}
         self._skill_reads_this_cycle: list = []
 
@@ -66,6 +68,11 @@ class _PrimaryManager:
         return []
 
     async def spawn(self, **_kwargs):
+        if self.telemetry_component == "executor":
+            from nanobot.observability.llm_telemetry import record_llm_prompt, telemetry_context
+            with telemetry_context(self.telemetry_cycle_id, "executor", attempt_id=self.task_id, root=self.telemetry_root):
+                record_llm_prompt(messages=[], content=PRIMARY_TEXT, reasoning_content=None,
+                                  finish_reason="stop", model="test", prompt_tokens=0, completion_tokens=0)
         (self.workspace / "scripts").mkdir(exist_ok=True)
         (self.workspace / "scripts" / "feature.py").write_text("def feature():\n    return 42\n")
         _run(self.workspace, "add", "scripts/feature.py")
@@ -83,12 +90,18 @@ def _make_repair_manager(status: str, result: str):
     class _RepairManager:
         task_id = REPAIR_TASK_ID
 
-        def __init__(self, *, workspace, **_kwargs):
+        def __init__(self, *, workspace, telemetry_cycle_id="", telemetry_root=None, **_kwargs):
             self.workspace = workspace
+            self.telemetry_cycle_id = telemetry_cycle_id
+            self.telemetry_root = telemetry_root
             self._running_tasks: dict = {}
             self._skill_reads_this_cycle: list = []
 
         async def spawn(self, **_kwargs):
+            from nanobot.observability.llm_telemetry import record_llm_prompt, telemetry_context
+            with telemetry_context(self.telemetry_cycle_id, "executor", attempt_id=self.task_id, root=self.telemetry_root):
+                record_llm_prompt(messages=[], content=result, reasoning_content=None,
+                                  finish_reason="stop", model="test", prompt_tokens=0, completion_tokens=0)
             _write_telemetry(bridge.STATE_DIR, self.task_id, status, result)
 
             async def _done():
@@ -171,6 +184,22 @@ def _core_smoke_set(monkeypatch, tmp_path):
 
 
 class TestAuthoritativeSpawnEndToEnd:
+    def test_successful_bridge_cycle_persists_authoritative_executor_attempt(self, tmp_path, monkeypatch):
+        state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
+        cycle_id = "cycle-attempt-sidecar"
+        _seed_bridge_request(state_dir, "req-attempt-sidecar", cycle_id)
+        _stub_planning_session(monkeypatch, "add feature")
+
+        asyncio.run(bridge._main_impl())
+
+        from nanobot.observability.llm_telemetry import read_authoritative_attempt
+
+        outcomes = [row for row in _read_ledger(state_dir) if row.get("phase") == "outcome"]
+        actual_cycle_id = outcomes[-1]["cycle_id"]
+        record = read_authoritative_attempt(state_dir / "llm_calls", actual_cycle_id)
+        assert record is not None
+        assert record["attempt_id"] == REPAIR_TASK_ID
+
     def test_repair_skipped_when_primary_consumes_wall_budget(self, tmp_path, monkeypatch):
         """A real bridge cycle must not spawn repair without wall+reserve budget (#1899 F1)."""
         state_dir = _wire(tmp_path, monkeypatch, _make_repair_manager("ok", REPAIR_TEXT_WITH_MARKER))
@@ -994,6 +1023,7 @@ class TestHelpers:
             tmp_path, "primary", ["repair-1", "repair-2"],
         ) == "repair-2"
 
+    # ADR-040: reflector correlation consumes this existing primary-fallback resolver.
     def test_authoritative_resolution_falls_back_to_primary_when_no_repair_ok(self, tmp_path):
         _write_telemetry(tmp_path, "primary", "ok", PRIMARY_TEXT)
         _write_telemetry(tmp_path, "repair-1", "error", "Error: boom")

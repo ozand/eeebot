@@ -223,6 +223,24 @@ def test_concurrent_explicit_subagent_contexts_keep_cycle_ids_isolated(tmp_path)
     assert sorted(rows) == ["cycle-one", "cycle-two"]
 
 
+def test_legacy_subagent_context_defaults_to_unattributed_and_resets_on_exception(tmp_path):
+    import pytest
+
+    from nanobot.agent.subagent import _subagent_telemetry_context
+    from nanobot.observability import llm_telemetry
+
+    root = tmp_path / "telemetry"
+    with pytest.raises(RuntimeError):
+        with _subagent_telemetry_context("legacy-cycle", "executor", root=root):
+            assert current_cycle_id("executor") == "legacy-cycle"
+            assert llm_telemetry._CALL_CONTEXT.get()["attempt_id"] == ""
+            assert llm_telemetry._llm_calls_dir() == root
+            raise RuntimeError("context reset")
+
+    assert current_cycle_id() == ""
+    assert llm_telemetry._TELEMETRY_ROOT.get() is None
+
+
 def test_subagent_without_explicit_cycle_keeps_ambient_correlation(monkeypatch, tmp_path):
     from nanobot.agent.subagent import _subagent_telemetry_context
 

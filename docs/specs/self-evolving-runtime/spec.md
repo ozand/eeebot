@@ -315,6 +315,18 @@ hooked into the same `chat_with_retry` choke point (right beside
   being written — defensive, since messages already went to the provider.
 - **Toggle**: `LLM_CAPTURE_PROMPTS` — default ON; set to `0`/`false`/empty to
   disable (privacy/perf-sensitive runs).
+- **Reflector correlation (#2034)**: executor prompt rows include a private
+  spawn attempt ID. The bridge persists the exact authoritative primary-or-
+  successful-repair selection under `prompts/attempt_resolutions/`; the
+  reflector joins only that attempt and exposes only safe component/sequence
+  provenance. Missing, legacy, ambiguous, or expired correlation is
+  unavailable, never a fallback to planner or another attempt. The reflector
+  journals this separately from pruned prompts, retries unavailable
+  correlation within its existing bounded attempt limit, and treats success as
+  terminal; malformed or expired sidecars alone do not prove prompt pruning.
+  Legacy `skipped_pruned` rows remain readable. Resolution
+  metadata is removed synchronously with its associated prompt retention; this
+  application-level restriction does not claim separate OS-role isolation.
 - **Reader**: `scripts/llm_prompt_inspect.py --dir PATH --cycle ID --date
   YYYY-MM-DD --call SEQ [--json]` reads plain and `.gz` daily files and, for a
   selected call, prints each message's role/byte-size/`len//4` token estimate
