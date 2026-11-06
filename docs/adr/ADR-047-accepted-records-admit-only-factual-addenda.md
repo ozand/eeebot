@@ -1,0 +1,74 @@
+---
+title: Accepted ADRs admit only append-only factual addenda
+status: accepted
+date: 2026-11-01
+authors: [eeebot maintainers]
+related: ["#2141", "ADR-030"]
+tags: [process, governance, adr]
+---
+
+# Status
+
+**Provisional acceptance candidate.** Prepared under the owner's delegated technical authority for #2141, not personal operator acceptance. It becomes effective only after independent PASS and applicable checks on the exact final candidate followed by authorized merge of that unchanged revision. The governing PR or issue must retain those receipts.
+
+## Context
+
+`docs/adr/README.md` describes accepted records as immutable, while ADR-030
+contains a dated addendum precedent. This repository-wide policy needs to
+clarify whether such non-decision additions are permitted and, if so, how they
+can be reviewed without making accepted decisions or their history editable.
+Reversing this governance choice later would require knowing which class of
+edits was permitted and how it was reviewed, so the ADR reversal test is met.
+
+## Decision
+
+Keep the accepted ADR's original decision, status, and existing historical text
+immutable. Permit only a dated, factual, non-decision addendum appended after
+all existing content. An addendum must not add or imply a decision, acceptance,
+status change, or authority; change, delete, or reorder existing content; or
+make unsupported factual claims. A named independent reviewer checks the
+complete `git diff <base>...<head>` against those conditions and verifies each
+factual claim against its cited evidence. Reject any diff that violates them.
+This is a human review guard, not an automated enforcement claim.
+
+This decision defines documentation governance only. It does not itself accept
+this ADR, authorize an addendum to any particular ADR, change any prior
+acceptance criteria, or grant merge/closure authority.
+
+## Consequences
+
+### What gets easier
+
+If accepted, authors and reviewers will have a precise test for a permissible
+post-acceptance clarification, consistent with ADR-030's dated addendum
+precedent.
+
+### What gets harder
+
+Every proposed factual addendum needs an independent full-diff review and
+traceable support; append-only placement alone is insufficient.
+
+### What does not change
+
+Accepted decisions and their prior history remain immutable. Normal ADR
+acceptance authority and all issue/PR review gates remain in force. No automated
+policy enforcement is introduced.
+
+## Alternatives Considered
+
+- Forbid all additions after acceptance: preserves the README's strictest
+  reading but excludes the existing ADR-030 precedent for a dated addendum.
+- Allow general amendments in place: rejected because it would blur the
+  decision's original status and history, contrary to the accepted-record
+  immutability rule.
+
+## Test Contract
+
+| Claim in Decision | Test | Currently |
+|---|---|---|
+| A permitted factual append can be distinguished from a rewrite or decision-changing append | Independent reviewer applies the human full-diff guard in `docs/adr/README.md` to supported and unsupported synthetic examples | deferred (#2141): independent exercise required before merge |
+
+## References
+
+- Issue #2141, including the research record at https://github.com/ozand/eeebot/issues/2141#issuecomment-6557053677
+- ADR-030, dated addendum precedent.

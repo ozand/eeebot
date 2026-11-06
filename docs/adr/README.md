@@ -70,6 +70,7 @@ that acceptance is already effective.
 | [ADR-044](ADR-044-planner-tool-capabilities-are-explicit-and-minimal.md) | Planner tool capabilities are explicit and minimal | accepted |
 | [ADR-045](ADR-045-bound-planner-finalization-by-remaining-time.md) | Bound planner finalization by remaining time inside a reserved shared budget | accepted |
 | [ADR-046](ADR-046-publish-resolved-prompt-budgets.md) | Publish resolved prompt budgets on system_prompt ledger rows | accepted |
+| [ADR-047](ADR-047-accepted-records-admit-only-factual-addenda.md) | Accepted ADRs admit only append-only factual addenda | accepted |
 | [ADR-048](ADR-048-persist-self-derived-provenance-in-public-projection.md) | Persist producer-established provenance on self-derived public rows | accepted |
 | [ADR-049](ADR-049-review-before-effective-ADR-acceptance.md) | Require exact-revision review before ADR acceptance takes effect | proposed |
 | [ADR-050](ADR-050-preserve-bounded-planning-call-evidence.md) | Preserve bounded planning-call evidence without inventing cause | accepted |
@@ -93,6 +94,24 @@ Each status word has one meaning:
   otherwise left as it was.
 - `deferred (#NNN)` -- a marker on one contract item, not a record status:
   the test is owed and issue #NNN owns it.
+
+### Accepted-record addenda
+
+The accepted decision, status, and all existing historical text in an accepted
+ADR are immutable. ADR-047 permits only a dated, factual, non-decision addendum
+appended after all existing content. It must not create or imply a decision,
+acceptance, status change or authority; change, delete or reorder prior text; or
+make unsupported factual claims. This rule becomes operative only upon effective
+acceptance of ADR-047 under the exact-review/check and authorized-merge gates above.
+
+**Independent full-diff review guard:** a reviewer who did not author the change
+inspects the complete `git diff <base>...<head>` and verifies placement and content
+against these constraints, including source support for every factual claim. The
+reviewer rejects edits to existing content, undated or non-final append material,
+new or implied decisions/status/authority, and unsupported facts. For example, a
+dated, sourced factual note appended at the end can pass; changing earlier
+rationale or `status: accepted`, or an unsupported claim, fails. This is a human
+review guard, not an automated test of factual truth.
 
 A record moves `proposed -> accepted` as a provisional candidate, not as
 effective acceptance. The status flip prepares the candidate revision; the
