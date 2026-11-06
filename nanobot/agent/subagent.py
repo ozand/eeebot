@@ -677,6 +677,8 @@ class SubagentManager:
                             messages=messages, tools=_tools_def, model=self.model,
                         )
                     if _bounded_planner and not self._planner_phase_budget:
+                        current_task = asyncio.current_task()
+                        cancel_count = current_task.cancelling() if current_task else 0
                         async with asyncio.timeout(_call_timeout) as timeout_scope:
                             if self._telemetry_component:
                                 with _subagent_telemetry_context(
@@ -685,6 +687,8 @@ class SubagentManager:
                                     response = await _call_provider()
                             else:
                                 response = await _call_provider()
+                        if current_task and current_task.cancelling() > cancel_count:
+                            raise asyncio.CancelledError
                         if timeout_scope.expired():
                             stop_reason = "progress_watchdog_timeout"
                             break
@@ -810,8 +814,12 @@ class SubagentManager:
                             break
                         try:
                             if _bounded_planner and not self._planner_phase_budget:
+                                current_task = asyncio.current_task()
+                                cancel_count = current_task.cancelling() if current_task else 0
                                 async with asyncio.timeout(_tool_timeout) as timeout_scope:
                                     result = await tools.execute(tool_call.name, tool_call.arguments)
+                                if current_task and current_task.cancelling() > cancel_count:
+                                    raise asyncio.CancelledError
                                 if timeout_scope.expired():
                                     stop_reason = (
                                         "wall_clock_deadline"
