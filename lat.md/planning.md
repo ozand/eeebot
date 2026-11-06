@@ -22,9 +22,9 @@ The bridge supplies the planner's exact read/list tool profile from one generate
 
 ## Planner phase budget (#2050 H3)
 
-Time-based planner finalization is behind a dedicated explicit source opt-in and remains OFF by default.
+The larger planner-phase budget is behind a dedicated explicit source opt-in and remains OFF by default. The existing 600-second path also uses time-based finalization.
 
-[[nanobot/runtime/session_clock.py#planner_phase_budget_enabled]] accepts only exact `true` or `false` in `SELFEVO_PLANNER_PHASE_BUDGET_ENABLED`; enabled mode requires explicit total wall `NANOBOT_SUBAGENT_WALL_SECS=9000`. [[nanobot/runtime/bridge.py#_run_planning_session]] partitions the bridge-start deadline into P=6000s planner and E=3000s executor/gate time; E includes F=300s once. The local final-call opportunity uses configured C; the separate shared guard remains C+F. Invalid or incompatible settings fail before planner spawn. Default-off preserves main's 600s timeout, iteration final turn, and legacy wall setting semantics. The flag is not host approval; no release/unit enables it and no deployment capacity is claimed. See [[nanobot/agent/subagent.py#SubagentManager]] and ADR-045 (Accepted for the narrow source contract; not host approval or rollout).
+[[nanobot/runtime/session_clock.py#planner_phase_budget_enabled]] accepts only exact `true` or `false` in `SELFEVO_PLANNER_PHASE_BUDGET_ENABLED`; enabled mode requires explicit total wall `NANOBOT_SUBAGENT_WALL_SECS=9000`. [[nanobot/runtime/bridge.py#_run_planning_session]] partitions the bridge-start deadline into P=6000s planner and E=3000s executor/gate time; E includes F=300s once. The local final-call opportunity uses configured C; the separate shared guard remains C+F. Invalid or incompatible settings fail before planner spawn. Default-off preserves the 600s timeout and legacy wall setting semantics while ADR-052 admits a tools-disabled final turn by remaining time. With local remaining R and call reserve C, normal calls need R>=2C and the final call needs R>=C; the shared C+F guard remains independent. The flag is not host approval; no release/unit enables it and no deployment capacity is claimed. See [[nanobot/agent/subagent.py#SubagentManager]] and ADR-045 (Accepted for the narrow source contract; not host approval or rollout).
 
 ## Current behavior and decision status
 

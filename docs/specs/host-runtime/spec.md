@@ -67,6 +67,10 @@ weak hardware without unbounded or non-recoverable behavior.
   autonomy — autonomy is already on via the R23 bridge timer alone; the
   coordinator python modules remain in-tree (inert, imported by other live
   modules) pending a separate import-untangling refactor.
+- R25. A preset that sets a cycle pause SHALL retain the bridge timer's stock
+  four-minute boot trigger as well as the configured post-cycle pause. An unset
+  pause SHALL leave the stock timer in effect. This is a source contract, not a
+  claim about an installed host or a completed post-boot cycle (#2156).
 
 ### Capability policy
 - R10. Every host-facing capability SHALL be classified as one of `available`,

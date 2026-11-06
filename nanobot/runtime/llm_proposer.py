@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.runtime.role_prompt import (
+    CharterTooLargeError,
     build_role_system_prompt,
     build_role_system_prompt_or_refuse,
     load_role_text,

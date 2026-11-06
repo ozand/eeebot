@@ -21,7 +21,8 @@
 #      preset's model choice).
 #   4. Reads SELFEVO_CYCLE_PAUSE out of the preset and translates it into a
 #      systemd timer drop-in: OnUnitActiveSec=<blank> (clears the stock 15m
-#      value) + OnUnitInactiveSec=<pause>. OnUnitInactiveSec fires N after
+#      values), restore OnBootSec=4m, and add OnUnitInactiveSec=<pause>.
+#      OnUnitInactiveSec fires N after
 #      the PREVIOUS run ENDS rather than N after it STARTED, which also
 #      sidesteps the OnUnitActiveSec + NTP clock-adjustment timer-stagnation
 #      failure mode recorded in lessons/errors.yaml (ERR-2026-2026-06-14-003:
@@ -125,7 +126,9 @@ if [[ -n "$SELFEVO_CYCLE_PAUSE" ]]; then
 # after an NTP clock adjustment. OnUnitInactiveSec (N after the previous run
 # ENDS) avoids that failure mode and self-adapts to cycle length.
 [Timer]
+# Empty timer assignments reset all triggers, including the stock boot trigger.
 OnUnitActiveSec=
+OnBootSec=4m
 OnUnitInactiveSec=$SELFEVO_CYCLE_PAUSE
 EOF
 else
