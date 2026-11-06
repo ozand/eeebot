@@ -446,6 +446,74 @@ async def test_planner_current_budget_tool_to_final_at_boundary(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_current_budget_timeout_suppressed_cancel_never_calls_provider_again(tmp_path, monkeypatch):
+    """ADR-052: a late tool result cannot revive a timed-out planner turn."""
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "0.05")
+    monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "0")
+    monkeypatch.setenv("NANOBOT_PROGRESS_TIMEOUT_SECS", "10")
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMResponse, ToolCallRequest
+    calls = []
+    class Provider:
+        def get_default_model(self): return "test-model"
+        async def chat_with_retry(self, *, messages, tools, model):
+            calls.append(tools)
+            return LLMResponse(content="continue", tool_calls=[ToolCallRequest(id="t", name="read_file", arguments={"path":"x"})])
+    class Registry(ToolRegistry):
+        async def execute(self, name, params):
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                return "late result"
+    monkeypatch.setattr("nanobot.agent.subagent.ToolRegistry", Registry)
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner", planner_deadline=600.0, wall_deadline=3000.0, tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}")
+    manager._monotonic = lambda: 0.0
+    await manager.spawn("plan")
+    await asyncio.gather(*manager._running_tasks.values(), return_exceptions=True)
+    assert len(calls) == 1
+    row = json.loads(next((tmp_path / "state" / "subagents").glob("*.json")).read_text(encoding="utf-8"))
+    assert row["status"] == "bounded_stop"
+
+
+@pytest.mark.asyncio
+async def test_current_budget_tool_external_cancel_propagates(tmp_path, monkeypatch):
+    """ADR-052: parent cancellation is not an internal timeout or a plan."""
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "1")
+    monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "0")
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMResponse, ToolCallRequest
+    started = asyncio.Event()
+    calls = []
+    class Provider:
+        def get_default_model(self): return "test-model"
+        async def chat_with_retry(self, *, messages, tools, model):
+            calls.append(tools)
+            return LLMResponse(content="continue", tool_calls=[ToolCallRequest(id="t", name="read_file", arguments={"path":"x"})])
+    class Registry(ToolRegistry):
+        async def execute(self, name, params):
+            started.set()
+            await asyncio.Event().wait()
+    monkeypatch.setattr("nanobot.agent.subagent.ToolRegistry", Registry)
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner", planner_deadline=600.0, wall_deadline=3000.0, tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}")
+    manager._monotonic = lambda: 0.0
+    await manager.spawn("plan")
+    task = next(iter(manager._running_tasks.values()))
+    await asyncio.wait_for(started.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(calls) == 1
+    row = json.loads(next((tmp_path / "state" / "subagents").glob("*.json")).read_text(encoding="utf-8"))
+    assert row["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("enabled,deadline", [(True, 6000.0), (False, 600.0)])
 async def test_opted_in_planner_tool_timeout_drains_cancellation_without_late_call(tmp_path, monkeypatch, enabled, deadline):
     """ADR-045: a timed-out tool may finish late, but no later provider turn starts."""

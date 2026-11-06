@@ -807,10 +807,21 @@ class SubagentManager:
                             )
                             break
                         try:
-                            result = await asyncio.wait_for(
-                                tools.execute(tool_call.name, tool_call.arguments),
-                                timeout=_tool_timeout,
-                            )
+                            if _bounded_planner and not self._planner_phase_budget:
+                                async with asyncio.timeout(_tool_timeout) as timeout_scope:
+                                    result = await tools.execute(tool_call.name, tool_call.arguments)
+                                if timeout_scope.expired():
+                                    stop_reason = (
+                                        "wall_clock_deadline"
+                                        if _wall_deadline is not None and _clock() >= _wall_deadline
+                                        else "progress_watchdog_timeout"
+                                    )
+                                    break
+                            else:
+                                result = await asyncio.wait_for(
+                                    tools.execute(tool_call.name, tool_call.arguments),
+                                    timeout=_tool_timeout,
+                                )
                         except asyncio.TimeoutError:
                             logger.warning(
                                 "Subagent [{}] tool step timed out by progress watchdog ({:.1f}s)",
