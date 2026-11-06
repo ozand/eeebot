@@ -321,6 +321,12 @@ class SubagentManager:
         origin = {"channel": origin_channel, "chat_id": origin_chat_id, "session_key": session_key}
         if runtime_options:
             origin["runtime_options"] = {key: value for key, value in runtime_options.items() if value is not None}
+        planner_deadline = self._planner_deadline
+        if planner_deadline is None and self._telemetry_component == "planner":
+            clock = getattr(self, '_monotonic', None) or time.monotonic
+            planner_deadline = clock() + 600.0
+            if self._wall_deadline is not None:
+                planner_deadline = min(planner_deadline, self._wall_deadline)
         correlation_context = self._build_subagent_correlation_context()
         self._write_subagent_telemetry(
             task_id,
@@ -347,6 +353,7 @@ class SubagentManager:
                 origin,
                 session_key=session_key,
                 correlation_context=correlation_context,
+                planner_deadline=planner_deadline,
             )
         )
         self._running_tasks[task_id] = bg_task
@@ -373,8 +380,10 @@ class SubagentManager:
         origin: dict[str, str],
         session_key: str | None = None,
         correlation_context: dict[str, Any] | None = None,
+        planner_deadline: float | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
+        _planner_deadline = planner_deadline if planner_deadline is not None else self._planner_deadline
         logger.info("Subagent [{}] starting task: {}", task_id, label)
         correlation_context = correlation_context or self._build_subagent_correlation_context()
         context_usage = {"peak_tokens": 0, "iterations": []}
@@ -539,11 +548,7 @@ class SubagentManager:
                 should_stop_for_wall_clock,
             )
             _watchdog = ProgressWatchdog(clock=_clock)
-            # ADR-052: direct planner callers receive one anchored local budget;
-            # bridge callers pass their already-anchored deadline explicitly.
-            if self._telemetry_component == "planner" and self._planner_deadline is None:
-                self._planner_deadline = min(_clock() + 600.0, _wall_deadline) if _wall_deadline is not None else _clock() + 600.0
-            _bounded_planner = self._telemetry_component == "planner" and self._planner_deadline is not None
+            _bounded_planner = self._telemetry_component == "planner" and _planner_deadline is not None
 
             while iteration < max_iterations:
                 # #1101/#1899: wall-clock deadline check with safety margin
@@ -602,14 +607,18 @@ class SubagentManager:
                 )
                 _is_final_turn = iteration == max_iterations or (
                     _planner_final_reserve > 0
-                    and self._planner_deadline is not None
-                    and _clock() > self._planner_deadline - 2 * _planner_final_reserve
+                    and _planner_deadline is not None
+                    and (
+                        _clock() >= _planner_deadline - _planner_final_reserve
+                        if self._planner_phase_budget
+                        else _clock() > _planner_deadline - 2 * _planner_final_reserve
+                    )
                 )
                 if (
                     _is_final_turn
                     and _planner_final_reserve > 0
-                    and self._planner_deadline is not None
-                    and self._planner_deadline - _clock() < _planner_final_reserve
+                    and _planner_deadline is not None
+                    and _planner_deadline - _clock() < _planner_final_reserve
                 ):
                     stop_reason = "planner_deadline_before_final_call"
                     break
@@ -634,8 +643,8 @@ class SubagentManager:
                     # #1899: bound in-flight model call by remaining progress watchdog time
                     _call_timeout = _watchdog.remaining_time()
                     _planner_remaining = None
-                    if self._planner_deadline is not None and self._telemetry_component == "planner":
-                        _planner_remaining = self._planner_deadline - _clock()
+                    if _planner_deadline is not None and self._telemetry_component == "planner":
+                        _planner_remaining = _planner_deadline - _clock()
                         if _bounded_planner and not _is_final_turn:
                             _call_timeout = min(
                                 _call_timeout,
@@ -776,8 +785,8 @@ class SubagentManager:
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.debug("Subagent [{}] executing: {} with arguments: {}", task_id, tool_call.name, args_str)
                         _tool_timeout = _watchdog.remaining_time()
-                        if self._planner_deadline is not None and self._telemetry_component == "planner":
-                            _phase_remaining = self._planner_deadline - _clock()
+                        if _planner_deadline is not None and self._telemetry_component == "planner":
+                            _phase_remaining = _planner_deadline - _clock()
                             if _bounded_planner:
                                 _tool_timeout = min(
                                     _tool_timeout,

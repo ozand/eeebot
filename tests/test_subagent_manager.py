@@ -361,8 +361,57 @@ async def test_planner_direct_caller_deadline_anchored_once(tmp_path, monkeypatc
     manager._monotonic = lambda: clock[0]
     await manager.spawn("plan", label="planner", origin_channel="system", origin_chat_id="test")
     await asyncio.gather(*manager._running_tasks.values(), return_exceptions=True)
-    assert manager._planner_deadline == 700.0
+    assert manager._planner_deadline is None
     assert len(seen) == 2 and seen[1] == []
+
+
+@pytest.mark.asyncio
+async def test_opted_in_planner_intermediate_window_remains_ordinary(tmp_path, monkeypatch):
+    """ADR-052 preserves ADR-045 ON behavior at C < R < 2C."""
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "243")
+    monkeypatch.setenv("NANOBOT_PROGRESS_TIMEOUT_SECS", "10000")
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMResponse
+    seen = []
+    class Provider:
+        def get_default_model(self): return "test-model"
+        async def chat_with_retry(self, *, messages, tools, model):
+            seen.append(tools)
+            return LLMResponse(content='{"plan":"ok","iterations_planned":1}', tool_calls=[])
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner", planner_phase_budget=True, planner_deadline=6000.0, wall_deadline=9000.0, tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}")
+    manager._monotonic = lambda: 5635.5
+    await manager.spawn("plan")
+    await asyncio.gather(*manager._running_tasks.values(), return_exceptions=True)
+    assert len(seen) == 1 and len(seen[0]) > 0
+
+
+@pytest.mark.asyncio
+async def test_planner_spawn_anchor_is_per_session_before_scheduling(tmp_path, monkeypatch):
+    """ADR-052: delayed coroutine start and manager reuse cannot extend a session."""
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    class Provider:
+        def get_default_model(self): return "test-model"
+    clock = [100.0]
+    starts = []
+    async def capture(*args, planner_deadline=None, **kwargs):
+        starts.append((clock[0], planner_deadline))
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner", tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}")
+    manager._monotonic = lambda: clock[0]
+    monkeypatch.setattr(manager, "_run_subagent", capture)
+    await manager.spawn("first")
+    first = next(iter(manager._running_tasks.values()))
+    clock[0] = 300.0
+    await first
+    clock[0] = 500.0
+    await manager.spawn("second")
+    second = list(manager._running_tasks.values())[-1]
+    clock[0] = 650.0
+    await second
+    assert starts == [(300.0, 700.0), (650.0, 1100.0)]
 
 
 @pytest.mark.asyncio
