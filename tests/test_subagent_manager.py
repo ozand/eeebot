@@ -267,6 +267,40 @@ async def test_planner_final_turn_starts_at_local_call_reserve_without_tools(tmp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("now,expected", [(114.0, "ordinary"), (114.01, "final"), (357.0, "final"), (357.01, "none")])
+async def test_planner_current_budget_final_admission_boundaries(tmp_path, monkeypatch, now, expected):
+    """ADR-052: OFF path must reach a tool-free final turn at R=C."""
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "243")
+    monkeypatch.setenv("NANOBOT_PROGRESS_TIMEOUT_SECS", "10000")
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMResponse
+
+    seen = []
+    class Provider:
+        def get_default_model(self):
+            return "test-model"
+        async def chat_with_retry(self, *, messages, tools, model):
+            seen.append(tools)
+            return LLMResponse(content='{"plan":"ok","iterations_planned":1}', tool_calls=[])
+    manager = SubagentManager(
+        provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner",
+        planner_phase_budget=False, planner_deadline=600.0, wall_deadline=3000.0,
+        tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}",
+    )
+    manager._monotonic = lambda: now
+    await manager.spawn("plan", label="planner", origin_channel="system", origin_chat_id="test")
+    await asyncio.gather(*manager._running_tasks.values(), return_exceptions=True)
+    if expected == "none":
+        assert seen == []
+    elif expected == "final":
+        assert seen == [[]]
+    else:
+        assert len(seen) == 1 and len(seen[0]) > 0
+
+
+@pytest.mark.asyncio
 async def test_opted_in_planner_entry_too_late_stops_without_provider_call(tmp_path, monkeypatch):
     monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "243")
     monkeypatch.setenv("NANOBOT_PROGRESS_TIMEOUT_SECS", "10000")
@@ -300,7 +334,291 @@ async def test_opted_in_planner_entry_too_late_stops_without_provider_call(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_opted_in_planner_tool_timeout_drains_cancellation_without_late_call(tmp_path, monkeypatch):
+async def test_planner_direct_caller_deadline_anchored_once(tmp_path, monkeypatch):
+    """ADR-052: absent shared deadline still anchors once, not at each turn."""
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "243")
+    monkeypatch.setenv("NANOBOT_PROGRESS_TIMEOUT_SECS", "10000")
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMResponse, ToolCallRequest
+    clock = [100.0]
+    seen = []
+    class Provider:
+        def get_default_model(self): return "test-model"
+        async def chat_with_retry(self, *, messages, tools, model):
+            seen.append(tools)
+            if len(seen) == 1:
+                return LLMResponse(content="continue", tool_calls=[ToolCallRequest(id="t", name="read_file", arguments={"path":"x"})])
+            return LLMResponse(content='{"plan":"ok","iterations_planned":1}', tool_calls=[])
+    class Registry(ToolRegistry):
+        async def execute(self, name, params):
+            clock[0] = 457.0
+            return "fixture"
+    monkeypatch.setattr("nanobot.agent.subagent.ToolRegistry", Registry)
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner", tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}")
+    manager._monotonic = lambda: clock[0]
+    await manager.spawn("plan", label="planner", origin_channel="system", origin_chat_id="test")
+    await asyncio.gather(*manager._running_tasks.values(), return_exceptions=True)
+    assert manager._planner_deadline is None
+    assert len(seen) == 2 and seen[1] == []
+
+
+@pytest.mark.asyncio
+async def test_opted_in_planner_intermediate_window_remains_ordinary(tmp_path, monkeypatch):
+    """ADR-052 preserves ADR-045 ON behavior at C < R < 2C."""
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "243")
+    monkeypatch.setenv("NANOBOT_PROGRESS_TIMEOUT_SECS", "10000")
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMResponse
+    seen = []
+    class Provider:
+        def get_default_model(self): return "test-model"
+        async def chat_with_retry(self, *, messages, tools, model):
+            seen.append(tools)
+            return LLMResponse(content='{"plan":"ok","iterations_planned":1}', tool_calls=[])
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner", planner_phase_budget=True, planner_deadline=6000.0, wall_deadline=9000.0, tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}")
+    manager._monotonic = lambda: 5635.5
+    await manager.spawn("plan")
+    await asyncio.gather(*manager._running_tasks.values(), return_exceptions=True)
+    assert len(seen) == 1 and len(seen[0]) > 0
+
+
+@pytest.mark.asyncio
+async def test_planner_spawn_anchor_is_per_session_before_scheduling(tmp_path, monkeypatch):
+    """ADR-052: delayed coroutine start and manager reuse cannot extend a session."""
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    class Provider:
+        def get_default_model(self): return "test-model"
+    clock = [100.0]
+    starts = []
+    async def capture(*args, planner_deadline=None, **kwargs):
+        starts.append((clock[0], planner_deadline))
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner", tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}")
+    manager._monotonic = lambda: clock[0]
+    monkeypatch.setattr(manager, "_run_subagent", capture)
+    await manager.spawn("first")
+    first = next(iter(manager._running_tasks.values()))
+    clock[0] = 300.0
+    await first
+    clock[0] = 500.0
+    await manager.spawn("second")
+    second = list(manager._running_tasks.values())[-1]
+    clock[0] = 650.0
+    await second
+    assert starts == [(300.0, 700.0), (650.0, 1100.0)]
+
+
+@pytest.mark.asyncio
+async def test_planner_current_budget_tool_to_final_at_boundary(tmp_path, monkeypatch):
+    """ADR-052: a tool completing at R=C admits a tools-disabled final call."""
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "243")
+    monkeypatch.setenv("NANOBOT_PROGRESS_TIMEOUT_SECS", "10000")
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMResponse, ToolCallRequest
+    clock = [0.0]
+    observed = []
+    class Provider:
+        def get_default_model(self): return "test-model"
+        async def chat_with_retry(self, *, messages, tools, model):
+            observed.append(tools)
+            if len(observed) == 1:
+                return LLMResponse(content="continue", tool_calls=[ToolCallRequest(id="t", name="read_file", arguments={"path":"x"})])
+            return LLMResponse(content='{"plan":"ok","iterations_planned":1}', tool_calls=[])
+    class Registry(ToolRegistry):
+        async def execute(self, name, params):
+            clock[0] = 357.0
+            return "fixture"
+    monkeypatch.setattr("nanobot.agent.subagent.ToolRegistry", Registry)
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner", planner_deadline=600.0, planner_phase_budget=False, wall_deadline=3000.0, tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}")
+    manager._monotonic = lambda: clock[0]
+    await manager.spawn("plan", label="planner", origin_channel="system", origin_chat_id="test")
+    await asyncio.gather(*manager._running_tasks.values(), return_exceptions=True)
+    assert len(observed) == 2 and observed[1] == []
+
+
+@pytest.mark.asyncio
+async def test_current_budget_timeout_suppressed_cancel_never_calls_provider_again(tmp_path, monkeypatch):
+    """ADR-052: a late tool result cannot revive a timed-out planner turn."""
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "0.05")
+    monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "0")
+    monkeypatch.setenv("NANOBOT_PROGRESS_TIMEOUT_SECS", "10")
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMResponse, ToolCallRequest
+    calls = []
+    class Provider:
+        def get_default_model(self): return "test-model"
+        async def chat_with_retry(self, *, messages, tools, model):
+            calls.append(tools)
+            return LLMResponse(content="continue", tool_calls=[ToolCallRequest(id="t", name="read_file", arguments={"path":"x"})])
+    class Registry(ToolRegistry):
+        async def execute(self, name, params):
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                return "late result"
+    monkeypatch.setattr("nanobot.agent.subagent.ToolRegistry", Registry)
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner", planner_deadline=600.0, wall_deadline=3000.0, tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}")
+    manager._monotonic = lambda: 0.0
+    await manager.spawn("plan")
+    await asyncio.gather(*manager._running_tasks.values(), return_exceptions=True)
+    assert len(calls) == 1
+    row = json.loads(next((tmp_path / "state" / "subagents").glob("*.json")).read_text(encoding="utf-8"))
+    assert row["status"] == "bounded_stop"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_turn", [False, True])
+async def test_current_budget_provider_suppressed_cancel_is_discarded(tmp_path, monkeypatch, final_turn):
+    """ADR-052: timed-out ordinary and final responses are never accepted."""
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "0.05")
+    monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "0")
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMResponse, ToolCallRequest
+    calls = []
+    class Provider:
+        def get_default_model(self): return "test-model"
+        async def chat_with_retry(self, *, messages, tools, model):
+            calls.append(tools)
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                if final_turn:
+                    return LLMResponse(content='{"plan":"late","iterations_planned":1}', tool_calls=[])
+                return LLMResponse(content="late", tool_calls=[ToolCallRequest(id="t", name="read_file", arguments={"path":"x"})])
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner", planner_deadline=600.0, wall_deadline=3000.0, tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}")
+    manager._monotonic = lambda: 599.94 if final_turn else 0.0
+    await manager.spawn("plan")
+    await asyncio.gather(*manager._running_tasks.values(), return_exceptions=True)
+    assert len(calls) == 1
+    row = json.loads(next((tmp_path / "state" / "subagents").glob("*.json")).read_text(encoding="utf-8"))
+    assert row["status"] == "bounded_stop"
+    assert '"plan":"late"' not in row.get("result", "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["provider", "final_provider", "tool"])
+async def test_current_budget_external_cancel_suppressed_is_propagated(tmp_path, monkeypatch, kind):
+    """ADR-052: a dependency suppressing external cancellation cannot resume work."""
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "5")
+    monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "0")
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMResponse, ToolCallRequest
+    started = asyncio.Event()
+    calls = []
+    class Provider:
+        def get_default_model(self): return "test-model"
+        async def chat_with_retry(self, *, messages, tools, model):
+            calls.append(tools)
+            if kind in ("provider", "final_provider"):
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    return LLMResponse(content='{"plan":"late","iterations_planned":1}', tool_calls=[])
+            return LLMResponse(content="continue", tool_calls=[ToolCallRequest(id="t", name="read_file", arguments={"path":"x"})])
+    class Registry(ToolRegistry):
+        async def execute(self, name, params):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                return "late tool result"
+    monkeypatch.setattr("nanobot.agent.subagent.ToolRegistry", Registry)
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner", planner_deadline=600.0, wall_deadline=3000.0, tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}")
+    manager._monotonic = lambda: 592.0 if kind == "final_provider" else 0.0
+    await manager.spawn("plan")
+    task = next(iter(manager._running_tasks.values()))
+    await asyncio.wait_for(started.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(calls) == 1
+    row = json.loads(next((tmp_path / "state" / "subagents").glob("*.json")).read_text(encoding="utf-8"))
+    assert row["status"] == "cancelled"
+    assert '"plan":"late"' not in row.get("result", "")
+
+
+@pytest.mark.asyncio
+async def test_current_budget_provider_external_cancel_propagates(tmp_path, monkeypatch):
+    """ADR-052: external cancellation remains cancellation while provider waits."""
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "1")
+    monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "0")
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    started = asyncio.Event()
+    class Provider:
+        def get_default_model(self): return "test-model"
+        async def chat_with_retry(self, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner", planner_deadline=600.0, wall_deadline=3000.0, tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}")
+    manager._monotonic = lambda: 0.0
+    await manager.spawn("plan")
+    task = next(iter(manager._running_tasks.values()))
+    await asyncio.wait_for(started.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    row = json.loads(next((tmp_path / "state" / "subagents").glob("*.json")).read_text(encoding="utf-8"))
+    assert row["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_current_budget_tool_external_cancel_propagates(tmp_path, monkeypatch):
+    """ADR-052: parent cancellation is not an internal timeout or a plan."""
+    monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "1")
+    monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "0")
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMResponse, ToolCallRequest
+    started = asyncio.Event()
+    calls = []
+    class Provider:
+        def get_default_model(self): return "test-model"
+        async def chat_with_retry(self, *, messages, tools, model):
+            calls.append(tools)
+            return LLMResponse(content="continue", tool_calls=[ToolCallRequest(id="t", name="read_file", arguments={"path":"x"})])
+    class Registry(ToolRegistry):
+        async def execute(self, name, params):
+            started.set()
+            await asyncio.Event().wait()
+    monkeypatch.setattr("nanobot.agent.subagent.ToolRegistry", Registry)
+    manager = SubagentManager(provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner", planner_deadline=600.0, wall_deadline=3000.0, tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}")
+    manager._monotonic = lambda: 0.0
+    await manager.spawn("plan")
+    task = next(iter(manager._running_tasks.values()))
+    await asyncio.wait_for(started.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(calls) == 1
+    row = json.loads(next((tmp_path / "state" / "subagents").glob("*.json")).read_text(encoding="utf-8"))
+    assert row["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled,deadline", [(True, 6000.0), (False, 600.0)])
+async def test_opted_in_planner_tool_timeout_drains_cancellation_without_late_call(tmp_path, monkeypatch, enabled, deadline):
     """ADR-045: a timed-out tool may finish late, but no later provider turn starts."""
     monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "0.05")
     monkeypatch.setenv("NANOBOT_WALL_FINAL_BUDGET_SECS", "0")
@@ -347,7 +665,7 @@ async def test_opted_in_planner_tool_timeout_drains_cancellation_without_late_ca
     monkeypatch.setattr("nanobot.agent.subagent.ToolRegistry", _CancellationResistantRegistry)
     manager = SubagentManager(
         provider=Provider(), workspace=tmp_path, bus=MessageBus(), telemetry_component="planner",
-        planner_phase_budget=True, planner_deadline=6000.0, wall_deadline=9000.0,
+        planner_phase_budget=enabled, planner_deadline=deadline, wall_deadline=9000.0,
         max_iterations=20, tool_profile=PLANNER_PROFILE,
         role_system_prompt="planner {{TOOL_CAPABILITIES}}",
     )
