@@ -73,6 +73,7 @@ that acceptance is already effective.
 | [ADR-048](ADR-048-persist-self-derived-provenance-in-public-projection.md) | Persist producer-established provenance on self-derived public rows | accepted |
 | [ADR-049](ADR-049-review-before-effective-ADR-acceptance.md) | Require exact-revision review before ADR acceptance takes effect | proposed |
 | [ADR-050](ADR-050-preserve-bounded-planning-call-evidence.md) | Preserve bounded planning-call evidence without inventing cause | accepted |
+| [ADR-052](ADR-052-finalize-planning-within-current-budget.md) | Finalize planning within the existing 600-second budget | accepted |
 
 ## Acceptance
 
