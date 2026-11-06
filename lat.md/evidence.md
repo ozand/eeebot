@@ -14,6 +14,12 @@ Scorecard summaries and held-out checks provide fitness evidence distinct from t
 
 [[nanobot/runtime/scorecard.py#compute_scorecard]] composes bounded loop, cost, quality, value, and held-out summaries from ledger rows and protected sidecars. Held-out evaluation is implemented by [[nanobot/runtime/heldout/__init__.py#run_heldout]] and applies harness-owned checkers to instance artifacts. Missing or unreadable inputs retain explicit status rather than being presented as confirmed zero. See [[tests/test_heldout.py#TestRunner#test_good_scripts_pass_and_results_shape]], [[tests/test_heldout.py#TestRunner#test_head_time_watermark_no_op]], and [[tests/test_scorecard.py#TestReaderStatus1179#test_missing_ledger_is_unavailable_not_empty]].
 
+## Skill-read display scope
+
+The canonical dashboard labels retained skill reads as delivered-cycle evidence, not a time-window count. Zero does not prove no reads outside delivered cycles.
+
+[[scripts/eeebot_dashboard.py#render_html]] presents this scope. [[tests/test_eeebot_dashboard_truth.py#test_skill_read_metric_labels_delivered_scope_and_zero]] covers zero and nonzero display; collection and missing-data behavior are unchanged.
+
 ## Trust boundary
 
 The instance cannot author its own fitness verdict or protected fitness inputs.

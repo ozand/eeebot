@@ -57,6 +57,10 @@ warning derived from append-only cycle-ledger evidence.
   warning does not block or alter planner, retry, handled-marker, wake,
   prioritization, or rollback behavior; #2050's global tripwire remains separate.
 
+### Runtime dashboard skill-read scope (#2170)
+
+The canonical runtime dashboard labels the existing skill-read count as retained recorded reads from delivered cycles, not all reads or a time-window count. It explains that zero does not prove a skill was never read outside delivered cycles. This is a presentation clarification; collection, count, schema and missing-data behavior are unchanged.
+
 ### Runtime dashboard recovery visibility (#2118)
 
 The existing runtime dashboard presents a bounded, read-only projection of persisted planner recovery state.
