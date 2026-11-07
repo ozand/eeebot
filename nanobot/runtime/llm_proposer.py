@@ -32,6 +32,7 @@ deterministic generator has nothing to offer.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -262,7 +263,7 @@ def _build_proposer_role_prompt(role_body: str) -> str | None:
         )
         return system_content
     except Exception as exc:
-        _last_propose_failure = f"RolePromptBuildFailed: {exc}"
+        _last_propose_failure = "RolePromptBuildFailed" if _FALLBACK_PASS.get() else f"RolePromptBuildFailed: {exc}"
         _record_role_prompt_refusal(role_body, exc, _last_propose_failure)
         return None
 
@@ -2110,6 +2111,83 @@ def build_context(
         return ""
 
 
+_FALLBACK_PASS = contextvars.ContextVar("proposer_fallback_pass", default=None)
+
+
+def _validate_fallback_routes(routes: dict[str, str], primary: str, alternate: str) -> bool:
+    """ADR-054: approved telemetry aliases map one-to-one to gateway routes."""
+    if not isinstance(routes, dict) or not routes or primary == alternate:
+        return False
+    safe_alias = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    safe_route = re.compile(r"^(?:cl|an|un)/[A-Za-z0-9][A-Za-z0-9._/-]{0,191}$")
+    if any(not isinstance(k, str) or not safe_alias.fullmatch(k) or not isinstance(v, str) or not safe_route.fullmatch(v) for k, v in routes.items()):
+        return False
+    return primary in routes and alternate in routes and len(set(routes.values())) == len(routes)
+
+
+def _fallback_pass_from_env() -> dict[str, Any] | None:
+    """Read explicit enabled configuration without logging untrusted values."""
+    if os.environ.get("SELFEVO_PROPOSER_FALLBACK_ENABLED") != "true":
+        return None
+    try:
+        def unique_pairs(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError
+                result[key] = value
+            return result
+        routes = json.loads(os.environ.get("SELFEVO_PROPOSER_FALLBACK_ROUTES", ""), object_pairs_hook=unique_pairs)
+        primary = os.environ.get("SELFEVO_PROPOSER_FALLBACK_PRIMARY", "")
+        alternate = os.environ.get("SELFEVO_PROPOSER_FALLBACK_ALTERNATE", "")
+        threshold_text = os.environ.get("SELFEVO_PROPOSER_FALLBACK_RETRY_AFTER", "60")
+        if not re.fullmatch(r"[0-9]{1,4}", threshold_text):
+            raise ValueError
+        threshold = int(threshold_text)
+        if not _validate_fallback_routes(routes, primary, alternate) or not 1 <= threshold <= 3600:
+            raise ValueError
+        if routes[primary] != _model_name():
+            raise ValueError
+        return {"routes": routes, "primary": primary, "alternate": alternate, "threshold": threshold,
+                "deadline": time.monotonic() + 120.0, "attempts": 0, "id": str(uuid.uuid4())}
+    except Exception:
+        return {"invalid": True}
+
+
+def _fallback_request_defect(exc: Exception) -> bool:
+    """Structured SDK request/auth exceptions take precedence over status."""
+    return any(cls.__name__ in {
+        "BadRequestError", "AuthenticationError", "PermissionDeniedError",
+        "NotFoundError", "UnprocessableEntityError",
+    } for cls in type(exc).__mro__)
+
+
+def _fallback_qualifies(exc: Exception, threshold: int) -> bool:
+    """Only structured 429/503 and narrowly recognized cooldown evidence."""
+    if _fallback_request_defect(exc):
+        return False
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, bool) or status not in (429, 503):
+        return False
+    try:
+        text = str(exc)
+    except Exception:
+        return False
+    if len(text) > 512:
+        return False
+    lowered = text.casefold()
+    if any(x in lowered for x in ("invalid model", "model not found", "unauthorized", "authentication", "invalid api key", "permission denied", "invalid parameter", "bad request")):
+        return False
+    if "no deployments available for selected model" in lowered:
+        return True
+    headers = getattr(exc, "headers", None) or getattr(getattr(exc, "response", None), "headers", None) or {}
+    try:
+        value = float(headers.get("Retry-After") or headers.get("retry-after"))
+        return value >= threshold and value < float("inf")
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _model_name() -> str:
     """Model used for the proposer's reasoning step (WHAT to improve).
 
@@ -2222,6 +2300,7 @@ def _dedup_exhausted(
 
 def _record_failed_proposer_call(
     exc: Exception, requested_model: str, component: str = "proposer", ts: str | None = None,
+    fallback_metadata: dict | None = None,
 ) -> None:
     try:
         from nanobot.observability.llm_telemetry import call_context, record_llm_failure
@@ -2244,10 +2323,82 @@ def _record_failed_proposer_call(
             record_llm_failure(
                 component=component, requested_model=requested_model,
                 error_type=type(exc).__name__, http_status=status,
-                retry_after_s=retry_after, ts=ts,
+                retry_after_s=retry_after, ts=ts, fallback_metadata=fallback_metadata,
             )
     except Exception:
         pass
+
+
+def _propose_with_fallback(state, client_type, base_url, api_key, system_content, user_content, component):
+    """ADR-054 enabled path; one shared pass budget, no raw error persistence."""
+    global _last_propose_failure
+    if len((system_content + user_content).encode("utf-8")) > 32768:
+        _last_propose_failure = "FallbackInputTooLarge"
+        return None
+    aliases = [state["primary"], state["alternate"]]
+    for index, alias in enumerate(aliases):
+        remaining = state["deadline"] - time.monotonic()
+        if remaining <= 0 or state["attempts"] >= 2:
+            _last_propose_failure = "FallbackBudgetExhausted"
+            return None
+        started = time.monotonic()
+        meta = {"operation_id": state["id"], "attempt_index": state["attempts"] + 1,
+                "fallback_count": int(index == 1), "requested_alias": alias}
+        try:
+            client = client_type(base_url=base_url, api_key=api_key, timeout=remaining, max_retries=0)
+            remaining = state["deadline"] - time.monotonic()
+            if remaining <= 0:
+                _last_propose_failure = "FallbackBudgetExhausted"
+                return None
+            kwargs = dict(model=state["routes"][alias], messages=[{"role": "system", "content": system_content},
+                {"role": "user", "content": user_content}], max_tokens=400, temperature=0.4, timeout=remaining)
+            effort = bridge_reasoning_effort()
+            if effort:
+                kwargs["reasoning_effort"] = effort
+            state["attempts"] += 1
+            response = client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            qualifies = _fallback_qualifies(exc, state["threshold"])
+            _last_propose_failure = (
+                "ProviderRequestDefect" if _fallback_request_defect(exc)
+                else "ProviderUnavailable" if qualifies else "ProviderError"
+            )
+            _record_failed_proposer_call(exc, alias, component, fallback_metadata=meta)
+            if index == 0 and qualifies:
+                continue
+            return None
+        try:
+            choices = getattr(response, "choices", None)
+            choice = choices[0] if choices else None
+            if choice is None or getattr(choice, "message", None) is None:
+                raise ValueError("invalid response")
+        except Exception:
+            _last_propose_failure = "InvalidProviderResponse"
+            _record_failed_proposer_call(ValueError("InvalidProviderResponse"), alias, component, fallback_metadata=meta)
+            return None
+        actual = getattr(response, "model", None)
+        served = next((key for key, route in state["routes"].items() if route == actual), None)
+        safe_model = served or alias
+        usage_obj = getattr(response, "usage", None)
+        usage = {key: getattr(usage_obj, key, 0) or 0 for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
+        content = getattr(getattr(choice, "message", None), "content", "") or ""
+        with call_context(current_cycle_id(), component):
+            try:
+                record_llm_call(model=safe_model, served_model=served, duration_ms=(time.monotonic() - started) * 1000,
+                                usage=usage, finish_reason=getattr(choice, "finish_reason", "") or "", retries=0,
+                                system_prompt_chars=len(system_content), fallback_metadata=meta)
+            except Exception:
+                pass
+            try:
+                record_llm_prompt(messages=[{"role": "system", "content": system_content}, {"role": "user", "content": user_content}],
+                                  content=content, reasoning_content=None, finish_reason=getattr(choice, "finish_reason", "") or "",
+                                  model=safe_model, prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"])
+            except Exception:
+                pass
+        result = _extract_json_object(content)
+        _last_propose_failure = "InvalidProviderResponse" if result is None else None
+        return result
+    return None
 
 
 def propose(
@@ -2270,19 +2421,23 @@ def propose(
     unparseable reply — never raises.
     """
     global _last_propose_failure, _role_prompt_refusal_state_dir
+    fallback_pass = _FALLBACK_PASS.get() if component == "proposer" else None
     _last_propose_failure = None
     _role_prompt_refusal_state_dir = None
+    if fallback_pass and fallback_pass.get("invalid"):
+        _last_propose_failure = "FallbackConfigurationInvalid"
+        return None
     try:
         from openai import OpenAI
     except Exception as exc:
-        _last_propose_failure = type(exc).__name__
-        _record_failed_proposer_call(exc, "", component)
+        _last_propose_failure = "ClientUnavailable" if fallback_pass else type(exc).__name__
+        _record_failed_proposer_call(exc, fallback_pass["primary"] if fallback_pass else "", component)
         return None
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
     api_key = os.environ.get("LITELLM_API_KEY", "").strip()
     if not base_url or not api_key:
         _last_propose_failure = "MissingGatewayConfiguration"
-        _record_failed_proposer_call(RuntimeError(_last_propose_failure), _model_name(), component)
+        _record_failed_proposer_call(RuntimeError(_last_propose_failure), fallback_pass["primary"] if fallback_pass else _model_name(), component)
         return None
     user_content = context
     if rejection_reason:
@@ -2300,6 +2455,8 @@ def propose(
     if system_content is None:
         return None
     requested_model = _model_name()
+    if fallback_pass:
+        return _propose_with_fallback(fallback_pass, OpenAI, base_url, api_key, system_content, user_content, component)
     call_start_utc = datetime.now(timezone.utc)
     try:
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
@@ -3960,7 +4117,11 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
     # the same ``cycle_id`` — a paid call can be joined to what it bought.
     cycle_id = ""
     context_token = None
+    fallback_token = None
+    fallback_state = _fallback_pass_from_env()
     try:
+        if fallback_state:
+            fallback_token = _FALLBACK_PASS.set(fallback_state)
         cycle_id = _mint_cycle_id()
         context_token = set_call_context(cycle_id, "proposer")
         # #749: keep the instance repo's SYSTEM_MAP.md fresh once per cycle,
@@ -3978,6 +4139,9 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                 pass
 
         if not should_propose(state_dir, selfevo_repo):
+            return None
+        if fallback_state and fallback_state.get("invalid"):
+            _record_proposer_reject(state_dir, "error", detail="FallbackConfigurationInvalid")
             return None
 
         # #751: an LLM that has honestly skipped 3 cycles in a row (no
@@ -4060,7 +4224,7 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                     )
                 return propose(context, rejection_reason=rejection_reason)
             except Exception as exc:
-                _last_propose_failure = f"{type(exc).__name__}: {exc}"
+                _last_propose_failure = "FallbackPassError" if fallback_state else f"{type(exc).__name__}: {exc}"
                 return None
 
         def _proposal_demand_id(p: Any) -> str:
@@ -4100,6 +4264,9 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
 
         proposal = _call_propose()
         calls_made += 1
+        if fallback_state and _last_propose_failure:
+            _record_proposer_reject(state_dir, "llm_unavailable" if _last_propose_failure == "ProviderUnavailable" else "error", detail=_last_propose_failure)
+            return None
         _stamp_assigned_hypothesis_ref(proposal)
 
         if allow_no_op and _is_noop_reply(proposal):
@@ -4110,6 +4277,9 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         if not ok and calls_made < _MAX_LLM_CALLS:
             proposal = _call_propose(rejection_reason=reason)
             calls_made += 1
+            if fallback_state and _last_propose_failure:
+                _record_proposer_reject(state_dir, "llm_unavailable" if _last_propose_failure == "ProviderUnavailable" else "error", detail=_last_propose_failure)
+                return None
             _stamp_assigned_hypothesis_ref(proposal)
             if allow_no_op and _is_noop_reply(proposal):
                 _record_noop_skip(state_dir, _noop_skip_reason(str(proposal.get("reason") or "")))
@@ -4150,6 +4320,9 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         if dup and calls_made < _MAX_LLM_CALLS:
             proposal = _call_propose(rejection_reason=retry_feedback)
             calls_made += 1
+            if fallback_state and _last_propose_failure:
+                _record_proposer_reject(state_dir, "llm_unavailable" if _last_propose_failure == "ProviderUnavailable" else "error", detail=_last_propose_failure)
+                return None
             _stamp_assigned_hypothesis_ref(proposal)
             # #760 follow-up (live 2026-07-15 20:42-21:02Z): a model told
             # "your proposal duplicates X" may honestly answer
@@ -4197,9 +4370,11 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
         # #762: the catch-all safety net now leaves a trace. The recorder is
         # itself fail-open (contextlib.suppress), so this can never raise out
         # of the except block and break the bridge cycle.
-        _record_proposer_reject(state_dir, "error", detail=f"{type(exc).__name__}: {exc}")
+        _record_proposer_reject(state_dir, "error", detail="FallbackPassError" if fallback_state else f"{type(exc).__name__}: {exc}")
         return None
     finally:
         if context_token is not None:
             reset_call_context(context_token)
+        if fallback_token is not None:
+            _FALLBACK_PASS.reset(fallback_token)
 

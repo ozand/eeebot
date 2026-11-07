@@ -20,6 +20,29 @@ def _read_jsonl(path):
         return [json.loads(line) for line in fh if line.strip()]
 
 
+def test_fallback_metadata_preserves_named_consumer_aggregates(tmp_path, monkeypatch):
+    from datetime import timedelta
+    from scripts import llm_calls_report, loop_metrics_report
+    from nanobot.runtime.scorecard import _cost_section
+    state = tmp_path / "state"
+    calls = state / "llm_calls"
+    calls.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    day = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    row = {"ts": day + "T12:00:00Z", "component": "proposer", "model": "primary",
+           "prompt_tokens": 4, "completion_tokens": 3, "total_tokens": 7}
+    path = calls / f"{day}.jsonl"
+    def measure():
+        return (llm_calls_report.aggregate(llm_calls_report.load_records(calls)),
+                loop_metrics_report._rsi_block(state, now), _cost_section(state, now, integrations=1))
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    legacy = measure()
+    row["fallback"] = {"operation_id": "00000000-0000-4000-8000-000000000000",
+                       "attempt_index": 1, "fallback_count": 0, "requested_alias": "primary"}
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    assert measure() == legacy
+
+
 def test_failure_stream_is_outside_daily_rotation_globs(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
     failure_dir = tmp_path / "failures"
