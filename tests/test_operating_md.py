@@ -398,9 +398,7 @@ def _assert_adr053_contract(text: str, *, accepted: bool) -> None:
     if accepted:
         assert "exception" in diary and "skip" in diary
         assert "already done" not in diary
-        assert "do not edit the diary" in skip
-        assert "bookkeeping commit" in skip
-        assert any(p in skip for p in ("no further tool calls", "call more tools"))
+        assert "do not edit the diary, make a bookkeeping commit, or call more tools" in skip
         assert "attempts an opening diary entry" in skip
         assert "before branch creation" in skip
         assert "not its later outcome" in skip
@@ -428,13 +426,21 @@ If already done or not applicable, stop immediately: report outcome: "skipped" a
     future = '''## Day diary
 Before your final response, use edit_file; exception for skip.
 ## Before editing: skip check
-If already done or not applicable, immediately report outcome: "skipped"; do not edit the diary, make a bookkeeping commit, and no further tool calls.
+If already done or not applicable, immediately report outcome: "skipped"; do not edit the diary, make a bookkeeping commit, or call more tools.
 The harness attempts an opening diary entry before branch creation, not its later outcome; no executor call or final response before start.
 '''
     _assert_adr053_contract(future, accepted=True)
     for old in ("exception for skip", "do not edit the diary", "not its later outcome", "Before your final response", "before branch creation"):
         with pytest.raises(AssertionError):
             _assert_adr053_contract(future.replace(old, ""), accepted=True)
+    negative = "do not edit the diary, make a bookkeeping commit, or call more tools"
+    for inverted in (
+        "edit the diary, but do not make a bookkeeping commit or call more tools",
+        "do not edit the diary; make a bookkeeping commit; do not call more tools",
+        "do not edit the diary or make a bookkeeping commit; call more tools",
+    ):
+        with pytest.raises(AssertionError):
+            _assert_adr053_contract(future.replace(negative, inverted), accepted=True)
     with pytest.raises(AssertionError):
         _assert_adr053_contract(future.replace("exception for skip", "exception for skip; already done"), accepted=True)
     with pytest.raises(AssertionError):
