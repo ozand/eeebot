@@ -1,6 +1,6 @@
 ---
 title: Bound proposer fallback to explicitly authorized routes
-status: proposed
+status: accepted
 date: 2026-11-07
 authors: [eeebot maintainers]
 related: ["#2047", "ADR-001"]
@@ -9,7 +9,7 @@ tags: [runtime, proposer, routing]
 
 # Status
 
-Proposed design only. It is not effective or implemented; independent review and exact-revision acceptance gates precede implementation. No route, credential, host configuration, deployment, or live call is authorized by this record.
+Provisional acceptance candidate under delegated technical authority; not effective or implemented. Proposed design `c3b7adae0b8dba05f20bd5b00d58ed5fa6fc051f` received independent privacy and consumer review PASS. This candidate becomes effective only after independent PASS and applicable checks on the exact final revision followed by authorized merge unchanged; the governing PR or issue retains those receipts. No route, credential, host configuration, deployment, or live call is authorized by this record.
 
 # Context
 
