@@ -222,6 +222,37 @@ def test_fallback_pass_shares_budget_with_feedback(monkeypatch, tmp_path, reject
     assert rejections
 
 
+def test_fallback_reasoning_and_malformed_response_attempt(monkeypatch):
+    from types import SimpleNamespace as NS
+    state = {"primary": "p", "alternate": "a", "routes": {"p": "cl/p", "a": "an/a"},
+             "threshold": 60, "deadline": 120, "attempts": 0, "id": "fake"}
+    calls, failures = [], []
+    monkeypatch.setattr(llm_proposer.time, "monotonic", lambda: 0)
+    monkeypatch.setattr(llm_proposer, "bridge_reasoning_effort", lambda: "high")
+    monkeypatch.setattr(llm_proposer, "_record_failed_proposer_call", lambda *a, **kw: failures.append((a, kw)))
+    class Client:
+        def __init__(self, **kw):
+            self.chat = self.completions = self
+        def create(self, **kw):
+            calls.append(kw)
+            return NS(choices=[])
+    assert llm_proposer._propose_with_fallback(state, Client, "fake", "fake", "s", "u", "proposer") is None
+    assert calls[0]["reasoning_effort"] == "high" and len(calls) == 1
+    assert llm_proposer._last_propose_failure == "InvalidProviderResponse"
+    assert failures[0][1]["fallback_metadata"]["attempt_index"] == 1
+    assert failures[0][0][1] == "p"
+
+
+def test_invalid_fallback_keeps_system_map_and_gate(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(llm_proposer, "_fallback_pass_from_env", lambda: {"invalid": True})
+    monkeypatch.setattr(llm_proposer.system_map, "update_system_map", lambda *a: seen.append("map"))
+    monkeypatch.setattr(llm_proposer, "should_propose", lambda *a: seen.append("gate") or True)
+    monkeypatch.setattr(llm_proposer, "_record_proposer_reject", lambda *a, **kw: seen.append(kw["detail"]))
+    assert llm_proposer.maybe_propose(tmp_path, tmp_path) is None
+    assert seen == ["map", "gate", "FallbackConfigurationInvalid"]
+
+
 def test_fallback_actual_pass_successful_alternate(monkeypatch, tmp_path):
     """A qualifying primary failure admits one attributed alternate success."""
     import sys

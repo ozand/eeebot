@@ -2350,11 +2350,13 @@ def _propose_with_fallback(state, client_type, base_url, api_key, system_content
             if remaining <= 0:
                 _last_propose_failure = "FallbackBudgetExhausted"
                 return None
+            kwargs = dict(model=state["routes"][alias], messages=[{"role": "system", "content": system_content},
+                {"role": "user", "content": user_content}], max_tokens=400, temperature=0.4, timeout=remaining)
+            effort = bridge_reasoning_effort()
+            if effort:
+                kwargs["reasoning_effort"] = effort
             state["attempts"] += 1
-            response = client.chat.completions.create(
-                model=state["routes"][alias], messages=[{"role": "system", "content": system_content},
-                {"role": "user", "content": user_content}], max_tokens=400, temperature=0.4, timeout=remaining,
-            )
+            response = client.chat.completions.create(**kwargs)
         except Exception as exc:
             qualifies = _fallback_qualifies(exc, state["threshold"])
             _last_propose_failure = (
@@ -2365,12 +2367,20 @@ def _propose_with_fallback(state, client_type, base_url, api_key, system_content
             if index == 0 and qualifies:
                 continue
             return None
+        try:
+            choices = getattr(response, "choices", None)
+            choice = choices[0] if choices else None
+            if choice is None or getattr(choice, "message", None) is None:
+                raise ValueError("invalid response")
+        except Exception:
+            _last_propose_failure = "InvalidProviderResponse"
+            _record_failed_proposer_call(ValueError("InvalidProviderResponse"), alias, component, fallback_metadata=meta)
+            return None
         actual = getattr(response, "model", None)
         served = next((key for key, route in state["routes"].items() if route == actual), None)
         safe_model = served or alias
         usage_obj = getattr(response, "usage", None)
         usage = {key: getattr(usage_obj, key, 0) or 0 for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
-        choice = response.choices[0]
         content = getattr(getattr(choice, "message", None), "content", "") or ""
         with call_context(current_cycle_id(), component):
             try:
@@ -4110,8 +4120,6 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
     fallback_token = None
     fallback_state = _fallback_pass_from_env()
     try:
-        if fallback_state and fallback_state.get("invalid"):
-            return None
         if fallback_state:
             fallback_token = _FALLBACK_PASS.set(fallback_state)
         cycle_id = _mint_cycle_id()
@@ -4131,6 +4139,9 @@ def maybe_propose(state_dir: Path, selfevo_repo: Path | None) -> str | None:
                 pass
 
         if not should_propose(state_dir, selfevo_repo):
+            return None
+        if fallback_state and fallback_state.get("invalid"):
+            _record_proposer_reject(state_dir, "error", detail="FallbackConfigurationInvalid")
             return None
 
         # #751: an LLM that has honestly skipped 3 cycles in a row (no
