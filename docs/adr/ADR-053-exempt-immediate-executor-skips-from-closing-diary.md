@@ -1,6 +1,6 @@
 ---
 title: Exempt immediate executor skips from the closing diary line
-status: proposed
+status: accepted
 date: 2026-11-06
 authors: [delegated delivery]
 related: ["#2167", "#2038", "ADR-030", "ADR-028"]
@@ -9,7 +9,7 @@ tags: [diary, executor, skip]
 
 # Status
 
-Proposed, not binding. This is a narrow proposed partial override of ADR-030 rule 2 for executor-discovered already-done or not-applicable skips only; ADR-030 remains accepted for all other decisions and outcomes. The owner delegated the technical selection recorded in #2167; this is not personal operator acceptance. The instruction draft preceded discovery of the ADR conflict and is not retroactively approved.
+Provisional acceptance candidate prepared 2026-11-07 under owner-delegated technical authority for #2167. It is effective only after independent PASS and applicable checks on this exact revision followed by authorized merge of that unchanged candidate; retain the review, check and merge receipts in the linked PR or issue. This is not personal operator acceptance. The instruction draft preceded discovery of the ADR conflict and is not retroactively approved. This narrow partial override of ADR-030 rule 2 applies only to executor-discovered already-done or not-applicable skips; ADR-030 remains accepted for all other decisions and outcomes.
 
 # Context
 
@@ -43,7 +43,7 @@ Other reporting outcomes still require the executor's closing line. ADR-030's re
 
 | Claim | Test | Currently |
 |---|---|---|
-| Proposed and accepted instruction branches enforce their respective skip and diary rules, including negative fixtures | `tests/test_operating_md.py::test_executor_skip_diary_exception` | status-aware test; operative text remains baseline while proposed |
+| Proposed and accepted instruction branches enforce their respective skip and diary rules, including negative fixtures | `tests/test_operating_md.py::test_executor_skip_diary_exception` | test and ADR citation published on main in #2169 |
 | Pre-start duplicate ends the cycle without another attempt | `tests/test_bridge_bulk_skip.py::TestSingleCandidatePerCycle::test_duplicate_plan_ends_run_no_second_attempt` | existing test with ADR citation |
 | Opening diary write call precedes branch setup | `tests/test_diary_open_entry.py::test_diary_write_call_site_precedes_cycle_branch_setup_in_source` | existing source-order test with ADR citation |
 | Prompt prose names only executor tools | `tests/test_prompt_ontology.py::test_prompt_prose_names_only_executor_registry_tools` | existing test with ADR citation |
