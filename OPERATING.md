@@ -19,7 +19,7 @@ Read today's diary as the first action of the cycle.
 
 You may also read any earlier day's diary, or a month's fold, whenever the task points there — study what was done at any depth; nothing bounds how far back you can look.
 
-Before your final response, add one line on what you tried and what happened (not why: the ledger already holds that) with `edit_file` on `diary/<today's date, YYYY-MM-DD>.md`: replace `<!-- diary: append new entries above this line -->` with your line followed by the marker. Exception: executor-discovered skips below.
+Before your final response, use `edit_file` on `diary/YYYY-MM-DD.md`: replace `<!-- diary: append new entries above this line -->` with your line and the marker. State what you tried and what happened, why blocked, and what next; not why chosen — the ledger already holds that. Exception: executor-discovered skips below.
 
 ## Before editing: skip check
 
