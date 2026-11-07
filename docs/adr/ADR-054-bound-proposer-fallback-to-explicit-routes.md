@@ -19,11 +19,17 @@ Current `llm_proposer.propose` uses one requested model and the existing LiteLLM
 
 # Decision
 
+This is a partial proposer-only increment, not satisfaction of #2047's original ordered fallback lists per role or registry fallback test. Those broader obligations remain unmet and the issue remains open until separately implemented and verified.
+
 Proposer fallback is disabled by default. Only an explicit operator-configured alternate through the same authorized gateway may be considered; absent, malformed, identical to primary, or unauthorized route means no alternate call. Do not invent a default alias. Activation and the alternate's data/trust and budget equivalence require the responsible owner's decision; this proposal does not establish either.
 
-Allow at most one alternate attempt per proposer operation, and only after affirmative supplier unavailability: a 429 or 503 with no-deployment/cooldown evidence, or a documented long Retry-After. Define a finite threshold in implementation configuration and tests rather than treating every transient response as a cooldown. A 400, malformed request, authentication/authorization failure, invalid model, unknown error, parse/validation rejection, or non-supplier timeout must not trigger fallback. Never infer supplier cause from arbitrary provider text alone. The alternate receives the same authorized input and parameters, not a broader data set, and remains under the existing per-operation time and cost bound; no unbounded retry chain.
+Allow at most one alternate attempt per proposer operation, and only after affirmative supplier unavailability: a 429 or 503 with a documented no-deployment/cooldown signal, or a valid numeric Retry-After at or above a proposed threshold of 60 seconds. The proposed threshold is a finite integer between 1 and 3600 seconds, inclusive; invalid threshold configuration fails closed before any alternate. Missing, non-finite, negative, malformed or HTTP-date Retry-After is unknown and alone never qualifies. A 400, malformed request, authentication/authorization failure, invalid model, unknown error, parse/validation rejection, or non-supplier timeout must not trigger fallback. Supplier signals must come from a bounded recognized classifier, not arbitrary provider text alone.
 
-Record primary and alternate attempts, selected route and actual served model when known, and an explicit fallback count using bounded, non-secret categorical metadata. Never record prompt text, credentials, raw error text, or an invented served model. Missing evidence remains unknown. Failed alternate yields the existing unavailable/no-proposal path; it does not assign a task or stop the planner. Any necessary telemetry-schema change is part of this design decision and needs privacy/compatibility review before acceptance.
+The current client has a per-call timeout and SDK automatic retries; a shared operation-wide time/cost bound is not established. For enabled fallback, propose one monotonic deadline of 120 seconds for both routes, no hidden SDK retries, and at most two actual network attempts total. Each call gets at most remaining time; if no time remains the alternate is not admitted. The identical prompt and existing `max_tokens=400` are the input/output ceilings for each admitted attempt, not proof that cost is unchanged: up to two calls can cost more. This resource tradeoff and route data/trust equivalence require owner approval before activation; no live budget increase is authorized. Disabled mode preserves current behavior.
+
+Use the existing private failed-call and successful-call telemetry streams, not a new telemetry service. Propose allowlisted bounded fields only: operation correlation token, attempt index 1 or 2, fallback count 0 or 1, configured requested route (maximum 256 characters under existing route policy), and `served_model` only from the gateway's actual response, otherwise null/unknown. A requested route is never a substitute for an unknown served model. Preserve legacy rows/readers when fields are absent; retain no prompt text, credentials, raw error body, or arbitrary exception message. Fallback attribution must not depend on joining unrelated rows by timestamp. This is an additive persisted-format proposal, requiring privacy and consumer compatibility review before acceptance.
+
+Failed alternate yields the existing unavailable/no-proposal path; it does not assign a task or stop the planner. Cancellation propagates, and an ambiguous provider error fails closed without another route.
 
 # Consequences
 
@@ -51,9 +57,9 @@ No default model, planner/executor route, credential, security boundary, retry b
 | Claim | Test | Currently |
 |---|---|---|
 | Explicit alternate only; no alternate on disabled, invalid, duplicate or unauthorized config | `tests/test_llm_proposer.py::test_explicit_fallback_configuration` | deferred (#2047) |
-| Qualifying cooldown makes at most one alternate attempt; request/auth/unknown failures do not | `tests/test_llm_proposer.py::test_fallback_supplier_cooldown_only` | deferred (#2047) |
+| Qualifying cooldown and finite threshold admit at most one alternate; request/auth/unknown and missing, invalid or HTTP-date Retry-After do not | `tests/test_llm_proposer.py::test_fallback_supplier_cooldown_only` | deferred (#2047) |
 | Primary and alternate attempts plus known served model and count are observable without raw errors or secrets | `tests/test_llm_proposer.py::test_fallback_telemetry_privacy_and_attribution` | deferred (#2047) |
-| Both failures preserve existing no-proposal behavior and bounded time/cost | `tests/test_llm_proposer.py::test_fallback_exhaustion_is_bounded` | deferred (#2047) |
+| One monotonic deadline covers at most two network attempts with SDK retries disabled in enabled mode; exhaustion/cancellation cannot issue another call | `tests/test_llm_proposer.py::test_fallback_exhaustion_is_bounded` | deferred (#2047) |
 
 # References
 
