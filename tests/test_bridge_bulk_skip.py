@@ -32,7 +32,7 @@ def _core_smoke_set_matches_fixture_repo(monkeypatch, tmp_path):
 
 
 class TestSingleCandidatePerCycle:
-    def test_duplicate_plan_ends_run_no_second_attempt(self, tmp_path, monkeypatch):
+    def test_duplicate_plan_ends_run_no_second_attempt(self, tmp_path, monkeypatch):  # ADR-053
         """A pre-spawn dedup match on the planner's ONE plan ends the run as
         a single recorded skip -- the planner is not invoked again, and no
         substitute candidate is picked up in the same run."""

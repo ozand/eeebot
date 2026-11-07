@@ -317,7 +317,7 @@ def test_every_outcome_kind_writes_exactly_one_journal_row(tmp_path: Path, monke
 # ---------------------------------------------------------------------------
 
 
-def test_diary_write_call_site_precedes_cycle_branch_setup_in_source():
+def test_diary_write_call_site_precedes_cycle_branch_setup_in_source():  # ADR-053
     """Pins the ordering the whole design leans on: bridge.py must call
     _write_diary_open_entry() before _setup_cycle_branch(), textually, in
     the main cycle path -- if a future edit reorders these, the diary write

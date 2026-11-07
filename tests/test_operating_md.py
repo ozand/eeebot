@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from nanobot.agent.context import ContextBuilder
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
 
@@ -384,3 +386,58 @@ def test_operating_md_has_headroom_for_the_soul_migration():
         f"only {slack} chars of pool headroom across the release ontology; "
         f"#1770's migration needs 153."
     )
+
+
+def _assert_adr053_contract(text: str, *, accepted: bool) -> None:
+    """ADR-053: check the operative wording, not just ADR status."""
+    diary = _section(text, "Day diary").lower()
+    skip = _section(text, "Before editing: skip check").lower()
+    assert "before your final response" in diary and "edit_file" in diary
+    assert "already done" in skip and "not applicable" in skip
+    assert 'outcome: "skipped"' in skip and "immediately" in skip
+    if accepted:
+        assert "exception" in diary and "skip" in diary
+        assert "already done" not in diary
+        assert "do not edit the diary" in skip
+        assert "bookkeeping commit" in skip
+        assert any(p in skip for p in ("no further tool calls", "call more tools"))
+        assert "attempts an opening diary entry" in skip
+        assert "before branch creation" in skip
+        assert "not its later outcome" in skip
+        assert "no executor call or final response" in skip
+    else:
+        assert "exception" not in diary
+        assert "do not edit the diary" not in skip
+        assert "spend no further tool calls" in skip
+
+
+def test_executor_skip_diary_exception():
+    """ADR-053: both status contracts reject missing or premature rules."""
+    adr = (RELEASE_ROOT / "docs/adr/ADR-053-exempt-immediate-executor-skips-from-closing-diary.md").read_text(encoding="utf-8")
+    statuses = [line.split(":", 1)[1].strip() for line in adr.splitlines() if line.startswith("status:")]
+    assert statuses in (["proposed"], ["accepted"])
+    _assert_adr053_contract(_read(), accepted=statuses == ["accepted"])
+    baseline = '''## Day diary
+Before your final response, add your own line using edit_file.
+## Before editing: skip check
+If already done or not applicable, stop immediately: report outcome: "skipped" and spend no further tool calls.
+'''
+    _assert_adr053_contract(baseline, accepted=False)
+    with pytest.raises(AssertionError):
+        _assert_adr053_contract(baseline.replace("Before your final response", "Later"), accepted=False)
+    future = '''## Day diary
+Before your final response, use edit_file; exception for skip.
+## Before editing: skip check
+If already done or not applicable, immediately report outcome: "skipped"; do not edit the diary, make a bookkeeping commit, and no further tool calls.
+The harness attempts an opening diary entry before branch creation, not its later outcome; no executor call or final response before start.
+'''
+    _assert_adr053_contract(future, accepted=True)
+    for old in ("exception for skip", "do not edit the diary", "not its later outcome", "Before your final response", "before branch creation"):
+        with pytest.raises(AssertionError):
+            _assert_adr053_contract(future.replace(old, ""), accepted=True)
+    with pytest.raises(AssertionError):
+        _assert_adr053_contract(future.replace("exception for skip", "exception for skip; already done"), accepted=True)
+    with pytest.raises(AssertionError):
+        _assert_adr053_contract(baseline.replace("Before your final response", "exception for skip; before your final response"), accepted=False)
+    with pytest.raises(AssertionError):
+        _assert_adr053_contract(baseline + " do not edit the diary", accepted=False)

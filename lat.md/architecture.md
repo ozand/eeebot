@@ -18,15 +18,15 @@ The chat framework exposes channels, tools, model routing, and user sessions thr
 
 ### Bounded self-evolving bridge
 
-The host bridge runs a bounded cycle through planning, subagent execution, gates, and evidence recording; skip outcomes have explicit diary boundaries.
+The host bridge runs a bounded cycle through planning, subagent execution, gates, and evidence recording.
 
 The entry point is [[nanobot/runtime/bridge.py#main]]. A cycle collects demand and proposer candidates before planner selection; a no-plan/rest result does not start the executor. Planned work proceeds through isolated subagent execution, gates, and evidence recording. The bridge chooses whether an accepted result can be integrated; executor output is not itself authority to change the product repository.
 
 The planning session is implemented by [[nanobot/runtime/bridge.py#_run_planning_session]]. It receives demand candidates collected by [[nanobot/runtime/demand.py#collect_demand]] and proposer candidates from [[nanobot/runtime/llm_proposer.py#proposer_candidate_items]], then returns a plan or an explicit no-plan/rest outcome. The executor task is derived from the planner's plan; a candidate is optional context, not a task assignment. Do not infer a no-demand idle rule from older architecture prose without checking current code and configuration. See [[planning]] for the candidate/selection boundary.
 
-The LLM proposer can author bounded candidates through [[nanobot/runtime/llm_proposer.py#maybe_propose]]. It is a candidate/request source, not the planner. Planner selection and proposer authoring are related but distinct steps, and an idle, failed, rested, blocked, or unplanned cycle is not an executed task.
+The status-aware instruction test [[tests/test_operating_md.py#test_executor_skip_diary_exception]] checks the current diary/skip wording and exercises both contract branches with positive and negative fixtures; ADR-053 remains proposed.
 
-For a pre-spawn skip, the harness attempts the opening diary entry before branch creation and executor spawn; this is task context, not a later outcome entry, and no executor call or final response follows. If the executor discovers that work is already done or not applicable, its immediate `skipped` result is exempt from its diary-line requirement and no further tool calls are made; it does not edit the diary or create a bookkeeping commit. Other executor outcomes retain the diary requirement in [[OPERATING.md]].
+The LLM proposer can author bounded candidates through [[nanobot/runtime/llm_proposer.py#maybe_propose]]. It is a candidate/request source, not the planner. Planner selection and proposer authoring are related but distinct steps, and an idle, failed, rested, blocked, or unplanned cycle is not an executed task.
 
 The public derived-view producer serializes goal-review-owned derived-priority rows with explicit `self-derived` provenance; operator priority wording remains private and the external typed dashboard allowlist is a read-only consumer. See [[nanobot/runtime/demand.py#build_derived_view]], [[docs/specs/subagent-bridge/spec.md]], and [[docs/adr/ADR-048-persist-self-derived-provenance-in-public-projection.md]] (Proposed).
 

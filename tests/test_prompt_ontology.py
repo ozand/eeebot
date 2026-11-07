@@ -360,7 +360,7 @@ def _mentioned_tool_words(text: str) -> set[str]:
     return {word for word in _ALL_CANDIDATE_TOOL_WORDS if re.search(rf"\b{re.escape(word)}\b", text)}
 
 
-def test_prompt_prose_names_only_executor_registry_tools(tmp_path: Path):
+def test_prompt_prose_names_only_executor_registry_tools(tmp_path: Path):  # ADR-053
     """AC: every tool name mentioned in the assembled prompt's prose is in
     EXECUTOR_TOOL_NAMES; none of message/web_fetch/web_search/spawn/cron
     appears (the executor was never given those tools)."""

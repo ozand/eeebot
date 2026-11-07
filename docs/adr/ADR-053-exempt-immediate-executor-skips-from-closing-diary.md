@@ -43,9 +43,10 @@ Other reporting outcomes still require the executor's closing line. ADR-030's re
 
 | Claim | Test | Currently |
 |---|---|---|
-| Executor-discovered skip has explicit immediate-stop exception; other outcomes retain closing line | `tests/test_operating_md.py::test_executor_skip_diary_exception` | not yet written |
-| Pre-start skip has no executor call and opening write is best-effort, not outcome insight | `tests/test_bridge_bulk_skip.py::TestSingleCandidatePerCycle::test_duplicate_plan_ends_run_no_second_attempt`; `tests/test_diary_open_entry.py::test_diary_write_call_site_precedes_cycle_branch_setup_in_source` | existing tests; citation to this ADR not yet present |
-| Prompt remains within executor tool vocabulary and release budget | `tests/test_prompt_ontology.py::test_prompt_prose_names_only_executor_registry_tools`; `tests/test_release_pool_budget.py` | existing tests; citation to this ADR not yet present |
+| Proposed and accepted instruction branches enforce their respective skip and diary rules, including negative fixtures | `tests/test_operating_md.py::test_executor_skip_diary_exception` | status-aware test; operative text remains baseline while proposed |
+| Pre-start duplicate ends the cycle without another attempt | `tests/test_bridge_bulk_skip.py::TestSingleCandidatePerCycle::test_duplicate_plan_ends_run_no_second_attempt` | existing test with ADR citation |
+| Opening diary write call precedes branch setup | `tests/test_diary_open_entry.py::test_diary_write_call_site_precedes_cycle_branch_setup_in_source` | existing source-order test with ADR citation |
+| Prompt prose names only executor tools | `tests/test_prompt_ontology.py::test_prompt_prose_names_only_executor_registry_tools` | existing test with ADR citation |
 
 # References
 
