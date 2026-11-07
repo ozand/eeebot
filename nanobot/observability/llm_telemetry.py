@@ -145,7 +145,7 @@ def _llm_calls_dir() -> Path:
 def record_llm_failure(
     *, component: str, requested_model: str, error_type: str,
     http_status: int | None = None, retry_after_s: float | None = None,
-    ts: str | None = None,
+    ts: str | None = None, fallback_metadata: dict | None = None,
 ) -> None:
     """Append bounded metadata for one failed provider attempt to a private stream."""
     try:
@@ -200,6 +200,7 @@ def record_llm_failure(
                 "retry_after_s": retry_after,
                 "cycle_id": cycle_id,
                 "seq": seq,
+                **({"fallback": fallback_metadata} if fallback_metadata is not None else {}),
             }, ensure_ascii=False) + "\n")
     except Exception as exc:
         logging.getLogger(__name__).warning("llm failure telemetry recording failed: %s", type(exc).__name__)
@@ -241,6 +242,7 @@ def record_llm_call(
     served_model: str | None = None,
     system_prompt_chars: int | None = None,
     context_window: int | None = None,
+    fallback_metadata: dict | None = None,
 ) -> None:
     """Append one JSONL line describing an LLM call. Best-effort — never raises.
 
@@ -283,6 +285,7 @@ def record_llm_call(
             "cycle_id": cycle_id,
             "component": component,
             "seq": seq,
+            **({"fallback": fallback_metadata} if fallback_metadata is not None else {}),
             "system_prompt_chars": (
                 int(system_prompt_chars) if system_prompt_chars is not None else None
             ),

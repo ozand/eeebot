@@ -6,6 +6,8 @@ The bridge separates candidate supply from the planner's choice of the increment
 
 Demand and proposer requests are candidate inputs, not assignments to the executor.
 
+[[nanobot/runtime/llm_proposer.py#maybe_propose]] supports default-off, explicitly configured proposer fallback: one cooperative 120-second deadline and two network attempts span feedback retries. Approved aliases bound telemetry attribution; a response model not in the mapping remains unknown. [[tests/test_llm_proposer.py#test_fallback_pass_shares_budget_with_feedback]] exercises sizing and dedup feedback with synthetic clients. This does not activate a route or change planner, goal-review, or ranked calls; see [[docs/specs/subagent-bridge/spec.md]].
+
 [[nanobot/runtime/demand.py#collect_demand]] assembles eligible demand in trust order from operator priorities, defects, goal gaps, skills, hypotheses, decay, and reflection. Stable demand IDs and completion/exhaustion evidence let the runtime fold, suppress, or re-present items without treating every ledger row as a new task. The proposer exposes live requests through [[nanobot/runtime/llm_proposer.py#proposer_candidate_items]] and can author bounded candidates through [[nanobot/runtime/llm_proposer.py#maybe_propose]]. These inputs do not themselves authorize execution.
 
 ## Planner choice

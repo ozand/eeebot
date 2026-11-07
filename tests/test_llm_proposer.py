@@ -93,6 +93,323 @@ def _write_derived_priority(state_dir: Path, *, number: int = 1, vector: str = "
     )
 
 
+def test_explicit_fallback_configuration(monkeypatch):
+    """ADR-054: 'Pairs must be one-to-one and both primary and alternate must be approved'."""
+    from nanobot.runtime.llm_proposer import _validate_fallback_routes
+
+    assert _validate_fallback_routes({"primary": "an/model-a", "backup": "cl/model-b"}, "primary", "backup")
+    assert not _validate_fallback_routes({"primary": "an/model-a", "backup": "an/model-a"}, "primary", "backup")
+    assert not _validate_fallback_routes({"primary": "an/model-a", "bad/url": "cl/model-b"}, "primary", "bad/url")
+    assert not _validate_fallback_routes({"primary": "an/model-a"}, "primary", "missing")
+    monkeypatch.delenv("SELFEVO_PROPOSER_FALLBACK_ENABLED", raising=False)
+    assert llm_proposer._fallback_pass_from_env() is None
+    monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_ROUTES", '{"unsafe/url":"secret"}')
+    assert llm_proposer._fallback_pass_from_env() == {"invalid": True}
+    monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_ROUTES", '{"primary":"cl/a","primary":"cl/b"}')
+    assert llm_proposer._fallback_pass_from_env() == {"invalid": True}
+
+
+def test_fallback_supplier_cooldown_only():
+    """ADR-054: 'structured HTTP status 429 or 503' and bounded evidence."""
+    from nanobot.runtime.llm_proposer import _fallback_qualifies
+    class Error(Exception):
+        status_code = 429
+        headers = {}
+    assert _fallback_qualifies(Error("No deployments available for selected model"), 60)
+    assert not _fallback_qualifies(Error("No deployments available for selected model; invalid model"), 60)
+    assert not _fallback_qualifies(Error("other error"), 60)
+    Error.status_code = 400
+    assert not _fallback_qualifies(Error("No deployments available for selected model"), 60)
+    Error.status_code = 503
+    Error.headers = {"Retry-After": "60"}
+    assert _fallback_qualifies(Error("cooldown"), 60)
+    for value in ("nan", "inf", "-1", "Wed, 21 Oct 2015 07:28:00 GMT"):
+        Error.headers = {"Retry-After": value}
+        assert not _fallback_qualifies(Error("cooldown"), 60)
+    assert not _fallback_qualifies(Error("x" * 513), 60)
+    for name in ("AuthenticationError", "PermissionDeniedError", "BadRequestError", "NotFoundError"):
+        defect = type(name, (Error,), {"status_code": 429, "headers": {"Retry-After": "60"}})
+        assert not _fallback_qualifies(defect("no deployments available for selected model"), 60)
+
+
+def test_fallback_exhaustion_is_bounded(monkeypatch):
+    """ADR-054: 'at most two actual network attempts' and 32,768 UTF-8 bytes."""
+    import time
+    state = {"primary": "primary", "alternate": "backup", "routes": {
+        "primary": "cl/fake-primary", "backup": "an/fake-backup"},
+        "threshold": 60, "deadline": time.monotonic() + 120,
+        "attempts": 0, "id": "synthetic"}
+    calls = []
+    monkeypatch.setattr(llm_proposer, "_record_failed_proposer_call", lambda *args, **kwargs: None)
+    class Client:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            self.chat = self
+            self.completions = self
+        def create(self, **kwargs):
+            raise RuntimeError("synthetic error")
+    run = llm_proposer._propose_with_fallback
+    assert run(state, Client, "fake", "fake", "s", "é" * 16384, "proposer") is None
+    assert not calls
+    assert run(state, Client, "fake", "fake", "s", "u", "proposer") is None
+    assert len(calls) == 1 and calls[0]["max_retries"] == 0
+    state["attempts"] = 2
+    assert run(state, Client, "fake", "fake", "s", "u", "proposer") is None
+    assert len(calls) == 1
+    state["attempts"] = 0
+    state["deadline"] = 0
+    assert run(state, Client, "fake", "fake", "s", "u", "proposer") is None
+    assert len(calls) == 1
+    class CancelClient(Client):
+        def create(self, **kwargs):
+            import asyncio
+            raise asyncio.CancelledError()
+    state["deadline"] = time.monotonic() + 120
+    with pytest.raises(__import__("asyncio").CancelledError):
+        run(state, CancelClient, "fake", "fake", "s", "u", "proposer")
+    assert state["attempts"] == 1
+    class Cooldown(Exception):
+        status_code = 429
+        headers = {}
+    class FallbackClient(Client):
+        def create(self, **kwargs):
+            raise Cooldown("no deployments available for selected model")
+    state["attempts"] = 0
+    before = len(calls)
+    assert run(state, FallbackClient, "fake", "fake", "s", "u", "proposer") is None
+    assert len(calls) - before == 2 and state["attempts"] == 2
+    assert run(state, FallbackClient, "fake", "fake", "s", "feedback", "proposer") is None
+    assert len(calls) - before == 2
+
+
+@pytest.mark.parametrize("reject_stage", ["sizing", "dedup"])
+def test_fallback_pass_shares_budget_with_feedback(monkeypatch, tmp_path, reject_stage):
+    """ADR-054: attempts span 'sizing and dedup retries'."""
+    from types import SimpleNamespace as NS
+    import sys
+    calls, rejections = [], []
+    monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_ROUTES", json.dumps({"primary": "cl/fake", "backup": "an/fake"}))
+    monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_PRIMARY", "primary")
+    monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_ALTERNATE", "backup")
+    monkeypatch.setenv("LITELLM_BASE_URL", "fake")
+    monkeypatch.setenv("LITELLM_API_KEY", "fake")
+    monkeypatch.setattr(llm_proposer, "_model_name", lambda: "cl/fake")
+    monkeypatch.setattr(llm_proposer.time, "monotonic", lambda: 0)
+    monkeypatch.setattr(llm_proposer, "should_propose", lambda *a: True)
+    monkeypatch.setattr(llm_proposer, "_consecutive_noop_streak", lambda *a: 0)
+    monkeypatch.setattr(llm_proposer, "build_context", lambda *a, **k: "context")
+    monkeypatch.setattr(llm_proposer, "_build_proposer_role_prompt", lambda *a: "system")
+    monkeypatch.setattr(llm_proposer, "record_llm_call", lambda **k: None)
+    monkeypatch.setattr(llm_proposer, "record_llm_prompt", lambda **k: None)
+    monkeypatch.setattr(llm_proposer, "_record_proposer_reject", lambda *a, **k: rejections.append((a, k)))
+    checks = iter([(False, "fix") if reject_stage == "sizing" else (True, ""), (True, "")])
+    monkeypatch.setattr(llm_proposer, "validate_sizing", lambda p: next(checks))
+    monkeypatch.setattr(llm_proposer, "_is_duplicate_proposal", lambda *a: (True, "duplicate", "match"))
+    monkeypatch.setattr(llm_proposer, "_dedup_evidence_context", lambda *a: ("duplicate", None))
+    class Client:
+        def __init__(self, **kw):
+            assert kw["max_retries"] == 0
+            self.chat = self.completions = self
+        def create(self, **kw):
+            calls.append(kw)
+            return NS(model="cl/fake", usage=None, choices=[NS(finish_reason="stop", message=NS(content='{"task_title":"ok"}'))])
+    monkeypatch.setitem(sys.modules, "openai", NS(OpenAI=Client))
+    assert llm_proposer.maybe_propose(tmp_path, None) is None
+    assert len(calls) == 2
+    assert "previous proposal was rejected" in calls[1]["messages"][1]["content"]
+    assert rejections
+
+
+def test_fallback_actual_pass_successful_alternate(monkeypatch, tmp_path):
+    """A qualifying primary failure admits one attributed alternate success."""
+    import sys
+    from types import SimpleNamespace as NS
+    calls, failures, successes = [], [], []
+    monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_ROUTES", '{"primary":"cl/fake","backup":"an/fake"}')
+    monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_PRIMARY", "primary")
+    monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_ALTERNATE", "backup")
+    monkeypatch.setenv("LITELLM_BASE_URL", "fake")
+    monkeypatch.setenv("LITELLM_API_KEY", "fake")
+    monkeypatch.setattr(llm_proposer, "_model_name", lambda: "cl/fake")
+    monkeypatch.setattr(llm_proposer.time, "monotonic", lambda: 0)
+    monkeypatch.setattr(llm_proposer, "should_propose", lambda *a: True)
+    monkeypatch.setattr(llm_proposer, "_consecutive_noop_streak", lambda *a: 0)
+    monkeypatch.setattr(llm_proposer, "build_context", lambda *a, **k: "context")
+    monkeypatch.setattr(llm_proposer, "_build_proposer_role_prompt", lambda *a: "system")
+    monkeypatch.setattr(llm_proposer, "validate_sizing", lambda p: (True, ""))
+    monkeypatch.setattr(llm_proposer, "_is_duplicate_proposal", lambda *a: (False, "", ""))
+    monkeypatch.setattr(llm_proposer, "write_request", lambda *a, **k: None)
+    monkeypatch.setattr(llm_proposer, "record_llm_call", lambda **kw: successes.append(kw))
+    monkeypatch.setattr(llm_proposer, "record_llm_prompt", lambda **kw: None)
+    monkeypatch.setattr(llm_proposer, "_record_failed_proposer_call", lambda *a, **kw: failures.append(kw))
+    class Cooldown(Exception):
+        status_code = 429
+        headers = {"Retry-After": "60"}
+    class Client:
+        def __init__(self, **kw):
+            self.chat = self.completions = self
+        def create(self, **kw):
+            calls.append(kw)
+            if len(calls) == 1:
+                raise Cooldown("synthetic")
+            return NS(model="an/fake", usage=None, choices=[NS(finish_reason="stop", message=NS(content='{"task_title":"ok"}'))])
+    monkeypatch.setitem(sys.modules, "openai", NS(OpenAI=Client))
+    assert llm_proposer.maybe_propose(tmp_path, None) == "Implement and commit: ok"
+    assert [call["model"] for call in calls] == ["cl/fake", "an/fake"]
+    assert failures[0]["fallback_metadata"]["attempt_index"] == 1
+    assert successes[0]["served_model"] == "backup"
+    assert successes[0]["fallback_metadata"]["attempt_index"] == 2
+    assert successes[0]["fallback_metadata"]["fallback_count"] == 1
+    assert failures[0]["fallback_metadata"]["operation_id"] == successes[0]["fallback_metadata"]["operation_id"]
+
+
+@pytest.mark.parametrize("failure, expected", [("ProviderUnavailable", "llm_unavailable"), ("ProviderRequestDefect", "error"), ("ProviderError", "error"), ("InvalidProviderResponse", "error")])
+def test_enabled_failure_categories_in_actual_rejection(monkeypatch, tmp_path, failure, expected):
+    state = {"routes": {"p": "cl/p", "a": "an/a"}, "primary": "p", "alternate": "a"}
+    rows = []
+    monkeypatch.setattr(llm_proposer, "_fallback_pass_from_env", lambda: state)
+    monkeypatch.setattr(llm_proposer, "should_propose", lambda *a: True)
+    monkeypatch.setattr(llm_proposer, "_consecutive_noop_streak", lambda *a: 0)
+    monkeypatch.setattr(llm_proposer, "build_context", lambda *a, **k: "context")
+    monkeypatch.setattr(llm_proposer, "_record_proposer_reject", lambda *a, **k: rows.append((a, k)))
+    def fail(*a, **k):
+        llm_proposer._last_propose_failure = failure
+        return None
+    monkeypatch.setattr(llm_proposer, "propose", fail)
+    assert llm_proposer.maybe_propose(tmp_path, None) is None
+    assert rows[0][0][1] == expected and rows[0][1]["detail"] == failure
+
+
+@pytest.mark.parametrize("stage", ["role", "outer", "invalid"])
+def test_fallback_enabled_error_canaries_never_reach_writers(monkeypatch, tmp_path, stage):
+    """ADR-054: 'never log rejected values' and sanitize enabled failures."""
+    import sys
+    from types import SimpleNamespace as NS
+    written = []
+    monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_ROUTES", json.dumps({"primary": "cl/fake", "backup": "an/fake"}))
+    monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_PRIMARY", "primary")
+    monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_ALTERNATE", "backup")
+    monkeypatch.setenv("LITELLM_BASE_URL", "fake")
+    monkeypatch.setenv("LITELLM_API_KEY", "fake")
+    monkeypatch.setattr(llm_proposer, "_model_name", lambda: "cl/fake")
+    monkeypatch.setattr(llm_proposer, "_record_proposer_reject", lambda *a, **k: written.append((a, k)))
+    monkeypatch.setattr(llm_proposer, "should_propose", lambda *a: True)
+    monkeypatch.setattr(llm_proposer, "_consecutive_noop_streak", lambda *a: 0)
+    monkeypatch.setattr(llm_proposer, "build_context", lambda *a, **k: "context")
+    monkeypatch.setitem(sys.modules, "openai", NS(OpenAI=object))
+    def fail(*args, **kwargs):
+        raise ValueError("https://fake.invalid/token-canary")
+    if stage == "role":
+        monkeypatch.setattr(llm_proposer, "build_role_system_prompt_or_refuse", fail)
+    elif stage == "outer":
+        monkeypatch.setattr(llm_proposer, "build_context", fail)
+    else:
+        monkeypatch.setenv("SELFEVO_PROPOSER_FALLBACK_PRIMARY", "token-canary")
+    assert llm_proposer.maybe_propose(tmp_path, None) is None
+    assert "token-canary" not in repr(written)
+    if stage == "role":
+        assert llm_proposer._last_propose_failure == "RolePromptBuildFailed"
+
+
+def test_fallback_does_not_affect_goal_review_or_ranked(monkeypatch, tmp_path):
+    """ADR-054 limits fallback to the maybe_propose pass, not other roles."""
+    import sys
+    from types import SimpleNamespace as NS
+    calls = []
+    monkeypatch.setenv("LITELLM_BASE_URL", "fake")
+    monkeypatch.setenv("LITELLM_API_KEY", "fake")
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path))
+    monkeypatch.setattr(llm_proposer, "_build_proposer_role_prompt", lambda *a: "system")
+    monkeypatch.setattr(llm_proposer, "resolve_context_window", lambda *a, **k: None)
+    class Client:
+        def __init__(self, **kw):
+            calls.append(kw)
+            self.chat = self.completions = self
+        def create(self, **kw):
+            return NS(model="legacy-model", usage=None, choices=[NS(finish_reason="stop", message=NS(content='{}'))])
+    monkeypatch.setitem(sys.modules, "openai", NS(OpenAI=Client))
+    token = llm_proposer._FALLBACK_PASS.set({"invalid": True})
+    try:
+        llm_proposer.propose("context", component="goal_review")
+        llm_proposer.propose_multi("context")
+    finally:
+        llm_proposer._FALLBACK_PASS.reset(token)
+    assert len(calls) == 2
+    assert all("max_retries" not in kw for kw in calls)
+    rows = [json.loads(line) for file in tmp_path.glob("*.jsonl") for line in file.read_text().splitlines()]
+    assert len(rows) == 2 and all("fallback" not in row for row in rows)
+
+
+def test_fallback_telemetry_privacy_and_attribution(monkeypatch):
+    """ADR-054: 'otherwise null/unknown' for an unmapped served model."""
+    from types import SimpleNamespace as NS
+    import uuid
+    state = {"primary": "primary", "alternate": "backup", "routes": {
+        "primary": "cl/fake-primary", "backup": "an/fake-backup"}, "threshold": 60,
+        "deadline": 120, "attempts": 0, "id": str(uuid.uuid4())}
+    rows, prompts = [], []
+    monkeypatch.setattr(llm_proposer.time, "monotonic", lambda: 0)
+    monkeypatch.setattr(llm_proposer, "record_llm_call", lambda **kw: rows.append(kw))
+    monkeypatch.setattr(llm_proposer, "record_llm_prompt", lambda **kw: prompts.append(kw))
+    class Client:
+        def __init__(self, **kwargs):
+            self.chat = self.completions = self
+        def create(self, **kwargs):
+            return NS(model="https://unsafe.invalid/token-canary", usage=None,
+                      choices=[NS(finish_reason="stop", message=NS(content='{"task_title":"ok"}'))])
+    assert llm_proposer._propose_with_fallback(state, Client, "fake", "fake", "s", "u", "proposer")
+    assert rows[0]["model"] == "primary" and rows[0]["served_model"] is None
+    assert prompts[0]["model"] == "primary"
+    assert "token-canary" not in repr(rows + prompts)
+    assert rows[0]["fallback_metadata"]["operation_id"] == state["id"]
+    class MappedClient(Client):
+        def create(self, **kwargs):
+            result = super().create(**kwargs)
+            result.model = "an/fake-backup"
+            return result
+    state["attempts"] = 0
+    llm_proposer._propose_with_fallback(state, MappedClient, "fake", "fake", "s", "u", "proposer")
+    assert rows[-1]["served_model"] == "backup"
+    failures = []
+    class Error(Exception):
+        status_code = 429
+        headers = {}
+    class FailingClient(Client):
+        def create(self, **kwargs):
+            raise Error("https://unsafe.invalid/token-canary")
+    monkeypatch.setattr(llm_proposer, "_record_failed_proposer_call", lambda *a, **k: failures.append((a[1:], k, llm_proposer._last_propose_failure)))
+    state["attempts"] = 0
+    assert llm_proposer._propose_with_fallback(state, FailingClient, "fake", "fake", "s", "u", "proposer") is None
+    assert failures and "token-canary" not in repr(failures)
+    assert llm_proposer._last_propose_failure == "ProviderError"
+
+
+@pytest.mark.parametrize("broken", ["record_llm_call", "record_llm_prompt"])
+def test_fallback_telemetry_failure_does_not_lose_response(monkeypatch, broken):
+    from types import SimpleNamespace as NS
+    state = {"primary": "p", "alternate": "a", "routes": {"p": "cl/p", "a": "an/a"},
+             "threshold": 60, "deadline": 120, "attempts": 0, "id": "fake"}
+    monkeypatch.setattr(llm_proposer.time, "monotonic", lambda: 0)
+    called = []
+    def fail(**kwargs):
+        called.append(broken)
+        raise RuntimeError("canary")
+    other = "record_llm_prompt" if broken == "record_llm_call" else "record_llm_call"
+    monkeypatch.setattr(llm_proposer, broken, fail)
+    monkeypatch.setattr(llm_proposer, other, lambda **kwargs: called.append(other))
+    class Client:
+        def __init__(self, **kw):
+            self.chat = self.completions = self
+        def create(self, **kw):
+            return NS(model="cl/p", usage=None, choices=[NS(finish_reason="stop", message=NS(content='{"task_title":"ok"}'))])
+    assert llm_proposer._propose_with_fallback(state, Client, "fake", "fake", "s", "u", "proposer") == {"task_title": "ok"}
+    assert set(called) == {broken, other} and state["attempts"] == 1
+
+
 def test_proposer_prompt_distinguishes_all_completed_derived_priorities(tmp_path):
     """ADR-034 F4: don't render an all-completed derived list as empty."""
     from nanobot.runtime.demand import _make_item

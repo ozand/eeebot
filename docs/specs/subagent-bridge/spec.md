@@ -246,6 +246,12 @@ interactive profiles.
   marker and SHALL skip a request whose marker already exists (idempotent — no
   duplicate execution of the same request).
 
+### Bounded proposer fallback (#2173)
+
+The `maybe_propose` pass has optional fallback, disabled unless `SELFEVO_PROPOSER_FALLBACK_ENABLED=true`. Configuration supplies JSON alias-to-route pairs in `SELFEVO_PROPOSER_FALLBACK_ROUTES`, selected by `SELFEVO_PROPOSER_FALLBACK_PRIMARY` and `SELFEVO_PROPOSER_FALLBACK_ALTERNATE`; the primary must match the configured model. Invalid mappings fail closed. `SELFEVO_PROPOSER_FALLBACK_RETRY_AFTER` defaults to 60 seconds and must be an integer from 1 to 3600. No route is supplied by default.
+
+A structured 429/503 with the recognized bounded cooldown marker or qualifying numeric Retry-After may use one alternate. All calls in the pass, including sizing and dedup feedback, share two attempts and a cooperative 120-second deadline; SDK retries are disabled and each input is limited to 32,768 UTF-8 bytes. Enabled-mode telemetry uses approved aliases and a generated operation ID; an unmapped response model remains unknown. Separate existing prompt capture is unchanged. This does not activate a route or change goal-review or ranked proposal calls; see ADR-054.
+
 ### LLM proposer (#707, GO 2026-07-13)
 
 When the deterministic backlog is exhausted, the bridge itself sources the
