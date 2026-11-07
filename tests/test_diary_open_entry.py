@@ -20,6 +20,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from nanobot.runtime.bridge import _write_diary_open_entry
 from nanobot.runtime.day_diary import DIARY_MARKER, diary_relpath
 
@@ -324,8 +326,17 @@ def test_diary_write_call_site_precedes_cycle_branch_setup_in_source():  # ADR-0
     would start racing the cycle branch cut instead of strictly preceding
     it, and this test catches that before it ships."""
     src = Path(__import__("nanobot.runtime.bridge", fromlist=["__file__"]).__file__).read_text(encoding="utf-8")
-    diary_idx = src.index("_write_diary_open_entry(\n")
-    setup_idx = src.index("_cycle_setup = _setup_cycle_branch(")
-    assert diary_idx < setup_idx, (
-        "the diary open-entry write must precede the cycle branch setup call site"
-    )
+    cycle_path = src[src.index("async def _main_impl_body("):]
+    diary_call = "_write_diary_open_entry(\n"
+    setup_call = "_cycle_setup = _setup_cycle_branch("
+    def assert_order(text):
+        assert text.index(diary_call) < text.index(setup_call), (
+            "the diary open-entry write must precede the cycle branch setup call site"
+        )
+
+    assert_order(cycle_path)
+    # Move the invocation after setup; the old definition remains untouched.
+    misplaced = cycle_path.replace(diary_call, "_moved_diary_call(\n", 1)
+    misplaced = misplaced.replace(setup_call, setup_call + "\n" + diary_call, 1)
+    with pytest.raises(AssertionError):
+        assert_order(misplaced)
