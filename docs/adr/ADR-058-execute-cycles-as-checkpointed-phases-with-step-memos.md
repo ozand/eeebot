@@ -40,7 +40,7 @@ Single-writer bridge lock (`ADR-043`), mutation-surface/smoke gates, and promoti
 # Alternatives considered
 
 - **Keep monolithic `_main_impl_body` and add more recovery `if` branches:** rejected because implicit stack state makes every crash window a bespoke bug (`#2050`).
-- **Adopt an external workflow server (Temporal/Celery):** rejected as too heavy for a 32-bit `eeepc` host (`ADR-055`).
+- **Use an external workflow server (for example, Temporal or Celery):** not evaluated here and outside this bounded proposal. No target compatibility or resource comparison is claimed; reconsideration requires the evidence and separate decision described by ADR-055.
 
 # Test Contract
 

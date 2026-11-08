@@ -3,7 +3,7 @@ title: Record intent before effect and declare explicit tool replay policy
 status: proposed
 date: 2026-11-07
 authors: [eeebot maintainers]
-related: ["#2178", "#2177", "#1765", "#2162", "#1989", "ADR-050", "ADR-051", "ADR-055"]
+related: ["#2178", "#2177", "#1765", "#2162", "#1989", "ADR-050", "ADR-055"]
 tags: [runtime, durability, tools, recovery]
 ---
 
@@ -21,7 +21,7 @@ When a host process crashes or times out during a model/tool call (`#1765`, desi
 2. Before admitting each model request or tool call, durably persist bounded intent metadata with `operation_kind` (`model` or `tool`), a stable logical `operation_id`, a unique `attempt_id`, cycle, component/target, tool policy where applicable, schema/version and timestamp. Append completion only for that same pair. Model requests have no `safe` tool policy: because billing and remote completion may be uncertain, an unmatched model attempt is held for reconciliation, never automatically resent. Persistence failure denies admission. Never infer completion from elapsed time.
 3. Serialize admission and reconciliation under a specified existing single-writer/bridge lock, after verifying every relevant admission/recovery writer cooperates with that exact lock; this proposal does not claim that the shared bridge lock currently covers every tool/provider entrypoint. Before classifying or reoffering an unmatched attempt, establish the old local executor/call is quiescent; a lock alone does not prove a remote provider stopped. A late terminal belongs only to its exact attempt and cannot settle a replacement. If quiescence, identity, required input/state, or effect outcome is uncertain, keep the attempt held and surface bounded evidence for authorized reconciliation; do not replay or mint a fresh budgeted attempt automatically. Unsupported lock, malformed/ambiguous legacy records, or persistence errors fail closed without state surgery.
 4. A replay requires current authorization, the original authorized input (or evidence of equivalent input), remaining original budget/deadline and cancellation state. If private inputs are unavailable, do not reconstruct them from public telemetry; hold. Paid model calls and unsafe effects are never blindly retried. Keep records bounded and exclude raw prompts, tool arguments, secrets and private payloads; define schema, retention and size limits before implementation.
-5. This proposal does not implement or absorb #1765 runtime recovery, #2162's stale-call design/acceptance (the separate proposed ADR-051), or #1989's separately owned real-subprocess SIGKILL/branch-resume regression. #2162 owns the stale incomplete-call reconciliation contract; #1765 owns its implementation and runtime behavior. These remain separate scopes with their own acceptance criteria. #2178 may stage one selected invocation path first, but that is sequencing only: all remaining intended paths/tests stay deferred or unmet in #2178, and the staged subset does not complete this proposal or authorize closure. No external orchestration service or shell/file-write auto-replay is proposed.
+5. This proposal does not implement or absorb #1765 runtime recovery, #2162's separately governed stale-call design/acceptance, or #1989's separately owned real-subprocess SIGKILL/branch-resume regression. #2162 owns the stale incomplete-call reconciliation contract; #1765 owns its implementation and runtime behavior. These remain separate scopes with their own acceptance criteria. #2178 may stage one selected invocation path first, but that is sequencing only: all remaining intended paths/tests stay deferred or unmet in #2178, and the staged subset does not complete this proposal or authorize closure. No external orchestration service or shell/file-write auto-replay is proposed.
 
 # Consequences
 
@@ -53,5 +53,5 @@ Existing tool schemas exposed to the LLM, mutation-surface gates, and telemetry 
 
 # References
 
-- Issues `#2178`, `#2177`, `#1765`, `#2162`, `#1989`; `ADR-050`, proposed `ADR-051` (separate #2162 decision), `ADR-055`.
+- Issues `#2178`, `#2177`, `#1765`, `#2162`, `#1989`; `ADR-050`, #2162 stale-call decision (separate scope), `ADR-055`.
 - `@earendil-works/pi-durable` (`packages/durable/src/harness/tool.ts`, `replay: "safe" | "unsafe"`) inspires an explicit classification only; its semantics do not establish eeebot equivalence or recovery authority.
