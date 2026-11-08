@@ -79,7 +79,7 @@ that acceptance is already effective.
 | [ADR-054](ADR-054-bound-proposer-fallback-to-explicit-routes.md) | Bound proposer fallback to explicitly authorized routes | accepted |
 
 | [ADR-055](ADR-055-retain-python-stdlib-for-32bit-hosts-and-decouple-nanobot-scaffold.md) | Prefer demonstrated portability over framework or language allegiance | proposed |
-| [ADR-056](ADR-056-record-intent-before-effect-and-explicit-tool-replay-policy.md) | Record intent before effect and declare explicit tool replay policy | proposed |
+| [ADR-056](ADR-056-record-intent-before-effect-and-explicit-tool-replay-policy.md) | Record intent before effect and declare explicit tool replay policy | accepted |
 | [ADR-057](ADR-057-assemble-named-prompt-sections-and-record-hash-deltas.md) | Assemble named prompt sections and record hash deltas | proposed |
 | [ADR-058](ADR-058-execute-cycles-as-checkpointed-phases-with-step-memos.md) | Execute checkpointed phases with step memos | proposed |
 | [ADR-059](ADR-059-consolidate-hot-operational-state-in-stdlib-sqlite-wal.md) | Evaluate transactional hot state before selecting SQLite WAL | proposed |
