@@ -95,6 +95,58 @@ def test_subagent_system_prompt_includes_harness_context(tmp_path):
     assert "CHARTER SENTINEL" in prompt
 
 
+def test_planner_role_override_uses_explicit_safe_role_sections(tmp_path):
+    import hashlib
+    from pathlib import Path
+
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.bus.queue import MessageBus
+    from nanobot.observability.prompt_provenance import provider_call_context
+    from nanobot.runtime.role_prompt import build_role_system_prompt
+
+    class Provider:
+        def get_default_model(self):
+            return "test-model"
+
+    release_root = Path(__file__).resolve().parents[1]
+    role_prompt_text, role_meta = build_role_system_prompt("planner", release_root=release_root)
+    manager = SubagentManager(
+        provider=Provider(), workspace=tmp_path, bus=MessageBus(),
+        tool_profile="planner", telemetry_component="planner",
+        role_system_prompt=role_prompt_text,
+        role_prompt_sections=tuple(role_meta["sections"]),
+        role_prompt_release_id=role_meta.get("release_id"),
+    )
+
+    prompt = manager._build_subagent_prompt()
+    role_body = role_meta["sections"][-1].content.replace(
+        "{{TOOL_CAPABILITIES}}", manager.allowed_actions_text(),
+    )
+    assert role_body in prompt
+    assert "{{TOOL_CAPABILITIES}}" not in prompt
+    from nanobot.observability.prompt_provenance import _ROLE_ASSEMBLY
+    assembly = _ROLE_ASSEMBLY.get()
+    assert assembly["schema"] == "role-prompt-v1:planner+tool-profile-v1"
+    assert assembly["release_id"] == role_meta.get("release_id")
+    assert manager._prompt_sections[0].evidence_safe is False
+    assert manager._prompt_sections[1].evidence_safe is False
+    assert manager._prompt_sections[-1].evidence_safe is True
+    assert manager._prompt_sections[-1].content == role_body
+    from nanobot.agent.context import ContextBuilder
+    assert ContextBuilder._join_sections([
+        (section.name, section.content) for section in manager._prompt_sections
+    ]) == prompt
+    with provider_call_context([{"role": "system", "content": prompt}]) as call:
+        assert call is not None
+        assert call.provenance["schema"] == "role-prompt-v1:planner+tool-profile-v1"
+        assert call.provenance["release_id"] == role_meta.get("release_id")
+        assert call.provenance["order"] == ["role"]
+        assert call.provenance["sections"] == [{
+            "name": "role", "sha256": hashlib.sha256(role_body.encode()).hexdigest(),
+            "chars": len(role_body),
+        }]
+
+
 def test_subagent_manager_default_max_iterations_is_15(tmp_path):
     """Issue #578: omitting max_iterations preserves the historical default."""
     from nanobot.agent.subagent import SubagentManager

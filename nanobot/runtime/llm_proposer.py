@@ -43,13 +43,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from nanobot.runtime.role_prompt import (
-    CharterTooLargeError,
-    build_role_system_prompt,
-    build_role_system_prompt_or_refuse,
-    load_role_text,
-    system_chars,
-)
 from nanobot.observability.llm_telemetry import (
     call_context,
     current_cycle_id,
@@ -57,6 +50,11 @@ from nanobot.observability.llm_telemetry import (
     record_llm_prompt,
     reset_call_context,
     set_call_context,
+)
+from nanobot.observability.prompt_provenance import (
+    prompt_request_context,
+    provider_call_context,
+    role_request_for_system,
 )
 from nanobot.providers.model_window import resolve_context_window
 from nanobot.runtime import (
@@ -80,7 +78,6 @@ from nanobot.runtime.model_registry import resolve_model
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
 from nanobot.runtime.operator_documents import (
     PRIORITY_UNAVAILABLE,
-    STATE_ABSENT,
     STATE_TEXT,
     PriorityResolution,
     format_derived_priority_line,
@@ -91,6 +88,11 @@ from nanobot.runtime.operator_documents import (
     resolve_operator_priorities,
 )
 from nanobot.runtime.reflection_context import build_reflection_hints
+from nanobot.runtime.role_prompt import (
+    CharterTooLargeError,
+    build_role_system_prompt_or_refuse,
+    load_role_text,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -258,9 +260,18 @@ def _build_proposer_role_prompt(role_body: str) -> str | None:
     """
     global _last_propose_failure
     try:
-        system_content, _fit = build_role_system_prompt_or_refuse(
-            _role_name_for(role_body), role_text=role_body
+        producer = _role_name_for(role_body)
+        system_content, telemetry = build_role_system_prompt_or_refuse(
+            producer, role_text=role_body
         )
+        from nanobot.observability.prompt_provenance import PromptSection, remember_role_assembly
+        fixed_role_body, role_meta = load_role_text(producer)
+        if role_body == fixed_role_body and not role_meta.get("missing") and not role_meta.get("truncated"):
+            from nanobot.runtime.role_prompt import SAFE_ROLE_PRODUCERS
+            telemetry["sections"] = [
+                PromptSection("role", role_body, producer in SAFE_ROLE_PRODUCERS),
+            ]
+        remember_role_assembly(system_content, producer, telemetry["sections"], telemetry.get("release_id"))
         return system_content
     except Exception as exc:
         _last_propose_failure = "RolePromptBuildFailed" if _FALLBACK_PASS.get() else f"RolePromptBuildFailed: {exc}"
@@ -2300,10 +2311,14 @@ def _dedup_exhausted(
 
 def _record_failed_proposer_call(
     exc: Exception, requested_model: str, component: str = "proposer", ts: str | None = None,
-    fallback_metadata: dict | None = None,
+    fallback_metadata: dict | None = None, prompt_provenance: dict | None = None,
 ) -> None:
     try:
         from nanobot.observability.llm_telemetry import call_context, record_llm_failure
+        from nanobot.observability.prompt_provenance import (
+            current_provenance,
+            take_failed_provenance,
+        )
 
         status = getattr(exc, "status_code", None)
         headers = getattr(exc, "headers", None)
@@ -2319,11 +2334,13 @@ def _record_failed_proposer_call(
             except (TypeError, ValueError):
                 retry_after = None
         component = str(component or "proposer")[:64]
+        provenance = current_provenance() or take_failed_provenance() or prompt_provenance
         with call_context(current_cycle_id(component), component):
             record_llm_failure(
                 component=component, requested_model=requested_model,
                 error_type=type(exc).__name__, http_status=status,
                 retry_after_s=retry_after, ts=ts, fallback_metadata=fallback_metadata,
+                prompt_provenance=provenance,
             )
     except Exception:
         pass
@@ -2356,7 +2373,15 @@ def _propose_with_fallback(state, client_type, base_url, api_key, system_content
             if effort:
                 kwargs["reasoning_effort"] = effort
             state["attempts"] += 1
-            response = client.chat.completions.create(**kwargs)
+            prompt_request = role_request_for_system(
+                system_content, owner=f"proposer:{current_cycle_id() or state['id']}",
+                producer_hint=_role_name_for(system_content),
+            )
+            with prompt_request_context(prompt_request):
+                from nanobot.observability.prompt_provenance import prompt_owner_context
+                with prompt_owner_context(prompt_request.owner):
+                    with provider_call_context(kwargs["messages"]) as prompt_call:
+                        response = client.chat.completions.create(**kwargs)
         except Exception as exc:
             qualifies = _fallback_qualifies(exc, state["threshold"])
             _last_propose_failure = (
@@ -2374,7 +2399,11 @@ def _propose_with_fallback(state, client_type, base_url, api_key, system_content
                 raise ValueError("invalid response")
         except Exception:
             _last_propose_failure = "InvalidProviderResponse"
-            _record_failed_proposer_call(ValueError("InvalidProviderResponse"), alias, component, fallback_metadata=meta)
+            _record_failed_proposer_call(
+                ValueError("InvalidProviderResponse"), alias, component,
+                fallback_metadata=meta,
+                prompt_provenance=prompt_call.provenance if prompt_call is not None else None,
+            )
             return None
         actual = getattr(response, "model", None)
         served = next((key for key, route in state["routes"].items() if route == actual), None)
@@ -2382,17 +2411,21 @@ def _propose_with_fallback(state, client_type, base_url, api_key, system_content
         usage_obj = getattr(response, "usage", None)
         usage = {key: getattr(usage_obj, key, 0) or 0 for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
         content = getattr(getattr(choice, "message", None), "content", "") or ""
+        from nanobot.observability.prompt_provenance import current_provenance
+        prompt_provenance = current_provenance()
         with call_context(current_cycle_id(), component):
             try:
                 record_llm_call(model=safe_model, served_model=served, duration_ms=(time.monotonic() - started) * 1000,
                                 usage=usage, finish_reason=getattr(choice, "finish_reason", "") or "", retries=0,
-                                system_prompt_chars=len(system_content), fallback_metadata=meta)
+                                system_prompt_chars=len(system_content), fallback_metadata=meta,
+                                prompt_provenance=prompt_provenance)
             except Exception:
                 pass
             try:
                 record_llm_prompt(messages=[{"role": "system", "content": system_content}, {"role": "user", "content": user_content}],
                                   content=content, reasoning_content=None, finish_reason=getattr(choice, "finish_reason", "") or "",
-                                  model=safe_model, prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"])
+                                  model=safe_model, prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"],
+                                  prompt_provenance=prompt_provenance)
             except Exception:
                 pass
         result = _extract_json_object(content)
@@ -2451,7 +2484,14 @@ def propose(
     state_dir = os.environ.get("STATE_DIR", "").strip()
     _role_prompt_refusal_state_dir = Path(state_dir) if state_dir else None
     role_body = system_prompt or _PROPOSER_SYSTEM_PROMPT
-    system_content = _build_proposer_role_prompt(role_body)
+    provenance_owner = (
+        f"proposer:{current_cycle_id() or uuid.uuid4().hex}"
+        if component != "goal_review"
+        else f"goal-review:{current_cycle_id() or uuid.uuid4().hex}"
+    )
+    from nanobot.observability.prompt_provenance import prompt_owner_context
+    with prompt_owner_context(provenance_owner):
+        system_content = _build_proposer_role_prompt(role_body)
     if system_content is None:
         return None
     requested_model = _model_name()
@@ -2473,7 +2513,14 @@ def propose(
         if effort:
             create_kwargs["reasoning_effort"] = effort
         call_start = time.monotonic()
-        response = client.chat.completions.create(**create_kwargs)
+        prompt_request = role_request_for_system(
+            system_content, owner=provenance_owner,
+            producer_hint=_role_name_for(role_body),
+        )
+        with prompt_request_context(prompt_request):
+            with prompt_owner_context(provenance_owner):
+                with provider_call_context(create_kwargs["messages"]):
+                    response = client.chat.completions.create(**create_kwargs)
         duration_ms = (time.monotonic() - call_start) * 1000
         usage_obj = getattr(response, "usage", None)
         usage = {
@@ -2486,6 +2533,8 @@ def propose(
         model = str(getattr(response, "model", "") or create_kwargs["model"])
         content = getattr(getattr(choice, "message", None), "content", "") or ""
         try:
+            from nanobot.observability.prompt_provenance import current_provenance
+            prompt_provenance = current_provenance()
             # #1374: keep the cycle the caller attributed (maybe_propose sets
             # it before the first call); ``None`` here erased it to "".
             with call_context(current_cycle_id(), component):
@@ -2494,12 +2543,14 @@ def propose(
                     finish_reason=finish_reason, retries=0,
                     system_prompt_chars=len(system_content),
                     context_window=resolve_context_window(model, base_url, api_key=api_key),
+                    prompt_provenance=prompt_provenance,
                 )
                 record_llm_prompt(
                     messages=create_kwargs["messages"], content=content,
                     reasoning_content=None, finish_reason=finish_reason, model=model,
                     prompt_tokens=usage["prompt_tokens"],
                     completion_tokens=usage["completion_tokens"],
+                    prompt_provenance=prompt_provenance,
                 )
         except Exception:
             pass
@@ -2557,7 +2608,10 @@ def propose_multi(
     state_dir = os.environ.get("STATE_DIR", "").strip()
     _role_prompt_refusal_state_dir = Path(state_dir) if state_dir else None
     role_body = system_prompt or _PROPOSER_SYSTEM_PROMPT
-    system_content = _build_proposer_role_prompt(role_body)
+    provenance_owner = f"proposer:{current_cycle_id() or uuid.uuid4().hex}"
+    from nanobot.observability.prompt_provenance import prompt_owner_context
+    with prompt_owner_context(provenance_owner):
+        system_content = _build_proposer_role_prompt(role_body)
     if system_content is None:
         return None
     requested_model = _model_name()
@@ -2580,7 +2634,14 @@ def propose_multi(
         if effort:
             create_kwargs["reasoning_effort"] = effort
         call_start = time.monotonic()
-        response = client.chat.completions.create(**create_kwargs)
+        prompt_request = role_request_for_system(
+            system_content, owner=f"proposer:{current_cycle_id() or uuid.uuid4().hex}",
+            producer_hint=_role_name_for(role_body),
+        )
+        with prompt_request_context(prompt_request):
+            with prompt_owner_context(prompt_request.owner):
+                with provider_call_context(create_kwargs["messages"]):
+                    response = client.chat.completions.create(**create_kwargs)
         duration_ms = (time.monotonic() - call_start) * 1000
         usage_obj = getattr(response, "usage", None)
         usage = {
@@ -2593,17 +2654,21 @@ def propose_multi(
         model = str(getattr(response, "model", "") or create_kwargs["model"])
         content = getattr(getattr(choice, "message", None), "content", "") or ""
         try:
+            from nanobot.observability.prompt_provenance import current_provenance
+            prompt_provenance = current_provenance()
             with call_context(current_cycle_id(), "proposer"):
                 record_llm_call(
                     model=model, duration_ms=duration_ms, usage=usage,
                     finish_reason=finish_reason, retries=0,
                     system_prompt_chars=len(system_content),
+                    prompt_provenance=prompt_provenance,
                 )
                 record_llm_prompt(
                     messages=create_kwargs["messages"], content=content,
                     reasoning_content=None, finish_reason=finish_reason, model=model,
                     prompt_tokens=usage["prompt_tokens"],
                     completion_tokens=usage["completion_tokens"],
+                    prompt_provenance=prompt_provenance,
                 )
         except Exception:
             pass
@@ -2946,7 +3011,9 @@ def _latest_non_residual_commit_for_path(
     import subprocess as _sp
 
     from nanobot.runtime.commit_markers import (
-        ARTIFICIAL_COMMIT_GREP_PATTERNS, GIT_UNAVAILABLE, is_artificial_commit_subject,
+        ARTIFICIAL_COMMIT_GREP_PATTERNS,
+        GIT_UNAVAILABLE,
+        is_artificial_commit_subject,
     )
 
     repo = Path(selfevo_repo)

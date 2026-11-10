@@ -146,10 +146,19 @@ def record_llm_failure(
     *, component: str, requested_model: str, error_type: str,
     http_status: int | None = None, retry_after_s: float | None = None,
     ts: str | None = None, fallback_metadata: dict | None = None,
+    prompt_provenance: dict | None = None,
 ) -> None:
     """Append bounded metadata for one failed provider attempt to a private stream."""
     try:
+        from nanobot.observability.prompt_provenance import current_provenance, sanitize_provenance
+
+        provenance = current_provenance()
+        if provenance is None:
+            from nanobot.observability.prompt_provenance import take_failed_provenance
+
+            provenance = take_failed_provenance()
         ctx = _CALL_CONTEXT.get() or {}
+        provenance = provenance or sanitize_provenance(prompt_provenance)
         cycle_id = str(ctx.get("cycle_id") or "")
         component = str(component or ctx.get("component") or "")[:64]
         requested_model = str(requested_model or "")[:256]
@@ -200,6 +209,7 @@ def record_llm_failure(
                 "retry_after_s": retry_after,
                 "cycle_id": cycle_id,
                 "seq": seq,
+                **({"prompt_provenance": provenance} if provenance is not None else {}),
                 **({"fallback": fallback_metadata} if fallback_metadata is not None else {}),
             }, ensure_ascii=False) + "\n")
     except Exception as exc:
@@ -243,6 +253,7 @@ def record_llm_call(
     system_prompt_chars: int | None = None,
     context_window: int | None = None,
     fallback_metadata: dict | None = None,
+    prompt_provenance: dict | None = None,
 ) -> None:
     """Append one JSONL line describing an LLM call. Best-effort — never raises.
 
@@ -265,7 +276,15 @@ def record_llm_call(
     ``AgentDefaults.context_window_tokens``) for a route it can't resolve.
     """
     try:
+        from nanobot.observability.prompt_provenance import current_provenance, sanitize_provenance
+
+        provenance = current_provenance()
+        if provenance is None:
+            from nanobot.observability.prompt_provenance import take_failed_provenance
+
+            provenance = take_failed_provenance()
         ctx = _CALL_CONTEXT.get() or {}
+        provenance = provenance or sanitize_provenance(prompt_provenance)
         usage = usage or {}
         cycle_id = ctx.get("cycle_id") or ""
         component = ctx.get("component") or ""
@@ -285,6 +304,7 @@ def record_llm_call(
             "cycle_id": cycle_id,
             "component": component,
             "seq": seq,
+            **({"prompt_provenance": provenance} if provenance is not None else {}),
             **({"fallback": fallback_metadata} if fallback_metadata is not None else {}),
             "system_prompt_chars": (
                 int(system_prompt_chars) if system_prompt_chars is not None else None
@@ -579,6 +599,7 @@ def record_llm_prompt(
     model: str | None,
     prompt_tokens: int | None,
     completion_tokens: int | None,
+    prompt_provenance: dict | None = None,
 ) -> None:
     """Append one JSONL line with the full assembled prompt + response.
 
@@ -596,6 +617,9 @@ def record_llm_prompt(
             _CALL_SEQ.set(None)
             return
 
+        from nanobot.observability.prompt_provenance import current_provenance, sanitize_provenance
+
+        provenance = current_provenance() or sanitize_provenance(prompt_provenance)
         ctx = _CALL_CONTEXT.get() or {}
         cycle_id = ctx.get("cycle_id") or ""
         component = ctx.get("component") or ""
@@ -616,6 +640,7 @@ def record_llm_prompt(
             "prompt_tokens": int(prompt_tokens or 0),
             "completion_tokens": int(completion_tokens or 0),
             "finish_reason": finish_reason or "",
+            **({"prompt_provenance": provenance} if provenance is not None else {}),
             "messages": messages or [],
             "content": content,
             "reasoning_content": reasoning_content,

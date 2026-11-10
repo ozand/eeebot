@@ -193,6 +193,8 @@ class SubagentManager:
         denied_paths: "set[Path] | None" = None,
         release_root: "Path | None" = None,
         role_system_prompt: "str | None" = None,
+        role_prompt_sections: tuple[Any, ...] | None = None,
+        role_prompt_release_id: str | None = None,
         # ADR-035 keep-work (#1942 B2): commit the workspace's dirty tree to
         # the current branch after every completed tool-execution step, so a
         # kill between steps loses only the in-flight one, not every
@@ -269,6 +271,8 @@ class SubagentManager:
         #: (every caller before this) leaves :meth:`_build_subagent_prompt`
         #: unchanged.
         self._role_system_prompt = role_system_prompt.strip() if role_system_prompt else None
+        self._role_prompt_sections = tuple(role_prompt_sections or ())
+        self._role_prompt_release_id = role_prompt_release_id
         if self._explicit_tool_profile and self._role_system_prompt and "{{TOOL_CAPABILITIES}}" not in self._role_system_prompt:
             raise ValueError("explicit tool profile requires role prompt capability placeholder")
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
@@ -302,6 +306,7 @@ class SubagentManager:
         self._excluded_skill_names: list[str] = list(excluded_skill_names or [])
         self._telemetry_component = str(telemetry_component or "").strip()
         self._telemetry_cycle_id = str(telemetry_cycle_id or "").strip()
+        self._provenance_producer = "planner" if self._telemetry_component == "planner" else "loop-profile"
         self.web_tools_enabled = bool(web_tools_enabled)
         self._checkpoint_commits = bool(checkpoint_commits)
         self._expected_cycle_branch = (expected_cycle_branch or "").strip() or None
@@ -586,6 +591,25 @@ class SubagentManager:
                     messages[0]["content"] = _CtxBuilder.update_step_position(
                         str(messages[0].get("content") or ""), iteration, max_iterations,
                     )
+                    from nanobot.observability.prompt_provenance import PromptSection
+                    if getattr(self, "_role_system_prompt", None) is None:
+                        sections = list(getattr(self, "_prompt_sections", ()))
+                        for index, section in enumerate(sections):
+                            if section.name == "position":
+                                content = _CtxBuilder.update_step_position(
+                                    section.content, iteration, max_iterations,
+                                )
+                                sections[index] = PromptSection(section.name, content, False)
+                        self._prompt_sections = tuple(sections)
+                    from nanobot.observability.prompt_provenance import remember_prompt_assembly
+                    _assembly_owner = (
+                        f"bridge:{getattr(self, '_telemetry_cycle_id', None) or self._skill_fitness_cycle_id or 'unknown'}"
+                    )
+                    remember_prompt_assembly(
+                        str(messages[0]["content"] or ""), self._provenance_producer,
+                        getattr(self, "_prompt_schema", "context-builder-loop-v1"),
+                        getattr(self, "_prompt_sections", ()), owner=_assembly_owner,
+                    )
 
                 # #1775: inject step position notification into the tail of the
                 # conversation (the last tool result) for the active turn, so the
@@ -673,9 +697,35 @@ class SubagentManager:
                         break
 
                     async def _call_provider():
-                        return await self.provider.chat_with_retry(
-                            messages=messages, tools=_tools_def, model=self.model,
+                        from nanobot.observability.prompt_provenance import (
+                            PromptRequest,
+                            prompt_owner_context,
+                            prompt_request_context,
                         )
+
+                        provenance_owner = (
+                            f"bridge:{self._telemetry_cycle_id or self._skill_fitness_cycle_id or task_id}:"
+                            f"{self._telemetry_component or 'executor'}"
+                        )
+                        provenance_context = prompt_owner_context(provenance_owner)
+                        with provenance_context:
+                            _producer = self._provenance_producer
+                            provenance_request = PromptRequest(
+                                owner=(
+                                    f"bridge:{self._telemetry_cycle_id or self._skill_fitness_cycle_id or task_id}"
+                                ),
+                                producer=_producer,
+                                schema=(
+                                    getattr(self, "_prompt_schema", "context-builder-loop-v1")
+                                ),
+                                sections=tuple(getattr(self, "_prompt_sections", ())),
+                                expected_system=str(messages[0].get("content") or "") if messages else "",
+                                release_id=getattr(self, "_role_prompt_release_id", None) if _producer == "planner" else None,
+                            )
+                            with prompt_request_context(provenance_request):
+                                return await self.provider.chat_with_retry(
+                                    messages=messages, tools=_tools_def, model=self.model,
+                                )
                     if _bounded_planner and not self._planner_phase_budget:
                         current_task = asyncio.current_task()
                         cancel_count = current_task.cancelling() if current_task else 0
@@ -1471,6 +1521,39 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
                     raise ValueError("role prompt omitted tool capability placeholder")
             if self.system_context:
                 prompt += "\n\n---\n\n" + self.system_context
+            from nanobot.observability.prompt_provenance import (
+                PromptSection,
+                remember_prompt_assembly,
+            )
+            role = "planner" if self._telemetry_component == "planner" else "unknown"
+            if role == "planner" and self._role_prompt_sections:
+                capability_text = self.allowed_actions_text()
+                role_sections = [
+                    PromptSection(
+                        section.name,
+                        section.content.replace("{{TOOL_CAPABILITIES}}", capability_text),
+                        section.evidence_safe,
+                    )
+                    for section in self._role_prompt_sections
+                ]
+                if self.system_context:
+                    role_sections.append(PromptSection("post_fit_system_context", self.system_context, False))
+                self._prompt_sections = tuple(role_sections)
+                self._role_prompt_schema = "role-prompt-v1:planner+tool-profile-v1"
+            else:
+                self._prompt_sections = (PromptSection("role_override", prompt, False),)
+                self._role_prompt_schema = "planner-role-v1"
+            self._prompt_schema = self._role_prompt_schema
+            _provenance_owner = (
+                f"bridge:{self._telemetry_cycle_id or self._skill_fitness_cycle_id or 'unknown'}"
+            )
+            from nanobot.observability.prompt_provenance import prompt_owner_context
+            with prompt_owner_context(_provenance_owner):
+                remember_prompt_assembly(
+                    prompt, role, self._role_prompt_schema, self._prompt_sections,
+                    owner=_provenance_owner, release_id=self._role_prompt_release_id,
+                )
+
             return prompt
 
         from nanobot.agent.context import ContextBuilder
@@ -1510,6 +1593,21 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
             # ledger row describes the capped builder prompt, not this
             # operator-owned tail (charter + loop identity).
             prompt += builder.SECTION_SEPARATOR + self.system_context
+        from nanobot.observability.prompt_provenance import PromptSection, remember_prompt_assembly
+        built_sections = list(getattr(builder, "last_prompt_sections", ()))
+        if self.system_context:
+            built_sections.append(PromptSection("post_fit_system_context", self.system_context, False))
+        self._prompt_sections = tuple(built_sections)
+        self._prompt_schema = "context-builder-loop-v1"
+        _provenance_owner = (
+            f"bridge:{getattr(self, '_telemetry_cycle_id', None) or self._skill_fitness_cycle_id or 'unknown'}"
+        )
+        from nanobot.observability.prompt_provenance import prompt_owner_context
+        with prompt_owner_context(_provenance_owner):
+            remember_prompt_assembly(
+                prompt, "loop-profile", self._prompt_schema, self._prompt_sections,
+                owner=_provenance_owner,
+            )
         return prompt
 
     def collect_skill_reads(self) -> int:

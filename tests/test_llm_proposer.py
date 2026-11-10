@@ -2355,7 +2355,7 @@ class TestProposeMockedClient:
         assert row["ts"].startswith(datetime.now(timezone.utc).strftime("%Y-%m-%d"))
         assert set(row) == {
             "ok", "ts", "component", "requested_model", "error_type",
-            "http_status", "retry_after_s", "cycle_id", "seq",
+            "http_status", "retry_after_s", "cycle_id", "seq", "prompt_provenance",
         }
         assert canary not in failures.read_text(encoding="utf-8")
         main_file = tmp_path / "llm_calls" / f"{today}.jsonl"
