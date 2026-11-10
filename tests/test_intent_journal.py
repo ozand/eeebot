@@ -304,9 +304,36 @@ def test_directory_fsync_failure_denies_admission_and_holds_visible_intent(tmp_p
             component="agent", target="provider.chat",
         )
     monkeypatch.setattr(journal, "_fsync_directory", real_sync)
-    assert [row["event"] for row in read_owner_records(tmp_path, owner)] == ["intent"]
+    # The atomic replace succeeded before directory sync failed. The API
+    # denied result release, but the complete terminal is visible in-process.
+    # A fresh process also reopens it and sees the same held owner; neither
+    # assertion claims power-loss or crash-durability after the failed fsync.
+    assert [row["event"] for row in read_owner_records(tmp_path, owner)] == ["intent", "terminal"]
+    fresh_operation, fresh_attempt = str(uuid4()), str(uuid4())
     with pytest.raises(JournalUnavailableError, match="durable parent-resolution"):
-        _intent(tmp_path, owner, str(uuid4()), str(uuid4()))
+        admit_attempt(
+            tmp_path, owner_id=owner, operation_id=fresh_operation,
+            attempt_id=fresh_attempt, component="agent", target="provider.chat",
+        )
+    script = """
+import sys
+from pathlib import Path
+from nanobot.runtime.intent_journal import JournalUnavailableError, admit_attempt, read_owner_records
+root = Path(sys.argv[1]); owner, operation, attempt = sys.argv[2:5]
+assert [row["event"] for row in read_owner_records(root, owner)] == ["intent", "terminal"]
+try:
+    admit_attempt(root, owner_id=owner, operation_id=operation, attempt_id=attempt, component="agent", target="provider.chat")
+except JournalUnavailableError as exc:
+    assert "durable parent-resolution" in str(exc)
+else:
+    raise SystemExit("fresh process admitted an unresolved owner")
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    subprocess.run([
+        sys.executable, "-c", script, str(tmp_path), owner,
+        str(uuid4()), str(uuid4()),
+    ], env=env, check=True, capture_output=True, text=True, timeout=10)
 
 
 # @lat: [[architecture#Intent-before-effect evidence]]
