@@ -233,23 +233,51 @@ with _owner_lock(root / "intent-journal" / f"{owner}.lock"):
 def test_terminal_fsync_failure_leaves_only_unsettled_intent(tmp_path: Path, monkeypatch) -> None:
     owner, operation, attempt = _ids()
     _intent(tmp_path, owner, operation, attempt)
+    real_open = os.open
     real_fsync = os.fsync
-    calls = 0
+    real_replace = os.replace
+    temp_fd: int | None = None
+    injected = False
+    replaced: list[Path] = []
+    journal_path = tmp_path / "intent-journal" / f"{owner}.jsonl"
+    temp_name = f".{journal_path.name}.tmp"
 
-    def fail_terminal_sync(fd: int) -> None:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise OSError("injected terminal fsync failure")
+    def observe_open(path, flags, *args, **kwargs):
+        nonlocal temp_fd
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path).name == temp_name:
+            temp_fd = fd
+        return fd
+
+    def fail_terminal_record_fsync(fd: int) -> None:
+        nonlocal injected
+        if fd == temp_fd:
+            injected = True
+            raise OSError("injected terminal record fsync failure before replace")
         real_fsync(fd)
 
-    monkeypatch.setattr(journal.os, "fsync", fail_terminal_sync)
+    def observe_replace(source, target) -> None:
+        if Path(target) == journal_path:
+            replaced.append(Path(source))
+        real_replace(source, target)
+
+    monkeypatch.setattr(journal.os, "open", observe_open)
+    monkeypatch.setattr(journal.os, "fsync", fail_terminal_record_fsync)
+    monkeypatch.setattr(journal.os, "replace", observe_replace)
     with pytest.raises(JournalUnavailableError, match="not verified"):
         record_returned(
             tmp_path, owner_id=owner, operation_id=operation, attempt_id=attempt,
             component="agent", target="provider.chat",
         )
+    monkeypatch.setattr(journal.os, "open", real_open)
     monkeypatch.setattr(journal.os, "fsync", real_fsync)
+    monkeypatch.setattr(journal.os, "replace", real_replace)
+    assert temp_fd is not None
+    assert injected
+    assert replaced == []
+    assert not (journal_path.parent / temp_name).exists()
+    # The terminal temp-file sync failed before replace; the persisted file
+    # remains intent-only, and its owner stays held for parent resolution.
     rows = read_owner_records(tmp_path, owner)
     assert [row["event"] for row in rows] == ["intent"]
     with pytest.raises(JournalUnavailableError, match="durable parent-resolution"):
