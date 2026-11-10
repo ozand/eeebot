@@ -2399,6 +2399,65 @@ class TestProposeMockedClient:
         assert prompt["component"] == "proposer"
         assert prompt["messages"][1]["content"] == "some context"
 
+    def test_direct_and_fallback_success_telemetry_keeps_own_call_ids(self, monkeypatch):
+        import openai
+
+        from nanobot.observability.prompt_provenance import current_provenance
+
+        replies = [
+            json.dumps({"task_title": "direct"}),
+            json.dumps([{"task_title": "multi"}]),
+            json.dumps({"task_title": "fallback"}),
+        ]
+        client_calls = []
+        call_rows = []
+        prompt_rows = []
+
+        class LocalSDK:
+            def __init__(self, *args, **kwargs):
+                self.chat = self.completions = self
+
+            def create(self, **kwargs):
+                client_calls.append(kwargs)
+                return _FakeResponse(replies[len(client_calls) - 1])
+
+        monkeypatch.setattr(openai, "OpenAI", LocalSDK)
+        monkeypatch.setenv("LITELLM_BASE_URL", "http://fake-gateway.local")
+        monkeypatch.setenv("LITELLM_API_KEY", "sk-fake")
+        monkeypatch.setattr(llm_proposer, "_model_name", lambda: "an/test-proposer")
+        monkeypatch.setattr(llm_proposer, "resolve_context_window", lambda *a, **k: None)
+        monkeypatch.setattr(llm_proposer, "record_llm_call", lambda **kwargs: call_rows.append(kwargs))
+        monkeypatch.setattr(llm_proposer, "record_llm_prompt", lambda **kwargs: prompt_rows.append(kwargs))
+
+        assert llm_proposer.propose("direct context") == {"task_title": "direct"}
+        assert current_provenance() is None
+        assert llm_proposer.propose_multi("multi context", n=1) == [{"task_title": "multi"}]
+        assert current_provenance() is None
+        state = {
+            "primary": "primary", "alternate": "backup",
+            "routes": {"primary": "cl/test-primary", "backup": "an/test-backup"},
+            "threshold": 60, "deadline": __import__("time").monotonic() + 60,
+            "attempts": 0, "id": "fallback-test-operation",
+        }
+        fallback_token = llm_proposer._FALLBACK_PASS.set(state)
+        try:
+            assert llm_proposer.propose("fallback context") == {"task_title": "fallback"}
+        finally:
+            llm_proposer._FALLBACK_PASS.reset(fallback_token)
+        assert current_provenance() is None
+
+        assert len(client_calls) == len(call_rows) == len(prompt_rows) == 3
+        call_ids = []
+        for call_row, prompt_row in zip(call_rows, prompt_rows, strict=True):
+            call_provenance = call_row["prompt_provenance"]
+            prompt_provenance = prompt_row["prompt_provenance"]
+            assert call_provenance["call_id"] == prompt_provenance["call_id"]
+            assert call_provenance["provenance_state"] == "observed"
+            assert call_provenance["producer"] == "proposer"
+            call_ids.append(call_provenance["call_id"])
+        assert len(set(call_ids)) == 3
+        assert all(current_provenance() is None for _ in range(1))
+
     def test_proposer_logging_failure_does_not_break_result(self, monkeypatch):
         self._patch_client(monkeypatch, json.dumps({"task_title": "x"}))
         monkeypatch.setattr(llm_proposer, "record_llm_call", lambda **_: (_ for _ in ()).throw(RuntimeError("telemetry")))

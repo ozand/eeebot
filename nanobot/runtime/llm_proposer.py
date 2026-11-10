@@ -2381,6 +2381,7 @@ def _propose_with_fallback(state, client_type, base_url, api_key, system_content
                 from nanobot.observability.prompt_provenance import prompt_owner_context
                 with prompt_owner_context(prompt_request.owner):
                     with provider_call_context(kwargs["messages"]) as prompt_call:
+                        prompt_provenance = prompt_call.provenance if prompt_call is not None else None
                         response = client.chat.completions.create(**kwargs)
         except Exception as exc:
             qualifies = _fallback_qualifies(exc, state["threshold"])
@@ -2401,8 +2402,7 @@ def _propose_with_fallback(state, client_type, base_url, api_key, system_content
             _last_propose_failure = "InvalidProviderResponse"
             _record_failed_proposer_call(
                 ValueError("InvalidProviderResponse"), alias, component,
-                fallback_metadata=meta,
-                prompt_provenance=prompt_call.provenance if prompt_call is not None else None,
+                fallback_metadata=meta, prompt_provenance=prompt_provenance,
             )
             return None
         actual = getattr(response, "model", None)
@@ -2411,8 +2411,6 @@ def _propose_with_fallback(state, client_type, base_url, api_key, system_content
         usage_obj = getattr(response, "usage", None)
         usage = {key: getattr(usage_obj, key, 0) or 0 for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
         content = getattr(getattr(choice, "message", None), "content", "") or ""
-        from nanobot.observability.prompt_provenance import current_provenance
-        prompt_provenance = current_provenance()
         with call_context(current_cycle_id(), component):
             try:
                 record_llm_call(model=safe_model, served_model=served, duration_ms=(time.monotonic() - started) * 1000,
@@ -2519,7 +2517,8 @@ def propose(
         )
         with prompt_request_context(prompt_request):
             with prompt_owner_context(provenance_owner):
-                with provider_call_context(create_kwargs["messages"]):
+                with provider_call_context(create_kwargs["messages"]) as prompt_call:
+                    prompt_provenance = prompt_call.provenance if prompt_call is not None else None
                     response = client.chat.completions.create(**create_kwargs)
         duration_ms = (time.monotonic() - call_start) * 1000
         usage_obj = getattr(response, "usage", None)
@@ -2533,8 +2532,6 @@ def propose(
         model = str(getattr(response, "model", "") or create_kwargs["model"])
         content = getattr(getattr(choice, "message", None), "content", "") or ""
         try:
-            from nanobot.observability.prompt_provenance import current_provenance
-            prompt_provenance = current_provenance()
             # #1374: keep the cycle the caller attributed (maybe_propose sets
             # it before the first call); ``None`` here erased it to "".
             with call_context(current_cycle_id(), component):
@@ -2640,7 +2637,8 @@ def propose_multi(
         )
         with prompt_request_context(prompt_request):
             with prompt_owner_context(prompt_request.owner):
-                with provider_call_context(create_kwargs["messages"]):
+                with provider_call_context(create_kwargs["messages"]) as prompt_call:
+                    prompt_provenance = prompt_call.provenance if prompt_call is not None else None
                     response = client.chat.completions.create(**create_kwargs)
         duration_ms = (time.monotonic() - call_start) * 1000
         usage_obj = getattr(response, "usage", None)
@@ -2654,8 +2652,6 @@ def propose_multi(
         model = str(getattr(response, "model", "") or create_kwargs["model"])
         content = getattr(getattr(choice, "message", None), "content", "") or ""
         try:
-            from nanobot.observability.prompt_provenance import current_provenance
-            prompt_provenance = current_provenance()
             with call_context(current_cycle_id(), "proposer"):
                 record_llm_call(
                     model=model, duration_ms=duration_ms, usage=usage,
