@@ -30,7 +30,7 @@ The LLM proposer can author bounded candidates through [[nanobot/runtime/llm_pro
 
 The public derived-view producer serializes goal-review-owned derived-priority rows with explicit `self-derived` provenance; operator priority wording remains private and the external typed dashboard allowlist is a read-only consumer. See [[nanobot/runtime/demand.py#build_derived_view]], [[docs/specs/subagent-bridge/spec.md]], and [[docs/adr/ADR-048-persist-self-derived-provenance-in-public-projection.md]] (Proposed).
 
-### Intent-before-effect evidence
+#### Intent-before-effect evidence
 
 The utility exposes durable intent admission and terminal receipts; callers must wait for intent admission before permitting an effect. It does not establish parent consumption or permit replay. See [[nanobot/runtime/intent_journal.py#admit_attempt]], [[nanobot/runtime/intent_journal.py#record_returned]], and [[tests/test_intent_journal.py]].
 

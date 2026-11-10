@@ -14,6 +14,7 @@ except ImportError:  # Windows development host; production contract requires fl
 import json
 import os
 import stat
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -210,32 +211,42 @@ def _append(path: Path, row: dict[str, Any], records: list[dict[str, Any]]) -> N
     reserved_terminal_records = 1 if row["event"] == "intent" else 0
     reserved_terminal_bytes = MAX_RECORD_BYTES if row["event"] == "intent" else 0
     try:
-        original_size = path.stat().st_size
+        original = path.read_bytes()
     except OSError as exc:
-        raise JournalUnavailableError("cannot inspect owner journal capacity") from exc
+        raise JournalUnavailableError("cannot read owner journal before append") from exc
     if (len(records) + 1 + reserved_terminal_records > MAX_OWNER_RECORDS
-            or original_size + len(encoded) + reserved_terminal_bytes > MAX_OWNER_BYTES):
+            or len(original) + len(encoded) + reserved_terminal_bytes > MAX_OWNER_BYTES):
         raise JournalUnavailableError("owner journal capacity exhausted")
+    # Stage the complete replacement on the same filesystem, validate it, then
+    # atomically replace the directory entry. Readers hold the owner lock, so
+    # they see only the old or the new complete journal, never a partial tail.
+    temp_path: Path | None = None
+    fd: int | None = None
     try:
-        with open(path, "ab", buffering=0) as stream:
-            view = memoryview(encoded)
-            while view:
-                written = stream.write(view)
-                if not written:
-                    raise OSError("short journal write")
-                view = view[written:]
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temp_path = Path(temp_name)
+        if os.name != "nt":
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb", closefd=True) as stream:
+            fd = None
+            stream.write(original)
+            stream.write(encoded)
+            stream.flush()
             os.fsync(stream.fileno())
-        _decode(path, row["owner_id"])
+        _decode(temp_path, row["owner_id"])
+        os.replace(temp_path, path)
+        temp_path = None
+        _fsync_directory(path.parent)
     except (OSError, JournalCorruptError) as exc:
-        # Preserve the prior owner prefix when possible. If rollback itself is
-        # uncertain, leave the bytes untouched for fail-closed validation.
-        try:
-            with open(path, "r+b", buffering=0) as stream:
-                stream.truncate(original_size)
-                os.fsync(stream.fileno())
-        except OSError:
-            pass
         raise JournalUnavailableError("journal append was not verified") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 
 def _record(owner_id: str, operation_id: str, attempt_id: str, event: str,
