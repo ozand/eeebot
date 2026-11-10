@@ -279,7 +279,10 @@ def provider_call_context(
     _FAILED.set(None)
     try:
         yield call
-    except BaseException:
+    except Exception:
+        # Provider failures can be recorded by a caller after this context
+        # exits; cancellation is not a provider failure and must not leave a
+        # stale correlation value for a later unrelated recorder.
         _FAILED.set(call.provenance)
         raise
     finally:

@@ -147,6 +147,170 @@ def test_planner_role_override_uses_explicit_safe_role_sections(tmp_path):
         }]
 
 
+def test_planner_dispatch_provenance_matches_final_injected_system_bytes(tmp_path, monkeypatch):
+    import asyncio
+    import hashlib
+    import json
+    from datetime import datetime, timezone
+
+    from nanobot.agent.context import ContextBuilder
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.observability.llm_telemetry import call_context
+    from nanobot.observability.prompt_provenance import PromptSection
+    from nanobot.providers.base import LLMProvider, LLMResponse
+
+    class CapturingProvider(LLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.messages = []
+
+        async def chat(self, *, messages, **kwargs):
+            self.messages.append(messages)
+            return LLMResponse(content="plan complete")
+
+        def get_default_model(self):
+            return "test-model"
+
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "llm_calls"))
+    provider = CapturingProvider()
+    private_identity = "## IDENTITY.md\n\nprivate identity"
+    private_goals = "## goals.md\n\nprivate charter"
+    fixed_role = "Planner role\n{{TOOL_CAPABILITIES}}"
+    sections = (
+        PromptSection("identity", private_identity, False),
+        PromptSection("goals", private_goals, False),
+        PromptSection("role", fixed_role, True),
+    )
+    system_prompt = ContextBuilder.SECTION_SEPARATOR.join(section.content for section in sections)
+    manager = SubagentManager(
+        provider=provider, workspace=tmp_path, bus=MessageBus(),
+        tool_profile=PLANNER_PROFILE, telemetry_component="planner",
+        telemetry_cycle_id="planner-fixture-cycle", max_iterations=1,
+        role_system_prompt=system_prompt,
+        role_prompt_sections=sections, role_prompt_release_id="release-fixture",
+    )
+
+    async def run():
+        with call_context("planner-fixture-cycle", "planner"):
+            await manager.spawn("plan")
+            await asyncio.gather(*manager._running_tasks.values())
+
+    asyncio.run(run())
+    assert len(provider.messages) == 1
+    final_system = provider.messages[0][0]["content"]
+    role_after_injection = fixed_role.replace("{{TOOL_CAPABILITIES}}", manager.allowed_actions_text())
+    expected = ContextBuilder.SECTION_SEPARATOR.join((
+        private_identity, private_goals, role_after_injection,
+    ))
+    assert final_system.encode("utf-8") == expected.encode("utf-8")
+    assert manager.allowed_actions_text() in final_system
+    assert private_identity in final_system and private_goals in final_system
+
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    rows = [json.loads(line) for line in (tmp_path / "llm_calls" / f"{day}.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    provenance = rows[0]["prompt_provenance"]
+    assert provenance["producer"] == "planner"
+    assert provenance["schema"] == "role-prompt-v1:planner+tool-profile-v1"
+    assert provenance["release_id"] == "release-fixture"
+    assert provenance["order"] == ["role"]
+    assert provenance["sections"] == [{
+        "name": "role", "sha256": hashlib.sha256(role_after_injection.encode("utf-8")).hexdigest(),
+        "chars": len(role_after_injection),
+    }]
+    assert private_identity not in json.dumps(provenance)
+    assert private_goals not in json.dumps(provenance)
+
+
+def test_loop_executor_position_update_is_the_actual_dispatched_system_bytes(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from nanobot.agent.context import ContextBuilder
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+
+    class CapturingProvider(LLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.messages = []
+
+        async def chat(self, *, messages, **kwargs):
+            self.messages.append([dict(message) for message in messages])
+            if len(self.messages) == 1:
+                return LLMResponse(
+                    content="read fixture",
+                    tool_calls=[ToolCallRequest(id="read-1", name="read_file", arguments={"path": "fixture.txt"})],
+                    finish_reason="tool_calls",
+                )
+            return LLMResponse(content="done")
+
+        def get_default_model(self):
+            return "test-model"
+
+    (tmp_path / "fixture.txt").write_text("fixture content", encoding="utf-8")
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "llm_calls"))
+    provider = CapturingProvider()
+    manager = SubagentManager(
+        provider=provider, workspace=tmp_path, bus=MessageBus(),
+        telemetry_component="executor", telemetry_cycle_id="position-fixture-cycle",
+        max_iterations=2,
+    )
+    builder = ContextBuilder(tmp_path, release_root=Path(__file__).resolve().parents[1], state_dir=tmp_path / "state")
+    builder._load_ontology_blocks = lambda: ([
+        ("identity", "## IDENTITY.md\n\nfixture identity"),
+        ("soul", "## SOUL.md\n\nfixture soul"),
+        ("goals", "## goals.md\n\nfixture goals"),
+        ("user", "## USER.md\n\nfixture user"),
+        ("operating", "## OPERATING.md\n\nfixture operating"),
+        ("agents", "## AGENTS.md\n\nfixture agents"),
+    ], [], [])
+    builder._load_priorities_block = lambda: "## Priorities\nfixture priorities"
+    builder._get_identity = lambda loop_profile=False: "## Runtime\nfixture runtime"
+    builder._load_scorecard_block = lambda: "[missing: scorecard]"
+    builder._load_position_block = lambda **kwargs: "## Position\nStep 1 of 2."
+    builder.memory.get_memory_context = lambda **kwargs: "fixture memory"
+    builder.skills.get_always_skills = lambda: []
+    builder.skills.load_skills_for_context = lambda names: ""
+    builder.skills.build_skills_summary = lambda **kwargs: ""
+    base_prompt = builder.build_system_prompt(
+        loop_profile=True, iteration=1, max_iterations=2, cycle_id="position-fixture-cycle",
+    )
+    manager._prompt_sections = builder.last_prompt_sections
+    manager._prompt_schema = "context-builder-loop-v1"
+    manager._role_system_prompt = None
+    manager._build_subagent_prompt = lambda: base_prompt
+
+    async def run():
+        with call_context("position-fixture-cycle", "executor"):
+            await manager.spawn("read the fixture")
+            await asyncio.gather(*manager._running_tasks.values())
+
+    from nanobot.observability.llm_telemetry import call_context
+    asyncio.run(run())
+    assert len(provider.messages) == 2
+    first_system = provider.messages[0][0]["content"]
+    actual_final_system = provider.messages[1][0]["content"]
+    base_system = ContextBuilder.update_step_position(first_system, 1, 2)
+    expected_final_system = ContextBuilder.update_step_position(base_system, 2, 2)
+    assert actual_final_system.encode("utf-8") == expected_final_system.encode("utf-8")
+    assert "Step 1 of 2." in base_system
+    assert "Step 2 of 2." in actual_final_system
+
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    rows = [json.loads(line) for line in (tmp_path / "llm_calls" / f"{day}.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 2
+    assert [row["prompt_provenance"]["provenance_state"] for row in rows] == ["unavailable", "unavailable"]
+    assert len({row["prompt_provenance"]["call_id"] for row in rows}) == 2
+    assert rows[1]["prompt_provenance"]["previous_call_id"] == rows[0]["prompt_provenance"]["call_id"]
+    assert all(row["prompt_provenance"]["order"] == [] for row in rows)
+
+
 def test_subagent_manager_default_max_iterations_is_15(tmp_path):
     """Issue #578: omitting max_iterations preserves the historical default."""
     from nanobot.agent.subagent import SubagentManager
