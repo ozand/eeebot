@@ -135,6 +135,8 @@ def _ensure_journal(path: Path) -> None:
             os.fchmod(fd, 0o600)
         if created:
             os.fsync(fd)
+        elif os.name != "nt":
+            _fsync_directory(path.parent)
     except OSError as exc:
         raise JournalUnavailableError("cannot verify or sync owner journal") from exc
     finally:
@@ -334,4 +336,7 @@ def read_owner_records(state_root: Path, owner_id: str) -> list[dict[str, Any]]:
     with _owner_lock(lock):
         if not journal.exists():
             raise JournalUnavailableError("owner journal is missing")
-        return _decode(journal, _uuid(owner_id, "owner_id"))
+        records = _decode(journal, _uuid(owner_id, "owner_id"))
+        if any(path.name.startswith(f".{journal.name}.") for path in journal.parent.iterdir()):
+            raise JournalUnavailableError("owner has an unresolved journal temp file")
+        return records
