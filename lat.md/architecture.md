@@ -30,11 +30,12 @@ The LLM proposer can author bounded candidates through [[nanobot/runtime/llm_pro
 
 The public derived-view producer serializes goal-review-owned derived-priority rows with explicit `self-derived` provenance; operator priority wording remains private and the external typed dashboard allowlist is a read-only consumer. See [[nanobot/runtime/demand.py#build_derived_view]], [[docs/specs/subagent-bridge/spec.md]], and [[docs/adr/ADR-048-persist-self-derived-provenance-in-public-projection.md]] (Proposed).
 
-#### Intent-before-effect evidence
+
+## Intent-before-effect evidence
 
 The utility exposes durable intent admission and terminal receipts; callers must wait for intent admission before permitting an effect. It does not establish parent consumption or permit replay. See [[nanobot/runtime/intent_journal.py#admit_attempt]], [[nanobot/runtime/intent_journal.py#record_returned]], and [[tests/test_intent_journal.py]].
 
-The current utility holds an owner after any recorded attempt because no durable parent-consumption/closure resolver is wired. It rejects malformed or oversized owner files without resetting them, uses fixed metadata allowlists and per-owner limits, and requires supported locking and sync before use. These tests establish only utility behavior; they do not prove that autonomous callers supply stable owners or use the journal before external effects. The Windows development suite uses a fake lock for logic tests and separately verifies the real implementation fails closed when its required lock and directory sync are unavailable; POSIX durability requires POSIX-host evidence.
+The utility holds an owner after any recorded attempt because no durable parent-consumption/closure resolver is wired. It rejects malformed or oversized owner files without resetting them, uses fixed metadata allowlists and per-owner limits, and requires supported locking and sync before use. Tests cover metadata validation, ownership and capacity bounds, injected file-sync failure, child termination, and persistent lock identity. The Windows development suite uses a fake lock only for logic tests and separately verifies that the real implementation fails closed because required locking and directory sync are unavailable; POSIX durability requires POSIX-host evidence. None of these utility tests establish that autonomous callers supply stable owners or use the journal before external effects.
 
 ## Evidence, gates, and authority
 
