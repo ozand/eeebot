@@ -14,7 +14,6 @@ except ImportError:  # Windows development host; production contract requires fl
 import json
 import os
 import stat
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -57,14 +56,20 @@ def _owner_paths(state_root: Path, owner_id: str) -> tuple[Path, Path]:
     if not root.is_dir():
         raise JournalUnavailableError("state root must already exist")
     directory = root / "intent-journal"
+    created = False
     try:
-        directory.mkdir(mode=0o700, exist_ok=True)
+        try:
+            directory.mkdir(mode=0o700)
+            created = True
+        except FileExistsError:
+            pass
         if not stat.S_ISDIR(directory.lstat().st_mode):
             raise OSError("journal path is not a real directory")
         if os.name != "nt":
             os.chmod(directory, 0o700)
-            _fsync_directory(root)
-            _fsync_directory(directory)
+            if created:
+                _fsync_directory(root)
+                _fsync_directory(directory)
     except OSError as exc:
         raise JournalUnavailableError("cannot prepare journal directory durably") from exc
     return directory / f"{owner}.jsonl", directory / f"{owner}.lock"
@@ -107,7 +112,7 @@ def _owner_lock(path: Path) -> Iterator[None]:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except JournalUnavailableError:
         raise
-    except OSError as exc:
+    except (OSError, AttributeError) as exc:
         raise JournalUnavailableError("cannot acquire or sync supported owner lock") from exc
     finally:
         if fd is not None:
@@ -116,37 +121,47 @@ def _owner_lock(path: Path) -> Iterator[None]:
 
 def _ensure_journal(path: Path) -> None:
     fd: int | None = None
+    created = False
     try:
-        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags, 0o600)
+        flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags, 0o600)
+            created = True
+        except FileExistsError:
+            fd = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("owner journal is not a regular file")
         if os.name != "nt":
             os.fchmod(fd, 0o600)
-        # Sync even when the file already exists: a prior creation may have
-        # failed during directory sync, and must not become trusted on retry.
-        os.fsync(fd)
+        if created:
+            os.fsync(fd)
     except OSError as exc:
         raise JournalUnavailableError("cannot verify or sync owner journal") from exc
     finally:
         if fd is not None:
             os.close(fd)
-    # Re-sync even for a pre-existing file: its first creation may have failed
-    # at directory fsync, and treating it as durable on retry would be unsafe.
-    try:
-        _fsync_directory(path.parent)
-    except OSError as exc:
-        raise JournalUnavailableError("cannot durably publish owner journal") from exc
+    if created:
+        try:
+            _fsync_directory(path.parent)
+        except OSError as exc:
+            raise JournalUnavailableError("cannot durably publish owner journal") from exc
 
 
 def _decode(path: Path, owner_id: str) -> list[dict[str, Any]]:
+    fd: int | None = None
     try:
-        if not stat.S_ISREG(path.lstat().st_mode):
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("owner journal is not a regular file")
-        with open(path, "rb") as stream:
+        with os.fdopen(fd, "rb", closefd=True) as stream:
+            fd = None
             raw = stream.read(MAX_OWNER_BYTES + 1)
     except OSError as exc:
         raise JournalUnavailableError("cannot read owner journal") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
     if len(raw) > MAX_OWNER_BYTES:
         raise JournalCorruptError("owner journal exceeds byte limit")
     if not raw:
@@ -217,14 +232,16 @@ def _append(path: Path, row: dict[str, Any], records: list[dict[str, Any]]) -> N
     if (len(records) + 1 + reserved_terminal_records > MAX_OWNER_RECORDS
             or len(original) + len(encoded) + reserved_terminal_bytes > MAX_OWNER_BYTES):
         raise JournalUnavailableError("owner journal capacity exhausted")
-    # Stage the complete replacement on the same filesystem, validate it, then
-    # atomically replace the directory entry. Readers hold the owner lock, so
-    # they see only the old or the new complete journal, never a partial tail.
-    temp_path: Path | None = None
+    # Stage one complete replacement at a deterministic per-owner temp path,
+    # validate it, then atomically replace the directory entry. A stale temp
+    # left by process death is preserved and blocks further writes for this owner.
+    temp_path = path.with_name(f".{path.name}.tmp")
     fd: int | None = None
+    created_temp = False
     try:
-        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-        temp_path = Path(temp_name)
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(temp_path, flags, 0o600)
+        created_temp = True
         if os.name != "nt":
             os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb", closefd=True) as stream:
@@ -235,14 +252,16 @@ def _append(path: Path, row: dict[str, Any], records: list[dict[str, Any]]) -> N
             os.fsync(stream.fileno())
         _decode(temp_path, row["owner_id"])
         os.replace(temp_path, path)
-        temp_path = None
+        created_temp = False
         _fsync_directory(path.parent)
     except (OSError, JournalCorruptError) as exc:
+        # If replace succeeded but directory fsync failed, the API still denies
+        # effect admission. A visible complete intent keeps the owner held.
         raise JournalUnavailableError("journal append was not verified") from exc
     finally:
         if fd is not None:
             os.close(fd)
-        if temp_path is not None:
+        if created_temp:
             try:
                 temp_path.unlink()
             except OSError:
@@ -267,7 +286,7 @@ def _record(owner_id: str, operation_id: str, attempt_id: str, event: str,
     return row
 
 
-# @lat: [[architecture#Two runtime surfaces#Bounded self-evolving bridge#Intent-before-effect evidence]]
+# @lat: [[architecture#Intent-before-effect evidence]]
 def admit_attempt(state_root: Path, *, owner_id: str, operation_id: str,
                   attempt_id: str, component: str, target: str,
                   ts: str | None = None) -> None:
@@ -288,7 +307,7 @@ def admit_attempt(state_root: Path, *, owner_id: str, operation_id: str,
         _append(journal, row, records)
 
 
-# @lat: [[architecture#Two runtime surfaces#Bounded self-evolving bridge#Intent-before-effect evidence]]
+# @lat: [[architecture#Intent-before-effect evidence]]
 def record_returned(state_root: Path, *, owner_id: str, operation_id: str,
                     attempt_id: str, component: str, target: str,
                     ts: str | None = None) -> None:
