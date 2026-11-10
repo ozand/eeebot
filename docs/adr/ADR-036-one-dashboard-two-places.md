@@ -127,16 +127,23 @@ rule 5's general host-only classification of the owner's own priorities; and the
 rejected alternative against public call detail. Their original rationale and
 date remain in the cited immutable revision.
 
-The other prior design requirements remain requirements wherever implementation
-is separately authorized: host-first/public-second ordered sink behavior;
-atomic, versioned snapshots and retry/consistent-read behavior; explicit
-published-path allowlist and refusal of unlisted files; entity model with
-per-attempt rows/counts and cycle totals; distinction between model and tool
-steps; accurate unknown queue/generation duration; incomplete-history labeling
-and source attribution for reconstructed steps; display-only marked truncation;
-actual secret/environment-file filtering; no text execution; and the bounded
-retention and reader-census obligations for the host service. This policy-only
-revision authorizes none of those D0-D2 implementation or host rollout steps.
+All non-overridden requirements and applicable Test Contract obligations in the
+immutable base ADR-036 remain applicable wherever implementation is separately
+authorized. The examples above include host-first/public-second sink ordering;
+atomic, versioned snapshots and retry/consistent-read behavior; the explicit
+published-path allowlist; per-attempt rows/counts and cycle totals; model/tool
+step distinctions; unknown queue/generation duration; incomplete-history
+labeling and reconstructed-step source attribution; display-only marked
+truncation; actual secret/environment-file filtering; bounded host retention
+and reader census. This examples list is illustrative, not exhaustive. In
+particular, the original tool-step recorder requirement and its test obligation
+remain future D0-D2 requirements: record tool, arguments, result excerpt, status,
+start and end keyed by cycle, attempt, session and sequence. The full original
+Test Contract remains applicable except assertions that directly require the
+superseded content-type publication ban; §5 adds the new content-eligibility and
+source-boundary obligations and replaces only those conflicting assertions.
+These preserved obligations do not authorize their implementation, new
+collection, or host rollout under #2185 or #457.
 
 ADR-034 remains Proposed and retains its runtime/document ownership and reader
 semantics. This decision does not change its rule that runtime dashboard status
@@ -146,7 +153,14 @@ eligibility for the owner's own goal/priority text through #457's bounded public
 projection. Separate status/log/error readers governed by ADR-034 remain
 unchanged.
 
-## 5. Test contract for the dependent implementation
+## 5. Additional and superseding test contract for the dependent implementation
+
+This section is additive to the original Test Contract at the immutable base
+revision linked in §4. Every original test-contract obligation remains
+applicable except a content-eligibility assertion that directly requires the
+superseded blanket publication ban; the new tests below replace only those
+conflicting content-eligibility assertions. This policy decision does not
+implement or accept the remaining D0-D2 test obligations.
 
 | Decision claim | Required synthetic test | Current |
 |---|---|---|
