@@ -114,20 +114,37 @@ content when it is later read through an authorized, bounded pipeline.
 
 ## 4. Prior records and chronology
 
-The original ADR-036 rules below are historical context only where they conflict
-with the above decision: rule 3's categorical exclusion of request/answer text,
-its separate public input that never holds that text, the use of call-content
-fingerprints as a reason to refuse publication, rule 5's general host-only
-classification of the operator's own priorities, and the rejected alternative
-against public call detail. Their recorded 2026-09-25/26 rationale is not
-rewritten or erased; this Proposed revision records the owner's later reversal.
+The pre-amendment ADR-036 is preserved verbatim at immutable base revision
+[`5fe9b746`](https://github.com/ozand/eeebot/blob/5fe9b746f494f49002f5423ca1c5e40a9e991828/docs/adr/ADR-036-one-dashboard-two-places.md).
+This Proposed revision changes only the public-content eligibility boundary; it
+does not accept, implement, or silently retire the remaining D0-D2 design.
+
+Only the following prior clauses are superseded for the owner-authorized content
+and public sink addressed here: rule 3's categorical exclusion of request/answer
+text and separate public input that never holds such text; its treatment of
+call-content fingerprints as grounds to reject otherwise authorized content;
+rule 5's general host-only classification of the owner's own priorities; and the
+rejected alternative against public call detail. Their original rationale and
+date remain in the cited immutable revision.
+
+The other prior design requirements remain requirements wherever implementation
+is separately authorized: host-first/public-second ordered sink behavior;
+atomic, versioned snapshots and retry/consistent-read behavior; explicit
+published-path allowlist and refusal of unlisted files; entity model with
+per-attempt rows/counts and cycle totals; distinction between model and tool
+steps; accurate unknown queue/generation duration; incomplete-history labeling
+and source attribution for reconstructed steps; display-only marked truncation;
+actual secret/environment-file filtering; no text execution; and the bounded
+retention and reader-census obligations for the host service. This policy-only
+revision authorizes none of those D0-D2 implementation or host rollout steps.
 
 ADR-034 remains Proposed and retains its runtime/document ownership and reader
-semantics. This decision does not change its rule that dashboard status surfaces
-do not render operator priority text, nor does it change the meaning of goals
-inside runtime decision-making. It changes only public publication eligibility
-for the owner's own goal/priority text through #457's bounded public projection.
-The separate status/log/error readers governed by ADR-034 remain unchanged.
+semantics. This decision does not change its rule that runtime dashboard status
+surfaces do not render operator priority text, nor does it change the meaning of
+goals inside runtime decision-making. It changes only public publication
+eligibility for the owner's own goal/priority text through #457's bounded public
+projection. Separate status/log/error readers governed by ADR-034 remain
+unchanged.
 
 ## 5. Test contract for the dependent implementation
 
@@ -185,6 +202,7 @@ published by this design phase.
 # References
 
 - #2185, owner authorization and 2026-11-10 clarification.
+- Immutable pre-amendment ADR-036 at base `5fe9b746f494f49002f5423ca1c5e40a9e991828`.
 - `ozand/eeebot-ops-dashboard#457`, dependent synthetic pipeline implementation.
 - ADR-034, operator document/priority semantics (unchanged outside public
   publication eligibility stated here).
