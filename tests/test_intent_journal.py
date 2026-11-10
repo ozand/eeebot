@@ -303,6 +303,7 @@ def test_directory_fsync_failure_denies_admission_and_holds_visible_intent(tmp_p
         _intent(tmp_path, owner, str(uuid4()), str(uuid4()))
 
 
+# @lat: [[architecture#Intent-before-effect evidence]]
 def test_stale_temp_file_holds_owner_without_overwrite(tmp_path: Path) -> None:
     owner, operation, attempt = _ids()
     _intent(tmp_path, owner, operation, attempt)
@@ -315,8 +316,20 @@ def test_stale_temp_file_holds_owner_without_overwrite(tmp_path: Path) -> None:
             component="agent", target="provider.chat",
         )
     assert path.read_bytes() == b"untrusted temporary state"
-    assert [row["event"] for row in read_owner_records(tmp_path, owner)] == ["intent"]
+    with pytest.raises(JournalUnavailableError, match="temp file"):
+        read_owner_records(tmp_path, owner)
     assert journal_path.exists()
+
+
+# @lat: [[architecture#Intent-before-effect evidence]]
+def test_temp_file_for_another_owner_does_not_block_healthy_partition(tmp_path: Path) -> None:
+    owner, operation, attempt = _ids()
+    other_owner = str(uuid4())
+    _intent(tmp_path, owner, operation, attempt)
+    other_path = tmp_path / "intent-journal" / f".{other_owner}.jsonl.tmp"
+    other_path.write_bytes(b"orphan from unrelated owner")
+    assert len(read_owner_records(tmp_path, owner)) == 1
+    assert other_path.read_bytes() == b"orphan from unrelated owner"
 
 
 def test_corruption_is_owner_scoped_and_preserved(tmp_path: Path) -> None:
