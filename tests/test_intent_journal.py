@@ -258,8 +258,10 @@ def test_file_fsync_before_admission_and_directory_fsync_capability(tmp_path: Pa
         monkeypatch.setattr(journal, "fcntl", object())
         with pytest.raises(JournalUnavailableError, match="durably"):
             _intent(tmp_path, owner, operation, attempt)
-        journal_path = tmp_path / "intent-journal" / f"{owner}.jsonl"
-        assert journal_path.read_bytes() == b""
+        # Setup failed before admission; after restoring the test-only sync
+        # shim, the created-but-unsynced empty journal is not treated as intent.
+        monkeypatch.setattr(journal, "_fsync_directory", lambda path: None)
+        assert read_owner_records(tmp_path, owner) == []
         return
 
     actual_fsync = os.fsync
