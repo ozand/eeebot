@@ -84,9 +84,25 @@ content when it is later read through an authorized, bounded pipeline.
 - Preserve explicit published path and field allowlists, size/count bounds,
   output encoding, and scan-failure behavior. A permitted value does not grant
   a new source reader or access to a host/private source.
-- Keep unrelated third-party or personal data withheld. The owner decision is
-  limited to this agent's own context and does not alter access routes for
-  other people's information.
+- **Bound the input sources, not a semantic privacy detector.** The eligible
+  input universe for #457 is this agent's own project-authored goals, skills and
+  context, plus its own recorded prompts, requests, responses and session/tool
+  history. Do not feed known excluded sources—environment/auth/credential
+  stores, other agents/users/projects, unrelated chats or connectors—into public
+  fields. The same exclusion applies to content in this agent's own session
+  record when the content is explicitly attributed to a known excluded source.
+- If an adapter receives a mixed record with an authorized field and separately
+  identified excluded-source content, omit/redact only that identified content
+  when its provenance boundary permits separation; otherwise fail that record
+  closed. Enforce this at existing producer/adapter input selection. Do not
+  invent origin metadata, a new collector, universal DLP, consent registry,
+  semantic detector, or per-record manual approval. If current source selection
+  cannot distinguish an excluded input, do not feed that source to the public
+  adapter; never infer provenance from text appearance.
+- Open web/public third-party quotation is not automatically private. Ordinary
+  names, email-like text, and project paths are not privacy heuristics. This
+  rule does not claim to detect unknown personal data semantically, and secret
+  regexes are not presented as a solution to that separate limitation.
 - Separate secret matching from content-type fingerprints or structural
   markers. Expected agent-owned text is not a secret merely because it matches
   a marker for a request/session object; actual secret patterns still block or
@@ -119,7 +135,8 @@ The separate status/log/error readers governed by ADR-034 remain unchanged.
 |---|---|---|
 | Owner-authorized synthetic prompt, request, response, session/history, goal, skill and context content passes the real public projection, renderer, scanner and publish dry-run when its path/field is allowlisted | `tests/test_two_sinks.py::test_public_agent_owned_content_survives_projection_render_and_publish_dry_run` | not yet written |
 | Synthetic actual-secret canaries remain redacted or reject publication through the same path | `tests/test_two_sinks.py::test_public_content_secret_and_unrelated_data_boundaries` | not yet written |
-| Unrelated third-party/personal-data canary remains withheld and ordinary project paths/context prose are not mistaken for secrets | `tests/test_two_sinks.py::test_public_content_secret_and_unrelated_data_boundaries` | not yet written |
+| The real input adapter excludes known disallowed source classes; a synthetic mixed record drops only separately identified excluded content, while inseparable known-excluded content fails that record closed; ordinary names, open/public quotation and project paths are not heuristically stripped | `tests/test_two_sinks.py::test_public_content_source_boundary_and_mixed_record_handling` | not yet written |
+| Synthetic secret canaries are redacted/rejected independently of source eligibility | `tests/test_two_sinks.py::test_public_content_secret_and_unrelated_data_boundaries` | not yet written |
 | Unallowlisted paths and scanner errors remain fail-closed | existing `tests/test_two_sinks.py::test_publish_allowlist_refuses_unlisted_pages` and scanner-failure tests, with unchanged assertions | existing tests to verify on implementation candidate |
 | No source/pipeline reads or executes actual session payloads during these synthetic tests | tests use synthetic fixture data only; no host/runtime input | required test constraint |
 
@@ -158,9 +175,9 @@ published by this design phase.
   Rejected: it conflates authorized own-content with secret material. Separate
   that detection from concrete secret patterns and continue scanning for actual
   secrets and unrelated private data.
-- **Bulk export raw historical files.** Not part of this increment. Rejected as
-  a mechanism because the authorized objective can be verified through bounded
-  synthetic cases without handling or publishing raw historical artifacts.
+- **Bulk export unprocessed historical files in this increment.** Explicitly
+  out of scope as an operation; this does not disqualify bounded publication of
+  this agent's own recorded history by age or artifact type after filtering.
 - **Change ADR-034's status or rewrite its history.** Rejected: it is Proposed
   and this decision only adjusts the dashboard's public publication boundary;
   runtime reader semantics and status/log surfaces remain unchanged.
