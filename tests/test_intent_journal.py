@@ -284,19 +284,25 @@ def test_directory_fsync_failure_denies_admission_and_holds_visible_intent(tmp_p
     if os.name == "nt":
         pytest.skip("Windows test backend replaces directory sync")
     owner, operation, attempt = _ids()
+    _intent(tmp_path, owner, operation, attempt)
     real_sync = journal._fsync_directory
-    failures = 0
+    calls = 0
 
     def fail_after_replace(path: Path) -> None:
-        nonlocal failures
-        failures += 1
-        if failures == 2:
-            raise OSError("injected directory fsync failure")
+        nonlocal calls
+        calls += 1
+        # The owner lock syncs first; the second call is the post-replace
+        # directory sync for the terminal record.
+        if calls == 2:
+            raise OSError("injected post-replace directory fsync failure")
         real_sync(path)
 
     monkeypatch.setattr(journal, "_fsync_directory", fail_after_replace)
     with pytest.raises(JournalUnavailableError, match="not verified"):
-        _intent(tmp_path, owner, operation, attempt)
+        record_returned(
+            tmp_path, owner_id=owner, operation_id=operation, attempt_id=attempt,
+            component="agent", target="provider.chat",
+        )
     monkeypatch.setattr(journal, "_fsync_directory", real_sync)
     assert [row["event"] for row in read_owner_records(tmp_path, owner)] == ["intent"]
     with pytest.raises(JournalUnavailableError, match="durable parent-resolution"):
