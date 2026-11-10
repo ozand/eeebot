@@ -286,14 +286,15 @@ def test_directory_fsync_failure_denies_admission_and_holds_visible_intent(tmp_p
     owner, operation, attempt = _ids()
     _intent(tmp_path, owner, operation, attempt)
     real_sync = journal._fsync_directory
-    calls = 0
+    injected = False
+    journal_path = tmp_path / "intent-journal" / f"{owner}.jsonl"
 
     def fail_after_replace(path: Path) -> None:
-        nonlocal calls
-        calls += 1
-        # The owner lock syncs first; the second call is the post-replace
-        # directory sync for the terminal record.
-        if calls == 2:
+        nonlocal injected
+        # Inject only once the terminal is visible in the target journal. This
+        # targets the post-replace sync without depending on setup sync counts.
+        if b'"event":"terminal"' in journal_path.read_bytes():
+            injected = True
             raise OSError("injected post-replace directory fsync failure")
         real_sync(path)
 
@@ -304,6 +305,7 @@ def test_directory_fsync_failure_denies_admission_and_holds_visible_intent(tmp_p
             component="agent", target="provider.chat",
         )
     monkeypatch.setattr(journal, "_fsync_directory", real_sync)
+    assert injected
     # The atomic replace succeeded before directory sync failed. The API
     # denied result release, but the complete terminal is visible in-process.
     # A fresh process also reopens it and sees the same held owner; neither
