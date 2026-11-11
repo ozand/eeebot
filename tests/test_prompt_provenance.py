@@ -196,7 +196,7 @@ def test_missing_baseline_and_release_change_start_full_snapshot():
 def test_fixed_role_producer_matrix_hashes_only_the_approved_role_body():
     from pathlib import Path
 
-    from nanobot.observability.prompt_provenance import SAFE_ROLE_PRODUCERS
+    from nanobot.observability.prompt_provenance import SAFE_ROLE_PRODUCERS, prompt_owner_context
     from nanobot.runtime.role_prompt import build_role_system_prompt
 
     assert SAFE_ROLE_PRODUCERS == {
@@ -205,11 +205,13 @@ def test_fixed_role_producer_matrix_hashes_only_the_approved_role_body():
     }
     release_root = Path(__file__).resolve().parents[1]
     for producer in sorted(SAFE_ROLE_PRODUCERS):
-        system, metadata = build_role_system_prompt(producer, release_root=release_root)
+        owner = f"matrix:{producer}"
+        with prompt_owner_context(owner):
+            system, metadata = build_role_system_prompt(producer, release_root=release_root)
         sections = tuple(metadata["sections"])
         role_sections = [section for section in sections if section.name == "role"]
         assert len(role_sections) == 1 and role_sections[0].evidence_safe
-        request = role_request_for_system(system, owner=f"matrix:{producer}")
+        request = role_request_for_system(system, owner=owner)
         with prompt_request_context(request):
             with provider_call_context([{"role": "system", "content": system}]) as call:
                 assert call is not None
@@ -269,6 +271,84 @@ def test_role_prompt_bytes_match_explicit_legacy_assembly_for_production_flag_br
         assert metadata["chars"] == len(expected)
         assert metadata["with_charter"] is True
         assert metadata["with_soul"] is (role == "proposer")
+
+
+def test_role_assembly_metadata_survives_repeated_dispatch_for_same_owner():
+    from nanobot.observability.prompt_provenance import remember_role_assembly
+
+    system = "exact demand proposer system bytes"
+    owner = "demand-proposer:repeat-fixture"
+    sections = (_section("role", "approved fixed role body"),)
+    remember_role_assembly(
+        system, "demand-proposer", sections, "release-fixture",
+        schema="role-prompt-v1:demand-proposer", owner=owner,
+    )
+
+    first = role_request_for_system(system, owner, producer_hint="proposer")
+    second = role_request_for_system(system, owner, producer_hint="proposer")
+    assert first.producer == second.producer == "demand-proposer"
+    assert first.owner == second.owner == owner
+    assert first.sections == second.sections == sections
+    assert first.release_id == second.release_id == "release-fixture"
+
+
+def test_provider_calls_partition_baselines_by_active_owner(tmp_path, monkeypatch):
+    from nanobot.observability.prompt_provenance import (
+        prompt_owner_context,
+        remember_role_assembly,
+    )
+
+    class LocalProvider(LLMProvider):
+        async def chat(self, *args, **kwargs):
+            return LLMResponse(content="local fake response")
+
+        def get_default_model(self) -> str:
+            return "test-model"
+
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "llm_calls"))
+    system = "same exact demand proposer system"
+    sections = (_section("role", "approved fixed role body"),)
+    provider = LocalProvider()
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": "synthetic"},
+    ]
+    owners = ("demand-proposer:session-one", "demand-proposer:session-two")
+
+    async def invoke_for(owner):
+        with prompt_owner_context(owner):
+            remember_role_assembly(
+                system, "demand-proposer", sections, "release-fixture",
+                schema="role-prompt-v1:demand-proposer", owner=owner,
+            )
+            for _ in range(2):
+                response = await provider.chat_with_retry(messages=messages, model="test-model")
+                assert response.content == "local fake response"
+
+    async def run():
+        for owner in owners:
+            await invoke_for(owner)
+
+    asyncio.run(run())
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    rows = [json.loads(line) for line in (
+        tmp_path / "llm_calls" / f"{day}.jsonl"
+    ).read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 4
+    provenance = [row["prompt_provenance"] for row in rows]
+    assert [row["producer"] for row in provenance] == ["demand-proposer"] * 4
+    assert [row["order"] for row in provenance] == [["role"]] * 4
+    assert all(row["provenance_state"] == "observed" for row in provenance)
+    assert provenance[0]["kind"] == provenance[2]["kind"] == "snapshot"
+    assert provenance[0]["previous_call_id"] is None
+    assert provenance[2]["previous_call_id"] is None
+    assert provenance[1]["previous_call_id"] == provenance[0]["call_id"]
+    assert provenance[3]["previous_call_id"] == provenance[2]["call_id"]
+    assert provenance[0]["baseline_id"] == provenance[1]["baseline_id"]
+    assert provenance[2]["baseline_id"] == provenance[3]["baseline_id"]
+    assert provenance[0]["baseline_id"] != provenance[2]["baseline_id"]
+    encoded = json.dumps(provenance)
+    assert all(owner not in encoded for owner in owners)
 
 
 def test_dispatch_matches_actual_system_and_mints_call_id():

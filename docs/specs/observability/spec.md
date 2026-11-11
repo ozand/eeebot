@@ -141,7 +141,11 @@ section order while retaining a transient ordered section representation.
 Optional `prompt_provenance` on existing LLM call, prompt, and bounded failure
 records correlates a logical provider invocation with an opaque `call_id`, a
 bounded in-memory snapshot/delta baseline, producer/schema, and predecessor
-call ID. Only explicitly allowlisted fixed role-file bodies may contribute
+call ID. The assembly metadata remains available for repeated dispatches within
+the same explicitly identified owner (including proposer fallback), while
+assemblies from another owner cannot be reused solely because system bytes
+match. Provider calls without an explicit owner use an isolated identity rather
+than a shared `unknown` baseline. Only explicitly allowlisted fixed role-file bodies may contribute
 UTF-8 SHA-256 and character length; identity, soul, goals, workspace, memory,
 task, runtime, and unknown sections disclose no fingerprints or structure.
 Missing baselines and unavailable calls are not inferred as empty prompts.

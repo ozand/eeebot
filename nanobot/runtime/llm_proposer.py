@@ -264,14 +264,21 @@ def _build_proposer_role_prompt(role_body: str) -> str | None:
         system_content, telemetry = build_role_system_prompt_or_refuse(
             producer, role_text=role_body
         )
-        from nanobot.observability.prompt_provenance import PromptSection, remember_role_assembly
+        from nanobot.observability.prompt_provenance import (
+            PromptSection,
+            current_owner,
+            remember_role_assembly,
+        )
         fixed_role_body, role_meta = load_role_text(producer)
         if role_body == fixed_role_body and not role_meta.get("missing") and not role_meta.get("truncated"):
             from nanobot.runtime.role_prompt import SAFE_ROLE_PRODUCERS
             telemetry["sections"] = [
                 PromptSection("role", role_body, producer in SAFE_ROLE_PRODUCERS),
             ]
-        remember_role_assembly(system_content, producer, telemetry["sections"], telemetry.get("release_id"))
+        remember_role_assembly(
+            system_content, producer, telemetry["sections"], telemetry.get("release_id"),
+            schema=telemetry.get("schema"), owner=current_owner(),
+        )
         return system_content
     except Exception as exc:
         _last_propose_failure = "RolePromptBuildFailed" if _FALLBACK_PASS.get() else f"RolePromptBuildFailed: {exc}"
@@ -2346,7 +2353,7 @@ def _record_failed_proposer_call(
         pass
 
 
-def _propose_with_fallback(state, client_type, base_url, api_key, system_content, user_content, component):
+def _propose_with_fallback(state, client_type, base_url, api_key, system_content, user_content, component, provenance_owner=None):
     """ADR-054 enabled path; one shared pass budget, no raw error persistence."""
     global _last_propose_failure
     if len((system_content + user_content).encode("utf-8")) > 32768:
@@ -2373,8 +2380,10 @@ def _propose_with_fallback(state, client_type, base_url, api_key, system_content
             if effort:
                 kwargs["reasoning_effort"] = effort
             state["attempts"] += 1
+            from nanobot.observability.prompt_provenance import current_owner
+            active_owner = provenance_owner or current_owner() or f"proposer:{current_cycle_id() or state['id']}"
             prompt_request = role_request_for_system(
-                system_content, owner=f"proposer:{current_cycle_id() or state['id']}",
+                system_content, owner=active_owner,
                 producer_hint=_role_name_for(system_content),
             )
             with prompt_request_context(prompt_request):
@@ -2494,7 +2503,10 @@ def propose(
         return None
     requested_model = _model_name()
     if fallback_pass:
-        return _propose_with_fallback(fallback_pass, OpenAI, base_url, api_key, system_content, user_content, component)
+        return _propose_with_fallback(
+            fallback_pass, OpenAI, base_url, api_key, system_content, user_content,
+            component, provenance_owner=provenance_owner,
+        )
     call_start_utc = datetime.now(timezone.utc)
     try:
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
@@ -2632,7 +2644,7 @@ def propose_multi(
             create_kwargs["reasoning_effort"] = effort
         call_start = time.monotonic()
         prompt_request = role_request_for_system(
-            system_content, owner=f"proposer:{current_cycle_id() or uuid.uuid4().hex}",
+            system_content, owner=provenance_owner,
             producer_hint=_role_name_for(role_body),
         )
         with prompt_request_context(prompt_request):

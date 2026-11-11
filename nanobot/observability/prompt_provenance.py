@@ -22,6 +22,7 @@ MAX_SECTIONS = 32
 MAX_NAME_CHARS = 48
 MAX_OWNER_CHARS = 128
 MAX_PRODUCER_CHARS = 64
+MAX_ASSEMBLY_CHARS = 128 * 1024
 
 # Only fixed role-file bodies for selected production roles are approved.
 # Identity, soul, charter, workspace, memory, task and runtime material is
@@ -243,11 +244,15 @@ def prompt_request_context(request: PromptRequest) -> Iterator[None]:
             _REQUEST.reset(token)
 
 
-def consume_request_for_system(system: str, owner: str) -> PromptRequest:
+def consume_request_for_system(system: str, owner: str | None = None) -> PromptRequest:
     request = _REQUEST.get()
     if isinstance(request, PromptRequest) and request.expected_system == system:
+        # This request is explicitly scoped around the dispatch; its owner is
+        # the baseline partition even if the surrounding producer context uses
+        # a broader owner label.
         return request
-    return role_request_for_system(system, owner)
+    active_owner = _bounded(owner or _OWNER.get(), MAX_OWNER_CHARS) or uuid.uuid4().hex
+    return role_request_for_system(system, active_owner)
 
 
 @contextlib.contextmanager
@@ -299,14 +304,33 @@ def prompt_call_context(call: PromptCall) -> Iterator[None]:
         reset_current(token)
 
 
+def _bounded_assembly_sections(
+    system: str, sections: Sequence[PromptSection],
+) -> tuple[PromptSection, ...] | None:
+    try:
+        if len(system) > MAX_ASSEMBLY_CHARS or len(sections) > MAX_SECTIONS:
+            return None
+        bounded = tuple(sections)
+        if sum(len(section.content) for section in bounded) > MAX_ASSEMBLY_CHARS:
+            return None
+        return bounded
+    except (AttributeError, TypeError):
+        return None
+
+
 def remember_role_assembly(
     system: str, producer: str, sections: Sequence[PromptSection],
     release_id: str | None = None, *, schema: str | None = None, owner: str | None = None,
 ) -> None:
+    bounded_sections = _bounded_assembly_sections(system, sections)
+    if bounded_sections is None:
+        _ROLE_ASSEMBLY.set(None)
+        return
     _ROLE_ASSEMBLY.set({
         "system": system, "producer": producer,
         "schema": schema or f"role-prompt-v1:{producer}",
-        "sections": tuple(sections), "release_id": release_id, "owner": owner,
+        "sections": bounded_sections, "release_id": release_id,
+        "owner": _bounded(owner or _OWNER.get(), MAX_OWNER_CHARS) or None,
     })
 
 
@@ -314,20 +338,35 @@ def remember_prompt_assembly(
     system: str, producer: str, schema: str, sections: Sequence[PromptSection],
     *, owner: str | None = None, release_id: str | None = None,
 ) -> None:
+    bounded_sections = _bounded_assembly_sections(system, sections)
+    if bounded_sections is None:
+        _ROLE_ASSEMBLY.set(None)
+        return
     _ROLE_ASSEMBLY.set({
         "system": system, "producer": producer, "schema": schema,
-        "sections": tuple(sections), "release_id": release_id, "owner": owner,
+        "sections": bounded_sections, "release_id": release_id,
+        "owner": _bounded(owner or _OWNER.get(), MAX_OWNER_CHARS) or None,
     })
 
 
 def role_request_for_system(
     system: str, owner: str, *, producer_hint: str | None = None,
 ) -> PromptRequest:
+    owner = _bounded(owner, MAX_OWNER_CHARS)
     assembly = _ROLE_ASSEMBLY.get()
     if isinstance(assembly, dict) and assembly.get("system") == system:
-        _ROLE_ASSEMBLY.set(None)
-        request_owner = str(assembly.get("owner") or owner)
-        return PromptRequest(request_owner, str(assembly.get("producer") or "unknown"), str(assembly.get("schema") or "unknown"), tuple(assembly.get("sections") or ()), system, assembly.get("release_id"))
+        assembly_owner = assembly.get("owner")
+        # Assemblies survive repeated dispatches for an explicit logical owner
+        # (for example a provider fallback), but cannot be borrowed by a later
+        # session that happens to emit identical bytes. Ownerless assemblies
+        # fail closed because their creating session cannot be verified.
+        if assembly_owner is not None and assembly_owner == owner:
+            return PromptRequest(
+                str(assembly_owner), str(assembly.get("producer") or "unknown"),
+                str(assembly.get("schema") or "unknown"),
+                tuple(assembly.get("sections") or ()), system,
+                assembly.get("release_id"),
+            )
     return PromptRequest(owner, producer_hint or "unknown", f"unknown:{producer_hint}" if producer_hint else "unknown", (), system, None)
 
 

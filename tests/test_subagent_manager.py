@@ -24,6 +24,7 @@ def test_executor_declared_and_registered_tool_names_match():
 def test_runtime_registration_assertion_rejects_declared_tool_divergence(tmp_path, monkeypatch):
     """H2 parity is enforced by the unchanged runtime assertion, not only tuple equality."""
     import asyncio
+
     from nanobot.agent.subagent import SubagentManager
     from nanobot.bus.queue import MessageBus
 
@@ -101,7 +102,7 @@ def test_planner_role_override_uses_explicit_safe_role_sections(tmp_path):
 
     from nanobot.agent.subagent import SubagentManager
     from nanobot.bus.queue import MessageBus
-    from nanobot.observability.prompt_provenance import provider_call_context
+    from nanobot.observability.prompt_provenance import prompt_owner_context, provider_call_context
     from nanobot.runtime.role_prompt import build_role_system_prompt
 
     class Provider:
@@ -136,15 +137,17 @@ def test_planner_role_override_uses_explicit_safe_role_sections(tmp_path):
     assert ContextBuilder._join_sections([
         (section.name, section.content) for section in manager._prompt_sections
     ]) == prompt
-    with provider_call_context([{"role": "system", "content": prompt}]) as call:
-        assert call is not None
-        assert call.provenance["schema"] == "role-prompt-v1:planner+tool-profile-v1"
-        assert call.provenance["release_id"] == role_meta.get("release_id")
-        assert call.provenance["order"] == ["role"]
-        assert call.provenance["sections"] == [{
-            "name": "role", "sha256": hashlib.sha256(role_body.encode()).hexdigest(),
-            "chars": len(role_body),
-        }]
+    with prompt_owner_context("bridge:unknown"):
+        call_context = provider_call_context([{"role": "system", "content": prompt}])
+        with call_context as call:
+            assert call is not None
+            assert call.provenance["schema"] == "role-prompt-v1:planner+tool-profile-v1"
+            assert call.provenance["release_id"] == role_meta.get("release_id")
+            assert call.provenance["order"] == ["role"]
+            assert call.provenance["sections"] == [{
+                "name": "role", "sha256": hashlib.sha256(role_body.encode()).hexdigest(),
+                "chars": len(role_body),
+            }]
 
 
 def test_planner_dispatch_provenance_matches_final_injected_system_bytes(tmp_path, monkeypatch):
@@ -410,9 +413,10 @@ def test_subagent_telemetry_omits_none_prompt_tokens(tmp_path):
 
 
 import asyncio
-from unittest.mock import AsyncMock
-import uuid
 import json
+import uuid
+from unittest.mock import AsyncMock
+
 
 @pytest.mark.asyncio
 async def test_planner_final_turn_starts_at_local_call_reserve_without_tools(tmp_path, monkeypatch):
@@ -420,9 +424,9 @@ async def test_planner_final_turn_starts_at_local_call_reserve_without_tools(tmp
     monkeypatch.setenv("NANOBOT_WALL_CALL_P99_SECS", "243")
     monkeypatch.setenv("NANOBOT_PROGRESS_TIMEOUT_SECS", "10000")
     from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
     from nanobot.bus.queue import MessageBus
     from nanobot.providers.base import LLMResponse, ToolCallRequest
-    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
 
     clock = [0.0]
     observed = []
@@ -937,8 +941,9 @@ async def test_subagent_telemetry_tracks_context_usage(tmp_path):
                 usage={"prompt_tokens": 1500}
             )
 
-    from nanobot.agent.subagent import SubagentManager
     from unittest.mock import Mock
+
+    from nanobot.agent.subagent import SubagentManager
     manager = SubagentManager(
         provider=FakeProvider(),
         workspace=tmp_path,

@@ -366,9 +366,12 @@ class LLMProvider(ABC):
             )
             return response
 
-        from nanobot.observability.prompt_provenance import consume_request_for_system
+        from nanobot.observability.prompt_provenance import (
+            consume_request_for_system,
+            current_owner,
+        )
         actual_system = next((str(message.get("content") or "") for message in messages if message.get("role") == "system"), "")
-        request = consume_request_for_system(actual_system, "unknown")
+        request = consume_request_for_system(actual_system, current_owner())
         if not isinstance(request, PromptRequest):
             request = None
         request_context = prompt_request_context(request) if request is not None else contextlib.nullcontext()
