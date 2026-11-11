@@ -19,8 +19,12 @@ from nanobot.runtime.intent_journal import (
     JournalCorruptError,
     JournalUnavailableError,
     admit_attempt,
+    create_parent,
+    operation_context,
     read_owner_records,
     record_returned,
+    reset_parent_context,
+    set_parent_context,
 )
 
 _ORIGINAL_OWNER_LOCK = journal._owner_lock
@@ -59,7 +63,7 @@ def _intent(root: Path, owner: str, operation: str, attempt: str, **kwargs) -> N
     admit_attempt(
         root, owner_id=owner, operation_id=operation, attempt_id=attempt,
         component=kwargs.pop("component", "agent"),
-        target=kwargs.pop("target", "provider.chat"), **kwargs,
+        target=kwargs.pop("target", "provider.chat"), _test_only=True, **kwargs,
     )
 
 
@@ -425,7 +429,7 @@ def test_capacity_limits_fail_closed_without_eviction(tmp_path: Path) -> None:
     path.parent.mkdir()
     path.touch()
     records = []
-    for _ in range(MAX_OWNER_RECORDS // 2):
+    for _ in range(MAX_OWNER_RECORDS // 3):
         operation, attempt = str(uuid4()), str(uuid4())
         intent = journal._record(owner, operation, attempt, "intent", "agent", "provider.chat", None)
         journal._append(path, intent, records)
@@ -433,16 +437,311 @@ def test_capacity_limits_fail_closed_without_eviction(tmp_path: Path) -> None:
         terminal = journal._record(owner, operation, attempt, "terminal", "agent", "provider.chat", None)
         journal._append(path, terminal, records)
         records.append(terminal)
+        consumed = journal._record(owner, operation, attempt, "consumed", "agent", "provider.chat", None)
+        journal._append(path, consumed, records)
+        records.append(consumed)
     before = path.read_bytes()
     next_row = journal._record(owner, str(uuid4()), str(uuid4()), "intent", "agent", "provider.chat", None)
     with pytest.raises(JournalUnavailableError, match="capacity"):
         journal._append(path, next_row, records)
     assert path.read_bytes() == before
-    assert len(read_owner_records(tmp_path, owner)) == MAX_OWNER_RECORDS
+    assert len(read_owner_records(tmp_path, owner)) == (MAX_OWNER_RECORDS // 3) * 3
     assert MAX_OWNER_BYTES == 1_048_576
 
 
 # @lat: [[architecture#Intent-before-effect evidence]]
+@pytest.mark.asyncio
+async def test_real_planner_manager_journals_provider_retry_attempts(tmp_path: Path, monkeypatch) -> None:
+    """The production planner parent and manager wrap real provider retry attempts."""
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMProvider, LLMResponse
+
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    owner = journal.ensure_parent(state_root, "planner")
+    if os.name == "nt":
+        locks: dict[str, threading.Lock] = {}
+        guard = threading.Lock()
+
+        @contextmanager
+        def fake_owner_lock(path: Path):
+            path.touch(exist_ok=True)
+            with guard:
+                lock = locks.setdefault(str(path.resolve()), threading.Lock())
+            with lock:
+                yield
+
+        monkeypatch.setattr(journal, "_owner_lock", fake_owner_lock)
+        monkeypatch.setattr(journal, "_fsync_directory", lambda _path: None)
+        monkeypatch.setattr("nanobot.agent.subagent.intent_journal._owner_lock", fake_owner_lock)
+        monkeypatch.setattr("nanobot.agent.subagent.intent_journal._fsync_directory", lambda _path: None)
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "calls"))
+    delays: list[int] = []
+
+    async def fake_sleep(delay: int) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("nanobot.providers.base.asyncio.sleep", fake_sleep)
+
+    class PlannerProvider(LLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.responses = [
+                LLMResponse(content="429 rate limit", finish_reason="error"),
+                LLMResponse(content='{"plan":"bounded","iterations_planned":1}'),
+            ]
+            self.physical_calls = 0
+
+        async def chat(self, **kwargs):
+            self.physical_calls += 1
+            return self.responses.pop(0)
+
+        def get_default_model(self) -> str:
+            return "test-model"
+
+    provider = PlannerProvider()
+    manager = SubagentManager(
+        provider=provider, workspace=tmp_path, bus=MessageBus(),
+        telemetry_component="planner", planner_deadline=__import__("time").monotonic() + 600.0,
+        tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}",
+        intent_state_root=state_root,
+    )
+    await manager.spawn("plan", label="planner", origin_channel="system", origin_chat_id="test")
+    await __import__("asyncio").gather(*manager._running_tasks.values(), return_exceptions=True)
+
+    rows = read_owner_records(state_root, owner)
+    assert provider.physical_calls == 2
+    assert delays == [1]
+    assert [row["event"] for row in rows] == ["intent", "terminal", "consumed"] * 2
+    attempts = [row for row in rows if row["event"] == "intent"]
+    assert len({row["attempt_id"] for row in attempts}) == 2
+    assert len({row["operation_id"] for row in attempts}) == 1
+    parent = __import__("json").loads(
+        (state_root / "intent-journal" / f"{owner}.parent.json").read_text()
+    )
+    assert parent["active_operation_id"] is None
+    assert parent["last_operation_id"] == attempts[0]["operation_id"]
+
+
+@pytest.mark.asyncio
+# @lat: [[architecture#Intent-before-effect evidence]]
+async def test_real_planner_manager_journals_tool_dispatch_between_provider_turns(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    owner = journal.ensure_parent(state_root, "planner")
+    monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "calls"))
+    tool_results: list[str] = []
+
+    class PlannerProvider(LLMProvider):
+        def __init__(self):
+            super().__init__()
+            self.responses = [
+                LLMResponse(content="", tool_calls=[ToolCallRequest(
+                    id="read-1", name="read_file", arguments={"path": "fixture"},
+                )]),
+                LLMResponse(content='{"plan":"bounded","iterations_planned":1}'),
+            ]
+            self.physical_calls = 0
+
+        async def chat(self, **kwargs):
+            self.physical_calls += 1
+            return self.responses.pop(0)
+
+        def get_default_model(self) -> str:
+            return "test-model"
+
+    class ResultRegistry(ToolRegistry):
+        async def execute(self, name, params):
+            tool_results.append(name)
+            return "fixture result"
+
+    monkeypatch.setattr("nanobot.agent.subagent.ToolRegistry", ResultRegistry)
+    manager = SubagentManager(
+        provider=PlannerProvider(), workspace=tmp_path, bus=MessageBus(),
+        telemetry_component="planner", planner_deadline=__import__("time").monotonic() + 600.0,
+        tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}",
+        intent_state_root=state_root,
+    )
+    await manager.spawn("plan", label="planner", origin_channel="system", origin_chat_id="test")
+    await __import__("asyncio").gather(*manager._running_tasks.values(), return_exceptions=True)
+
+    rows = read_owner_records(state_root, owner)
+    assert tool_results == ["read_file"]
+    assert [row["target"] for row in rows if row["event"] == "intent"] == [
+        "provider.chat", "tool.dispatch", "provider.chat",
+    ]
+    assert [row["event"] for row in rows] == ["intent", "terminal", "consumed"] * 3
+    assert not any("path" in row or "fixture" in row for row in rows)
+    assert len({row["operation_id"] for row in rows if row["event"] == "intent"}) == 3
+
+
+@pytest.mark.asyncio
+# @lat: [[architecture#Intent-before-effect evidence]]
+async def test_planner_tool_cancellation_leaves_attempt_unknown_and_held(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import asyncio
+
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    owner = journal.ensure_parent(state_root, "planner")
+
+    class Provider(LLMProvider):
+        async def chat(self, **kwargs):
+            return LLMResponse(content="", tool_calls=[ToolCallRequest(
+                id="cancelled-tool", name="read_file", arguments={"path": "fixture"},
+            )])
+
+        def get_default_model(self) -> str:
+            return "test-model"
+
+    class CancelledRegistry(ToolRegistry):
+        async def execute(self, name, params):
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("nanobot.agent.subagent.ToolRegistry", CancelledRegistry)
+    manager = SubagentManager(
+        provider=Provider(), workspace=tmp_path, bus=MessageBus(),
+        telemetry_component="planner", planner_deadline=__import__("time").monotonic() + 600.0,
+        tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}",
+        intent_state_root=state_root,
+    )
+    await manager.spawn("plan", label="planner", origin_channel="system", origin_chat_id="test")
+    results = await asyncio.gather(*manager._running_tasks.values(), return_exceptions=True)
+
+    assert any(isinstance(result, asyncio.CancelledError) for result in results)
+    rows = read_owner_records(state_root, owner)
+    assert [row["target"] for row in rows if row["event"] == "intent"] == [
+        "provider.chat", "tool.dispatch",
+    ]
+    assert [row["event"] for row in rows] == [
+        "intent", "terminal", "consumed", "intent",
+    ]
+    parent = __import__("json").loads(
+        (state_root / "intent-journal" / f"{owner}.parent.json").read_text()
+    )
+    assert parent["active_operation_id"] == rows[-1]["operation_id"]
+    with pytest.raises(JournalUnavailableError, match="unresolved active operation"):
+        journal.ensure_parent(state_root, "planner")
+
+
+@pytest.mark.asyncio
+# @lat: [[architecture#Intent-before-effect evidence]]
+async def test_tool_intent_persistence_failure_prevents_dispatch(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+
+    from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.agent.tools.toolsets import PLANNER_PROFILE
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    owner = journal.ensure_parent(state_root, "planner")
+    executed: list[str] = []
+
+    class Provider(LLMProvider):
+        async def chat(self, **kwargs):
+            return LLMResponse(content="", tool_calls=[ToolCallRequest(
+                id="blocked-tool", name="read_file", arguments={"path": "fixture"},
+            )])
+
+        def get_default_model(self) -> str:
+            return "test-model"
+
+    class TrackingRegistry(ToolRegistry):
+        async def execute(self, name, params):
+            executed.append(name)
+            return "unexpected"
+
+    monkeypatch.setattr("nanobot.agent.subagent.ToolRegistry", TrackingRegistry)
+    real_append = journal._append
+
+    def fail_tool_intent(path, row, records):
+        if row["event"] == "intent" and row["target"] == "tool.dispatch":
+            raise JournalUnavailableError("injected tool intent persistence failure")
+        real_append(path, row, records)
+
+    monkeypatch.setattr(journal, "_append", fail_tool_intent)
+    manager = SubagentManager(
+        provider=Provider(), workspace=tmp_path, bus=MessageBus(),
+        telemetry_component="planner", planner_deadline=__import__("time").monotonic() + 600.0,
+        tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}",
+        intent_state_root=state_root,
+    )
+    await manager.spawn("plan", label="planner", origin_channel="system", origin_chat_id="test")
+    await asyncio.gather(*manager._running_tasks.values(), return_exceptions=True)
+
+    assert executed == []
+    rows = read_owner_records(state_root, owner)
+    assert [row["target"] for row in rows if row["event"] == "intent"] == ["provider.chat"]
+    parent = __import__("json").loads(
+        (state_root / "intent-journal" / f"{owner}.parent.json").read_text()
+    )
+    assert parent["active_operation_id"] is not None
+
+
+def test_parent_operation_consumes_and_closes_before_next_provider_call(tmp_path: Path) -> None:
+    if os.name == "nt":
+        pytest.skip("requires POSIX flock and directory fsync")
+    owner = str(uuid4())
+    create_parent(tmp_path, owner)
+    token = set_parent_context(tmp_path, owner)
+    try:
+        with operation_context("subagent", "provider.chat") as operation:
+            assert operation is not None
+            attempt = operation.admit()
+            operation.returned(attempt)
+            operation.consume(attempt)
+        with operation_context("subagent", "provider.chat") as second:
+            assert second is not None
+            attempt = second.admit()
+            second.returned(attempt)
+            second.consume(attempt)
+        rows = read_owner_records(tmp_path, owner)
+        assert [row["event"] for row in rows] == [
+            "intent", "terminal", "consumed", "intent", "terminal", "consumed",
+        ]
+    finally:
+        reset_parent_context(token)
+
+
+def test_parent_operation_keeps_unknown_attempt_held(tmp_path: Path) -> None:
+    if os.name == "nt":
+        pytest.skip("requires POSIX flock and directory fsync")
+    owner = str(uuid4())
+    create_parent(tmp_path, owner)
+    token = set_parent_context(tmp_path, owner)
+    try:
+        with pytest.raises(RuntimeError, match="uncertain"):
+            with operation_context("subagent", "provider.chat") as operation:
+                assert operation is not None
+                operation.admit()
+                raise RuntimeError("uncertain")
+        with pytest.raises(JournalUnavailableError, match="active or unresolved"):
+            with operation_context("subagent", "provider.chat"):
+                pass
+    finally:
+        reset_parent_context(token)
+
+
 def test_owner_lock_identity_survives_settlement_and_partitions_threads(tmp_path: Path) -> None:
     owners = [str(uuid4()) for _ in range(8)]
     barrier = threading.Barrier(len(owners))

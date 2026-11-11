@@ -31,6 +31,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ExecToolConfig
 from nanobot.providers.base import LLMProvider
 from nanobot.runtime import context_compaction as _ctx_compact
+from nanobot.runtime import intent_journal
 from nanobot.utils.helpers import build_assistant_message
 
 #: #1767 -- longest requested path kept verbatim in a failure row. A
@@ -215,6 +216,7 @@ class SubagentManager:
         wall_deadline: float | None = None,
         planner_deadline: float | None = None,
         planner_phase_budget: bool = False,
+        intent_state_root: "Path | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -310,6 +312,12 @@ class SubagentManager:
         self.web_tools_enabled = bool(web_tools_enabled)
         self._checkpoint_commits = bool(checkpoint_commits)
         self._expected_cycle_branch = (expected_cycle_branch or "").strip() or None
+        if intent_state_root is not None and self._telemetry_component != "planner":
+            raise ValueError("intent journal is supported only for the planner component")
+        self._intent_owner_id = intent_journal.ensure_parent(
+            intent_state_root, "planner",
+        ) if intent_state_root is not None else None
+        self._intent_state_root = Path(intent_state_root) if self._intent_owner_id else None
 
     async def spawn(
         self,
@@ -392,6 +400,7 @@ class SubagentManager:
         logger.info("Subagent [{}] starting task: {}", task_id, label)
         correlation_context = correlation_context or self._build_subagent_correlation_context()
         context_usage = {"peak_tokens": 0, "iterations": []}
+        _intent_parent_token = None
 
         try:
             # Build subagent tools (no message tool, no spawn tool)
@@ -514,6 +523,12 @@ class SubagentManager:
                 tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
                 tools.register(WebFetchTool(proxy=self.web_proxy))
 
+            _intent_parent_token = None
+            if self._intent_owner_id:
+                assert self._intent_state_root is not None
+                _intent_parent_token = intent_journal.set_parent_context(
+                    self._intent_state_root, self._intent_owner_id,
+                )
             assert tuple(tools.tool_names) == self.registered_tool_names(), (
                 "registered tool set must match the configured declaration"
             )
@@ -696,6 +711,7 @@ class SubagentManager:
                         )
                         break
 
+                    _provider_operation = None
                     async def _call_provider():
                         from nanobot.observability.prompt_provenance import (
                             PromptRequest,
@@ -723,9 +739,13 @@ class SubagentManager:
                                 release_id=getattr(self, "_role_prompt_release_id", None) if _producer == "planner" else None,
                             )
                             with prompt_request_context(provenance_request):
-                                return await self.provider.chat_with_retry(
-                                    messages=messages, tools=_tools_def, model=self.model,
-                                )
+                                with intent_journal.operation_context(
+                                    "subagent", "provider.chat", state_root=self._intent_state_root,
+                                ) as _operation:
+                                    response = await self.provider.chat_with_retry(
+                                        messages=messages, tools=_tools_def, model=self.model,
+                                    )
+                                    return response, _operation
                     if _bounded_planner and not self._planner_phase_budget:
                         current_task = asyncio.current_task()
                         cancel_count = current_task.cancelling() if current_task else 0
@@ -734,9 +754,9 @@ class SubagentManager:
                                 with _subagent_telemetry_context(
                                     self._telemetry_cycle_id, self._telemetry_component,
                                 ):
-                                    response = await _call_provider()
+                                    response, _provider_operation = await _call_provider()
                             else:
-                                response = await _call_provider()
+                                response, _provider_operation = await _call_provider()
                         if current_task and current_task.cancelling() > cancel_count:
                             raise asyncio.CancelledError
                         if timeout_scope.expired():
@@ -746,10 +766,16 @@ class SubagentManager:
                         with _subagent_telemetry_context(
                             self._telemetry_cycle_id, self._telemetry_component,
                         ):
-                            response = await asyncio.wait_for(_call_provider(), timeout=_call_timeout)
+                            response, _provider_operation = await asyncio.wait_for(
+                                _call_provider(), timeout=_call_timeout,
+                            )
                     else:
-                        response = await asyncio.wait_for(_call_provider(), timeout=_call_timeout)
+                        response, _provider_operation = await asyncio.wait_for(
+                            _call_provider(), timeout=_call_timeout,
+                        )
                 except asyncio.TimeoutError:
+                    if _provider_operation is not None:
+                        _provider_operation.close()
                     logger.warning(
                         "Subagent [{}] model call timed out by progress watchdog ({:.1f}s)",
                         task_id, _watchdog.timeout_secs,
@@ -772,6 +798,9 @@ class SubagentManager:
                     if prompt_tokens > context_usage["peak_tokens"]:
                         context_usage["peak_tokens"] = prompt_tokens
 
+                if _provider_operation is not None:
+                    _provider_operation.consume_pending()
+                    _provider_operation.close()
                 if response.finish_reason == "error":
                     raise RuntimeError(f"LLM execution failed: {response.content}")
 
@@ -838,6 +867,8 @@ class SubagentManager:
 
                     # Execute tools
                     for tool_call in response.tool_calls:
+                        _tool_operation = None
+                        _tool_attempt = None
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.debug("Subagent [{}] executing: {} with arguments: {}", task_id, tool_call.name, args_str)
                         _tool_timeout = _watchdog.remaining_time()
@@ -863,25 +894,33 @@ class SubagentManager:
                             )
                             break
                         try:
-                            if _bounded_planner and not self._planner_phase_budget:
-                                current_task = asyncio.current_task()
-                                cancel_count = current_task.cancelling() if current_task else 0
-                                async with asyncio.timeout(_tool_timeout) as timeout_scope:
-                                    result = await tools.execute(tool_call.name, tool_call.arguments)
-                                if current_task and current_task.cancelling() > cancel_count:
-                                    raise asyncio.CancelledError
-                                if timeout_scope.expired():
-                                    stop_reason = (
-                                        "wall_clock_deadline"
-                                        if _wall_deadline is not None and _clock() >= _wall_deadline
-                                        else "progress_watchdog_timeout"
+                            with intent_journal.operation_context(
+                                "subagent", "tool.dispatch", state_root=self._intent_state_root,
+                            ) as _tool_operation:
+                                if _tool_operation is not None:
+                                    _tool_attempt = _tool_operation.admit()
+                                if _bounded_planner and not self._planner_phase_budget:
+                                    current_task = asyncio.current_task()
+                                    cancel_count = current_task.cancelling() if current_task else 0
+                                    async with asyncio.timeout(_tool_timeout) as timeout_scope:
+                                        result = await tools.execute(tool_call.name, tool_call.arguments)
+                                    if current_task and current_task.cancelling() > cancel_count:
+                                        raise asyncio.CancelledError
+                                    if timeout_scope.expired():
+                                        stop_reason = (
+                                            "wall_clock_deadline"
+                                            if _wall_deadline is not None and _clock() >= _wall_deadline
+                                            else "progress_watchdog_timeout"
+                                        )
+                                    if _tool_operation is not None:
+                                        _tool_operation.returned(_tool_attempt)
+                                else:
+                                    result = await asyncio.wait_for(
+                                        tools.execute(tool_call.name, tool_call.arguments),
+                                        timeout=_tool_timeout,
                                     )
-                                    break
-                            else:
-                                result = await asyncio.wait_for(
-                                    tools.execute(tool_call.name, tool_call.arguments),
-                                    timeout=_tool_timeout,
-                                )
+                                    if _tool_operation is not None:
+                                        _tool_operation.returned(_tool_attempt)
                         except asyncio.TimeoutError:
                             logger.warning(
                                 "Subagent [{}] tool step timed out by progress watchdog ({:.1f}s)",
@@ -920,6 +959,9 @@ class SubagentManager:
                             "content": result,
                         })
                         _watchdog.record_step_completed()
+                        if _tool_operation is not None:
+                            _tool_operation.consume(_tool_attempt)
+                            _tool_operation.close()
                     # ADR-035 keep-work (#1942 B2): this iteration's tool
                     # calls just finished -- checkpoint now, before whatever
                     # comes next (another provider call, a break) can be the
@@ -1101,6 +1143,9 @@ class SubagentManager:
             self.last_max_call_gap_s = _error_call_gap
             logger.error("Subagent [{}] failed: {}", task_id, e)
             await self._announce_result(task_id, label, task, error_msg, origin, "error")
+        finally:
+            if _intent_parent_token is not None:
+                intent_journal.reset_parent_context(_intent_parent_token)
 
     def _maybe_checkpoint_commit(self) -> None:
         """ADR-035 keep-work (#1942 B2): commit the workspace's dirty tree

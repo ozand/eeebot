@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -86,6 +87,7 @@ def _make_fake_mgr_factory(
             self._telemetry_cycle_id = kwargs.get("telemetry_cycle_id")
             self._planner_phase_budget = kwargs.get("planner_phase_budget", False)
             self._planner_deadline = kwargs.get("planner_deadline")
+            self.intent_state_root = kwargs.get("intent_state_root")
             self.web_tools_enabled = kwargs.get("web_tools_enabled")
             type(self).last_instance = self
             self._running_tasks: dict[str, asyncio.Task] = {}
@@ -236,15 +238,37 @@ def test_opted_in_planner_deadline_timeout_cancels_real_manager_before_diary(tmp
     from nanobot.agent.subagent import SubagentManager
     from nanobot.agent.tools.toolsets import PLANNER_PROFILE
 
+    state.mkdir(parents=True, exist_ok=True)
     real_manager_init = SubagentManager.__init__
 
     def _manager_init(self, **kwargs):
         kwargs["tool_profile"] = PLANNER_PROFILE
         kwargs["role_system_prompt"] = "planner {{TOOL_CAPABILITIES}}"
+        kwargs.setdefault("intent_state_root", state)
         return real_manager_init(self, **kwargs)
 
     monkeypatch.setattr(SubagentManager, "__init__", _manager_init)
     monkeypatch.setattr(bridge, "SubagentManager", SubagentManager)
+    monkeypatch.setenv("NANOBOT_RUNTIME_STATE_SOURCE", "workspace_state")
+    if os.name == "nt":
+        import threading
+        from contextlib import contextmanager
+
+        from nanobot.runtime import intent_journal
+
+        _intent_locks: dict[str, threading.Lock] = {}
+        _intent_guard = threading.Lock()
+
+        @contextmanager
+        def _fake_intent_lock(path: Path):
+            path.touch(exist_ok=True)
+            with _intent_guard:
+                _lock = _intent_locks.setdefault(str(path.resolve()), threading.Lock())
+            with _lock:
+                yield
+
+        monkeypatch.setattr(intent_journal, "_owner_lock", _fake_intent_lock)
+        monkeypatch.setattr(intent_journal, "_fsync_directory", lambda _path: None)
     real_wait_for = asyncio.wait_for
     outer_timeouts: list[float] = []
 

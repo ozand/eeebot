@@ -1,10 +1,31 @@
 import asyncio
 import json
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import pytest
 
 from nanobot.providers.base import GenerationSettings, LLMProvider, LLMResponse
+from nanobot.runtime import intent_journal
+
+
+def _enable_journal_logic_backend(monkeypatch) -> None:
+    """Use thread-serialized test primitives; this is not platform durability evidence."""
+    locks: dict[str, threading.Lock] = {}
+    guard = threading.Lock()
+
+    @contextmanager
+    def fake_owner_lock(path):
+        path.touch(exist_ok=True)
+        key = str(path.resolve())
+        with guard:
+            lock = locks.setdefault(key, threading.Lock())
+        with lock:
+            yield
+
+    monkeypatch.setattr(intent_journal, "_owner_lock", fake_owner_lock)
+    monkeypatch.setattr(intent_journal, "_fsync_directory", lambda _path: None)
 
 
 class ScriptedProvider(LLMProvider):
@@ -27,7 +48,208 @@ class ScriptedProvider(LLMProvider):
 
 
 @pytest.mark.asyncio
-async def test_chat_with_retry_retries_transient_error_then_succeeds(monkeypatch) -> None:
+async def test_real_chat_with_retry_journals_each_planner_attempt_and_closes(tmp_path, monkeypatch) -> None:
+    from uuid import uuid4
+
+    _enable_journal_logic_backend(monkeypatch)
+    owner = str(uuid4())
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    intent_journal.create_parent(state_root, owner)
+    parent_token = intent_journal.set_parent_context(state_root, owner)
+    provider = ScriptedProvider([
+        LLMResponse(content="429 rate limit", finish_reason="error"),
+        LLMResponse(content="ok"),
+    ])
+    delays: list[int] = []
+
+    async def _fake_sleep(delay: int) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("nanobot.providers.base.asyncio.sleep", _fake_sleep)
+    try:
+        with intent_journal.operation_context("subagent", "provider.chat") as operation:
+            assert operation is not None
+            response = await provider.chat_with_retry(messages=[{"role": "user", "content": "hello"}])
+            operation.consume_pending()
+            operation.close()
+        rows = intent_journal.read_owner_records(state_root, owner)
+        assert response.content == "ok"
+        assert provider.calls == 2
+        assert delays == [1]
+        assert [row["event"] for row in rows] == ["intent", "terminal", "consumed"] * 2
+        assert len({row["attempt_id"] for row in rows}) == 2
+        assert len({row["operation_id"] for row in rows}) == 1
+        assert all(row["owner_id"] == owner for row in rows)
+        parent = __import__("json").loads(
+            (state_root / "intent-journal" / f"{owner}.parent.json").read_text()
+        )
+        assert parent["active_operation_id"] is None
+        assert parent["last_operation_id"] == rows[0]["operation_id"]
+    finally:
+        intent_journal.reset_parent_context(parent_token)
+
+
+@pytest.mark.asyncio
+async def test_journalled_chat_with_retry_records_full_existing_transient_budget(tmp_path, monkeypatch) -> None:
+    from uuid import uuid4
+
+    _enable_journal_logic_backend(monkeypatch)
+    owner = str(uuid4())
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    intent_journal.create_parent(state_root, owner)
+    parent_token = intent_journal.set_parent_context(state_root, owner)
+    provider = ScriptedProvider([
+        LLMResponse(content=f"{status} rate limit", finish_reason="error")
+        for status in (429, 500, 502, 503)
+    ])
+    delays: list[int] = []
+
+    async def fake_sleep(delay: int) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("nanobot.providers.base.asyncio.sleep", fake_sleep)
+    try:
+        with intent_journal.operation_context("subagent", "provider.chat") as operation:
+            assert operation is not None
+            response = await provider.chat_with_retry(messages=[{"role": "user", "content": "hello"}])
+            operation.consume_pending()
+            operation.close()
+        rows = intent_journal.read_owner_records(state_root, owner)
+        attempts = [row for row in rows if row["event"] == "intent"]
+        assert provider.calls == 4
+        assert delays == [1, 2, 4]
+        assert response.content == "503 rate limit"
+        assert len(attempts) == 4
+        assert len({row["attempt_id"] for row in attempts}) == 4
+        assert [row["event"] for row in rows] == ["intent", "terminal", "consumed"] * 4
+    finally:
+        intent_journal.reset_parent_context(parent_token)
+
+
+@pytest.mark.asyncio
+async def test_journalled_image_fallback_records_distinct_stripped_attempt(tmp_path, monkeypatch) -> None:
+    from uuid import uuid4
+
+    _enable_journal_logic_backend(monkeypatch)
+    owner = str(uuid4())
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    intent_journal.create_parent(state_root, owner)
+    parent_token = intent_journal.set_parent_context(state_root, owner)
+    provider = ScriptedProvider([
+        LLMResponse(content="400 invalid request", finish_reason="error"),
+        LLMResponse(content="ok without image"),
+    ])
+    physical_messages: list[list[dict]] = []
+    original_chat = provider.chat
+
+    async def capture_chat(*args, **kwargs):
+        physical_messages.append(kwargs["messages"])
+        return await original_chat(*args, **kwargs)
+
+    provider.chat = capture_chat
+    try:
+        with intent_journal.operation_context("subagent", "provider.chat") as operation:
+            assert operation is not None
+            response = await provider.chat_with_retry(messages=_IMAGE_MSG)
+            operation.consume_pending()
+            operation.close()
+        rows = intent_journal.read_owner_records(state_root, owner)
+        attempts = [row for row in rows if row["event"] == "intent"]
+        assert response.content == "ok without image"
+        assert len(physical_messages) == 2
+        assert physical_messages[0] == _IMAGE_MSG
+        assert all(block.get("type") != "image_url" for block in physical_messages[1][0]["content"])
+        assert len({row["attempt_id"] for row in attempts}) == 2
+        assert [row["event"] for row in rows] == ["intent", "terminal", "consumed"] * 2
+    finally:
+        intent_journal.reset_parent_context(parent_token)
+
+
+@pytest.mark.asyncio
+async def test_journalled_chat_cancellation_leaves_unknown_attempt_held(tmp_path, monkeypatch) -> None:
+    from uuid import uuid4
+
+    _enable_journal_logic_backend(monkeypatch)
+    owner = str(uuid4())
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    intent_journal.create_parent(state_root, owner)
+    parent_token = intent_journal.set_parent_context(state_root, owner)
+    provider = ScriptedProvider([asyncio.CancelledError()])
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            with intent_journal.operation_context("subagent", "provider.chat"):
+                await provider.chat_with_retry(messages=[{"role": "user", "content": "hello"}])
+        rows = intent_journal.read_owner_records(state_root, owner)
+        assert [row["event"] for row in rows] == ["intent"]
+        parent = json.loads((state_root / "intent-journal" / f"{owner}.parent.json").read_text())
+        assert parent["active_operation_id"] == rows[0]["operation_id"]
+        with pytest.raises(intent_journal.JournalUnavailableError, match="active or unresolved"):
+            with intent_journal.operation_context("subagent", "provider.chat"):
+                pass
+    finally:
+        intent_journal.reset_parent_context(parent_token)
+
+
+@pytest.mark.asyncio
+async def test_journalled_terminal_persistence_failure_withholds_provider_result(tmp_path, monkeypatch) -> None:
+    from uuid import uuid4
+
+    _enable_journal_logic_backend(monkeypatch)
+    owner = str(uuid4())
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    intent_journal.create_parent(state_root, owner)
+    parent_token = intent_journal.set_parent_context(state_root, owner)
+    provider = ScriptedProvider([LLMResponse(content="result not releasable")])
+    real_append = intent_journal._append
+
+    def fail_terminal(path, row, records):
+        if row["event"] == "terminal":
+            raise intent_journal.JournalUnavailableError("injected terminal persistence failure")
+        real_append(path, row, records)
+
+    monkeypatch.setattr(intent_journal, "_append", fail_terminal)
+    try:
+        with pytest.raises(intent_journal.JournalUnavailableError, match="terminal persistence"):
+            with intent_journal.operation_context("subagent", "provider.chat"):
+                await provider.chat_with_retry(messages=[{"role": "user", "content": "hello"}])
+        assert provider.calls == 1
+        assert [row["event"] for row in intent_journal.read_owner_records(state_root, owner)] == ["intent"]
+        parent = json.loads((state_root / "intent-journal" / f"{owner}.parent.json").read_text())
+        assert parent["active_operation_id"] is not None
+    finally:
+        intent_journal.reset_parent_context(parent_token)
+
+
+@pytest.mark.asyncio
+async def test_real_chat_with_retry_intent_failure_prevents_provider_call(tmp_path, monkeypatch) -> None:
+    from uuid import uuid4
+
+    _enable_journal_logic_backend(monkeypatch)
+    owner = str(uuid4())
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    intent_journal.create_parent(state_root, owner)
+    parent_token = intent_journal.set_parent_context(state_root, owner)
+    provider = ScriptedProvider([LLMResponse(content="must not call")])
+    monkeypatch.setattr(intent_journal, "_append", lambda *args: (_ for _ in ()).throw(
+        intent_journal.JournalUnavailableError("injected intent persistence failure")
+    ))
+    try:
+        with intent_journal.operation_context("subagent", "provider.chat"):
+            with pytest.raises(intent_journal.JournalUnavailableError, match="injected"):
+                await provider.chat_with_retry(messages=[{"role": "user", "content": "hello"}])
+        assert provider.calls == 0
+    finally:
+        intent_journal.reset_parent_context(parent_token)
+
+
+@pytest.mark.asyncio
+async def test_real_chat_with_retry_retries_transient_error_then_succeeds(monkeypatch) -> None:
     provider = ScriptedProvider([
         LLMResponse(content="429 rate limit", finish_reason="error"),
         LLMResponse(content="ok"),

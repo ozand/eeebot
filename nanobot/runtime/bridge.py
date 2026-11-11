@@ -3620,6 +3620,7 @@ async def _run_planning_session(
             wall_deadline=_effective_wall_deadline,
             planner_deadline=_planner_deadline,
             planner_phase_budget=planner_phase_budget,
+            intent_state_root=state_dir,
         )
         await planner_manager.spawn(
             task=_planner_task,

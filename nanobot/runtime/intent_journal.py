@@ -1,9 +1,8 @@
 """Strict, bounded per-owner evidence for application-controlled attempts.
 
-This module owns only one-attempt-per-owner journal admission and terminal
-receipts. Because it has no parent-consumption/closure evidence API yet, an
-owner with any prior intent remains held. Callers own stable parent identity
-and retry/cost/cancellation budgets; no provider or tool is invoked here.
+Callers own durable parent identity and retry/cost/cancellation budgets; this
+module records admission, terminal returns, and explicit consumption without
+invoking providers or tools.
 """
 from __future__ import annotations
 
@@ -15,9 +14,11 @@ import json
 import os
 import stat
 from contextlib import contextmanager
+from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 SCHEMA_VERSION = 1
 MAX_RECORD_BYTES = 4096
@@ -29,6 +30,9 @@ _TARGETS = frozenset({
     "tool.write_file", "subagent.spawn", "memory.write", "heartbeat.run",
     "evaluator.run", "proposer.run", "bridge.cycle",
 })
+_ACTIVE_PARENT: ContextVar[tuple[Path, str] | None] = ContextVar("_intent_parent", default=None)
+_ACTIVE_OPERATION: ContextVar["IntentOperation | None"] = ContextVar("_intent_operation", default=None)
+_PARENT_SCHEMA = 1
 
 
 class JournalUnavailableError(RuntimeError):
@@ -48,6 +52,46 @@ def _uuid(value: str, field: str) -> str:
     if canonical != value:
         raise ValueError(f"{field} must be a canonical lowercase UUID")
     return canonical
+
+
+def _route_owner_id(route: str) -> str:
+    if route != "planner":
+        raise ValueError("autonomous parent route is not approved")
+    return str(uuid5(NAMESPACE_URL, "eeebot.intent-journal.parent.planner"))
+
+
+def ensure_parent(state_root: Path, route: str) -> str:
+    """Return the one persistent parent identity for an approved route."""
+    owner_id = _route_owner_id(route)
+    journal, lock = _owner_paths(state_root, owner_id)
+    parent_path = journal.with_suffix(".parent.json")
+    with _owner_lock(lock):
+        if parent_path.exists():
+            parent = _read_parent(parent_path, owner_id)
+            if parent.get("active_operation_id") is not None:
+                raise JournalUnavailableError("route parent has unresolved active operation")
+            journal_records = _decode(journal, owner_id) if journal.exists() else []
+            if any(event != "consumed" for event in _latest_attempt_events(journal_records).values()):
+                raise JournalUnavailableError("route parent has unresolved attempts")
+        else:
+            value = {
+                "version": 1, "owner_id": owner_id, "status": "active",
+                "created_at": _now_iso(), "resolved_at": None,
+                "active_operation_id": None, "last_operation_id": None,
+            }
+            _write_parent(parent_path, value)
+            if _read_parent(parent_path, owner_id) != value:
+                raise JournalUnavailableError("parent record read-back mismatch")
+    return owner_id
+
+
+def open_parent_context(state_root: Path, route: str) -> Token:
+    owner_id = ensure_parent(state_root, route)
+    return set_parent_context(state_root, owner_id)
+
+
+def open_existing_parent_context(state_root: Path, owner_id: str) -> Token:
+    return set_parent_context(state_root, owner_id)
 
 
 def _owner_paths(state_root: Path, owner_id: str) -> tuple[Path, Path]:
@@ -84,6 +128,237 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+@dataclass(frozen=True)
+class IntentAttempt:
+    owner_id: str
+    operation_id: str
+    attempt_id: str
+    component: str
+    target: str
+
+
+@dataclass
+class IntentOperation:
+    state_root: Path
+    owner_id: str
+    operation_id: str
+    component: str
+    target: str
+    _attempts: list[tuple[IntentAttempt, bool]] | None = None
+    _closed: bool = False
+
+    def admit(self) -> IntentAttempt:
+        if self._closed:
+            raise JournalUnavailableError("operation is already closed")
+        attempt = IntentAttempt(self.owner_id, self.operation_id, str(uuid4()), self.component, self.target)
+        admit_attempt(
+            self.state_root, owner_id=self.owner_id, operation_id=self.operation_id,
+            attempt_id=attempt.attempt_id, component=self.component, target=self.target,
+        )
+        if self._attempts is None:
+            self._attempts = []
+        self._attempts.append((attempt, False))
+        return attempt
+
+    def returned(self, attempt: IntentAttempt) -> None:
+        record_returned(
+            self.state_root, owner_id=self.owner_id, operation_id=self.operation_id,
+            attempt_id=attempt.attempt_id, component=self.component, target=self.target,
+        )
+
+    def consume(self, attempt: IntentAttempt) -> None:
+        _record_consumed(
+            self.state_root, owner_id=self.owner_id, operation_id=self.operation_id,
+            attempt_id=attempt.attempt_id, component=self.component, target=self.target,
+        )
+        if self._attempts is not None:
+            self._attempts = [(item, True if item == attempt else done) for item, done in self._attempts]
+
+    def consume_pending(self) -> None:
+        for attempt, consumed in self._attempts or []:
+            if not consumed:
+                self.consume(attempt)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        _close_operation(self)
+        self._closed = True
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def create_parent(state_root: Path, owner_id: str) -> None:
+    owner_id = _uuid(owner_id, "owner_id")
+    journal, lock = _owner_paths(state_root, owner_id)
+    path = journal.with_suffix(".parent.json")
+    with _owner_lock(lock):
+        if path.exists():
+            raise JournalUnavailableError("parent identity already exists")
+        value = {
+            "version": 1, "owner_id": owner_id, "status": "active",
+            "created_at": _now_iso(), "resolved_at": None,
+            "active_operation_id": None, "last_operation_id": None,
+        }
+        _write_parent(path, value)
+        if _read_parent(path, owner_id) != value:
+            raise JournalUnavailableError("parent record read-back mismatch")
+
+
+def _read_parent(path: Path, owner_id: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise JournalUnavailableError("parent record missing or unreadable") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != {
+            "version", "owner_id", "status", "created_at", "resolved_at",
+            "active_operation_id", "last_operation_id",
+        }
+        or value.get("version") != 1
+        or value.get("owner_id") != owner_id
+        or value.get("status") not in {"active", "resolved"}
+    ):
+        raise JournalCorruptError("parent record malformed")
+    return value
+
+
+def _write_parent(path: Path, value: dict[str, Any]) -> None:
+    temp = path.with_name(f".{path.name}.tmp")
+    fd: int | None = None
+    created = False
+    try:
+        fd = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        created = True
+        with os.fdopen(fd, "wb", closefd=True) as stream:
+            fd = None
+            stream.write(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+        created = False
+        _fsync_directory(path.parent)
+    except OSError as exc:
+        raise JournalUnavailableError("parent record write was not verified") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if created:
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+
+
+def set_parent_context(state_root: Path, owner_id: str) -> Token:
+    journal, lock = _owner_paths(state_root, owner_id)
+    with _owner_lock(lock):
+        parent = _read_parent(journal.with_suffix(".parent.json"), owner_id)
+        if parent["status"] != "active":
+            raise JournalUnavailableError("parent is resolved")
+        if parent.get("active_operation_id") is not None:
+            raise JournalUnavailableError("parent already has an active or unresolved operation")
+        records = _decode(journal, owner_id) if journal.exists() else []
+        if any(event != "consumed" for event in _latest_attempt_events(records).values()):
+            raise JournalUnavailableError("parent has unresolved attempts")
+    return _ACTIVE_PARENT.set((Path(state_root), owner_id))
+
+
+def reset_parent_context(token: Token) -> None:
+    _ACTIVE_PARENT.reset(token)
+
+
+def _latest_attempt_events(
+    records: list[dict[str, Any]], operation_id: str | None = None,
+) -> dict[tuple[str, str], str]:
+    latest: dict[tuple[str, str], str] = {}
+    for row in records:
+        if operation_id is None or row["operation_id"] == operation_id:
+            latest[(row["operation_id"], row["attempt_id"])] = row["event"]
+    return latest
+
+
+def _begin_operation(operation: IntentOperation) -> None:
+    journal, lock = _owner_paths(operation.state_root, operation.owner_id)
+    with _owner_lock(lock):
+        parent_path = journal.with_suffix(".parent.json")
+        parent = _read_parent(parent_path, operation.owner_id)
+        if parent["status"] != "active" or parent.get("active_operation_id") is not None:
+            raise JournalUnavailableError("parent already has an active or unresolved operation")
+        records = _decode(journal, operation.owner_id) if journal.exists() else []
+        if any(event != "consumed" for event in _latest_attempt_events(records).values()):
+            raise JournalUnavailableError("parent has unresolved attempts")
+        parent["active_operation_id"] = operation.operation_id
+        _write_parent(parent_path, parent)
+        if _read_parent(parent_path, operation.owner_id) != parent:
+            raise JournalUnavailableError("active operation read-back mismatch")
+
+
+def _close_operation(operation: IntentOperation) -> None:
+    journal, lock = _owner_paths(operation.state_root, operation.owner_id)
+    with _owner_lock(lock):
+        records = _decode(journal, operation.owner_id) if journal.exists() else []
+        selected = [row for row in records if row["operation_id"] == operation.operation_id]
+        if any(row["component"] != operation.component or row["target"] != operation.target for row in selected):
+            raise JournalUnavailableError("operation identity mismatch")
+        if any(
+            event != "consumed"
+            for event in _latest_attempt_events(selected, operation.operation_id).values()
+        ):
+            raise JournalUnavailableError("operation has unresolved attempts")
+        parent_path = journal.with_suffix(".parent.json")
+        parent = _read_parent(parent_path, operation.owner_id)
+        if parent.get("active_operation_id") != operation.operation_id:
+            raise JournalUnavailableError("parent active operation does not match")
+        # A returned provider/tool result is a consumed outcome for this
+        # in-process planner turn. A crash before durable closure still leaves
+        # active_operation_id set and therefore holds the parent.
+        # The in-process parent consumed all operation results before this
+        # durable closure. If the process stops before this write, recovery
+        # sees the active operation and holds admission.
+        parent["active_operation_id"] = None
+        parent["last_operation_id"] = operation.operation_id
+        _write_parent(parent_path, parent)
+        if _read_parent(parent_path, operation.owner_id) != parent:
+            raise JournalUnavailableError("parent operation closure read-back mismatch")
+
+
+def current_operation() -> IntentOperation | None:
+    return _ACTIVE_OPERATION.get()
+
+
+@contextmanager
+def operation_context(
+    component: str, target: str, *, state_root: Path | None = None,
+) -> Iterator[IntentOperation | None]:
+    parent = _ACTIVE_PARENT.get()
+    if state_root is not None:
+        if parent is None or parent[0] != Path(state_root):
+            yield None
+            return
+    if parent is None:
+        yield None
+        return
+    if component not in _COMPONENTS or target not in _TARGETS:
+        raise JournalUnavailableError("component or target is not allowlisted")
+    state_root, owner_id = parent
+    operation = IntentOperation(state_root, owner_id, str(uuid4()), component, target)
+    _begin_operation(operation)
+    token = _ACTIVE_OPERATION.set(operation)
+    try:
+        yield operation
+    except BaseException:
+        # Interruption or an unverified caller outcome keeps the active
+        # operation held for explicit recovery.
+        raise
+    finally:
+        _ACTIVE_OPERATION.reset(token)
 
 
 @contextmanager
@@ -171,7 +446,7 @@ def _decode(path: Path, owner_id: str) -> list[dict[str, Any]]:
     if not raw.endswith(b"\n"):
         raise JournalCorruptError("owner journal has a truncated final record")
     records: list[dict[str, Any]] = []
-    states: dict[tuple[str, str], bool] = {}
+    states: dict[tuple[str, str], str] = {}
     for line in raw.splitlines():
         if not line or len(line) > MAX_RECORD_BYTES:
             raise JournalCorruptError("owner journal has an empty or oversized record")
@@ -186,11 +461,15 @@ def _decode(path: Path, owner_id: str) -> list[dict[str, Any]]:
         if row["event"] == "intent":
             if key in states:
                 raise JournalCorruptError("duplicate attempt identity")
-            states[key] = False
-        else:
-            if key not in states or states[key]:
+            states[key] = "intent"
+        elif row["event"] == "terminal":
+            if states.get(key) != "intent":
                 raise JournalCorruptError("terminal has no unique unsettled intent")
-            states[key] = True
+            states[key] = "terminal"
+        else:
+            if states.get(key) != "terminal":
+                raise JournalCorruptError("consumed record has no terminal")
+            states[key] = "consumed"
         records.append(row)
     return records
 
@@ -204,7 +483,7 @@ def _validate_record(row: Any, owner_id: str) -> None:
         raise ValueError("record version or owner mismatch")
     _uuid(row["operation_id"], "operation_id")
     _uuid(row["attempt_id"], "attempt_id")
-    if row["event"] not in {"intent", "terminal"}:
+    if row["event"] not in {"intent", "terminal", "consumed"}:
         raise ValueError("invalid event")
     if row["component"] not in _COMPONENTS:
         raise ValueError("component is not allowlisted")
@@ -225,8 +504,8 @@ def _append(path: Path, row: dict[str, Any], records: list[dict[str, Any]]) -> N
     encoded = json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
     if len(encoded) > MAX_RECORD_BYTES:
         raise JournalUnavailableError("journal record exceeds byte limit")
-    reserved_terminal_records = 1 if row["event"] == "intent" else 0
-    reserved_terminal_bytes = MAX_RECORD_BYTES if row["event"] == "intent" else 0
+    reserved_terminal_records = 2 if row["event"] == "intent" else 1 if row["event"] == "terminal" else 0
+    reserved_terminal_bytes = MAX_RECORD_BYTES * reserved_terminal_records
     try:
         original = path.read_bytes()
     except OSError as exc:
@@ -291,21 +570,40 @@ def _record(owner_id: str, operation_id: str, attempt_id: str, event: str,
 # @lat: [[architecture#Intent-before-effect evidence]]
 def admit_attempt(state_root: Path, *, owner_id: str, operation_id: str,
                   attempt_id: str, component: str, target: str,
-                  ts: str | None = None) -> None:
+                  ts: str | None = None, _test_only: bool = False) -> None:
     """Durably record an intent before the caller permits the external effect."""
     row = _record(owner_id, operation_id, attempt_id, "intent", component, target, ts)
     journal, lock = _owner_paths(state_root, owner_id)
     with _owner_lock(lock):
         _ensure_journal(journal)
         records = _decode(journal, _uuid(owner_id, "owner_id"))
-        if records:
-            # A terminal only proves the attempt returned to this process; it
-            # does not prove same-owner parent consumption or closure. Until a
-            # caller-owned durable resolution seam exists, never release the
-            # owner for another operation/attempt, even after a terminal.
-            raise JournalUnavailableError("owner lacks durable parent-resolution evidence")
+        parent = _ACTIVE_PARENT.get()
+        operation = _ACTIVE_OPERATION.get()
+        if not _test_only and (parent != (Path(state_root), row["owner_id"]) or operation is None or (
+            operation.operation_id != row["operation_id"] or operation.component != row["component"]
+            or operation.target != row["target"]
+        )):
+            raise JournalUnavailableError("attempt lacks matching active parent operation")
+        if not _test_only:
+            parent_state = _read_parent(journal.with_suffix(".parent.json"), row["owner_id"])
+            if (parent_state["status"] != "active"
+                    or parent_state.get("active_operation_id") != row["operation_id"]):
+                raise JournalUnavailableError("parent operation is not active")
         if any(item["attempt_id"] == row["attempt_id"] for item in records):
             raise JournalUnavailableError("attempt identity already used")
+        if records and _test_only and any(item["event"] != "consumed" for item in records):
+            raise JournalUnavailableError("owner lacks durable parent-resolution evidence")
+        other_operations = {
+            key: event for key, event in _latest_attempt_events(records).items()
+            if key[0] != row["operation_id"]
+        }
+        if not _test_only and any(event != "consumed" for event in other_operations.values()):
+            raise JournalUnavailableError("owner lacks durable parent-resolution evidence")
+        prior_same_operation = _latest_attempt_events(records, row["operation_id"])
+        if prior_same_operation and not _test_only and any(
+            event != "consumed" for event in prior_same_operation.values()
+        ):
+            raise JournalUnavailableError("parent operation must resolve previous attempt before retry")
         _append(journal, row, records)
 
 
@@ -327,6 +625,23 @@ def record_returned(state_root: Path, *, owner_id: str, operation_id: str,
             raise JournalUnavailableError("terminal does not match one unsettled intent")
         if intents[0]["component"] != row["component"] or intents[0]["target"] != row["target"]:
             raise JournalUnavailableError("terminal target differs from intent")
+        _append(journal, row, records)
+
+
+def _record_consumed(state_root: Path, *, owner_id: str, operation_id: str,
+                     attempt_id: str, component: str, target: str) -> None:
+    row = _record(owner_id, operation_id, attempt_id, "consumed", component, target, None)
+    journal, lock = _owner_paths(state_root, owner_id)
+    with _owner_lock(lock):
+        records = _decode(journal, _uuid(owner_id, "owner_id"))
+        key = (row["operation_id"], row["attempt_id"])
+        intents = [r for r in records if r["event"] == "intent" and (r["operation_id"], r["attempt_id"]) == key]
+        terminals = [r for r in records if r["event"] == "terminal" and (r["operation_id"], r["attempt_id"]) == key]
+        consumed = [r for r in records if r["event"] == "consumed" and (r["operation_id"], r["attempt_id"]) == key]
+        if len(intents) != 1 or len(terminals) != 1 or consumed:
+            raise JournalUnavailableError("consumption does not match a terminal")
+        if intents[0]["component"] != row["component"] or intents[0]["target"] != row["target"]:
+            raise JournalUnavailableError("consumption target differs from intent")
         _append(journal, row, records)
 
 
