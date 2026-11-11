@@ -7,11 +7,12 @@ append-only goal_text writing in the exact `(X) Priority N — label: body`
 shape demand's parser reads (numbering continued past Completed mentions,
 operator entries untouched), dedup against existing priorities, the
 goal_review ledger row, malformed/exception LLM replies, and the fail-open
-wiring from the scorecard recompute path. The LLM call is always
-monkeypatched — no test ever reaches a provider.
+wiring from the scorecard recompute path. The SDK is always fake; no live
+provider is contacted.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -123,6 +124,8 @@ def _read_goal_text(state_dir: Path) -> str:
 def test_call_llm_records_goal_review_component_for_duration_and_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
+    sdk_calls = []
+
     class FakeResponse:
         model = "test-model"
         usage = type("Usage", (), {
@@ -137,7 +140,8 @@ def test_call_llm_records_goal_review_component_for_duration_and_prompt(
         class Chat:
             class Completions:
                 @staticmethod
-                def create(**_kwargs):
+                def create(**kwargs):
+                    sdk_calls.append(kwargs)
                     return FakeResponse()
             completions = Completions()
         chat = Chat()
@@ -150,6 +154,11 @@ def test_call_llm_records_goal_review_component_for_duration_and_prompt(
     monkeypatch.setenv("RELEASE_ROOT", str(tmp_path / "release"))
     release_root = tmp_path / "release"
     (release_root / "roles").mkdir(parents=True)
+    (release_root / "roles" / "goal-review.md").write_text(
+        "---\nrole: goal-review\nbudget_chars: 2600\n---\n"
+        "# Role: Goal review\n\n" + goal_review._GOAL_REVIEW_SYSTEM_PROMPT + "\n",
+        encoding="utf-8",
+    )
     (release_root / "goals.md").write_text("charter", encoding="utf-8")
     (release_root / "IDENTITY.md").write_text("identity", encoding="utf-8")
     (release_root / "SOUL.md").write_text("soul", encoding="utf-8")
@@ -164,6 +173,21 @@ def test_call_llm_records_goal_review_component_for_duration_and_prompt(
                    (tmp_path / "prompts" / f"{day}.jsonl").read_text().splitlines()]
     assert call_rows[-1]["component"] == "goal_review"
     assert prompt_rows[-1]["component"] == "goal_review"
+    assert len(sdk_calls) == 1
+    assert prompt_rows[-1]["messages"] == sdk_calls[0]["messages"]
+    call_provenance = call_rows[-1]["prompt_provenance"]
+    prompt_provenance = prompt_rows[-1]["prompt_provenance"]
+    assert call_provenance["call_id"] == prompt_provenance["call_id"]
+    assert call_provenance["producer"] == prompt_provenance["producer"] == "goal-review"
+    assert call_provenance["schema"] == prompt_provenance["schema"] == "role-prompt-v1:goal-review"
+    assert call_provenance["provenance_state"] == "observed"
+    assert call_provenance["order"] == prompt_provenance["order"] == ["role"]
+    assert call_provenance["sections"] == prompt_provenance["sections"] == [{
+        "name": "role",
+        "sha256": hashlib.sha256(goal_review._GOAL_REVIEW_SYSTEM_PROMPT.encode("utf-8")).hexdigest(),
+        "chars": len(goal_review._GOAL_REVIEW_SYSTEM_PROMPT),
+    }]
+    assert "identity" not in call_provenance and "soul" not in call_provenance
 
 
 def test_load_goal_data_prefers_release_charter(tmp_path: Path):

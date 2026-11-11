@@ -149,8 +149,11 @@ than a shared `unknown` baseline. A reflector job uses one owner window across
 its selected cycle prompts while preserving each cycle ID in ordinary telemetry;
 a later job invocation starts a fresh baseline. Curator fact-retry batches share
 the owner within one job, while later curator runs, strategist invocations, and
-narrator invocations get fresh owner windows. Only explicitly allowlisted fixed
-role-file bodies may contribute UTF-8 SHA-256 and character length; identity,
+narrator invocations get fresh owner windows. Goal review and demand-mode proposal
+are verified at their production entrypoints through fake SDK dispatch, and the
+interactive AgentLoop is exercised through message assembly and provider retry.
+Only explicitly allowlisted fixed role-file bodies may contribute UTF-8 SHA-256
+and character length; identity,
 soul, goals, workspace, memory, task, runtime, and unknown sections disclose
 no fingerprints or structure.
 Missing baselines and unavailable calls are not inferred as empty prompts.

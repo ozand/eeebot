@@ -3770,6 +3770,96 @@ class TestDemandDrivenMode:
         assert llm_proposer.maybe_propose(state_dir, None) is not None
         assert captured.get("system_prompt") == llm_proposer._DEMAND_PROPOSER_SYSTEM_PROMPT
 
+    def test_demand_entrypoint_dispatches_demand_proposer_with_actual_provenance(self, tmp_path, monkeypatch):
+        import hashlib
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+
+        import openai
+
+        state_dir = _state_dir(tmp_path)
+        _write_goal_text(state_dir, json.loads(GOAL_TEXT_JSON)["text"])
+        monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "llm_calls"))
+        monkeypatch.setenv("RELEASE_ROOT", str(tmp_path / "release"))
+        release = tmp_path / "release"
+        (release / "roles").mkdir(parents=True)
+        (release / "roles" / "demand-proposer.md").write_text(
+            "---\nrole: demand-proposer\nbudget_chars: 2600\n---\n"
+            "# Role: Demand proposer\n\n" + llm_proposer._DEMAND_PROPOSER_SYSTEM_PROMPT + "\n",
+            encoding="utf-8",
+        )
+        (release / "goals.md").write_text("Synthetic charter for demand-proposer fixture.", encoding="utf-8")
+        (release / "IDENTITY.md").write_text("Identity sentinel must stay private.", encoding="utf-8")
+        (release / "SOUL.md").write_text("Soul sentinel must stay private.", encoding="utf-8")
+        monkeypatch.setenv("LITELLM_BASE_URL", "http://fake-gateway.local")
+        monkeypatch.setenv("LITELLM_API_KEY", "synthetic-key")
+        monkeypatch.setattr(llm_proposer, "_model_name", lambda: "an/test-proposer")
+        monkeypatch.setattr(llm_proposer, "resolve_context_window", lambda *args, **kwargs: None)
+        item = {
+            "kind": "defect", "id": "defect-fixture-1234",
+            "summary": "Repair the fixture path safely", "evidence": "test evidence only",
+            "affected_path": "scripts/fixture.py",
+        }
+        monkeypatch.setattr(llm_proposer.demand, "collect_demand", lambda *_args, **_kwargs: [item])
+        # Return a selected list object distinct from collect_demand's original
+        # one-item list so maybe_propose takes its actual assigned-demand path.
+        monkeypatch.setattr(llm_proposer, "_select_assigned_demand", lambda _state, items: list(items))
+        captured = []
+
+        class LocalSDK:
+            def __init__(self, *args, **kwargs):
+                self.chat = self.completions = self
+
+            def create(self, **kwargs):
+                captured.append(kwargs)
+                return SimpleNamespace(
+                    model=kwargs["model"],
+                    usage=SimpleNamespace(prompt_tokens=9, completion_tokens=4, total_tokens=13),
+                    choices=[SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(content=json.dumps({
+                            "task_title": "Repair the fixture path",
+                            "rationale": "Address the selected demand item.",
+                            "target_path": "scripts/fixture.py",
+                            "serves": "demand defect-fixture-1234",
+                        })),
+                    )],
+                )
+
+        monkeypatch.setattr(openai, "OpenAI", LocalSDK)
+        assert llm_proposer.maybe_propose(state_dir, None) is not None
+        assert len(captured) == 1
+        messages = captured[0]["messages"]
+        assert messages[0]["content"] == llm_proposer._build_proposer_role_prompt(
+            llm_proposer._DEMAND_PROPOSER_SYSTEM_PROMPT,
+        )
+        assert "## IDENTITY.md" in messages[0]["content"]
+        assert "## Demand" in messages[1]["content"]
+
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        telemetry_dir = tmp_path / "llm_calls"
+        call_rows = [json.loads(line) for line in (telemetry_dir / f"{day}.jsonl").read_text(encoding="utf-8").splitlines()]
+        prompt_rows = [json.loads(line) for line in (telemetry_dir / "prompts" / f"{day}.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert len(call_rows) == len(prompt_rows) == 1
+        provenance = call_rows[0]["prompt_provenance"]
+        prompt_provenance = prompt_rows[0]["prompt_provenance"]
+        assert prompt_rows[0]["messages"] == messages
+        role = llm_proposer._DEMAND_PROPOSER_SYSTEM_PROMPT
+        expected = [{
+            "name": "role", "sha256": hashlib.sha256(role.encode("utf-8")).hexdigest(),
+            "chars": len(role),
+        }]
+        assert provenance["call_id"] == prompt_provenance["call_id"]
+        assert provenance["producer"] == prompt_provenance["producer"] == "demand-proposer"
+        assert provenance["schema"] == prompt_provenance["schema"] == "role-prompt-v1:demand-proposer"
+        assert provenance["kind"] == "snapshot" and provenance["previous_call_id"] is None
+        assert provenance["order"] == ["role"]
+        assert provenance["sections"] == prompt_provenance["sections"] == expected
+        assert "Identity sentinel" not in json.dumps(provenance)
+        assert "Soul sentinel" not in json.dumps(provenance)
+        assert "Synthetic charter" not in json.dumps(provenance)
+        assert len({call_rows[0]["prompt_provenance"]["call_id"], prompt_rows[0]["prompt_provenance"]["call_id"]}) == 1
+
     def test_self_dedup_reject_row_carries_demand_id(self, tmp_path, monkeypatch):
         """#1785: demand_id is carried on EVERY proposer_reject row now,
         not just when the old text matcher happened to fire — here via a
