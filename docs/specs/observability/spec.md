@@ -145,9 +145,12 @@ call ID. The assembly metadata remains available for repeated dispatches within
 the same explicitly identified owner (including proposer fallback), while
 assemblies from another owner cannot be reused solely because system bytes
 match. Provider calls without an explicit owner use an isolated identity rather
-than a shared `unknown` baseline. Only explicitly allowlisted fixed role-file bodies may contribute
-UTF-8 SHA-256 and character length; identity, soul, goals, workspace, memory,
-task, runtime, and unknown sections disclose no fingerprints or structure.
+than a shared `unknown` baseline. A reflector job uses one owner window across
+its selected cycle prompts while preserving each cycle ID in ordinary telemetry;
+a later job invocation starts a fresh baseline. Only explicitly allowlisted fixed
+role-file bodies may contribute UTF-8 SHA-256 and character length; identity,
+soul, goals, workspace, memory, task, runtime, and unknown sections disclose
+no fingerprints or structure.
 Missing baselines and unavailable calls are not inferred as empty prompts.
 This is process-local comparison evidence, not authentication or proof of
 provider receipt. It adds no public/dashboard projection, cycle-ledger row, or

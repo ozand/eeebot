@@ -142,6 +142,73 @@ def test_aged_out_reanchor_is_single_advance_no_consecutive_duplicates(tmp_path:
     assert lost_cursors == ["ancient-lost", "active-2"]
 
 
+def test_reflector_job_baseline_spans_cycles_but_resets_for_next_invocation(tmp_path: Path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    telemetry_dir = tmp_path / "llm_calls"
+    monkeypatch.setenv("LLM_CALLS_DIR", str(telemetry_dir))
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://fake-gateway.local")
+    monkeypatch.setenv("LITELLM_API_KEY", "synthetic-key")
+    monkeypatch.setattr(reflector, "resolve_model", lambda *args, **kwargs: "test-model")
+    monkeypatch.setattr(reflector, "resolve_context_window", lambda *args, **kwargs: None)
+
+    class FakeOpenAI:
+        def __init__(self, *args, **kwargs):
+            self.chat = self.completions = self
+
+        def create(self, **kwargs):
+            cycle_id = kwargs["messages"][1]["content"].split("CYCLE_ID: ", 1)[1].split("\n", 1)[0]
+            return SimpleNamespace(
+                model=kwargs["model"],
+                usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7, total_tokens=18),
+                choices=[SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content=_answer(cycle_id)),
+                )],
+            )
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+    state = tmp_path / "state"
+    _write(state / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "job-a-1", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "job-a-2", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+    ])
+    _write(state / "llm_calls/prompts/2026-08-26.jsonl", [
+        {"cycle_id": "job-a-1", "seq": 1, "messages": []},
+        {"cycle_id": "job-a-2", "seq": 1, "messages": []},
+    ])
+    assert reflector.run_reflector(state, max_cycles=2)["processed"] == 2
+
+    # A later scheduled invocation handles the next cycle; its in-memory
+    # owner window starts fresh even though cycle/schema/release are unchanged.
+    _write(state / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "job-a-1", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "job-a-2", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+        {"phase": "outcome", "cycle_id": "job-a-3", "outcome": "success", "ts": "2026-08-26T00:02:00Z"},
+    ])
+    _write(state / "llm_calls/prompts/2026-08-26.jsonl", [
+        {"cycle_id": f"job-a-{index}", "seq": 1, "messages": []}
+        for index in (1, 2, 3)
+    ])
+    assert reflector.run_reflector(state, max_cycles=2)["processed"] == 1
+
+    from datetime import datetime, timezone
+
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    calls = [json.loads(line) for line in (telemetry_dir / f"{day}.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(calls) == 3
+    provenance = [row["prompt_provenance"] for row in calls]
+    assert [row["cycle_id"] for row in calls] == ["job-a-1", "job-a-2", "job-a-3"]
+    assert [item["producer"] for item in provenance] == ["reflector"] * 3
+    assert [item["kind"] for item in provenance] == ["snapshot", "delta", "snapshot"]
+    assert provenance[0]["previous_call_id"] is None
+    assert provenance[1]["previous_call_id"] == provenance[0]["call_id"]
+    assert provenance[2]["previous_call_id"] is None
+    assert provenance[0]["baseline_id"] == provenance[1]["baseline_id"]
+    assert provenance[0]["baseline_id"] != provenance[2]["baseline_id"]
+
+
 def test_reflector_journal_watermark_and_prior_tail(tmp_path: Path):
     _seed(tmp_path)
     seen = []

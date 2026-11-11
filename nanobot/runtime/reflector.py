@@ -420,7 +420,10 @@ def _fit_note(fit: dict[str, Any], unit: str) -> str:
     return f" ({'; '.join(parts)})" if parts else ""
 
 
-def _build_prompt(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[str, Any]], journal: list[dict[str, Any]]) -> tuple[list[dict[str, str]], dict[str, Any]]:
+def _build_prompt(
+    cycle_id: str, transcript: dict[str, Any], ledger: list[dict[str, Any]],
+    journal: list[dict[str, Any]], *, provenance_owner: str | None = None,
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
     """The reflector prompt plus an ``input_fit`` record of what each section kept and dropped (#1314).
 
     Every section is complete JSON: inputs are bounded before serialization,
@@ -432,7 +435,8 @@ def _build_prompt(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[s
     # soul and no charter: this role runs under a tight input cap, so its
     # growth is bounded by the first paragraph of IDENTITY.md.
     from nanobot.observability.prompt_provenance import prompt_owner_context
-    with prompt_owner_context(f"reflector:{cycle_id}"):
+    provenance_owner = provenance_owner or f"reflector:{cycle_id}"
+    with prompt_owner_context(provenance_owner):
         system, _role_fit = build_role_system_prompt_or_refuse("reflector")
     _role_fit["sections"] = tuple(_role_fit.get("sections") or ())
     transcript_kept, transcript_fit = _fit_transcript(transcript, _MAX_TRANSCRIPT_CHARS)
@@ -461,10 +465,10 @@ def _build_prompt(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[s
     user = f"CYCLE_ID: {cycle_id}\n" + "\n".join(sections)
     from nanobot.observability.prompt_provenance import remember_role_assembly
 
-    with prompt_owner_context(f"reflector:{cycle_id}"):
+    with prompt_owner_context(provenance_owner):
         remember_role_assembly(
             system, "reflector", _role_fit["sections"], _role_fit.get("release_id"),
-            owner=f"reflector:{cycle_id}",
+            owner=provenance_owner,
         )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}], input_fit
 
@@ -546,14 +550,17 @@ def _parse_output(value: Any, cycle_id: str) -> tuple[dict[str, Any] | None, str
     return result, "fenced_json" if parsed_from_fence else "ok"
 
 
-def _default_llm(messages: list[dict[str, str]], model: str, cycle_id: str) -> str:
+def _default_llm(
+    messages: list[dict[str, str]], model: str, cycle_id: str, *,
+    provenance_owner: str | None = None,
+) -> str:
     from openai import OpenAI
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
     api_key = os.environ.get("LITELLM_API_KEY", "").strip()
     if not base_url or not api_key:
         raise RuntimeError("litellm credentials not configured")
     started = time.monotonic()
-    provenance_owner = f"reflector:{cycle_id}"
+    provenance_owner = provenance_owner or f"reflector:{cycle_id}"
     prompt_request = role_request_for_system(
         str(messages[0].get("content") or ""), owner=provenance_owner,
         producer_hint="reflector",
@@ -675,6 +682,11 @@ def run_reflector(
         or str(row.get("cycle_id") or "") in prompts
     ]
     result["candidates"] = len(candidates)
+    # One owner window spans the prompts dispatched during this job; the
+    # telemetry cycle_id remains each reflected cycle, not this opaque owner.
+    from uuid import uuid4
+
+    provenance_owner = f"reflector-job:{uuid4().hex}"
     proposed = {str(row.get("cycle_id")): row for row in rows if row.get("phase") == "proposed"}
     consecutive_errs = 0
     for outcome in candidates:
@@ -695,11 +707,19 @@ def run_reflector(
         parse_reason = "not_attempted"
         input_fit: dict[str, Any] = {}
         try:
-            messages, input_fit = _build_prompt(cycle_id, transcript, context_rows, _journal_tail(state_dir))
+            messages, input_fit = _build_prompt(
+                cycle_id, transcript, context_rows, _journal_tail(state_dir),
+                provenance_owner=provenance_owner,
+            )
             if input_fit["status"] != "complete":
                 result["input_truncated"] += 1
             model = resolve_model("reflector", strip_openai=True)
-            response = llm(messages, model) if llm else _default_llm(messages, model, cycle_id)
+            response = (
+                llm(messages, model)
+                if llm else _default_llm(
+                    messages, model, cycle_id, provenance_owner=provenance_owner,
+                )
+            )
             parsed, parse_reason = _parse_output(response, cycle_id)
             if parsed is None:
                 raise ValueError(f"malformed reflector output: {parse_reason}")
