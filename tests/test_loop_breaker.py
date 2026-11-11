@@ -11,6 +11,8 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -399,6 +401,69 @@ class TestSubagentWallClockDeadline:
 
 
 # ── AgentLoop integration tests ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_interactive_agent_loop_emits_call_provenance_for_actual_built_prompt(tmp_path, monkeypatch):
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.bus.events import InboundMessage
+    from nanobot.bus.queue import MessageBus
+
+    (tmp_path / "BOOTSTRAP.md").write_text("Safe fixed bootstrap guidance.", encoding="utf-8")
+    (tmp_path / "IDENTITY.md").write_text("Identity privacy sentinel.", encoding="utf-8")
+    (tmp_path / "memory").mkdir()
+    (tmp_path / "memory" / "MEMORY.md").write_text("Private memory sentinel.", encoding="utf-8")
+    telemetry_dir = tmp_path / "llm_calls"
+    monkeypatch.setenv("LLM_CALLS_DIR", str(telemetry_dir))
+    monkeypatch.setenv("NANOBOT_LOOP_BREAKER_K", "3")
+
+    class CapturingProvider(_Provider):
+        def __init__(self):
+            super().__init__()
+            self.sent = []
+
+        async def chat(self, messages=None, tools=None, model=None, **kwargs) -> LLMResponse:
+            self.sent.append([dict(message) for message in messages])
+            return LLMResponse(content="hello from fake provider")
+
+    provider = CapturingProvider()
+    bus = MessageBus()
+    loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path, max_iterations=1)
+    async def _no_consolidation(*_args, **_kwargs):
+        return None
+
+    loop.memory_consolidator.maybe_consolidate_by_tokens = _no_consolidation
+
+    def _discard_background(coro):
+        coro.close()
+
+    loop._schedule_background = _discard_background
+
+    outbound = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="operator", chat_id="session-a", content="hello"),
+    )
+    assert outbound is not None and outbound.content == "hello from fake provider"
+    assert len(provider.sent) == 1
+    actual_messages = provider.sent[0]
+    actual_system = actual_messages[0]["content"]
+    assert actual_messages[-1]["content"].endswith("hello")
+
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    calls = [json.loads(line) for line in (telemetry_dir / f"{day}.jsonl").read_text(encoding="utf-8").splitlines()]
+    prompts = [json.loads(line) for line in (telemetry_dir / "prompts" / f"{day}.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(calls) == len(prompts) == 1
+    provenance, prompt_provenance = calls[0]["prompt_provenance"], prompts[0]["prompt_provenance"]
+    assert prompts[0]["messages"][0]["content"].encode("utf-8") == actual_system.encode("utf-8")
+    assert provenance["call_id"] == prompt_provenance["call_id"]
+    assert provenance["producer"] == prompt_provenance["producer"] == "interactive"
+    assert provenance["schema"] == prompt_provenance["schema"] == "context-builder-interactive-v1"
+    assert provenance["kind"] == "snapshot" and provenance["previous_call_id"] is None
+    assert provenance["sections"] == prompt_provenance["sections"] == []
+    assert provenance["order"] == prompt_provenance["order"] == []
+    serialized = json.dumps(provenance)
+    assert "Identity privacy sentinel" not in serialized
+    assert "Private memory sentinel" not in serialized
+    assert "Safe fixed bootstrap guidance" not in serialized
+
 
 class TestAgentLoopBreaker:
     async def test_agent_loop_k_identical_calls_abort(self, tmp_path, monkeypatch):

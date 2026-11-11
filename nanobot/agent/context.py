@@ -14,6 +14,7 @@ from loguru import logger
 from nanobot.agent.block_loader import load_block, trim_lines
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
+from nanobot.observability.prompt_provenance import PromptSection
 from nanobot.runtime import context_compaction as _ctx_compact
 from nanobot.runtime import day_clock
 from nanobot.runtime.mutation_policy import MUTATION_POLICY
@@ -230,6 +231,7 @@ class ContextBuilder:
 
     def __init__(self, workspace: Path, release_root: "Path | None" = None, state_dir: "Path | None" = None):
         self.workspace = workspace
+        self._active_prompt_owner: str | None = None
         #: #1802: per-file occupancy of the release pool from the last
         #: assembly, and what was left. Published on the ``system_prompt``
         #: ledger row so a file approaching the pool is visible BEFORE it
@@ -309,6 +311,9 @@ class ContextBuilder:
         if strict is None:
             strict = loop_profile
 
+        self._prompt_provenance_schema = (
+            "context-builder-loop-v1" if loop_profile else "context-builder-interactive-v1"
+        )
         if loop_profile:
             return self._build_loop_system_prompt(
                 excluded_skill_names=excluded_skill_names,
@@ -351,6 +356,7 @@ Skills with available="false" need dependencies installed first - you can try in
         self._skills_catalogue_observation = None
         sections.append(("skills_catalogue", skills_section))
         sections.append(("memory", memory_section))
+        self.last_prompt_sections = tuple(PromptSection(name, content) for name, content in sections)
         return self._fit_system_prompt(
             sections, strict=strict, degrade_on_overflow=degrade_on_overflow,
             memory_fit=self.memory.last_index_fit,
@@ -761,6 +767,7 @@ Skills with available="false" need dependencies installed first - you can try in
         sections.append(("runtime", runtime_section))
         sections.append(("scorecard", scorecard_section))
         sections.append(("position", position_section))
+        self.last_prompt_sections = tuple(PromptSection(name, content) for name, content in sections)
         return self._fit_system_prompt(
             sections, strict=strict, degrade_on_overflow=degrade_on_overflow,
             memory_fit=self.memory.last_index_fit,
@@ -796,6 +803,11 @@ Skills with available="false" need dependencies installed first - you can try in
         prompt = self._join_sections(sections)
         fit["chars"] = len(prompt)
         fit["sections"] = self._section_sizes(names, sections)
+        # The transient representation follows the exact post-fit list used
+        # to render the legacy string. Callers can pass it to provenance
+        # without parsing delimiter text; all ContextBuilder sections remain
+        # non-evidence-safe by default.
+        self.last_prompt_sections = tuple(PromptSection(name, content) for name, content in sections)
         return prompt
 
     #: Block loading lives in :mod:`nanobot.agent.block_loader` so the role
@@ -1345,8 +1357,19 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         else:
             merged = [{"type": "text", "text": runtime_ctx}] + user_content
 
+        system = self.build_system_prompt(skill_names)
+        from nanobot.observability.prompt_provenance import remember_prompt_assembly
+        schema = getattr(self, "_prompt_provenance_schema", "context-builder-interactive-v1")
+        if schema == "context-builder-loop-v1":
+            producer = "loop-profile"
+        else:
+            producer = "interactive"
+        remember_prompt_assembly(
+            system, producer, schema, getattr(self, "last_prompt_sections", ()),
+            owner=getattr(self, "_active_prompt_owner", None),
+        )
         return [
-            {"role": "system", "content": self.build_system_prompt(skill_names)},
+            {"role": "system", "content": system},
             *history,
             {"role": current_role, "content": merged},
         ]

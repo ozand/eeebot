@@ -278,6 +278,52 @@ def _raising_llm(messages, model):
     raise RuntimeError("gateway unreachable")
 
 
+def test_narrator_invocations_start_distinct_provenance_owner_windows(tmp_path, monkeypatch):
+    import sys
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    telemetry_dir = tmp_path / "llm_calls"
+    monkeypatch.setenv("LLM_CALLS_DIR", str(telemetry_dir))
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://fake-gateway.local")
+    monkeypatch.setenv("LITELLM_API_KEY", "synthetic-key")
+    monkeypatch.setattr("scripts.journal_story._resolve_narrator_model", lambda: "test-model")
+
+    class FakeOpenAI:
+        def __init__(self, *args, **kwargs):
+            self.chat = self.completions = self
+
+        def create(self, **kwargs):
+            prompt = json.loads(kwargs["messages"][1]["content"])
+            output = [
+                {"beat_id": beat["beat_id"], "text": f"Something happened: {beat['event']}.", "sign": beat["sign"], "terms": []}
+                for beat in prompt["beats"]
+            ]
+            return SimpleNamespace(
+                model=kwargs["model"],
+                usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3, total_tokens=8),
+                choices=[SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content=json.dumps(output)),
+                )],
+            )
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+    _write_ledger(tmp_path, [_ledger_row("2026-09-15T08:00:00Z", "cycle-a", "success")], [])
+    assert run_narrator_job(tmp_path, "2026-09-15")["status"] == "ok"
+    assert run_narrator_job(tmp_path, "2026-09-15")["status"] == "ok"
+
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    calls = [json.loads(line) for line in (telemetry_dir / f"{day}.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(calls) == 2
+    first, second = [row["prompt_provenance"] for row in calls]
+    assert [row["component"] for row in calls] == ["narrator"] * 2
+    assert first["producer"] == second["producer"] == "narrator"
+    assert first["kind"] == second["kind"] == "snapshot"
+    assert first["previous_call_id"] is second["previous_call_id"] is None
+    assert first["baseline_id"] != second["baseline_id"]
+
+
 def test_prompt_contains_only_the_selected_days_beats(tmp_path):
     _write_ledger(
         tmp_path,

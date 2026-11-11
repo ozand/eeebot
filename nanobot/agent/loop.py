@@ -32,6 +32,7 @@ from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.observability.prompt_provenance import prompt_owner_context
 from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
@@ -225,11 +226,15 @@ class AgentLoop:
 
             tool_defs = self.tools.get_definitions()
 
-            response = await self.provider.chat_with_retry(
-                messages=messages,
-                tools=tool_defs,
-                model=self.model,
-            )
+            if not hasattr(self, "_active_prompt_owner"):
+                self._active_prompt_owner = "interactive:unscoped"
+            self.context._active_prompt_owner = self._active_prompt_owner
+            with prompt_owner_context(self._active_prompt_owner):
+                response = await self.provider.chat_with_retry(
+                    messages=messages,
+                    tools=tool_defs,
+                    model=self.model,
+                )
 
             if response.has_tool_calls:
                 if on_progress:
@@ -448,6 +453,8 @@ class AgentLoop:
                                 else ("cli", msg.chat_id))
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
+            self._active_prompt_owner = f"interactive:{key}"
+            self.context._active_prompt_owner = self._active_prompt_owner
             session = self.sessions.get_or_create(key)
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
@@ -470,6 +477,8 @@ class AgentLoop:
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         key = session_key or msg.session_key
+        self._active_prompt_owner = f"interactive:{key}"
+        self.context._active_prompt_owner = self._active_prompt_owner
         session = self.sessions.get_or_create(key)
 
         # Slash commands

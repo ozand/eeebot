@@ -195,12 +195,25 @@ def _json_object(line: str) -> bool:
     except Exception:
         return False
 
-def build_strategist_prompt(inputs: dict[str, Any], watermark: dict[str, Any]) -> tuple[str, str]:
+def build_strategist_prompt(
+    inputs: dict[str, Any], watermark: dict[str, Any], *,
+    provenance_owner: str | None = None,
+) -> tuple[str, str]:
     # #1729 (ADR-022 rule 2): identity (short form) + roles/strategist.md. No
     # soul and no charter: this role runs under a tight payload cap.
     from nanobot.runtime.role_prompt import build_role_system_prompt_or_refuse
 
     system, _role_fit = build_role_system_prompt_or_refuse("strategist")
+    from nanobot.observability.prompt_provenance import prompt_owner_context, remember_role_assembly
+    if provenance_owner is None:
+        from uuid import uuid4
+
+        provenance_owner = f"strategist-job:{uuid4().hex}"
+    with prompt_owner_context(provenance_owner):
+        remember_role_assembly(
+            system, "strategist", _role_fit["sections"], _role_fit.get("release_id"),
+            owner=provenance_owner,
+        )
     watermark = _cap(watermark, 1_000) if isinstance(watermark, dict) else {}
     payload = {"schema": SCHEMA, "watermark": watermark, "archive": inputs, "output": {
         "schema": SCHEMA, "period_reviewed": "ISO period", "hypotheses": [{
@@ -315,7 +328,10 @@ def _apply(value: dict[str, Any], state_root: Path, max_h: int, max_f: int) -> d
         raise OSError("advisory sidecar write failed")
     return {"hypotheses_appended": appended, "advisories_written": len(advisories), "advisories_recorded": len(advisories)}
 
-def _default_llm(messages: list[dict[str, str]], model: str) -> str:
+def _default_llm(
+    messages: list[dict[str, str]], model: str, *,
+    provenance_owner: str | None = None,
+) -> str:
     from openai import OpenAI
 
     from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
@@ -326,9 +342,27 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> str:
         raise RuntimeError("litellm credentials not configured; check the unit EnvironmentFile chain")
     started = time.monotonic()
     max_retries = _env_int("SELFEVO_STRATEGIST_MAX_RETRIES", DEFAULT_MAX_RETRIES)
-    response = OpenAI(base_url=base_url, api_key=api_key, timeout=120, max_retries=max_retries).chat.completions.create(
-        model=model, messages=messages, max_tokens=2_000, temperature=0.2
+    from nanobot.observability.prompt_provenance import (
+        prompt_owner_context,
+        prompt_request_context,
+        provider_call_context,
+        role_request_for_system,
     )
+
+    if provenance_owner is None:
+        from uuid import uuid4
+
+        provenance_owner = f"strategist-job:{uuid4().hex}"
+    prompt_request = role_request_for_system(
+        str(messages[0].get("content") or ""), owner=provenance_owner,
+        producer_hint="strategist",
+    )
+    with prompt_request_context(prompt_request):
+        with prompt_owner_context(provenance_owner):
+            with provider_call_context(messages) as prompt_call:
+                response = OpenAI(base_url=base_url, api_key=api_key, timeout=120, max_retries=max_retries).chat.completions.create(
+                    model=model, messages=messages, max_tokens=2_000, temperature=0.2
+                )
     choice = response.choices[0]
     content = getattr(getattr(choice, "message", None), "content", "") or ""
     usage_obj = getattr(response, "usage", None)
@@ -336,14 +370,17 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> str:
     # #1374 audit: the strategist runs from its own systemd timer
     # (eeebot-strategist.timer), not inside a bridge cycle, so there is no
     # cycle_id to attribute; "" is the honest value, not a gap.
+    prompt_provenance = prompt_call.provenance if prompt_call is not None else None
     with call_context(None, "strategist"):
         record_llm_call(model=model, duration_ms=(time.monotonic() - started) * 1000, usage=usage,
                         finish_reason=getattr(choice, "finish_reason", ""), retries=0,
+                        prompt_provenance=prompt_provenance,
                         system_prompt_chars=system_chars(messages),
                         context_window=resolve_context_window(model, base_url, api_key=api_key))
         record_llm_prompt(messages=messages, content=content, reasoning_content=None,
                           finish_reason=getattr(choice, "finish_reason", ""), model=model,
-                          prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"])
+                          prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"],
+                          prompt_provenance=prompt_provenance)
     return content
 
 def run_strategist(state_root: Path, repo_root: Path, llm: Callable[[list[dict[str, str]], str], Any] | None = None) -> dict[str, Any]:
@@ -372,9 +409,18 @@ def run_strategist(state_root: Path, repo_root: Path, llm: Callable[[list[dict[s
                              "unavailable_inputs": strategist_inputs.unavailable_inputs(status)})
             _record_decision(state_root, decision)
             return decision
-        system, user = build_strategist_prompt(inputs, old)
+        from uuid import uuid4
+
+        provenance_owner = f"strategist-job:{uuid4().hex}"
+        system, user = build_strategist_prompt(
+            inputs, old, provenance_owner=provenance_owner,
+        )
         decision["prompt_chars"] = len(user)
-        raw = (llm or _default_llm)([{"role": "system", "content": system}, {"role": "user", "content": user}], model)
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        raw = (
+            llm(messages, model)
+            if llm else _default_llm(messages, model, provenance_owner=provenance_owner)
+        )
         if hasattr(raw, "content"):
             raw = raw.content
         text = str(raw or "").strip()
@@ -422,8 +468,13 @@ def inputs_report(state_root: Path, repo_root: Path) -> dict[str, Any]:
     state_root = Path(state_root)
     inputs = collect_inputs(state_root, Path(repo_root))
     status = inputs["inputs_status"]
+    from uuid import uuid4
+
+    provenance_owner = f"strategist-inspect:{uuid4().hex}"
     try:
-        _, user = build_strategist_prompt(inputs, load_watermark(state_root))
+        _, user = build_strategist_prompt(
+            inputs, load_watermark(state_root), provenance_owner=provenance_owner,
+        )
     except (CharterTooLargeError, RolePromptBuildError) as exc:
         return {"timestamp": _now(), "dry_run": True, "inputs_status": status,
                 "prompt_chars": 0, "refused": True,

@@ -452,18 +452,32 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _narrator_system_prompt() -> str:
+def _narrator_system_prompt(provenance_owner: str | None = None) -> str:
     """#1729 (ADR-022 rule 2): the narrator's role text lives in
     ``roles/narrator.md`` at the release root, with identity (short form) and
     soul prepended. ADR-016 rule 1 still holds by construction: the assembler
     reads those release files and nothing else, so it has no reader for any
     channel figure."""
+    from nanobot.observability.prompt_provenance import prompt_owner_context, remember_role_assembly
     from nanobot.runtime.role_prompt import build_role_system_prompt
 
-    return build_role_system_prompt("narrator")[0]
+    if provenance_owner is None:
+        from uuid import uuid4
+
+        provenance_owner = f"narrator-job:{uuid4().hex}"
+    with prompt_owner_context(provenance_owner):
+        system, telemetry = build_role_system_prompt("narrator")
+        remember_role_assembly(
+            system, "narrator", telemetry["sections"], telemetry.get("release_id"),
+            owner=provenance_owner,
+        )
+    return system
 
 
-def _default_narrator_llm(messages: list[dict[str, str]], model: str) -> str:
+def _default_narrator_llm(
+    messages: list[dict[str, str]], model: str, *,
+    provenance_owner: str | None = None,
+) -> str:
     """The strategist's own gateway-client pattern
     (:func:`nanobot.runtime.strategist._default_llm`), reused verbatim:
     ``LITELLM_BASE_URL``/``LITELLM_API_KEY`` from the unit's own
@@ -480,9 +494,27 @@ def _default_narrator_llm(messages: list[dict[str, str]], model: str) -> str:
         raise RuntimeError("litellm credentials not configured; check the unit EnvironmentFile chain")
     started = time.monotonic()
     max_retries = _env_int(NARRATOR_MAX_RETRIES_ENV, DEFAULT_MAX_RETRIES)
-    response = OpenAI(base_url=base_url, api_key=api_key, timeout=120, max_retries=max_retries).chat.completions.create(
-        model=model, messages=messages, max_tokens=2_000, temperature=0.3
+    from nanobot.observability.prompt_provenance import (
+        prompt_owner_context,
+        prompt_request_context,
+        provider_call_context,
+        role_request_for_system,
     )
+
+    if provenance_owner is None:
+        from uuid import uuid4
+
+        provenance_owner = f"narrator-job:{uuid4().hex}"
+    prompt_request = role_request_for_system(
+        str(messages[0].get("content") or ""), owner=provenance_owner,
+        producer_hint="narrator",
+    )
+    with prompt_request_context(prompt_request):
+        with prompt_owner_context(provenance_owner):
+            with provider_call_context(messages) as prompt_call:
+                response = OpenAI(base_url=base_url, api_key=api_key, timeout=120, max_retries=max_retries).chat.completions.create(
+                    model=model, messages=messages, max_tokens=2_000, temperature=0.3
+                )
     choice = response.choices[0]
     content = getattr(getattr(choice, "message", None), "content", "") or ""
     usage_obj = getattr(response, "usage", None)
@@ -490,13 +522,16 @@ def _default_narrator_llm(messages: list[dict[str, str]], model: str) -> str:
     # The narrator runs as its own job (increment 3's future timer, or an
     # operator invocation), not inside a bridge cycle -- no cycle_id to
     # attribute, same reasoning as the strategist's own call site.
+    prompt_provenance = prompt_call.provenance if prompt_call is not None else None
     with call_context(None, "narrator"):
         record_llm_call(model=model, duration_ms=(time.monotonic() - started) * 1000, usage=usage,
                         finish_reason=getattr(choice, "finish_reason", ""), retries=0,
+                        prompt_provenance=prompt_provenance,
                         system_prompt_chars=system_chars(messages))
         record_llm_prompt(messages=messages, content=content, reasoning_content=None,
                           finish_reason=getattr(choice, "finish_reason", ""), model=model,
-                          prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"])
+                          prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"],
+                          prompt_provenance=prompt_provenance)
     return content
 
 
@@ -605,15 +640,23 @@ def run_narrator_job(
             "note": "no beats recorded for this day; no model call made",
         }
         return _finish(state_dir, day, no_beats_result)
+    from uuid import uuid4
+
+    provenance_owner = f"narrator-job:{uuid4().hex}"
     model = _resolve_narrator_model()
     prompt = build_story_prompt(beats, glossary=glossary)
     messages = [
-        {"role": "system", "content": _narrator_system_prompt()},
+        {"role": "system", "content": _narrator_system_prompt(provenance_owner)},
         {"role": "user", "content": prompt},
     ]
     raw: Any = None
     try:
-        raw = (llm or _default_narrator_llm)(messages, model)
+        raw = (
+            llm(messages, model)
+            if llm else _default_narrator_llm(
+                messages, model, provenance_owner=provenance_owner,
+            )
+        )
         narration = _parse_model_output(raw)
         artifact = assemble_story_artifact(beats, narration, prompt=prompt, model_output=raw, glossary=glossary)
         result = {**base, **artifact, "status": "ok", "model": model, "violations": []}

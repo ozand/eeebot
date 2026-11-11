@@ -30,6 +30,12 @@ from typing import Any
 
 from nanobot.agent.block_loader import load_block, trim_lines
 from nanobot.observability.llm_telemetry import system_chars as _system_chars
+from nanobot.observability.prompt_provenance import (
+    SAFE_ROLE_PRODUCERS,
+    PromptSection,
+    current_owner,
+    remember_role_assembly,
+)
 from nanobot.runtime.operator_documents import CHARTER_MAX_CHARS, STATE_TEXT, resolve_charter
 
 
@@ -307,6 +313,36 @@ def build_role_system_prompt(
         "with_charter": charter,
         "with_soul": soul,
     }
+    telemetry["sections"] = [
+        PromptSection(
+            name=name,
+            content=text,
+            # Only fixed role-file bodies in the production role inventory
+            # are approved; identity/soul/charter blocks stay private. A
+            # caller-supplied role override never hashes by section name.
+            evidence_safe=(
+                name == "role" and role in SAFE_ROLE_PRODUCERS
+                and role_text is None
+                and not bool(_meta.get("missing") or _meta.get("truncated"))
+            ),
+        )
+        for name, text, _meta in blocks
+    ]
+    if role_text is not None:
+        telemetry["sections"] = [PromptSection("role_override", role_text, False)]
+    telemetry["producer"] = role
+    telemetry["schema"] = f"role-prompt-v1:{role}"
+    telemetry["release_id"] = None
+    try:
+        from nanobot.runtime.demand import _runtime_release_id
+
+        telemetry["release_id"] = _runtime_release_id() or None
+    except Exception:
+        pass
+    remember_role_assembly(
+        assembled, role, telemetry["sections"], telemetry["release_id"],
+        schema=telemetry["schema"], owner=current_owner(),
+    )
     return assembled, telemetry
 
 

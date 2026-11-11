@@ -47,7 +47,6 @@ from typing import Any, Callable, Iterable
 
 from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
 from nanobot.providers.model_window import resolve_context_window
-from nanobot.runtime.role_prompt import build_role_system_prompt_or_refuse, system_chars
 from nanobot.runtime.lesson_v2 import (
     append_curator_decision,
     atomic_write_yaml,
@@ -65,6 +64,7 @@ from nanobot.runtime.lesson_v2 import (
 )
 from nanobot.runtime.model_registry import resolve_model
 from nanobot.runtime.retirement_candidates import propose_retirement
+from nanobot.runtime.role_prompt import build_role_system_prompt_or_refuse, system_chars
 from nanobot.runtime.schemas import CONTROLLED_LESSON_TAGS
 from nanobot.runtime.state_access import ledger_window
 from nanobot.runtime.trainer_evidence import validate_trainer_citation
@@ -817,12 +817,25 @@ def _quarantine_oversized_head(
     return lessons[index:], quarantined, ""
 
 
-def _messages(lessons: list[dict[str, Any]], index: str, facts: str) -> list[dict[str, str]]:
+def _messages(
+    lessons: list[dict[str, Any]], index: str, facts: str, *,
+    provenance_owner: str | None = None,
+) -> list[dict[str, str]]:
     body = json.dumps(lessons, ensure_ascii=False, separators=(",", ":"))
     if len(body) > MAX_INPUT_CHARS:
         raise ValueError("curator lesson batch was not fitted to complete items")
     # #1729 (ADR-022 rule 2): identity (short form) + soul + roles/curator.md.
     system, _role_fit = build_role_system_prompt_or_refuse("curator")
+    from nanobot.observability.prompt_provenance import prompt_owner_context, remember_role_assembly
+    if provenance_owner is None:
+        from uuid import uuid4
+
+        provenance_owner = f"curator-job:{uuid4().hex}"
+    with prompt_owner_context(provenance_owner):
+        remember_role_assembly(
+            system, "curator", _role_fit["sections"], _role_fit.get("release_id"),
+            owner=provenance_owner,
+        )
     user = f"NEW LESSONS:\n{body}\n\nKB INDEXES:\n{index[:24000]}\n\nCITED ARTIFACT BODIES:\n{facts[:12000]}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -994,7 +1007,10 @@ def _cited_bodies(workspace: Path, decisions: list[dict[str, Any]]) -> str:
     return "\n\n".join(part for part in out if part)
 
 
-def _default_llm(messages: list[dict[str, str]], model: str) -> Any:
+def _default_llm(
+    messages: list[dict[str, str]], model: str, *,
+    provenance_owner: str | None = None,
+) -> Any:
     """Production OpenAI-compatible call; tests should inject ``llm``."""
     from openai import OpenAI
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
@@ -1009,7 +1025,25 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> Any:
         )
     client = OpenAI(base_url=base_url, api_key=api_key, timeout=120)
     started = __import__("time").monotonic()
-    response = client.chat.completions.create(model=model, messages=messages, max_tokens=1200, temperature=0.2)
+    from nanobot.observability.prompt_provenance import (
+        prompt_owner_context,
+        prompt_request_context,
+        provider_call_context,
+        role_request_for_system,
+    )
+
+    if provenance_owner is None:
+        from uuid import uuid4
+
+        provenance_owner = f"curator-job:{uuid4().hex}"
+    prompt_request = role_request_for_system(
+        str(messages[0].get("content") or ""), owner=provenance_owner,
+        producer_hint="curator",
+    )
+    with prompt_request_context(prompt_request):
+        with prompt_owner_context(provenance_owner):
+            with provider_call_context(messages) as prompt_call:
+                response = client.chat.completions.create(model=model, messages=messages, max_tokens=1200, temperature=0.2)
     usage_obj = getattr(response, "usage", None)
     usage = {k: int(getattr(usage_obj, k, 0) or 0) for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
     choice = response.choices[0]
@@ -1017,14 +1051,17 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> Any:
     # #1374 audit: the curator runs from its own systemd timer
     # (eeebot-knowledge-curator.timer), not inside a bridge cycle, so there is
     # no cycle_id to attribute; "" is the honest value, not a gap.
+    prompt_provenance = prompt_call.provenance if prompt_call is not None else None
     with call_context(None, "curator"):
         record_llm_call(model=model, duration_ms=(__import__("time").monotonic() - started) * 1000,
                         usage=usage, finish_reason=getattr(choice, "finish_reason", ""), retries=0,
+                        prompt_provenance=prompt_provenance,
                         system_prompt_chars=system_chars(messages),
                         context_window=resolve_context_window(model, base_url, api_key=api_key))
         record_llm_prompt(messages=messages, content=content, reasoning_content=None,
                           finish_reason=getattr(choice, "finish_reason", ""), model=model,
-                          prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"])
+                          prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"],
+                          prompt_provenance=prompt_provenance)
     return content
 
 
@@ -2721,17 +2758,25 @@ def run_curation(
             "last_success_ts": _now(), **result["stages"],
         })
         return result
+    from uuid import uuid4
+
+    provenance_owner = f"curator-job:{uuid4().hex}"
     try:
         model = resolve_model("curator", strip_openai=True)
         try:
-            messages = _messages(entries, _read_index(workspace), "")
+            messages = _messages(
+                entries, _read_index(workspace), "", provenance_owner=provenance_owner,
+            )
         except Exception as exc:
             _append_jsonl(state_dir / "curator" / "errors.jsonl", {
                 "timestamp": _now(), "error": f"role_prompt_refused: {exc}",
             })
             return {"ok": False, "processed": 0, "writes": 0, "staged": [],
                     "error": f"role_prompt_refused: {exc}"}
-        result = llm(messages, model) if llm else _default_llm(messages, model)
+        result = (
+            llm(messages, model)
+            if llm else _default_llm(messages, model, provenance_owner=provenance_owner)
+        )
         if inspect.isawaitable(result):
             result = asyncio.run(result)
         decisions, diag = _parse_output_with_diag(result)
@@ -2749,14 +2794,20 @@ def run_curation(
         if facts:
             caller = llm or _default_llm
             try:
-                retry_messages = _messages(entries, _read_index(workspace), facts)
+                retry_messages = _messages(
+                    entries, _read_index(workspace), facts,
+                    provenance_owner=provenance_owner,
+                )
             except Exception as exc:
                 _append_jsonl(state_dir / "curator" / "errors.jsonl", {
                     "timestamp": _now(), "error": f"role_prompt_refused: {exc}",
                 })
                 return {"ok": False, "processed": 0, "writes": 0, "staged": [],
                         "error": f"role_prompt_refused: {exc}"}
-            result = caller(retry_messages, model)
+            result = (
+                caller(retry_messages, model)
+                if llm else caller(retry_messages, model, provenance_owner=provenance_owner)
+            )
             if inspect.isawaitable(result):
                 result = asyncio.run(result)
             decisions, diag = _parse_output_with_diag(result)

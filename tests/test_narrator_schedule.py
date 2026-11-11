@@ -276,7 +276,7 @@ def test_main_runs_the_job_and_reports_the_day(tmp_path: Path, capsys):
 def test_main_exits_zero_for_an_ok_narration(tmp_path: Path, monkeypatch, capsys):
     _ledger(tmp_path, "2026-09-19", 1)
 
-    def _compliant(messages, model):
+    def _compliant(messages, model, *, provenance_owner: str | None = None):
         beats = json.loads(messages[1]["content"])["beats"]
         return json.dumps([
             {"beat_id": b["beat_id"], "text": "task 1 worked", "sign": b["sign"], "terms": []}
@@ -310,7 +310,7 @@ def test_main_exits_zero_when_the_content_gate_rejects_a_completed_run(tmp_path:
     the unit ``ActiveState=active`` / ``Result=success``, not ``failed``."""
     _ledger(tmp_path, "2026-09-19", 3)
 
-    def _untraceable(messages, model):
+    def _untraceable(messages, model, *, provenance_owner: str | None = None):
         return json.dumps([{"beat_id": "not-a-real-beat", "text": "x", "sign": "worked", "terms": []}])
 
     monkeypatch.setattr("scripts.journal_story._default_narrator_llm", _untraceable)
@@ -366,7 +366,7 @@ def test_recorded_2026_09_20_replay_gate_rejection_leaves_unit_successful(tmp_pa
     report this as a failure -- the machine and the gate both worked."""
     _write_2026_09_20_ledger(tmp_path)
 
-    def _narrator_with_one_contradiction(messages, model):
+    def _narrator_with_one_contradiction(messages, model, *, provenance_owner: str | None = None):
         beats = {b["beat_id"]: b for b in json.loads(messages[1]["content"])["beats"]}
         narration = []
         for beat_id, beat in beats.items():
@@ -394,7 +394,7 @@ def test_recorded_2026_09_20_replay_gateway_outage_leaves_unit_failed(tmp_path: 
     machine itself is broken this time, and only this case may exit non-zero."""
     _write_2026_09_20_ledger(tmp_path)
 
-    def _dead_gateway(messages, model):
+    def _dead_gateway(messages, model, *, provenance_owner: str | None = None):
         raise RuntimeError("litellm credentials not configured; check the unit EnvironmentFile chain")
 
     monkeypatch.setattr("scripts.journal_story._default_narrator_llm", _dead_gateway)

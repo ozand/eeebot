@@ -1,6 +1,7 @@
 """Base LLM provider interface."""
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -17,6 +18,11 @@ from nanobot.observability.llm_telemetry import (
     record_llm_failure,
     record_llm_prompt,
     system_chars,
+)
+from nanobot.observability.prompt_provenance import (
+    PromptRequest,
+    prompt_request_context,
+    provider_call_context,
 )
 from nanobot.providers.model_window import resolve_context_window
 
@@ -280,6 +286,8 @@ class LLMProvider(ABC):
         call_start_utc = datetime.now(timezone.utc)
         resolved_model = model or self.get_default_model()
 
+        _active_prompt_provenance: dict[str, Any] | None = None
+
         def _record_failure(response: LLMResponse) -> None:
             status = response.usage.get("_http_status")
             retry_after = response.usage.get("_retry_after_s")
@@ -304,6 +312,7 @@ class LLMProvider(ABC):
                 component=current_component() or "executor", requested_model=resolved_model,
                 error_type=error_type, http_status=status, retry_after_s=retry_after,
                 ts=call_start_utc.isoformat().replace("+00:00", "Z"),
+                prompt_provenance=_active_prompt_provenance,
             )
 
         def _record(response: LLMResponse, retries: int, sent_messages: list[dict[str, Any]]) -> LLMResponse:
@@ -338,6 +347,7 @@ class LLMProvider(ABC):
                     # budget was raised to 35,000 (#1753) was the one not
                     # measured.
                     system_prompt_chars=system_chars(sent_messages),
+                    prompt_provenance=_active_prompt_provenance,
                 )
             except Exception as exc:
                 logging.getLogger(__name__).warning("llm call telemetry recording failed: %s", exc)
@@ -352,38 +362,57 @@ class LLMProvider(ABC):
                 model=resolved_model,
                 prompt_tokens=response.usage.get("prompt_tokens"),
                 completion_tokens=response.usage.get("completion_tokens"),
+                prompt_provenance=_active_prompt_provenance,
             )
             return response
 
-        for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
-            response = await self._safe_chat(**kw)
+        from nanobot.observability.prompt_provenance import (
+            consume_request_for_system,
+            current_owner,
+        )
+        actual_system = next((str(message.get("content") or "") for message in messages if message.get("role") == "system"), "")
+        request = consume_request_for_system(actual_system, current_owner())
+        if not isinstance(request, PromptRequest):
+            request = None
+        request_context = prompt_request_context(request) if request is not None else contextlib.nullcontext()
+        with request_context:
+            with provider_call_context(messages) as prompt_call:
+                _active_prompt_provenance = prompt_call.provenance if prompt_call is not None else None
+                for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
+                    response = await self._safe_chat(**kw)
+                    from nanobot.observability.prompt_provenance import current_provenance
+                    _active_prompt_provenance = current_provenance() or _active_prompt_provenance
 
-            if response.finish_reason == "error":
-                _record_failure(response)
-            if response.finish_reason != "error":
-                return _record(response, attempt - 1, messages)
-
-            if not self._is_transient_error(response.content):
-                stripped = self._strip_image_content(messages)
-                if stripped is not None:
-                    logger.warning("Non-transient LLM error with image content, retrying without images")
-                    response = await self._safe_chat(**{**kw, "messages": stripped})
                     if response.finish_reason == "error":
                         _record_failure(response)
-                    return _record(response, attempt - 1, stripped)
-                return _record(response, attempt - 1, messages)
+                    if response.finish_reason != "error":
+                        return _record(response, attempt - 1, messages)
 
-            logger.warning(
-                "LLM transient error (attempt {}/{}), retrying in {}s: {}",
-                attempt, len(self._CHAT_RETRY_DELAYS), delay,
-                (response.content or "")[:120].lower(),
-            )
-            await asyncio.sleep(delay)
+                    if not self._is_transient_error(response.content):
+                        stripped = self._strip_image_content(messages)
+                        if stripped is not None:
+                            logger.warning("Non-transient LLM error with image content, retrying without images")
+                            response = await self._safe_chat(**{**kw, "messages": stripped})
+                            from nanobot.observability.prompt_provenance import current_provenance
+                            _active_prompt_provenance = current_provenance() or _active_prompt_provenance
+                            if response.finish_reason == "error":
+                                _record_failure(response)
+                            return _record(response, attempt - 1, stripped)
+                        return _record(response, attempt - 1, messages)
 
-        response = await self._safe_chat(**kw)
-        if response.finish_reason == "error":
-            _record_failure(response)
-        return _record(response, len(self._CHAT_RETRY_DELAYS), messages)
+                    logger.warning(
+                        "LLM transient error (attempt {}/{}), retrying in {}s: {}",
+                        attempt, len(self._CHAT_RETRY_DELAYS), delay,
+                        (response.content or "")[:120].lower(),
+                    )
+                    await asyncio.sleep(delay)
+
+                response = await self._safe_chat(**kw)
+                from nanobot.observability.prompt_provenance import current_provenance
+                _active_prompt_provenance = current_provenance() or _active_prompt_provenance
+                if response.finish_reason == "error":
+                    _record_failure(response)
+                return _record(response, len(self._CHAT_RETRY_DELAYS), messages)
 
     @abstractmethod
     def get_default_model(self) -> str:

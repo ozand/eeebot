@@ -14,20 +14,26 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from nanobot.runtime.role_prompt import (
-    CharterTooLargeError,
-    RolePromptBuildError,
-    build_role_system_prompt_or_refuse,
-    system_chars,
-)
 from nanobot.observability.llm_telemetry import (
     MAX_LLM_PROMPT_PAYLOAD_BYTES,
     call_context,
     record_llm_call,
     record_llm_prompt,
 )
+from nanobot.observability.prompt_provenance import (
+    prompt_owner_context,
+    prompt_request_context,
+    provider_call_context,
+    role_request_for_system,
+)
 from nanobot.providers.model_window import resolve_context_window
 from nanobot.runtime.model_registry import resolve_model
+from nanobot.runtime.role_prompt import (
+    CharterTooLargeError,
+    RolePromptBuildError,
+    build_role_system_prompt_or_refuse,
+    system_chars,
+)
 
 _MAX_CYCLES = 3
 _MAX_RECOMMENDATIONS = 3
@@ -414,7 +420,10 @@ def _fit_note(fit: dict[str, Any], unit: str) -> str:
     return f" ({'; '.join(parts)})" if parts else ""
 
 
-def _build_prompt(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[str, Any]], journal: list[dict[str, Any]]) -> tuple[list[dict[str, str]], dict[str, Any]]:
+def _build_prompt(
+    cycle_id: str, transcript: dict[str, Any], ledger: list[dict[str, Any]],
+    journal: list[dict[str, Any]], *, provenance_owner: str | None = None,
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
     """The reflector prompt plus an ``input_fit`` record of what each section kept and dropped (#1314).
 
     Every section is complete JSON: inputs are bounded before serialization,
@@ -425,7 +434,11 @@ def _build_prompt(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[s
     # #1729 (ADR-022 rule 2): identity (short form) + roles/reflector.md. No
     # soul and no charter: this role runs under a tight input cap, so its
     # growth is bounded by the first paragraph of IDENTITY.md.
-    system, _role_fit = build_role_system_prompt_or_refuse("reflector")
+    from nanobot.observability.prompt_provenance import prompt_owner_context
+    provenance_owner = provenance_owner or f"reflector:{cycle_id}"
+    with prompt_owner_context(provenance_owner):
+        system, _role_fit = build_role_system_prompt_or_refuse("reflector")
+    _role_fit["sections"] = tuple(_role_fit.get("sections") or ())
     transcript_kept, transcript_fit = _fit_transcript(transcript, _MAX_TRANSCRIPT_CHARS)
     protect = 1 if ledger and isinstance(ledger[0], dict) and ledger[0].get("phase") == "proposed" else 0
     ledger_kept, ledger_fit = _fit_rows(ledger, _MAX_LEDGER_CHARS, protect_head=protect)
@@ -450,6 +463,13 @@ def _build_prompt(cycle_id: str, transcript: dict[str, Any], ledger: list[dict[s
         "journal": journal_fit,
     }
     user = f"CYCLE_ID: {cycle_id}\n" + "\n".join(sections)
+    from nanobot.observability.prompt_provenance import remember_role_assembly
+
+    with prompt_owner_context(provenance_owner):
+        remember_role_assembly(
+            system, "reflector", _role_fit["sections"], _role_fit.get("release_id"),
+            owner=provenance_owner,
+        )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}], input_fit
 
 
@@ -530,23 +550,36 @@ def _parse_output(value: Any, cycle_id: str) -> tuple[dict[str, Any] | None, str
     return result, "fenced_json" if parsed_from_fence else "ok"
 
 
-def _default_llm(messages: list[dict[str, str]], model: str, cycle_id: str) -> str:
+def _default_llm(
+    messages: list[dict[str, str]], model: str, cycle_id: str, *,
+    provenance_owner: str | None = None,
+) -> str:
     from openai import OpenAI
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
     api_key = os.environ.get("LITELLM_API_KEY", "").strip()
     if not base_url or not api_key:
         raise RuntimeError("litellm credentials not configured")
     started = time.monotonic()
-    response = OpenAI(base_url=base_url, api_key=api_key, timeout=120).chat.completions.create(model=model, messages=messages, max_tokens=1600, temperature=0.2)
+    provenance_owner = provenance_owner or f"reflector:{cycle_id}"
+    prompt_request = role_request_for_system(
+        str(messages[0].get("content") or ""), owner=provenance_owner,
+        producer_hint="reflector",
+    )
+    with prompt_request_context(prompt_request):
+        with prompt_owner_context(provenance_owner):
+            with provider_call_context(messages) as prompt_call:
+                response = OpenAI(base_url=base_url, api_key=api_key, timeout=120).chat.completions.create(model=model, messages=messages, max_tokens=1600, temperature=0.2)
     choice = response.choices[0]
     content = getattr(getattr(choice, "message", None), "content", "") or ""
     usage_obj = getattr(response, "usage", None)
     usage = {key: int(getattr(usage_obj, key, 0) or 0) for key in ("prompt_tokens", "completion_tokens", "total_tokens")}
+    prompt_provenance = prompt_call.provenance if prompt_call is not None else None
     with call_context(cycle_id, "reflector"):
         record_llm_call(model=model, duration_ms=(time.monotonic() - started) * 1000, usage=usage, finish_reason=getattr(choice, "finish_reason", ""), retries=0,
+                        prompt_provenance=prompt_provenance,
                         system_prompt_chars=system_chars(messages),
                         context_window=resolve_context_window(model, base_url, api_key=api_key))
-        record_llm_prompt(messages=messages, content=content, reasoning_content=None, finish_reason=getattr(choice, "finish_reason", ""), model=model, prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"])
+        record_llm_prompt(messages=messages, content=content, reasoning_content=None, finish_reason=getattr(choice, "finish_reason", ""), model=model, prompt_tokens=usage["prompt_tokens"], completion_tokens=usage["completion_tokens"], prompt_provenance=prompt_provenance)
     return content
 
 
@@ -649,6 +682,11 @@ def run_reflector(
         or str(row.get("cycle_id") or "") in prompts
     ]
     result["candidates"] = len(candidates)
+    # One owner window spans the prompts dispatched during this job; the
+    # telemetry cycle_id remains each reflected cycle, not this opaque owner.
+    from uuid import uuid4
+
+    provenance_owner = f"reflector-job:{uuid4().hex}"
     proposed = {str(row.get("cycle_id")): row for row in rows if row.get("phase") == "proposed"}
     consecutive_errs = 0
     for outcome in candidates:
@@ -669,11 +707,19 @@ def run_reflector(
         parse_reason = "not_attempted"
         input_fit: dict[str, Any] = {}
         try:
-            messages, input_fit = _build_prompt(cycle_id, transcript, context_rows, _journal_tail(state_dir))
+            messages, input_fit = _build_prompt(
+                cycle_id, transcript, context_rows, _journal_tail(state_dir),
+                provenance_owner=provenance_owner,
+            )
             if input_fit["status"] != "complete":
                 result["input_truncated"] += 1
             model = resolve_model("reflector", strip_openai=True)
-            response = llm(messages, model) if llm else _default_llm(messages, model, cycle_id)
+            response = (
+                llm(messages, model)
+                if llm else _default_llm(
+                    messages, model, cycle_id, provenance_owner=provenance_owner,
+                )
+            )
             parsed, parse_reason = _parse_output(response, cycle_id)
             if parsed is None:
                 raise ValueError(f"malformed reflector output: {parse_reason}")

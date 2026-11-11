@@ -3421,6 +3421,8 @@ async def _run_planning_session(
 
     try:
         role_text, _role_meta = role_prompt.build_role_system_prompt_or_refuse('planner', release_root=RELEASE_ROOT)
+        _planner_role_sections = tuple(_role_meta.get("sections") or ())
+        _planner_role_release_id = _role_meta.get("release_id")
     except (role_prompt.CharterTooLargeError, role_prompt.RolePromptBuildError) as exc:
         return _fail('refused', f'role prompt assembly failed: {exc}')
     except Exception as exc:
@@ -3611,6 +3613,8 @@ async def _run_planning_session(
             max_iterations=20,
             release_root=RELEASE_ROOT,
             role_system_prompt=role_text,
+            role_prompt_sections=_planner_role_sections,
+            role_prompt_release_id=_planner_role_release_id,
             telemetry_component='planner',
             telemetry_cycle_id=cycle_id,
             wall_deadline=_effective_wall_deadline,

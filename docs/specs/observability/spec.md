@@ -134,6 +134,33 @@ cycle IDs, mismatches, required fields, invalid kinds, and empty details.
 The reflector unit permits writes to the state tree, matching the strategist,
 so `state/llm_calls` recording is possible while systemd hardening remains intact.
 
+### Named system-prompt provenance (#2179, ADR-057)
+
+Selected production prompt builders preserve their existing emitted bytes and
+section order while retaining a transient ordered section representation.
+Optional `prompt_provenance` on existing LLM call, prompt, and bounded failure
+records correlates a logical provider invocation with an opaque `call_id`, a
+bounded in-memory snapshot/delta baseline, producer/schema, and predecessor
+call ID. The assembly metadata remains available for repeated dispatches within
+the same explicitly identified owner (including proposer fallback), while
+assemblies from another owner cannot be reused solely because system bytes
+match. Provider calls without an explicit owner use an isolated identity rather
+than a shared `unknown` baseline. A reflector job uses one owner window across
+its selected cycle prompts while preserving each cycle ID in ordinary telemetry;
+a later job invocation starts a fresh baseline. Curator fact-retry batches share
+the owner within one job, while later curator runs, strategist invocations, and
+narrator invocations get fresh owner windows. Goal review and demand-mode proposal
+are verified at their production entrypoints through fake SDK dispatch, and the
+interactive AgentLoop is exercised through message assembly and provider retry.
+Only explicitly allowlisted fixed role-file bodies may contribute UTF-8 SHA-256
+and character length; identity,
+soul, goals, workspace, memory, task, runtime, and unknown sections disclose
+no fingerprints or structure.
+Missing baselines and unavailable calls are not inferred as empty prompts.
+This is process-local comparison evidence, not authentication or proof of
+provider receipt. It adds no public/dashboard projection, cycle-ledger row, or
+prompt capture; current prompt capture behavior remains unchanged.
+
 ## Scenarios
 
 ### Scenario: operator answers all seven questions from state
