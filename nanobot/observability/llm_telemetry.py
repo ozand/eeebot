@@ -28,22 +28,26 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import ctypes
 import gzip
+import io
 import json
 import logging
 import math
 import os
 import re
 import shutil
+import stat
 import time
 from contextvars import ContextVar, Token
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from itertools import count
 from pathlib import Path
 from typing import Any, Iterator
 
 _CALL_CONTEXT: ContextVar[dict[str, str] | None] = ContextVar("_llm_call_context", default=None)
 _CALL_SEQ: ContextVar[int | None] = ContextVar("_llm_call_seq", default=None)
+_TELEMETRY_ROOT: ContextVar[Path | None] = ContextVar("_llm_telemetry_root", default=None)
 
 # Monotonic within-process sequence per cycle_id, used to order prompt
 # captures belonging to the same self-evolving cycle. Process-local is
@@ -68,7 +72,7 @@ def _redact_secrets(text: str) -> str:
     return text
 
 
-def set_call_context(cycle_id: str | None, component: str | None) -> tuple[Token, Token]:
+def set_call_context(cycle_id: str | None, component: str | None, attempt_id: str | None = None) -> tuple[Token, Token]:
     """Set the current (cycle_id, component) attribution context.
 
     Returns a token that must be passed to :func:`reset_call_context` to
@@ -78,7 +82,11 @@ def set_call_context(cycle_id: str | None, component: str | None) -> tuple[Token
     # A cached duration sequence belongs only to the active call context; never
     # let it leak into a later prompt-only call after this boundary.
     seq_token = _CALL_SEQ.set(None)
-    context_token = _CALL_CONTEXT.set({"cycle_id": cycle_id or "", "component": component or ""})
+    context_token = _CALL_CONTEXT.set({
+        "cycle_id": cycle_id or "",
+        "component": component or "",
+        "attempt_id": attempt_id or "",
+    })
     return context_token, seq_token
 
 
@@ -123,23 +131,389 @@ def current_cycle_id(component: str | None = None) -> str:
 
 
 @contextlib.contextmanager
-def call_context(cycle_id: str | None, component: str | None) -> Iterator[None]:
+def call_context(cycle_id: str | None, component: str | None, attempt_id: str | None = None) -> Iterator[None]:
     """Context manager form of :func:`set_call_context` / :func:`reset_call_context`."""
-    token = set_call_context(cycle_id, component)
+    token = set_call_context(cycle_id, component, attempt_id)
     try:
         yield
     finally:
         reset_call_context(token)
 
 
-def _llm_calls_dir() -> Path:
+@contextlib.contextmanager
+def telemetry_context(cycle_id: str | None, component: str | None, *, attempt_id: str | None = None, root: Path | None = None) -> Iterator[None]:
+    """Bind call attribution and one shared telemetry root for a bounded operation."""
+    token = set_call_context(cycle_id, component, attempt_id)
+    root_token = _TELEMETRY_ROOT.set(Path(root) if root is not None else resolve_llm_calls_dir())
+    try:
+        yield
+    finally:
+        _TELEMETRY_ROOT.reset(root_token)
+        reset_call_context(token)
+
+
+def resolve_llm_calls_dir(state_dir: Path | None = None) -> Path:
     env_dir = os.environ.get("LLM_CALLS_DIR", "").strip()
     if env_dir:
         return Path(env_dir)
-    state_dir = os.environ.get("STATE_DIR", "").strip()
-    if state_dir:
+    if state_dir is not None:
         return Path(state_dir) / "llm_calls"
+    state_env = os.environ.get("STATE_DIR", "").strip()
+    if state_env:
+        return Path(state_env) / "llm_calls"
     return Path.home() / ".nanobot" / "llm_calls"
+
+
+def _llm_calls_dir() -> Path:
+    return _TELEMETRY_ROOT.get() or resolve_llm_calls_dir()
+
+
+def _attempt_resolution_path(root: Path, cycle_id: str) -> Path:
+    import hashlib
+
+    return Path(root) / "prompts" / "attempt_resolutions" / f"{hashlib.sha256(cycle_id.encode('utf-8')).hexdigest()}.json"
+
+
+def _read_prompt_rows(path: Path):
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8") as stream:
+        yield from _decode_prompt_rows(stream)
+
+
+def _decode_prompt_rows(stream):
+    for line in stream:
+        try:
+            value = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(value, dict):
+            yield value
+
+
+@contextlib.contextmanager
+def _open_prompt_file(root: Path, name: str):
+    """Open one daily prompt through verified directory/file handles."""
+    if os.name == "nt":
+        yield from _open_prompt_file_windows(root, name)
+        return
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    root_fd = os.open(root, dir_flags)
+    try:
+        prompts_fd = os.open("prompts", dir_flags, dir_fd=root_fd)
+        try:
+            fd = os.open(name, file_flags, dir_fd=prompts_fd)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise OSError("prompt is not a regular file")
+                with os.fdopen(fd, "rb") as stream:
+                    fd = -1
+                    yield stream
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+        finally:
+            os.close(prompts_fd)
+    finally:
+        os.close(root_fd)
+
+
+def _open_prompt_file_windows(root: Path, name: str):
+    """Open validated children relative to Windows directory handles."""
+    from ctypes import wintypes
+    import msvcrt
+
+    class _UnicodeString(ctypes.Structure):
+        _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT), ("Buffer", wintypes.LPWSTR)]
+
+    class _ObjectAttributes(ctypes.Structure):
+        _fields_ = [("Length", wintypes.ULONG), ("RootDirectory", wintypes.HANDLE),
+                    ("ObjectName", ctypes.POINTER(_UnicodeString)), ("Attributes", wintypes.ULONG),
+                    ("SecurityDescriptor", ctypes.c_void_p), ("SecurityQualityOfService", ctypes.c_void_p)]
+
+    class _IoStatusBlock(ctypes.Structure):
+        _fields_ = [("Status", ctypes.c_void_p), ("Information", ctypes.c_size_t)]
+
+    class _FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = [("FileAttributes", wintypes.DWORD), ("ReparseTag", wintypes.DWORD)]
+
+    class _FileStandardInfo(ctypes.Structure):
+        _fields_ = [("AllocationSize", ctypes.c_longlong), ("EndOfFile", ctypes.c_longlong),
+                    ("NumberOfLinks", wintypes.DWORD), ("DeletePending", wintypes.BOOLEAN),
+                    ("Directory", wintypes.BOOLEAN)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                   ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel.GetFileType.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD,
+                                   ctypes.POINTER(_ObjectAttributes), ctypes.POINTER(_IoStatusBlock),
+                                   ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG,
+                                   wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
+    ntdll.NtCreateFile.restype = ctypes.c_long
+
+    def _check_handle(handle, *, directory):
+        if handle == wintypes.HANDLE(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        attrs = _FileAttributeTagInfo()
+        standard = _FileStandardInfo()
+        if (not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(attrs), ctypes.sizeof(attrs))
+                or not kernel.GetFileInformationByHandleEx(handle, 1, ctypes.byref(standard), ctypes.sizeof(standard))):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if (attrs.FileAttributes & 0x400 or bool(standard.Directory) != directory
+                or (not directory and kernel.GetFileType(handle) != 1)):
+            raise OSError("prompt path contains a reparse point or unexpected file type")
+
+    def _open_relative(parent, component, *, directory):
+        name_buf = ctypes.create_unicode_buffer(component)
+        name = _UnicodeString(
+            len(component.encode("utf-16-le")), len(component.encode("utf-16-le")) + 2,
+            ctypes.cast(name_buf, wintypes.LPWSTR),
+        )
+        oa = _ObjectAttributes(ctypes.sizeof(_ObjectAttributes), parent, ctypes.pointer(name), 0x40, None, None)
+        iosb = _IoStatusBlock()
+        handle = wintypes.HANDLE()
+        options = 0x20 | 0x00200000 | (0x1 if directory else 0x40)
+        status = ntdll.NtCreateFile(ctypes.byref(handle), 0x00120089, ctypes.byref(oa), ctypes.byref(iosb),
+                                    None, 0x80, 0x7, 1, options, None, 0)
+        if status < 0:
+            code = status & 0xffffffff
+            if code in {0xC0000034, 0xC000003A}:
+                raise FileNotFoundError(component)
+            if code == 0xC0000022:
+                raise PermissionError(component)
+            raise OSError(f"NtCreateFile failed: 0x{code:08x}")
+        try:
+            _check_handle(handle, directory=directory)
+        except Exception:
+            kernel.CloseHandle(handle)
+            raise
+        return handle
+
+    root_handle = kernel.CreateFileW(str(Path(root).absolute()), 0x80000000, 0x7, None, 3,
+                                     0x02000000 | 0x00200000, None)
+    try:
+        _check_handle(root_handle, directory=True)
+    except Exception:
+        kernel.CloseHandle(root_handle)
+        raise
+    prompts_handle = file_handle = None
+    try:
+        prompts_handle = _open_relative(root_handle, "prompts", directory=True)
+        file_handle = _open_relative(prompts_handle, name, directory=False)
+        fd = msvcrt.open_osfhandle(ctypes.cast(file_handle, ctypes.c_void_p).value, os.O_RDONLY | os.O_BINARY)
+        file_handle = None  # fd now owns the native handle
+        with os.fdopen(fd, "rb") as stream:
+            yield stream
+    finally:
+        if file_handle is not None:
+            kernel.CloseHandle(file_handle)
+        if prompts_handle is not None:
+            kernel.CloseHandle(prompts_handle)
+        kernel.CloseHandle(root_handle)
+
+
+def _remove_authoritative_attempt(path: Path) -> bool:
+    if path.is_symlink():
+        return False
+    try:
+        path.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def write_authoritative_attempt(root: Path, cycle_id: str, attempt_id: str) -> bool:
+    """Persist one private, prompt-retention-bounded authoritative attempt record."""
+    if not cycle_id or not attempt_id or len(cycle_id) > 256 or len(attempt_id) > 128:
+        return False
+    prompts_dir = Path(root) / "prompts"
+    if prompts_dir.is_symlink() or not prompts_dir.is_dir():
+        return False
+    selected: dict[str, Any] | None = None
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=_prompts_retention_days())
+    for path in sorted((*prompts_dir.glob("*.jsonl"), *prompts_dir.glob("*.jsonl.gz"))):
+        day = _day_str(path.name)
+        if day and datetime.strptime(day, "%Y-%m-%d").date() < cutoff:
+            continue
+        if path.is_symlink():
+            return False
+        try:
+            for row in _read_prompt_rows(path):
+                if row.get("cycle_id") != cycle_id or row.get("attempt_id") != attempt_id:
+                    continue
+                if (row.get("component") != "executor" or type(row.get("seq")) is not int
+                        or row["seq"] < 0):
+                    return False
+                if selected is not None and row.get("seq") == selected.get("seq"):
+                    return False
+                if selected is None or row["seq"] > selected["seq"]:
+                    selected = row
+        except (OSError, ValueError, UnicodeError):
+            return False
+    if selected is None:
+        return False
+    prompt_ts = str(selected.get("ts") or "")
+    try:
+        day = datetime.fromisoformat(prompt_ts.replace("Z", "+00:00")).astimezone(timezone.utc).date()
+    except ValueError:
+        return False
+    expires = datetime.combine(day + timedelta(days=_prompts_retention_days()), datetime.min.time(), tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) >= expires:
+        return False
+    payload = {
+        "schema": "authoritative-attempt-v1", "cycle_id": cycle_id,
+        "attempt_id": attempt_id, "prompt_seq": selected["seq"],
+        "prompt_ts": prompt_ts,
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "expires_at": expires.isoformat().replace("+00:00", "Z"),
+    }
+    path = _attempt_resolution_path(Path(root), cycle_id)
+    if Path(root).is_symlink() or prompts_dir.is_symlink() or path.parent.is_symlink():
+        return False
+    if path.exists() and path.is_symlink():
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name == "posix":
+            os.chmod(path.parent, 0o700)
+        fd, temporary = __import__("tempfile").mkstemp(prefix=".attempt.", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, separators=(",", ":"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary)
+        if os.name == "posix":
+            os.chmod(path, 0o600)
+        return True
+    except OSError:
+        return False
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate metadata field")
+        value[key] = item
+    return value
+
+
+def _aware_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def read_authoritative_attempt(
+    root: Path, cycle_id: str, *, now: datetime | None = None,
+    invalid: list[str] | None = None,
+) -> dict[str, Any] | None:
+    path = _attempt_resolution_path(Path(root), cycle_id)
+    try:
+        if Path(root).is_symlink() or (Path(root) / "prompts").is_symlink():
+            return None
+        if path.parent.is_symlink() or path.is_symlink():
+            _remove_authoritative_attempt(path)
+            return None
+        try:
+            size = path.stat().st_size
+            if size > 2048:
+                _remove_authoritative_attempt(path)
+                return None
+            sidecar_text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return None
+        value = json.loads(sidecar_text, object_pairs_hook=_unique_json_object)
+        required = {"schema", "cycle_id", "attempt_id", "prompt_seq", "prompt_ts", "created_at", "expires_at"}
+        if (not isinstance(value, dict) or set(value) != required
+                or value["schema"] != "authoritative-attempt-v1"
+                or value["cycle_id"] != cycle_id or not isinstance(value["attempt_id"], str)
+                or not value["attempt_id"] or len(value["attempt_id"]) > 128
+                or type(value["prompt_seq"]) is not int or value["prompt_seq"] < 0
+                or not isinstance(value["prompt_ts"], str) or not isinstance(value["created_at"], str)
+                or not isinstance(value["expires_at"], str)):
+            with contextlib.suppress(OSError):
+                path.unlink()
+            return None
+        prompt_ts = _aware_timestamp(value["prompt_ts"])
+        created_at = _aware_timestamp(value["created_at"])
+        expiry = _aware_timestamp(value["expires_at"])
+        if prompt_ts is None or created_at is None or expiry is None:
+            if invalid is not None:
+                invalid.append("malformed")
+            _remove_authoritative_attempt(path)
+            return None
+        expected_expiry = datetime.combine(
+            prompt_ts.date() + timedelta(days=_prompts_retention_days()),
+            datetime.min.time(), tzinfo=timezone.utc,
+        )
+        if created_at < prompt_ts or created_at >= expected_expiry or expiry != expected_expiry:
+            _remove_authoritative_attempt(path)
+            return None
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None or current.utcoffset() is None:
+            _remove_authoritative_attempt(path)
+            return None
+        current = current.astimezone(timezone.utc)
+        if current >= expiry:
+            if invalid is not None:
+                invalid.append("expired")
+            _remove_authoritative_attempt(path)
+            return None
+        prompts_dir = Path(root) / "prompts"
+        if prompts_dir.is_symlink():
+            _remove_authoritative_attempt(path)
+            return None
+        day = prompt_ts.astimezone(timezone.utc).date().isoformat()
+        prompt_found = False
+        for prompt_file in (prompts_dir / f"{day}.jsonl", prompts_dir / f"{day}.jsonl.gz"):
+            if prompt_file.is_symlink():
+                return None
+            try:
+                with _open_prompt_file(Path(root), prompt_file.name) as binary_stream:
+                    if prompt_file.suffix == ".gz":
+                        binary_stream = gzip.GzipFile(fileobj=binary_stream)
+                    text_stream = io.TextIOWrapper(binary_stream, encoding="utf-8")
+                    for row in _decode_prompt_rows(text_stream):
+                        if (row.get("cycle_id") == cycle_id and row.get("attempt_id") == value["attempt_id"]
+                                and row.get("component") == "executor" and row.get("seq") == value["prompt_seq"]
+                                and row.get("ts") == value["prompt_ts"]):
+                            prompt_found = True
+                            break
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError, UnicodeError):
+                return None
+        if not prompt_found:
+            if invalid is not None:
+                invalid.append("prompt_missing")
+            _remove_authoritative_attempt(path)
+            return None
+        return value
+    except OSError:
+        return None
+    except (ValueError, UnicodeError, json.JSONDecodeError):
+        if invalid is not None:
+            invalid.append("malformed")
+        _remove_authoritative_attempt(path)
+        return None
 
 
 def record_llm_failure(
@@ -331,12 +705,12 @@ def _day_str(name: str) -> str | None:
     return candidate
 
 
-def _rotate_and_prune(prompts_dir: Path, today: str, retention_days: int) -> None:
-    """Gzip previous-day plain files and prune ``.jsonl.gz`` older than retention.
-
-    Best-effort: any single file's failure is swallowed so it can't block the
-    others or the caller.
-    """
+def _rotate_and_prune(
+    prompts_dir: Path, today: str, retention_days: int, *, prune_resolutions: bool = True,
+) -> None:
+    """Rotate prompt files and synchronously prune dependent attempt sidecars."""
+    if prompts_dir.is_symlink():
+        return
     for path in prompts_dir.glob("*.jsonl"):
         day = _day_str(path.name)
         if not day or day == today:
@@ -364,9 +738,108 @@ def _rotate_and_prune(prompts_dir: Path, today: str, retention_days: int) -> Non
         try:
             day_ordinal = datetime.strptime(day, "%Y-%m-%d").date().toordinal()
             if day_ordinal < cutoff_ordinal:
+                if not _delete_resolutions_for_day(prompts_dir, day):
+                    continue
                 path.unlink(missing_ok=True)
         except Exception:
             continue
+    if prune_resolutions:
+        _prune_attempt_resolutions(prompts_dir)
+
+
+def _discard_invalid_resolution(sidecar: Path) -> bool:
+    """Remove malformed private metadata from the active resolution namespace."""
+    if sidecar.is_symlink():
+        return False
+    try:
+        sidecar.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def _delete_resolutions_for_day(prompts_dir: Path, day: str) -> bool:
+    sidecars = prompts_dir / "attempt_resolutions"
+    if sidecars.is_symlink():
+        return False
+    if not sidecars.is_dir():
+        return True
+    for sidecar in sidecars.glob("*.json"):
+        if sidecar.is_symlink():
+            continue
+        try:
+            record = json.loads(sidecar.read_text(encoding="utf-8"))
+        except OSError:
+            return False
+        except (ValueError, UnicodeError):
+            if not _discard_invalid_resolution(sidecar):
+                return False
+            continue
+        if (not isinstance(record, dict) or not isinstance(record.get("prompt_ts"), str)
+                or _aware_timestamp(record["prompt_ts"]) is None):
+            if not _discard_invalid_resolution(sidecar):
+                return False
+            continue
+        if record["prompt_ts"].startswith(day + "T"):
+            try:
+                sidecar.unlink()
+            except OSError:
+                return False
+    return True
+
+
+def _prune_attempt_resolutions(prompts_dir: Path) -> bool:
+    sidecars = prompts_dir / "attempt_resolutions"
+    if sidecars.is_symlink():
+        return False
+    if not sidecars.is_dir():
+        return True
+    for sidecar in sidecars.glob("*.json"):
+        if sidecar.is_symlink():
+            continue
+        try:
+            record = json.loads(sidecar.read_text(encoding="utf-8"))
+            if not isinstance(record, dict) or set(record) != {
+                "schema", "cycle_id", "attempt_id", "prompt_seq", "prompt_ts", "created_at", "expires_at",
+            }:
+                if not _discard_invalid_resolution(sidecar):
+                    return False
+                continue
+            day = datetime.fromisoformat(str(record["prompt_ts"]).replace("Z", "+00:00")).astimezone(timezone.utc).date()
+            expiry = datetime.fromisoformat(str(record["expires_at"]).replace("Z", "+00:00"))
+            if datetime.now(timezone.utc) >= expiry:
+                sidecar.unlink()
+                continue
+            digest_path = _attempt_resolution_path(prompts_dir.parent, str(record["cycle_id"]))
+            if digest_path != sidecar:
+                continue
+            prompt_found = False
+            for prompt_file in (*prompts_dir.glob(f"{day.isoformat()}.jsonl"), *prompts_dir.glob(f"{day.isoformat()}.jsonl.gz")):
+                if prompt_file.is_symlink():
+                    raise OSError("prompt path is a symlink")
+                for row in _read_prompt_rows(prompt_file):
+                    if (row.get("cycle_id") == record["cycle_id"] and row.get("attempt_id") == record["attempt_id"]
+                            and row.get("component") == "executor" and row.get("seq") == record["prompt_seq"]
+                            and row.get("ts") == record["prompt_ts"]):
+                        prompt_found = True
+                        break
+                if prompt_found:
+                    break
+            if not prompt_found:
+                sidecar.unlink()
+        except OSError:
+            return False
+        except (ValueError, UnicodeError):
+            if not _discard_invalid_resolution(sidecar):
+                return False
+        except (KeyError, TypeError):
+            if not _discard_invalid_resolution(sidecar):
+                return False
+        except Exception:
+            # Third-party malformed filesystem objects are not valid correlation.
+            if not _discard_invalid_resolution(sidecar):
+                return False
+    return True
 
 
 MAX_LLM_PROMPT_PAYLOAD_BYTES = 32 * 1024  # 32KB per-record cap (#1039)
@@ -613,6 +1086,7 @@ def record_llm_prompt(
             "cycle_id": cycle_id,
             "component": component,
             "seq": seq,
+            **({"attempt_id": ctx["attempt_id"]} if component == "executor" and ctx.get("attempt_id") else {}),
             "prompt_tokens": int(prompt_tokens or 0),
             "completion_tokens": int(completion_tokens or 0),
             "finish_reason": finish_reason or "",
@@ -659,11 +1133,19 @@ def record_llm_prompt(
                 build_action_index(state_root, prompts_dir, max_days=2)
         except Exception:
             pass
-        _rotate_and_prune(prompts_dir, today, _prompts_retention_days())
+        # The final executor prune below must see the newly appended row;
+        # skip the otherwise duplicate full scan during rotation. Other prompt
+        # captures retain the rotation path's regular sidecar cleanup.
+        _rotate_and_prune(
+            prompts_dir, today, _prompts_retention_days(),
+            prune_resolutions=not bool(ctx.get("attempt_id")),
+        )
 
         out_path = prompts_dir / f"{today}.jsonl"
         with open(out_path, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
+        if ctx.get("attempt_id") and not _prune_attempt_resolutions(prompts_dir):
+            _remove_authoritative_attempt(_attempt_resolution_path(_llm_calls_dir(), cycle_id))
     except Exception:
         # Capture must never break the LLM call it is observing.
         pass

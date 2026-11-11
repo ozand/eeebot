@@ -1,17 +1,21 @@
-"""Tests for nanobot.observability.llm_telemetry (issue #675)."""
+"""Tests for nanobot.observability.llm_telemetry (issues #675 and #2034)."""
 
+# ADR-040
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from nanobot.observability.llm_telemetry import (
+    _rotate_and_prune,
     call_context,
     record_llm_call,
     record_llm_failure,
     record_llm_prompt,
     reset_call_context,
     set_call_context,
+    telemetry_context,
+    write_authoritative_attempt,
 )
 
 
@@ -63,6 +67,358 @@ def test_failure_stream_is_outside_daily_rotation_globs(tmp_path, monkeypatch):
     assert failure_file.exists()
     assert failure_file.read_bytes() == before
     assert not list(failure_dir.glob("*.jsonl.gz"))
+
+
+def test_executor_prompt_capture_prunes_resolutions_once_after_append(tmp_path, monkeypatch):
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    prompts = root / "prompts"
+    prompts.mkdir(parents=True)
+    real_prune = telemetry._prune_attempt_resolutions
+    observed = []
+
+    def count_prune(prompts_dir):
+        observed.append(list(prompts_dir.glob("*.jsonl")))
+        return real_prune(prompts_dir)
+
+    monkeypatch.setattr(telemetry, "_prune_attempt_resolutions", count_prune)
+    with telemetry_context("cycle-prune-once", "executor", attempt_id="attempt-prune-once", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+
+    assert len(observed) == 1
+    assert len(observed[0]) == 1
+    assert _read_jsonl(observed[0][0])[0]["attempt_id"] == "attempt-prune-once"
+
+
+def test_authoritative_attempt_sidecar_is_pruned_with_prompt(tmp_path, monkeypatch):
+    root = tmp_path / "calls"
+    prompts = root / "prompts"
+    prompts.mkdir(parents=True)
+    day = datetime.now(timezone.utc).date().isoformat()
+    with telemetry_context("cycle-retain", "executor", attempt_id="spawn-retain", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert write_authoritative_attempt(root, "cycle-retain", "spawn-retain")
+    sidecar = next((prompts / "attempt_resolutions").glob("*.json"))
+    expected_expiry = (datetime.fromisoformat(day).date() + timedelta(days=14)).isoformat()
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["expires_at"].startswith(expected_expiry)
+
+    (prompts / f"{day}.jsonl").unlink()
+    _rotate_and_prune(prompts, today=day, retention_days=1)
+
+    assert not sidecar.exists()
+
+
+def test_authoritative_attempt_writer_fails_closed_on_active_corrupt_archive(tmp_path):
+    root = tmp_path / "calls"
+    from nanobot.observability.llm_telemetry import telemetry_context
+
+    with telemetry_context("valid-cycle", "executor", attempt_id="valid-attempt", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    (root / "prompts" / f"{day}.jsonl.gz").write_bytes(b"not a gzip stream")
+
+    assert not write_authoritative_attempt(root, "valid-cycle", "valid-attempt")
+
+
+def test_resolution_reader_preserves_valid_sidecar_on_temporary_sidecar_read_error(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    with telemetry.telemetry_context("sidecar-read-error", "executor", attempt_id="attempt-sidecar-error", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert telemetry.write_authoritative_attempt(root, "sidecar-read-error", "attempt-sidecar-error")
+    sidecar = next((root / "prompts/attempt_resolutions").glob("*.json"))
+    real_read_text = Path.read_text
+
+    def fail_sidecar_read(path, *args, **kwargs):
+        if path == sidecar:
+            raise PermissionError("temporary sidecar read failure")
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_sidecar_read)
+    invalid = []
+    assert telemetry.read_authoritative_attempt(root, "sidecar-read-error", invalid=invalid) is None
+    assert invalid == []
+    assert sidecar.exists()
+
+
+def test_resolution_reader_preserves_metadata_on_plain_prompt_permission_error(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    with telemetry.telemetry_context("permission-read", "executor", attempt_id="attempt-permission", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert telemetry.write_authoritative_attempt(root, "permission-read", "attempt-permission")
+    sidecar = next((root / "prompts/attempt_resolutions").glob("*.json"))
+    prompt = next((root / "prompts").glob("*.jsonl"))
+    import nanobot.observability.llm_telemetry as telemetry_module
+    real_open = telemetry_module._open_prompt_file
+
+    def deny_plain_prompt(root_arg, name):
+        if name == prompt.name:
+            raise PermissionError("temporarily unavailable")
+        return real_open(root_arg, name)
+
+    monkeypatch.setattr(telemetry_module, "_open_prompt_file", deny_plain_prompt)
+    invalid = []
+    assert telemetry.read_authoritative_attempt(root, "permission-read", invalid=invalid) is None
+    assert "prompt_missing" not in invalid
+    assert sidecar.exists()
+
+
+def test_resolution_reader_does_not_open_symlinked_prompt_before_rejection(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    with telemetry.telemetry_context("symlink-prompt", "executor", attempt_id="attempt-symlink", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert telemetry.write_authoritative_attempt(root, "symlink-prompt", "attempt-symlink")
+    prompt = next((root / "prompts").glob("*.jsonl"))
+    external = tmp_path / "external.jsonl"
+    external.write_text(prompt.read_text(encoding="utf-8"), encoding="utf-8")
+    prompt.unlink()
+    try:
+        prompt.symlink_to(external)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    real_open = Path.open
+
+    def reject_symlink_open(path, *args, **kwargs):
+        if path == prompt:
+            raise AssertionError("symlinked path was opened before rejection")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", reject_symlink_open)
+    assert telemetry.read_authoritative_attempt(root, "symlink-prompt") is None
+
+
+def test_resolution_reader_rejects_prompt_directory_symlink(tmp_path):
+    import os
+
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with telemetry.telemetry_context("parent-symlink", "executor", attempt_id="attempt-parent", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert telemetry.write_authoritative_attempt(root, "parent-symlink", "attempt-parent")
+    prompts = root / "prompts"
+    for file in prompts.glob("*.jsonl"):
+        file.replace(outside / file.name)
+    import shutil
+    shutil.rmtree(prompts)
+    try:
+        os.symlink(outside, prompts, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlink creation unavailable")
+
+    assert telemetry.read_authoritative_attempt(root, "parent-symlink") is None
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="FIFO open safety is POSIX-specific")
+def test_resolution_reader_does_not_block_on_fifo_prompt(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    with telemetry.telemetry_context("fifo-prompt", "executor", attempt_id="attempt-fifo", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert telemetry.write_authoritative_attempt(root, "fifo-prompt", "attempt-fifo")
+    prompt = next((root / "prompts").glob("*.jsonl"))
+    prompt.unlink()
+    os.mkfifo(prompt)
+
+    code = (
+        "from pathlib import Path; "
+        "from nanobot.observability.llm_telemetry import read_authoritative_attempt; "
+        f"assert read_authoritative_attempt(Path({str(root)!r}), 'fifo-prompt') is None"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=3)
+
+
+def test_resolution_reader_rejects_prompt_directory_replaced_with_symlink(tmp_path, monkeypatch):
+    import contextlib
+    import os
+
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with telemetry.telemetry_context("root-swap", "executor", attempt_id="attempt-root-swap", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert telemetry.write_authoritative_attempt(root, "root-swap", "attempt-root-swap")
+    prompts = root / "prompts"
+    sidecar = next((prompts / "attempt_resolutions").glob("*.json"))
+    sidecar_bytes = sidecar.read_bytes()
+    moved = root / "prompts-original"
+    swapped = []
+
+    def swap_prompt_path():
+        prompts.rename(moved)
+        os.symlink(outside, prompts, target_is_directory=True)
+        swapped.append(True)
+
+    if os.name == "posix":
+        prompt_name = next(prompts.glob("*.jsonl")).name
+        real_os_open = os.open
+
+        def swap_after_prompt_directory_handle(path, flags, *args, **kwargs):
+            if path == prompt_name and kwargs.get("dir_fd") is not None and not swapped:
+                # The production helper already owns the real prompts
+                # directory descriptor; replace only its pathname before the
+                # final component is opened relative to that descriptor.
+                swap_prompt_path()
+            return real_os_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(telemetry.os, "open", swap_after_prompt_directory_handle)
+        record = telemetry.read_authoritative_attempt(root, "root-swap")
+        assert swapped == [True]
+        assert record is None
+        assert not list(outside.iterdir()), "handle-relative open must not read the replacement target"
+        moved_sidecar = moved / sidecar.relative_to(prompts)
+        assert moved_sidecar.exists(), "original resolution metadata must remain in the renamed directory"
+        assert moved_sidecar.read_bytes() == sidecar_bytes
+    else:
+        real_open = telemetry._open_prompt_file_windows
+
+        def swap_before_windows_open(root_arg, name):
+            if not swapped:
+                swap_prompt_path()
+            yield from real_open(root_arg, name)
+
+        monkeypatch.setattr(telemetry, "_open_prompt_file_windows", swap_before_windows_open)
+        assert telemetry.read_authoritative_attempt(root, "root-swap") is None
+        assert swapped == [True]
+
+
+def test_resolution_reader_preserves_metadata_across_plain_to_gzip_rotation(tmp_path, monkeypatch):
+    import nanobot.observability.llm_telemetry as telemetry
+
+    root = tmp_path / "calls"
+    with telemetry.telemetry_context("rotate-race", "executor", attempt_id="attempt-rotate", root=root):
+        record_llm_prompt(
+            messages=[], content=None, reasoning_content=None, finish_reason="stop",
+            model="test", prompt_tokens=0, completion_tokens=0,
+        )
+    assert telemetry.write_authoritative_attempt(root, "rotate-race", "attempt-rotate")
+    prompts = root / "prompts"
+    plain = next(prompts.glob("*.jsonl"))
+    archive = plain.with_suffix(plain.suffix + ".gz")
+    real_decode = telemetry._decode_prompt_rows
+    rotated = []
+
+    def rotate_after_open(stream):
+        if not rotated and plain.exists():
+            import gzip
+            with plain.open("rb") as source, gzip.open(archive, "wb") as target:
+                target.write(source.read())
+            plain.unlink()
+            rotated.append(True)
+        yield from real_decode(stream)
+
+    monkeypatch.setattr(telemetry, "_decode_prompt_rows", rotate_after_open)
+    record = telemetry.read_authoritative_attempt(root, "rotate-race")
+
+    assert record is not None
+    assert record["attempt_id"] == "attempt-rotate"
+    assert next((prompts / "attempt_resolutions").glob("*.json")).exists()
+
+
+def test_malformed_sidecar_is_discarded_so_expired_prompt_cleanup_continues(tmp_path):
+    import nanobot.observability.llm_telemetry as telemetry
+
+    prompts = tmp_path / "prompts"
+    sidecars = prompts / "attempt_resolutions"
+    sidecars.mkdir(parents=True)
+    expired_prompt = prompts / "2020-01-01.jsonl.gz"
+    expired_prompt.write_bytes(b"expired prompt")
+    malformed = sidecars / "bad.json"
+    malformed.write_text("{bad json", encoding="utf-8")
+
+    telemetry._rotate_and_prune(prompts, today="2026-10-30", retention_days=1)
+
+    assert not expired_prompt.exists()
+    assert not malformed.exists()
+    assert not list(sidecars.glob("*.invalid"))
+
+
+def test_resolution_cleanup_io_failure_preserves_expired_prompt(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import nanobot.observability.llm_telemetry as telemetry
+
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    expired_prompt = prompts / "2020-01-01.jsonl.gz"
+    expired_prompt.write_bytes(b"expired prompt")
+    sidecars = prompts / "attempt_resolutions"
+    sidecars.mkdir()
+    (sidecars / "unreadable.json").write_text("{}", encoding="utf-8")
+    real_read_text = Path.read_text
+
+    def fail_sidecar_read(path, *args, **kwargs):
+        if path.parent.name == "attempt_resolutions":
+            raise OSError("sidecar storage unavailable")
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_sidecar_read)
+    telemetry._rotate_and_prune(prompts, today="2026-10-30", retention_days=1)
+
+    assert expired_prompt.exists()
+
+
+# ADR-040: prompt retention does not proceed when associated sidecar cleanup fails.
+def test_attempt_resolution_cleanup_failure_preserves_prompt(tmp_path, monkeypatch):
+    import nanobot.observability.llm_telemetry as telemetry
+
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    old_prompt = prompts / "2020-01-01.jsonl.gz"
+    old_prompt.write_bytes(b"retained until resolution cleanup succeeds")
+    monkeypatch.setattr(telemetry, "_delete_resolutions_for_day", lambda *_: False)
+
+    telemetry._rotate_and_prune(prompts, today="2026-10-30", retention_days=1)
+
+    assert old_prompt.exists()
 
 
 def test_record_llm_failure_writes_only_bounded_metadata(tmp_path, monkeypatch):
