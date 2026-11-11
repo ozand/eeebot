@@ -195,17 +195,24 @@ def _json_object(line: str) -> bool:
     except Exception:
         return False
 
-def build_strategist_prompt(inputs: dict[str, Any], watermark: dict[str, Any]) -> tuple[str, str]:
+def build_strategist_prompt(
+    inputs: dict[str, Any], watermark: dict[str, Any], *,
+    provenance_owner: str | None = None,
+) -> tuple[str, str]:
     # #1729 (ADR-022 rule 2): identity (short form) + roles/strategist.md. No
     # soul and no charter: this role runs under a tight payload cap.
     from nanobot.runtime.role_prompt import build_role_system_prompt_or_refuse
 
     system, _role_fit = build_role_system_prompt_or_refuse("strategist")
     from nanobot.observability.prompt_provenance import prompt_owner_context, remember_role_assembly
-    with prompt_owner_context("strategist:job"):
+    if provenance_owner is None:
+        from uuid import uuid4
+
+        provenance_owner = f"strategist-job:{uuid4().hex}"
+    with prompt_owner_context(provenance_owner):
         remember_role_assembly(
             system, "strategist", _role_fit["sections"], _role_fit.get("release_id"),
-            owner="strategist:job",
+            owner=provenance_owner,
         )
     watermark = _cap(watermark, 1_000) if isinstance(watermark, dict) else {}
     payload = {"schema": SCHEMA, "watermark": watermark, "archive": inputs, "output": {
@@ -321,7 +328,10 @@ def _apply(value: dict[str, Any], state_root: Path, max_h: int, max_f: int) -> d
         raise OSError("advisory sidecar write failed")
     return {"hypotheses_appended": appended, "advisories_written": len(advisories), "advisories_recorded": len(advisories)}
 
-def _default_llm(messages: list[dict[str, str]], model: str) -> str:
+def _default_llm(
+    messages: list[dict[str, str]], model: str, *,
+    provenance_owner: str | None = None,
+) -> str:
     from openai import OpenAI
 
     from nanobot.observability.llm_telemetry import call_context, record_llm_call, record_llm_prompt
@@ -339,7 +349,10 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> str:
         role_request_for_system,
     )
 
-    provenance_owner = "strategist:job"
+    if provenance_owner is None:
+        from uuid import uuid4
+
+        provenance_owner = f"strategist-job:{uuid4().hex}"
     prompt_request = role_request_for_system(
         str(messages[0].get("content") or ""), owner=provenance_owner,
         producer_hint="strategist",
@@ -396,9 +409,18 @@ def run_strategist(state_root: Path, repo_root: Path, llm: Callable[[list[dict[s
                              "unavailable_inputs": strategist_inputs.unavailable_inputs(status)})
             _record_decision(state_root, decision)
             return decision
-        system, user = build_strategist_prompt(inputs, old)
+        from uuid import uuid4
+
+        provenance_owner = f"strategist-job:{uuid4().hex}"
+        system, user = build_strategist_prompt(
+            inputs, old, provenance_owner=provenance_owner,
+        )
         decision["prompt_chars"] = len(user)
-        raw = (llm or _default_llm)([{"role": "system", "content": system}, {"role": "user", "content": user}], model)
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        raw = (
+            llm(messages, model)
+            if llm else _default_llm(messages, model, provenance_owner=provenance_owner)
+        )
         if hasattr(raw, "content"):
             raw = raw.content
         text = str(raw or "").strip()
@@ -446,8 +468,13 @@ def inputs_report(state_root: Path, repo_root: Path) -> dict[str, Any]:
     state_root = Path(state_root)
     inputs = collect_inputs(state_root, Path(repo_root))
     status = inputs["inputs_status"]
+    from uuid import uuid4
+
+    provenance_owner = f"strategist-inspect:{uuid4().hex}"
     try:
-        _, user = build_strategist_prompt(inputs, load_watermark(state_root))
+        _, user = build_strategist_prompt(
+            inputs, load_watermark(state_root), provenance_owner=provenance_owner,
+        )
     except (CharterTooLargeError, RolePromptBuildError) as exc:
         return {"timestamp": _now(), "dry_run": True, "inputs_status": status,
                 "prompt_chars": 0, "refused": True,

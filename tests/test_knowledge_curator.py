@@ -231,6 +231,79 @@ def test_action_index_fallback_opens_only_bounded_newest_segments(tmp_path, monk
     assert len(opened) <= _ACTION_INDEX_SEGMENTS
 
 
+def test_curator_job_baseline_spans_retry_batches_and_resets_next_invocation(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    _journal(tmp_path, ["L1", "L2"])
+    (tmp_path / "memory" / "facts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "memory" / "index.md").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "memory" / "index.md").write_text("# Memory index\n", encoding="utf-8")
+    state = tmp_path / "state"
+    telemetry_dir = tmp_path / "llm_calls"
+    monkeypatch.setenv("LLM_CALLS_DIR", str(telemetry_dir))
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://fake-gateway.local")
+    monkeypatch.setenv("LITELLM_API_KEY", "synthetic-key")
+    monkeypatch.setattr("nanobot.runtime.knowledge_curator.resolve_model", lambda *args, **kwargs: "test-model")
+
+    call_index = [0]
+
+    class FakeOpenAI:
+        def __init__(self, *args, **kwargs):
+            self.chat = self.completions = self
+
+        def create(self, **kwargs):
+            # First attempt requests a cited fact; the retry consumes it.
+            decisions = ([{
+                "action": "duplicate", "lesson_id": "L1",
+                "duplicate_path": "memory/facts/covered.md", "reason": "covered",
+            }] if call_index[0] % 2 == 0 else [{
+                "action": "unimportant", "lesson_id": "L2", "reason": "no change",
+            }])
+            call_index[0] += 1
+            return SimpleNamespace(
+                model=kwargs["model"],
+                usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3, total_tokens=8),
+                choices=[SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content=json.dumps(decisions)),
+                )],
+            )
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+    (tmp_path / "memory" / "facts" / "covered.md").write_text(
+        "# Covered\n\nL1 is supported by the existing fact.\n", encoding="utf-8",
+    )
+    first = run_curation(tmp_path, state)
+    assert first["ok"] is True and first["processed"] == 2
+    assert call_index[0] == 2  # same owner window spans the fact-lookup retry
+
+    # Add the next eligible lesson and run the same production entrypoint on
+    # the same state again; this must start a fresh baseline owner window.
+    with (tmp_path / "lessons" / "lessons.yaml").open("a", encoding="utf-8") as handle:
+        handle.write("\n- id: L3\n  title: insight L3\n  approach: use L3\n  evidence: ['#1094']\n")
+    second = run_curation(tmp_path, state)
+    assert second["ok"] is True and second["processed"] == 1
+    assert call_index[0] == 4  # retry batches still share the second job's owner
+
+    from datetime import datetime, timezone
+
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    calls = [json.loads(line) for line in (telemetry_dir / f"{day}.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(calls) == 4
+    provenance = [row["prompt_provenance"] for row in calls]
+    assert [row["component"] for row in calls] == ["curator"] * 4
+    assert [item["producer"] for item in provenance] == ["curator"] * 4
+    assert [item["kind"] for item in provenance] == ["snapshot", "delta", "snapshot", "delta"]
+    assert provenance[0]["previous_call_id"] is None
+    assert provenance[2]["previous_call_id"] is None
+    assert provenance[1]["previous_call_id"] == provenance[0]["call_id"]
+    assert provenance[3]["previous_call_id"] == provenance[2]["call_id"]
+    assert provenance[0]["baseline_id"] == provenance[1]["baseline_id"]
+    assert provenance[2]["baseline_id"] == provenance[3]["baseline_id"]
+    assert provenance[0]["baseline_id"] != provenance[2]["baseline_id"]
+
+
 def test_curator_stages_promotions_not_workspace(tmp_path):
     """#1001 A: run_curation must NOT write the workspace; facts land in staging."""
     _journal(tmp_path, ["L1", "L2"])

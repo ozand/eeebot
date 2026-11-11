@@ -817,17 +817,24 @@ def _quarantine_oversized_head(
     return lessons[index:], quarantined, ""
 
 
-def _messages(lessons: list[dict[str, Any]], index: str, facts: str) -> list[dict[str, str]]:
+def _messages(
+    lessons: list[dict[str, Any]], index: str, facts: str, *,
+    provenance_owner: str | None = None,
+) -> list[dict[str, str]]:
     body = json.dumps(lessons, ensure_ascii=False, separators=(",", ":"))
     if len(body) > MAX_INPUT_CHARS:
         raise ValueError("curator lesson batch was not fitted to complete items")
     # #1729 (ADR-022 rule 2): identity (short form) + soul + roles/curator.md.
     system, _role_fit = build_role_system_prompt_or_refuse("curator")
     from nanobot.observability.prompt_provenance import prompt_owner_context, remember_role_assembly
-    with prompt_owner_context("curator:job"):
+    if provenance_owner is None:
+        from uuid import uuid4
+
+        provenance_owner = f"curator-job:{uuid4().hex}"
+    with prompt_owner_context(provenance_owner):
         remember_role_assembly(
-        system, "curator", _role_fit["sections"], _role_fit.get("release_id"),
-            owner="curator:job",
+            system, "curator", _role_fit["sections"], _role_fit.get("release_id"),
+            owner=provenance_owner,
         )
     user = f"NEW LESSONS:\n{body}\n\nKB INDEXES:\n{index[:24000]}\n\nCITED ARTIFACT BODIES:\n{facts[:12000]}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -1000,7 +1007,10 @@ def _cited_bodies(workspace: Path, decisions: list[dict[str, Any]]) -> str:
     return "\n\n".join(part for part in out if part)
 
 
-def _default_llm(messages: list[dict[str, str]], model: str) -> Any:
+def _default_llm(
+    messages: list[dict[str, str]], model: str, *,
+    provenance_owner: str | None = None,
+) -> Any:
     """Production OpenAI-compatible call; tests should inject ``llm``."""
     from openai import OpenAI
     base_url = os.environ.get("LITELLM_BASE_URL", "").strip()
@@ -1022,7 +1032,10 @@ def _default_llm(messages: list[dict[str, str]], model: str) -> Any:
         role_request_for_system,
     )
 
-    provenance_owner = "curator:job"
+    if provenance_owner is None:
+        from uuid import uuid4
+
+        provenance_owner = f"curator-job:{uuid4().hex}"
     prompt_request = role_request_for_system(
         str(messages[0].get("content") or ""), owner=provenance_owner,
         producer_hint="curator",
@@ -2745,17 +2758,25 @@ def run_curation(
             "last_success_ts": _now(), **result["stages"],
         })
         return result
+    from uuid import uuid4
+
+    provenance_owner = f"curator-job:{uuid4().hex}"
     try:
         model = resolve_model("curator", strip_openai=True)
         try:
-            messages = _messages(entries, _read_index(workspace), "")
+            messages = _messages(
+                entries, _read_index(workspace), "", provenance_owner=provenance_owner,
+            )
         except Exception as exc:
             _append_jsonl(state_dir / "curator" / "errors.jsonl", {
                 "timestamp": _now(), "error": f"role_prompt_refused: {exc}",
             })
             return {"ok": False, "processed": 0, "writes": 0, "staged": [],
                     "error": f"role_prompt_refused: {exc}"}
-        result = llm(messages, model) if llm else _default_llm(messages, model)
+        result = (
+            llm(messages, model)
+            if llm else _default_llm(messages, model, provenance_owner=provenance_owner)
+        )
         if inspect.isawaitable(result):
             result = asyncio.run(result)
         decisions, diag = _parse_output_with_diag(result)
@@ -2773,14 +2794,20 @@ def run_curation(
         if facts:
             caller = llm or _default_llm
             try:
-                retry_messages = _messages(entries, _read_index(workspace), facts)
+                retry_messages = _messages(
+                    entries, _read_index(workspace), facts,
+                    provenance_owner=provenance_owner,
+                )
             except Exception as exc:
                 _append_jsonl(state_dir / "curator" / "errors.jsonl", {
                     "timestamp": _now(), "error": f"role_prompt_refused: {exc}",
                 })
                 return {"ok": False, "processed": 0, "writes": 0, "staged": [],
                         "error": f"role_prompt_refused: {exc}"}
-            result = caller(retry_messages, model)
+            result = (
+                caller(retry_messages, model)
+                if llm else caller(retry_messages, model, provenance_owner=provenance_owner)
+            )
             if inspect.isawaitable(result):
                 result = asyncio.run(result)
             decisions, diag = _parse_output_with_diag(result)

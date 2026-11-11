@@ -249,7 +249,7 @@ def test_strategist_records_role_prompt_refusal_and_dry_run_reports_it(mock_stat
     error = role_prompt.CharterTooLargeError("strategist", 8001, 8000)
     monkeypatch.setattr(
         strategist, "build_strategist_prompt",
-        lambda *_args: (_ for _ in ()).throw(error),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(error),
     )
     called = False
 
@@ -271,7 +271,7 @@ def test_strategist_records_role_prompt_refusal_and_dry_run_reports_it(mock_stat
 
     monkeypatch.setattr(
         strategist, "build_strategist_prompt",
-        lambda *_args: (_ for _ in ()).throw(
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
             role_prompt.RolePromptBuildError("missing goals.md")
         ),
     )
@@ -331,6 +331,50 @@ def test_run_strategist_end_to_end(mock_state_and_repo, monkeypatch):
     hyp_data = json.loads((state_root / "hypotheses" / "durable.json").read_text(encoding="utf-8"))
     assert len(hyp_data["entries"]) == 1
     assert hyp_data["entries"][0]["title"] == "Subagent isolation"
+
+
+def test_strategist_invocations_start_distinct_provenance_owner_windows(mock_state_and_repo, monkeypatch):
+    import sys
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    state_root, repo_root = mock_state_and_repo
+    telemetry_dir = state_root / "llm_calls"
+    monkeypatch.setenv("LLM_CALLS_DIR", str(telemetry_dir))
+    monkeypatch.setenv("LITELLM_BASE_URL", "http://fake-gateway.local")
+    monkeypatch.setenv("LITELLM_API_KEY", "synthetic-key")
+    monkeypatch.setenv("SELFEVO_STRATEGIST_MODEL", "test-model")
+
+    class FakeOpenAI:
+        def __init__(self, *args, **kwargs):
+            self.chat = self.completions = self
+
+        def create(self, **kwargs):
+            return SimpleNamespace(
+                model=kwargs["model"],
+                usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3, total_tokens=8),
+                choices=[SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content=json.dumps({
+                        "schema": SCHEMA, "period_reviewed": "today",
+                        "hypotheses": [], "futility_advisories": [],
+                    })),
+                )],
+            )
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+    assert run_strategist(state_root, repo_root)["success"] is True
+    assert run_strategist(state_root, repo_root)["success"] is True
+
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    calls = [json.loads(line) for line in (telemetry_dir / f"{day}.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(calls) == 2
+    first, second = [row["prompt_provenance"] for row in calls]
+    assert [row["component"] for row in calls] == ["strategist"] * 2
+    assert first["producer"] == second["producer"] == "strategist"
+    assert first["kind"] == second["kind"] == "snapshot"
+    assert first["previous_call_id"] is second["previous_call_id"] is None
+    assert first["baseline_id"] != second["baseline_id"]
 
 
 def test_default_llm_passes_max_retries(monkeypatch: pytest.MonkeyPatch) -> None:

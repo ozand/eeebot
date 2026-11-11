@@ -452,7 +452,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _narrator_system_prompt() -> str:
+def _narrator_system_prompt(provenance_owner: str | None = None) -> str:
     """#1729 (ADR-022 rule 2): the narrator's role text lives in
     ``roles/narrator.md`` at the release root, with identity (short form) and
     soul prepended. ADR-016 rule 1 still holds by construction: the assembler
@@ -461,16 +461,23 @@ def _narrator_system_prompt() -> str:
     from nanobot.observability.prompt_provenance import prompt_owner_context, remember_role_assembly
     from nanobot.runtime.role_prompt import build_role_system_prompt
 
-    with prompt_owner_context("narrator:job"):
+    if provenance_owner is None:
+        from uuid import uuid4
+
+        provenance_owner = f"narrator-job:{uuid4().hex}"
+    with prompt_owner_context(provenance_owner):
         system, telemetry = build_role_system_prompt("narrator")
         remember_role_assembly(
             system, "narrator", telemetry["sections"], telemetry.get("release_id"),
-            owner="narrator:job",
+            owner=provenance_owner,
         )
     return system
 
 
-def _default_narrator_llm(messages: list[dict[str, str]], model: str) -> str:
+def _default_narrator_llm(
+    messages: list[dict[str, str]], model: str, *,
+    provenance_owner: str | None = None,
+) -> str:
     """The strategist's own gateway-client pattern
     (:func:`nanobot.runtime.strategist._default_llm`), reused verbatim:
     ``LITELLM_BASE_URL``/``LITELLM_API_KEY`` from the unit's own
@@ -494,7 +501,10 @@ def _default_narrator_llm(messages: list[dict[str, str]], model: str) -> str:
         role_request_for_system,
     )
 
-    provenance_owner = "narrator:job"
+    if provenance_owner is None:
+        from uuid import uuid4
+
+        provenance_owner = f"narrator-job:{uuid4().hex}"
     prompt_request = role_request_for_system(
         str(messages[0].get("content") or ""), owner=provenance_owner,
         producer_hint="narrator",
@@ -630,15 +640,23 @@ def run_narrator_job(
             "note": "no beats recorded for this day; no model call made",
         }
         return _finish(state_dir, day, no_beats_result)
+    from uuid import uuid4
+
+    provenance_owner = f"narrator-job:{uuid4().hex}"
     model = _resolve_narrator_model()
     prompt = build_story_prompt(beats, glossary=glossary)
     messages = [
-        {"role": "system", "content": _narrator_system_prompt()},
+        {"role": "system", "content": _narrator_system_prompt(provenance_owner)},
         {"role": "user", "content": prompt},
     ]
     raw: Any = None
     try:
-        raw = (llm or _default_narrator_llm)(messages, model)
+        raw = (
+            llm(messages, model)
+            if llm else _default_narrator_llm(
+                messages, model, provenance_owner=provenance_owner,
+            )
+        )
         narration = _parse_model_output(raw)
         artifact = assemble_story_artifact(beats, narration, prompt=prompt, model_output=raw, glossary=glossary)
         result = {**base, **artifact, "status": "ok", "model": model, "violations": []}
