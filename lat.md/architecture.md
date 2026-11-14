@@ -30,6 +30,13 @@ The LLM proposer can author bounded candidates through [[nanobot/runtime/llm_pro
 
 The public derived-view producer serializes goal-review-owned derived-priority rows with explicit `self-derived` provenance; operator priority wording remains private and the external typed dashboard allowlist is a read-only consumer. See [[nanobot/runtime/demand.py#build_derived_view]], [[docs/specs/subagent-bridge/spec.md]], and [[docs/adr/ADR-048-persist-self-derived-provenance-in-public-projection.md]] (Proposed).
 
+
+## Intent-before-effect evidence
+
+The utility exposes durable intent admission and terminal receipts; callers must wait for intent admission before permitting an effect. It does not establish parent consumption or permit replay. See [[nanobot/runtime/intent_journal.py#admit_attempt]], [[nanobot/runtime/intent_journal.py#record_returned]], and [[tests/test_intent_journal.py]].
+
+The utility holds an owner after any recorded attempt because no durable parent-consumption/closure resolver is wired. It rejects malformed or oversized owner files without resetting them, uses fixed metadata allowlists and per-owner limits, and requires supported locking and sync before use. Tests cover metadata validation, ownership and capacity bounds, injected file- and directory-sync failure, child termination, stale temporary files, and persistent lock identity. The Windows development suite uses a fake lock only for logic tests and separately verifies that the real implementation fails closed because required locking and directory sync are unavailable; POSIX durability requires POSIX-host evidence. None of these utility tests establish that autonomous callers supply stable owners or use the journal before external effects. The injected post-replace terminal-directory-sync failure leaves a complete `intent` plus `terminal` visible to the running process, but the append API withholds success; this is not evidence of restart durability after that sync failure.
+
 ## Evidence, gates, and authority
 
 Cycle and phase evidence is append-oriented in the runtime ledger at [[nanobot/runtime/cycle_ledger.py#append_event]]. Demand collection and ranking provide inputs; they do not establish that work passed a gate or integrated.
