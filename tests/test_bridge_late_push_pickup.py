@@ -217,6 +217,47 @@ class TestFinishPendingPushes:
         outcome_rows = [r for r in rows if r.get("phase") == "outcome" and r.get("cycle_id") == "cid-idempotent"]
         assert [r["outcome"] for r in outcome_rows] == ["push_pending", "pushed_late"]
 
+    def test_post_push_crash_holds_without_duplicate_integration(self, tmp_path):
+        """ADR-058 #2180: a push may precede its durable terminal receipt.
+
+        On the next normal repository-preparation boundary, current evidence
+        cannot prove whether this cycle or another writer moved origin/main.
+        Recovery must therefore hold the branch as superseded, not merge/push
+        again or discard the only branch evidence.
+        """
+        origin, work = _init_repo(tmp_path)
+        staged = _stage_push_pending(tmp_path, work, "cid-post-push-crash")
+        origin_before = _origin_main_sha(origin)
+
+        # Simulate the bridge's non-ff integration effect succeeding while
+        # the terminal receipt write is lost. Keep push_pending as the only
+        # durable outcome record.
+        _run(work, "checkout", staged["branch"])
+        branch_head = _run(work, "rev-parse", "HEAD").stdout.strip()
+        _run(work, "checkout", "main")
+        merge = _run(
+            work, "merge", "--no-ff", staged["branch"],
+            "-m", f"merge: integrate {staged['branch']} (late push, cycle cid-post-push-crash)",
+        )
+        assert merge.returncode == 0, merge.stderr
+        push = _run(work, "push", "origin", "main")
+        assert push.returncode == 0, push.stderr
+        origin_after_effect = _origin_main_sha(origin)
+        assert origin_after_effect != origin_before
+        merge_parents = _run(origin, "rev-list", "--parents", "-n", "1", "main").stdout.strip().split()
+        assert merge_parents == [origin_after_effect, staged["main_sha"], branch_head]
+
+        prepared = bridge._prepare_repository_for_cycle(work, staged["state_dir"])
+
+        assert prepared["restored"] is True
+        assert prepared["pending_pushed"] == 1
+        assert _origin_main_sha(origin) == origin_after_effect
+        rows = _read_ledger_rows(staged["state_dir"])
+        outcomes = [r for r in rows if r.get("phase") == "outcome" and r.get("cycle_id") == "cid-post-push-crash"]
+        assert [r["outcome"] for r in outcomes] == ["push_pending", "superseded"]
+        branches = _run(work, "branch", "--list", staged["branch"]).stdout
+        assert staged["branch"] in branches
+
     def test_no_pending_rows_is_a_cheap_noop(self, tmp_path):
         origin, work = _init_repo(tmp_path)
         state_dir = tmp_path / "state"
