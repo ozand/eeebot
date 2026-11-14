@@ -9,7 +9,7 @@ tags: [runtime, bridge, durability, state-machine]
 
 # Status
 
-Accepted as a provisional candidate for `#2180`; not effective until independent PASS review and all applicable required checks on this exact candidate revision, followed by authorized merge of that unchanged revision. Under the delegated #2180-C assignment recorded in [issue comment 6796022247](https://github.com/ozand/eeebot/issues/2180#issuecomment-6796022247), the assigned delivery executor may technically accept this ADR; the coordinator retains merge and issue-closure responsibility. Acceptance is planned through the #2180 implementation PR. This is delegated technical acceptance, not personal operator acceptance. The first post-execution boundary is staged work only: every other #2180 outcome remains required and is not complete.
+Accepted as a provisional candidate for `#2180`; not effective until independent PASS review and all applicable required checks on this exact candidate revision, followed by authorized merge of that unchanged revision. Under the delegated #2180-C assignment recorded in [issue comment 6796022247](https://github.com/ozand/eeebot/issues/2180#issuecomment-6796022247), this is the provisional ADR acceptance candidate ahead of implementation. Effective acceptance requires independent PASS and applicable checks on this exact revision, followed by the coordinator's authorized merge of this unchanged candidate PR before implementation merge. This is delegated technical acceptance, not personal operator acceptance. The first post-execution boundary is staged work only: every other #2180 outcome remains required and is not complete.
 
 # Context
 
