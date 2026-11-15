@@ -293,6 +293,43 @@ def verify_local_branch_head(
         raise CheckpointHeldError("checkout branch identity changed")
 
 
+def _verify_committed_phase_tip(
+    repo_root: Path, *, branch: str, expected_base: str, expected_head: str,
+) -> str:
+    """Accept only a clean cycle checkout whose committed tip descends from admission."""
+    if type(branch) is not str or not _BRANCH_RX.fullmatch(branch) or ".." in branch.split("/"):
+        raise CheckpointError("invalid checkpoint branch")
+    if any(type(sha) is not str or not _SHA_RX.fullmatch(sha) for sha in (expected_base, expected_head)):
+        raise CheckpointError("invalid checkpoint revision")
+    import subprocess
+
+    repo = Path(repo_root)
+    actual = _git_sha(repo, f"refs/heads/{branch}")
+    for ancestor, descendant, reason in (
+        (expected_base.lower(), actual, "checkpoint base is not an ancestor of phase tip"),
+        (expected_head.lower(), actual, "phase tip does not descend from admitted head"),
+    ):
+        ancestry = subprocess.run(
+            ["git", "-C", str(repo), "merge-base", "--is-ancestor", ancestor, descendant],
+            capture_output=True, text=True, timeout=10,
+        )
+        if ancestry.returncode != 0:
+            raise CheckpointHeldError(reason)
+    checkout = subprocess.run(
+        ["git", "-C", str(repo), "symbolic-ref", "--quiet", "--short", "HEAD"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if checkout.returncode != 0 or checkout.stdout.strip() != branch:
+        raise CheckpointHeldError("checkout branch identity changed")
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if status.returncode != 0 or status.stdout:
+        raise CheckpointHeldError("phase checkout has uncommitted changes")
+    return actual
+
+
 def complete_phase(
     state_dir: Path, *, owner_id: str, cycle_id: str, branch: str,
     base_sha: str, head_sha: str, phase: str, repo_root: Path,
@@ -324,13 +361,17 @@ def complete_phase(
                 repo_root, cycle_id=cycle_id, branch=branch, base_sha=base_sha,
                 cycle_head_sha=head_sha, main_sha=memos.get("integration_main_sha"),
             )
+        elif phase in {"post_execution", "smoke_gate"}:
+            head_sha = _verify_committed_phase_tip(
+                repo_root, branch=branch, expected_base=base_sha, expected_head=head_sha,
+            )
         else:
             verify_local_branch_head(
                 repo_root, branch=branch, expected_base=base_sha, expected_head=head_sha,
             )
     completed = CycleCheckpoint(
         current.cycle_id, current.owner_id, current.branch, current.base_sha,
-        current.head_sha, current.phase, "complete", memos,
+        head_sha, current.phase, "complete", memos,
     )
     _write_checkpoint(path, completed)
     return completed

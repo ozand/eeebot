@@ -198,6 +198,45 @@ def test_new_cycle_cannot_replace_checkpoint_before_all_phases_complete(tmp_path
     assert preserved is not None and preserved.memos == {"receipt": "persisted"}
 
 
+def test_post_execution_completion_records_clean_committed_descendant(tmp_path):
+    import subprocess
+
+    repo, base, head = _cycle_repo(tmp_path)
+    state_dir = tmp_path / "state"
+    _begin(state_dir, repo, base, head)
+    (repo / "tracked.txt").write_text("producer output\\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-am", "producer output"],
+        check=True, capture_output=True, text=True,
+    )
+    new_head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    completed = phase_checkpoint.complete_phase(
+        state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+        base_sha=base, head_sha=head, phase="post_execution", repo_root=repo,
+    )
+    assert completed.status == "complete" and completed.head_sha == new_head
+    assert completed.head_sha != head
+    next_phase = _begin(state_dir, repo, base, new_head, phase="smoke_gate")
+    assert next_phase.status == "running" and next_phase.head_sha == new_head
+
+
+def test_post_execution_completion_holds_uncommitted_tree_without_receipt(tmp_path):
+    repo, base, head = _cycle_repo(tmp_path)
+    state_dir = tmp_path / "state"
+    _begin(state_dir, repo, base, head)
+    (repo / "tracked.txt").write_text("uncommitted producer output\\n", encoding="utf-8")
+    with pytest.raises(phase_checkpoint.CheckpointHeldError, match="uncommitted changes"):
+        phase_checkpoint.complete_phase(
+            state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+            base_sha=base, head_sha=head, phase="post_execution", repo_root=repo,
+        )
+    held = phase_checkpoint.load_checkpoint(state_dir, owner_id=_OWNER)
+    assert held is not None and held.status == "running" and held.head_sha == head
+
+
 def test_phase_completion_requires_exact_local_branch_head(tmp_path):
     import subprocess
 
