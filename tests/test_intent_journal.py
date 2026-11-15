@@ -859,12 +859,104 @@ def test_bridge_cycle_close_requires_exact_selected_phase_receipts(tmp_path: Pat
     ) is True
 
 
+def test_bridge_cycle_no_execution_receipt_closes_and_recovers_same_terminal(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    cycle_id = "cycle-rest-opaque-1"
+    with journal.bridge_cycle_parent_context(state_dir) as owner:
+        pass
+    journal.consume_bridge_cycle_no_execution(
+        state_dir, owner, cycle_id=cycle_id, outcome="rest_unchanged",
+    )
+    before = journal.read_owner_records(state_dir, owner)
+    journal.consume_bridge_cycle_no_execution(
+        state_dir, owner, cycle_id=cycle_id, outcome="rest_unchanged",
+    )
+    assert journal.read_owner_records(state_dir, owner) == before
+    with pytest.raises(JournalUnavailableError, match="attempted work"):
+        journal.consume_bridge_cycle_no_execution(
+            state_dir, owner, cycle_id=cycle_id, outcome="no_plan",
+        )
+    with journal.bridge_cycle_parent_context(
+        state_dir, cycle_id=cycle_id, no_execution_outcome="rest_unchanged",
+    ) as resumed_owner:
+        assert resumed_owner == owner
+    assert journal.close_route_parent(
+        state_dir, "bridge.cycle", owner,
+        no_execution_cycle_id=cycle_id, no_execution_outcome="rest_unchanged",
+    ) is True
+    assert journal.provision_route_parent(state_dir, "bridge.cycle") != owner
+
+
+def test_bridge_cycle_no_execution_rejects_empty_wrong_and_attempted_close(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    cycle_id = "cycle-no-plan-opaque"
+    with journal.bridge_cycle_parent_context(state_dir) as owner:
+        pass
+    assert journal.close_route_parent(
+        state_dir, "bridge.cycle", owner, cycle_id=cycle_id, required_phase_heads={},
+    ) is False
+    for outcome in ("exception", "refused", "malformed", "spawn_failed", "timed_out"):
+        with pytest.raises(JournalUnavailableError, match="not allowlisted"):
+            journal.consume_bridge_cycle_no_execution(
+                state_dir, owner, cycle_id=cycle_id, outcome=outcome,
+            )
+    operation_id, attempt_id = str(uuid4()), str(uuid4())
+    journal.admit_attempt(
+        state_dir, owner_id=owner, operation_id=operation_id, attempt_id=attempt_id,
+        component="bridge", target="bridge.cycle", _test_only=True,
+    )
+    with pytest.raises(JournalUnavailableError, match="attempted work"):
+        journal.consume_bridge_cycle_no_execution(
+            state_dir, owner, cycle_id=cycle_id, outcome="no_plan",
+        )
+    assert journal.close_route_parent(
+        state_dir, "bridge.cycle", owner,
+        no_execution_cycle_id=cycle_id, no_execution_outcome="no_plan",
+    ) is False
+
+
+def test_bridge_cycle_no_execution_cannot_follow_selected_phase_receipt(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    cycle_id = "cycle-mixed-opaque"
+    with journal.bridge_cycle_parent_context(state_dir) as owner:
+        pass
+    journal.consume_bridge_cycle_phase(
+        state_dir, owner, cycle_id=cycle_id, phase="post_execution",
+        checkpoint_head_sha="c" * 40, checkpoint_status="complete",
+    )
+    with pytest.raises(JournalUnavailableError, match="attempted work"):
+        journal.consume_bridge_cycle_no_execution(
+            state_dir, owner, cycle_id=cycle_id, outcome="no_plan",
+        )
+    assert journal.provision_route_parent(state_dir, "bridge.cycle") == owner
+
+
+def test_bridge_cycle_cancel_without_terminal_receipt_stays_held(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    cycle_id = "cycle-cancel-opaque"
+    with journal.bridge_cycle_parent_context(state_dir) as owner:
+        pass
+    assert journal.close_route_parent(
+        state_dir, "bridge.cycle", owner,
+        no_execution_cycle_id=cycle_id, no_execution_outcome="no_plan",
+    ) is False
+    with pytest.raises(JournalUnavailableError, match="terminal receipt is missing"):
+        with journal.bridge_cycle_parent_context(
+            state_dir, cycle_id=cycle_id, no_execution_outcome="no_plan",
+        ):
+            pytest.fail("missing terminal receipt must not reopen owner")
+
+
 def test_bridge_cycle_unconsumed_phase_cannot_be_replaced_by_fresh_owner(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     state_root.mkdir()
     with journal.bridge_cycle_parent_context(state_root) as owner:
         pass
-    with pytest.raises(JournalUnavailableError, match="requires checkpoint resume evidence"):
+    with pytest.raises(JournalUnavailableError, match="requires checkpoint (or no-execution )?evidence"):
         with journal.bridge_cycle_parent_context(state_root):
             pytest.fail("started cycle owner must not be reopened without checkpoint receipt")
     assert journal.provision_route_parent(state_root, "bridge.cycle") == owner

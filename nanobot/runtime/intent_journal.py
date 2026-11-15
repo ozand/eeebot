@@ -38,6 +38,7 @@ _PARENT_SCHEMA = 3
 _ROUTES = frozenset({"planner", "bridge.cycle"})
 _BRIDGE_CYCLE_PHASES = ("post_execution", "smoke_gate", "integration", "reflection")
 _BRIDGE_CYCLE_ID_RX = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_BRIDGE_NO_EXECUTION_OUTCOMES = frozenset({"no_plan", "rest", "rest_unchanged"})
 
 
 class JournalUnavailableError(RuntimeError):
@@ -271,6 +272,7 @@ def bridge_cycle_parent_context(
     state_dir: Path, *, cycle_id: str | None = None,
     completed_phase: str | None = None, checkpoint_head_sha: str | None = None,
     checkpoint_status: Literal["complete"] | None = None,
+    no_execution_outcome: str | None = None,
 ) -> Iterator[str]:
     """Start or resume one bridge cycle under its same durable route owner."""
     route = "bridge.cycle"
@@ -279,15 +281,23 @@ def bridge_cycle_parent_context(
     journal, owner_lock = _owner_paths(state_root, owner_id)
     with _owner_lock(owner_lock):
         parent = _read_parent(journal.with_suffix(".parent.json"), owner_id)
-    resume_values = (cycle_id, completed_phase, checkpoint_head_sha, checkpoint_status)
+    resume_values = (cycle_id, completed_phase, checkpoint_head_sha, checkpoint_status, no_execution_outcome)
     if not parent["parent_started"]:
         if any(value is not None for value in resume_values):
             raise JournalUnavailableError("new bridge-cycle parent cannot accept resume evidence")
         with bridge_parent_context(state_root, owner_id, route=route):
             yield owner_id
         return
-    if any(value is None for value in resume_values):
-        raise JournalUnavailableError("started bridge-cycle parent requires checkpoint resume evidence")
+    if no_execution_outcome is not None:
+        _verify_bridge_cycle_no_execution(state_root, owner_id, cycle_id=cycle_id, outcome=no_execution_outcome)
+        token = _ACTIVE_PARENT.set((state_root, owner_id))
+        try:
+            yield owner_id
+        finally:
+            _ACTIVE_PARENT.reset(token)
+        return
+    if any(value is None for value in resume_values[:4]):
+        raise JournalUnavailableError("started bridge-cycle parent requires checkpoint or no-execution evidence")
     with resume_bridge_cycle_parent_context(
         state_root, owner_id, cycle_id=cycle_id,
         completed_phase=completed_phase, checkpoint_head_sha=checkpoint_head_sha,
@@ -335,6 +345,82 @@ def resume_bridge_cycle_parent_context(
         yield
     finally:
         _ACTIVE_PARENT.reset(token)
+
+
+def _verify_bridge_cycle_no_execution(
+    state_root: Path, owner_id: str, *, cycle_id: str, outcome: str,
+) -> None:
+    if type(cycle_id) is not str or not _BRIDGE_CYCLE_ID_RX.fullmatch(cycle_id):
+        raise JournalUnavailableError("bridge-cycle identifier is invalid")
+    if type(outcome) is not str or outcome not in _BRIDGE_NO_EXECUTION_OUTCOMES:
+        raise JournalUnavailableError("no-execution outcome is not allowlisted")
+    route_path, route_lock = _route_paths(state_root, "bridge.cycle")
+    with _owner_lock(route_lock):
+        selected = _read_route(route_path, "bridge.cycle")
+        if selected["status"] != "active" or selected["owner_id"] != owner_id:
+            raise JournalUnavailableError("no-execution owner is not the active bridge cycle")
+    journal, lock = _owner_paths(state_root, owner_id)
+    with _owner_lock(lock):
+        parent = _read_parent(journal.with_suffix(".parent.json"), owner_id)
+        records = _decode(journal, owner_id)
+        matching = [
+            row for row in records
+            if row["event"] == "no_execution_consumed" and row["cycle_id"] == cycle_id
+        ]
+        if len(matching) != 1 or matching[0]["outcome"] != outcome:
+            raise JournalUnavailableError("no-execution terminal receipt is missing or mismatched")
+        if (
+            parent["status"] != "active" or parent["parent_consumed"]
+            or parent.get("active_operation_id") is not None
+            or any(row["event"] != "no_execution_consumed" for row in records)
+            or any(row["event"] == "no_execution_consumed" and row["cycle_id"] != cycle_id for row in records)
+        ):
+            raise JournalUnavailableError("no-execution owner contains attempted or unresolved work")
+
+
+def consume_bridge_cycle_no_execution(
+    state_dir: Path, owner_id: str, *, cycle_id: str, outcome: str,
+) -> None:
+    """Persist an explicit normal planner terminal that selected no executor phase."""
+    owner_id = _uuid(owner_id, "owner_id")
+    state_root = Path(state_dir)
+    if type(cycle_id) is not str or not _BRIDGE_CYCLE_ID_RX.fullmatch(cycle_id):
+        raise JournalUnavailableError("bridge-cycle identifier is invalid")
+    if type(outcome) is not str or outcome not in _BRIDGE_NO_EXECUTION_OUTCOMES:
+        raise JournalUnavailableError("no-execution outcome is not allowlisted")
+    row = {
+        "version": SCHEMA_VERSION, "owner_id": owner_id, "cycle_id": cycle_id,
+        "outcome": outcome, "event": "no_execution_consumed", "ts": _now_iso(),
+    }
+    _validate_record(row, owner_id)
+    route_path, route_lock = _route_paths(state_root, "bridge.cycle")
+    with _owner_lock(route_lock):
+        selected = _read_route(route_path, "bridge.cycle")
+        if selected["status"] != "active" or selected["owner_id"] != owner_id:
+            raise JournalUnavailableError("no-execution owner is not the active bridge cycle")
+    journal, lock = _owner_paths(state_root, owner_id)
+    with _owner_lock(lock):
+        if not journal.exists():
+            raise JournalUnavailableError("bridge-cycle owner journal is missing")
+        parent = _read_parent(journal.with_suffix(".parent.json"), owner_id)
+        if parent["status"] != "active" or parent["parent_consumed"] or not parent["parent_started"]:
+            raise JournalUnavailableError("bridge-cycle parent is not active")
+        if parent.get("active_operation_id") is not None:
+            raise JournalUnavailableError("bridge-cycle has an unresolved operation")
+        records = _decode(journal, owner_id)
+        if records:
+            if len(records) == 1 and (
+                records[0]["event"] == "no_execution_consumed"
+                and records[0]["owner_id"] == owner_id
+                and records[0]["cycle_id"] == cycle_id
+                and records[0]["outcome"] == outcome
+            ):
+                return
+            raise JournalUnavailableError("no-execution terminal cannot consume attempted work")
+        _append(journal, row, records)
+        observed = _decode(journal, owner_id)
+        if not observed or observed[-1] != row:
+            raise JournalUnavailableError("no-execution terminal readback mismatch")
 
 
 def _settled_marker_path(state_root: Path, route: str, owner_id: str) -> Path:
@@ -396,14 +482,19 @@ def _settled_route_owners(state_root: Path, route: str) -> set[str]:
 def close_route_parent(
     state_root: Path, route: str, owner_id: str, *,
     cycle_id: str | None = None, required_phase_heads: dict[str, str] | None = None,
+    no_execution_cycle_id: str | None = None, no_execution_outcome: str | None = None,
 ) -> bool:
     """Close after attempt settlement and, for bridge cycles, selected phase receipts."""
     owner_id = _uuid(owner_id, "owner_id")
     if route == "bridge.cycle":
-        if cycle_id is None or required_phase_heads is None:
+        phase_close = cycle_id is not None and required_phase_heads is not None
+        no_execution_close = no_execution_cycle_id is not None and no_execution_outcome is not None
+        if phase_close == no_execution_close:
             return False
-    elif cycle_id is not None or required_phase_heads is not None:
-        raise JournalUnavailableError("phase receipt arguments are only valid for bridge.cycle")
+    elif any(value is not None for value in (
+        cycle_id, required_phase_heads, no_execution_cycle_id, no_execution_outcome,
+    )):
+        raise JournalUnavailableError("bridge-cycle close arguments are only valid for bridge.cycle")
     route_path, route_lock = _route_paths(state_root, route)
     with _owner_lock(route_lock):
         selected = _read_route(route_path, route)
@@ -425,29 +516,49 @@ def close_route_parent(
             if any(event != "consumed" for event in _latest_attempt_events(records).values()):
                 return False
             if route == "bridge.cycle":
-                if cycle_id is None or required_phase_heads is None:
-                    return False
-                if type(cycle_id) is not str or not _BRIDGE_CYCLE_ID_RX.fullmatch(cycle_id):
-                    return False
-                selected_phases = list(required_phase_heads)
-                if (
-                    not selected_phases
-                    or selected_phases != [phase for phase in _BRIDGE_CYCLE_PHASES if phase in selected_phases]
-                    or any(phase not in _BRIDGE_CYCLE_PHASES for phase in selected_phases)
-                ):
-                    return False
-                expected_heads = {}
-                for phase, head in required_phase_heads.items():
-                    if type(head) is not str or not re.fullmatch(r"[a-fA-F0-9]{40,64}", head):
+                if no_execution_close:
+                    if cycle_id is not None or required_phase_heads is not None:
                         return False
-                    expected_heads[phase] = head.lower()
-                phase_rows = [
-                    row for row in records
-                    if row["event"] == "phase_consumed" and row["cycle_id"] == cycle_id
-                ]
-                observed_heads = {row["phase"]: row["checkpoint_head_sha"] for row in phase_rows}
-                if observed_heads != expected_heads:
-                    return False
+                    if (
+                        type(no_execution_cycle_id) is not str
+                        or not _BRIDGE_CYCLE_ID_RX.fullmatch(no_execution_cycle_id)
+                        or type(no_execution_outcome) is not str
+                        or no_execution_outcome not in _BRIDGE_NO_EXECUTION_OUTCOMES
+                    ):
+                        return False
+                    receipts = [
+                        row for row in records
+                        if row["event"] == "no_execution_consumed"
+                        and row["cycle_id"] == no_execution_cycle_id
+                    ]
+                    if len(receipts) != 1 or receipts[0]["outcome"] != no_execution_outcome:
+                        return False
+                    if any(row["event"] != "no_execution_consumed" for row in records):
+                        return False
+                else:
+                    if cycle_id is None or required_phase_heads is None:
+                        return False
+                    if type(cycle_id) is not str or not _BRIDGE_CYCLE_ID_RX.fullmatch(cycle_id):
+                        return False
+                    selected_phases = list(required_phase_heads)
+                    if (
+                        not selected_phases
+                        or selected_phases != [phase for phase in _BRIDGE_CYCLE_PHASES if phase in selected_phases]
+                        or any(phase not in _BRIDGE_CYCLE_PHASES for phase in selected_phases)
+                    ):
+                        return False
+                    expected_heads = {}
+                    for phase, head in required_phase_heads.items():
+                        if type(head) is not str or not re.fullmatch(r"[a-fA-F0-9]{40,64}", head):
+                            return False
+                        expected_heads[phase] = head.lower()
+                    phase_rows = [
+                        row for row in records
+                        if row["event"] == "phase_consumed" and row["cycle_id"] == cycle_id
+                    ]
+                    observed_heads = {row["phase"]: row["checkpoint_head_sha"] for row in phase_rows}
+                    if observed_heads != expected_heads:
+                        return False
             parent["parent_consumed"] = True
             parent["status"] = "resolved"
             parent["resolved_at"] = _now_iso()
@@ -692,7 +803,7 @@ def _latest_attempt_events(
 ) -> dict[tuple[str, str], str]:
     latest: dict[tuple[str, str], str] = {}
     for row in records:
-        if row["event"] == "phase_consumed":
+        if row["event"] in {"phase_consumed", "no_execution_consumed"}:
             continue
         if operation_id is None or row["operation_id"] == operation_id:
             latest[(row["operation_id"], row["attempt_id"])] = row["event"]
@@ -877,7 +988,22 @@ def _decode(path: Path, owner_id: str) -> list[dict[str, Any]]:
             raise JournalCorruptError("owner journal contains an invalid record") from exc
         if len(records) >= MAX_OWNER_RECORDS:
             raise JournalCorruptError("owner journal exceeds record limit")
+        if row["event"] == "no_execution_consumed":
+            if any(
+                item.get("event") == "phase_consumed" and item.get("cycle_id") == row["cycle_id"]
+                for item in records
+            ):
+                raise JournalCorruptError("no-execution receipt conflicts with phase receipts")
+            if any(item.get("event") == "no_execution_consumed" for item in records):
+                raise JournalCorruptError("duplicate no-execution terminal receipt")
+            records.append(row)
+            continue
         if row["event"] == "phase_consumed":
+            if any(
+                item.get("event") == "no_execution_consumed" and item.get("cycle_id") == row["cycle_id"]
+                for item in records
+            ):
+                raise JournalCorruptError("phase receipt conflicts with no-execution receipt")
             phases = phases_by_cycle.setdefault(row["cycle_id"], {})
             if row["phase"] in phases:
                 raise JournalCorruptError("duplicate bridge-cycle phase receipt")
@@ -909,6 +1035,26 @@ def _decode(path: Path, owner_id: str) -> list[dict[str, Any]]:
 
 
 def _validate_record(row: Any, owner_id: str) -> None:
+    no_execution_fields = {"version", "owner_id", "cycle_id", "outcome", "event", "ts"}
+    if isinstance(row, dict) and row.get("event") == "no_execution_consumed":
+        if set(row) != no_execution_fields:
+            raise ValueError("no-execution receipt schema mismatch")
+        if type(row["version"]) is not int or row["version"] != SCHEMA_VERSION or row["owner_id"] != owner_id:
+            raise ValueError("no-execution receipt version or owner mismatch")
+        if type(row["cycle_id"]) is not str or not _BRIDGE_CYCLE_ID_RX.fullmatch(row["cycle_id"]):
+            raise ValueError("no-execution receipt cycle identity is invalid")
+        if type(row["outcome"]) is not str or row["outcome"] not in _BRIDGE_NO_EXECUTION_OUTCOMES:
+            raise ValueError("no-execution receipt outcome is not allowlisted")
+        if not isinstance(row["ts"], str) or len(row["ts"]) > 40:
+            raise ValueError("no-execution receipt timestamp is invalid")
+        from datetime import datetime
+        try:
+            parsed_ts = datetime.fromisoformat(row["ts"].replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("no-execution receipt timestamp is invalid") from exc
+        if parsed_ts.tzinfo is None:
+            raise ValueError("no-execution receipt timestamp needs timezone")
+        return
     phase_fields = {"version", "owner_id", "cycle_id", "phase", "checkpoint_head_sha", "event", "ts"}
     if isinstance(row, dict) and row.get("event") == "phase_consumed":
         if set(row) != phase_fields:
