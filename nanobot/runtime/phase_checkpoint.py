@@ -1,0 +1,324 @@
+"""Single-cycle, versioned checkpoints for safe bridge phase progression (#2180).
+
+This module stores phase state only. It does not mint owner IDs, journal
+external attempts, classify effect settlement, or authorize side effects.
+Callers must hold the bridge lock and supply the existing durable parent owner.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+_SCHEMA = "bridge-phase-checkpoint-v1"
+_RELATIVE_PATH = Path("subagent_bridge") / "phase_checkpoint.json"
+_MAX_FILE_BYTES = 16_384
+_MAX_MEMOS = 16
+_MAX_MEMO_VALUE_BYTES = 128
+# This increment checkpoints only the selected post-execution path. Expanding
+# phase coverage is an explicit #2180 follow-up; unknown phases fail closed.
+_PHASES = ("post_execution", "smoke_gate", "integration", "reflection")
+_PHASE_RX = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_TOKEN_RX = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_SHA_RX = re.compile(r"^[a-fA-F0-9]{40,64}$")
+_BRANCH_RX = re.compile(r"^[A-Za-z0-9._/-]{1,160}$")
+_MEMO_KEY_RX = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+_MEMO_TEXT_RX = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+
+
+class CheckpointError(ValueError):
+    """Checkpoint is invalid, unavailable, or cannot advance safely."""
+
+
+class CheckpointHeldError(CheckpointError):
+    """An incomplete or mismatched phase must be reconciled, not replayed."""
+
+
+@dataclass(frozen=True)
+class CycleCheckpoint:
+    cycle_id: str
+    owner_id: str
+    branch: str
+    base_sha: str
+    head_sha: str
+    phase: str
+    status: str
+    memos: dict[str, Any]
+
+
+def _path(state_dir: Path) -> Path:
+    root = Path(state_dir)
+    directory = root / _RELATIVE_PATH.parent
+    if root.is_symlink() or directory.is_symlink():
+        raise CheckpointError("unsafe checkpoint path")
+    return directory / _RELATIVE_PATH.name
+
+
+def _identity(payload: dict[str, Any]) -> CycleCheckpoint:
+    expected = {
+        "schema", "cycle_id", "owner_id", "branch", "base_sha", "head_sha",
+        "phase", "status", "memos",
+    }
+    if set(payload) != expected or payload.get("schema") != _SCHEMA:
+        raise CheckpointError("unsupported checkpoint schema")
+    for key in ("cycle_id", "owner_id"):
+        if type(payload[key]) is not str or not _TOKEN_RX.fullmatch(payload[key]):
+            raise CheckpointError("invalid checkpoint identity")
+    if type(payload["branch"]) is not str or not _BRANCH_RX.fullmatch(payload["branch"]):
+        raise CheckpointError("invalid checkpoint branch")
+    if any(".." in part for part in payload["branch"].split("/")):
+        raise CheckpointError("invalid checkpoint branch")
+    if any(type(payload[key]) is not str or not _SHA_RX.fullmatch(payload[key]) for key in ("base_sha", "head_sha")):
+        raise CheckpointError("invalid checkpoint revision")
+    if type(payload["phase"]) is not str or payload["phase"] not in _PHASES:
+        raise CheckpointError("invalid checkpoint phase")
+    if type(payload["status"]) is not str or payload["status"] not in {"running", "complete"}:
+        raise CheckpointError("invalid checkpoint status")
+    memos = payload["memos"]
+    if type(memos) is not dict or len(memos) > _MAX_MEMOS:
+        raise CheckpointError("invalid checkpoint memos")
+    for key, value in memos.items():
+        if type(key) is not str or not _MEMO_KEY_RX.fullmatch(key):
+            raise CheckpointError("invalid checkpoint memo key")
+        _validate_memo_value(value)
+    return CycleCheckpoint(
+        cycle_id=payload["cycle_id"], owner_id=payload["owner_id"], branch=payload["branch"],
+        base_sha=payload["base_sha"], head_sha=payload["head_sha"], phase=payload["phase"],
+        status=payload["status"], memos=dict(memos),
+    )
+
+
+def _validate_memo_value(value: Any) -> None:
+    if value is None or type(value) is bool:
+        return
+    if type(value) is int and value.bit_length() <= 128:
+        return
+    if type(value) is str and _MEMO_TEXT_RX.fullmatch(value) and len(value.encode("utf-8")) <= _MAX_MEMO_VALUE_BYTES:
+        return
+    raise CheckpointError("memo value is not an allowlisted scalar")
+
+
+def _payload(checkpoint: CycleCheckpoint) -> dict[str, Any]:
+    return {
+        "schema": _SCHEMA, "cycle_id": checkpoint.cycle_id, "owner_id": checkpoint.owner_id,
+        "branch": checkpoint.branch, "base_sha": checkpoint.base_sha, "head_sha": checkpoint.head_sha,
+        "phase": checkpoint.phase, "status": checkpoint.status, "memos": checkpoint.memos,
+    }
+
+
+def _read_checkpoint(path: Path) -> CycleCheckpoint | None:
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise CheckpointError("unsafe checkpoint file")
+    try:
+        if path.stat().st_size > _MAX_FILE_BYTES:
+            raise CheckpointError("checkpoint exceeds size limit")
+        raw = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_strict_object)
+    except CheckpointError:
+        raise
+    except Exception as exc:
+        raise CheckpointError("checkpoint is unavailable or corrupt") from exc
+    if type(raw) is not dict:
+        raise CheckpointError("checkpoint is not an object")
+    return _identity(raw)
+
+
+def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise CheckpointError("duplicate checkpoint key")
+        result[key] = value
+    return result
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_checkpoint(path: Path, checkpoint: CycleCheckpoint) -> None:
+    payload = _payload(checkpoint)
+    encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
+    if len(encoded.encode("utf-8")) > _MAX_FILE_BYTES:
+        raise CheckpointError("checkpoint exceeds size limit")
+    created = not path.parent.exists()
+    _identity(payload)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise CheckpointError("unsafe checkpoint file")
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False,
+        ) as handle:
+            tmp_path = Path(handle.name)
+            handle.write(encoded)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if path.exists():
+            os.chmod(tmp_path, path.stat().st_mode & 0o777)
+        else:
+            os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+        tmp_path = None
+        if created:
+            _fsync_directory(path.parent.parent)
+        _fsync_directory(path.parent)
+        observed = _read_checkpoint(path)
+        if observed != checkpoint:
+            raise CheckpointError("checkpoint readback mismatch")
+    except CheckpointError:
+        raise
+    except Exception as exc:
+        raise CheckpointError("checkpoint persistence failed") from exc
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def load_checkpoint(state_dir: Path, *, owner_id: str) -> CycleCheckpoint | None:
+    """Read the active bridge checkpoint; unreadable/corrupt state is never empty."""
+    if type(owner_id) is not str or not _TOKEN_RX.fullmatch(owner_id):
+        raise CheckpointError("invalid caller owner")
+    checkpoint = _read_checkpoint(_path(state_dir))
+    if checkpoint is not None and checkpoint.owner_id != owner_id:
+        raise CheckpointHeldError("checkpoint belongs to a different durable parent")
+    return checkpoint
+
+
+def begin_phase(
+    state_dir: Path, *, owner_id: str, cycle_id: str, branch: str,
+    base_sha: str, head_sha: str, phase: str, repo_root: Path,
+) -> CycleCheckpoint:
+    """Durably admit one phase without minting identity or replaying incomplete work."""
+    path = _path(state_dir)
+    if phase not in _PHASES:
+        raise CheckpointError("unsupported checkpoint phase")
+    verify_local_branch_head(
+        repo_root, branch=branch, expected_base=base_sha, expected_head=head_sha,
+    )
+    current = _read_checkpoint(path)
+    if current is not None and current.owner_id != owner_id:
+        raise CheckpointHeldError("checkpoint belongs to a different durable parent")
+    if current is not None and current.status == "running":
+        raise CheckpointHeldError("previous phase has uncertain settlement")
+    if current is not None and current.cycle_id == cycle_id:
+        if (current.owner_id, current.branch, current.base_sha, current.head_sha) != (
+            owner_id, branch, base_sha, head_sha,
+        ):
+            raise CheckpointHeldError("cycle owner, branch identity, or revision changed")
+        if _PHASES.index(phase) != _PHASES.index(current.phase) + 1:
+            raise CheckpointHeldError("phase transition is not the next bounded phase")
+        memos = dict(current.memos)
+    else:
+        if phase != _PHASES[0]:
+            raise CheckpointHeldError("first phase checkpoint is missing")
+        # Keep only one active/most-recent completed cycle. A completed
+        # checkpoint is retained until a caller presents the next durable
+        # owner and cycle; a running/ambiguous one is never replaced.
+        memos = {}
+    checkpoint = CycleCheckpoint(cycle_id, owner_id, branch, base_sha, head_sha, phase, "running", memos)
+    _write_checkpoint(path, checkpoint)
+    return checkpoint
+
+
+def _git_sha(repo_root: Path, ref: str) -> str:
+    """Resolve a local Git ref strictly; missing/error evidence is not empty state."""
+    import subprocess
+
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "--verify", ref],
+        capture_output=True, text=True, timeout=10,
+    )
+    sha = result.stdout.strip()
+    if result.returncode != 0 or not _SHA_RX.fullmatch(sha):
+        raise CheckpointHeldError("Git revision evidence unavailable")
+    return sha.lower()
+
+
+def verify_local_branch_head(
+    repo_root: Path, *, branch: str, expected_base: str, expected_head: str,
+) -> None:
+    """Prove checkout identity, branch tip and base ancestry using local Git only."""
+    if type(branch) is not str or not _BRANCH_RX.fullmatch(branch) or ".." in branch.split("/"):
+        raise CheckpointError("invalid checkpoint branch")
+    if any(type(sha) is not str or not _SHA_RX.fullmatch(sha) for sha in (expected_base, expected_head)):
+        raise CheckpointError("invalid checkpoint revision")
+    repo = Path(repo_root)
+    import subprocess
+    actual = _git_sha(repo, f"refs/heads/{branch}")
+    if actual != expected_head.lower():
+        raise CheckpointHeldError("cycle branch head changed")
+    ancestry = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", expected_base.lower(), expected_head.lower()],
+        capture_output=True, text=True, timeout=10,
+    )
+    if ancestry.returncode != 0:
+        raise CheckpointHeldError("checkpoint base is not an ancestor of branch head")
+    result = subprocess.run(
+        ["git", "-C", str(repo), "symbolic-ref", "--quiet", "--short", "HEAD"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode != 0 or result.stdout.strip() != branch:
+        raise CheckpointHeldError("checkout branch identity changed")
+
+
+def complete_phase(
+    state_dir: Path, *, owner_id: str, cycle_id: str, branch: str,
+    base_sha: str, head_sha: str, phase: str, repo_root: Path,
+) -> CycleCheckpoint:
+    """Mark a phase complete only after effect and exact local branch head are verified."""
+    path = _path(state_dir)
+    current = load_checkpoint(state_dir, owner_id=owner_id)
+    if current is None or current.status != "running":
+        raise CheckpointHeldError("no unsettled phase checkpoint exists")
+    if (current.cycle_id, current.branch, current.base_sha, current.head_sha, current.phase) != (
+        cycle_id, branch, base_sha, head_sha, phase,
+    ):
+        raise CheckpointHeldError("completion does not match the durable phase checkpoint")
+    verify_local_branch_head(
+        repo_root, branch=branch, expected_base=base_sha, expected_head=head_sha,
+    )
+    completed = CycleCheckpoint(
+        current.cycle_id, current.owner_id, current.branch, current.base_sha,
+        current.head_sha, current.phase, "complete", dict(current.memos),
+    )
+    _write_checkpoint(path, completed)
+    return completed
+
+
+def memo(state_dir: Path, *, owner_id: str, key: str, value: Any) -> Any:
+    """Persist one small first-write-wins decision within the current running phase."""
+    if type(key) is not str or not _MEMO_KEY_RX.fullmatch(key):
+        raise CheckpointError("invalid memo key")
+    _validate_memo_value(value)
+    current = load_checkpoint(state_dir, owner_id=owner_id)
+    if current is None or current.status != "running":
+        raise CheckpointHeldError("memos require an active phase")
+    if key in current.memos:
+        return current.memos[key]
+    if len(current.memos) >= _MAX_MEMOS:
+        raise CheckpointHeldError("memo capacity reached")
+    values = dict(current.memos)
+    values[key] = value
+    updated = CycleCheckpoint(
+        current.cycle_id, current.owner_id, current.branch, current.base_sha,
+        current.head_sha, current.phase, current.status, values,
+    )
+    _write_checkpoint(_path(state_dir), updated)
+    return value

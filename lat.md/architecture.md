@@ -46,6 +46,8 @@ The fitness boundary is harness-owned: scorecard and held-out verification are p
 
 Code, mutable instance workspace, runtime state, and product release are separate authority domains.
 
+`nanobot/runtime/phase_checkpoint.py` provides a strict, bounded versioned checkpoint for one bridge cycle under `state/subagent_bridge/`. It verifies atomic-write readback and the exact local cycle branch, base ancestry, and head; corrupt state, an unresolved phase, or owner/revision mismatch is held rather than treated as empty. This primitive is not yet called by the bridge execution path and does not replace best-effort append evidence in `cycle_ledger.py` or executor-call recovery ownership.
+
 The self-evolving instance workspace is where bounded cycle changes are staged and integrated. Runtime state is held separately under the configured state root; it is evidence and operational state, not a second source-code repository. Product releases are selected through the host release mechanism and verified separately from repository CI. This page makes no claim about current host installation or health. See [[host-boundaries]], [[docs/specs/host-runtime/spec.md]], [[docs/specs/subagent-bridge/spec.md]], and [[docs/CURRENT_ARCHITECTURE.md]].
 
 ## Decision-record navigation
