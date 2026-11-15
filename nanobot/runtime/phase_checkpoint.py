@@ -19,6 +19,7 @@ _RELATIVE_PATH = Path("subagent_bridge") / "phase_checkpoint.json"
 _MAX_FILE_BYTES = 16_384
 _MAX_MEMOS = 16
 _MAX_MEMO_VALUE_BYTES = 128
+_RESERVED_MEMO_KEYS = frozenset({"integration_main_sha"})
 # This increment checkpoints only the selected post-execution path. Expanding
 # phase coverage is an explicit #2180 follow-up; unknown phases fail closed.
 _PHASES = ("post_execution", "smoke_gate", "integration", "reflection")
@@ -211,9 +212,6 @@ def begin_phase(
     path = _path(state_dir)
     if phase not in _PHASES:
         raise CheckpointError("unsupported checkpoint phase")
-    verify_local_branch_head(
-        repo_root, branch=branch, expected_base=base_sha, expected_head=head_sha,
-    )
     current = _read_checkpoint(path)
     if current is not None and current.status == "running":
         raise CheckpointHeldError("previous phase has uncertain settlement")
@@ -228,6 +226,17 @@ def begin_phase(
         if _PHASES.index(phase) != _PHASES.index(current.phase) + 1:
             raise CheckpointHeldError("phase transition is not the next bounded phase")
         memos = dict(current.memos)
+        if phase == "reflection":
+            if current.phase != "integration" or current.status != "complete":
+                raise CheckpointHeldError("reflection requires a completed integration receipt")
+            _verify_completed_integration(
+                repo_root, cycle_id=cycle_id, branch=branch, base_sha=base_sha,
+                cycle_head_sha=head_sha, main_sha=memos.get("integration_main_sha"),
+            )
+        else:
+            verify_local_branch_head(
+                repo_root, branch=branch, expected_base=base_sha, expected_head=head_sha,
+            )
     else:
         if phase != _PHASES[0]:
             raise CheckpointHeldError("first phase checkpoint is missing")
@@ -235,6 +244,9 @@ def begin_phase(
         # checkpoint is retained until a caller presents the next durable
         # owner and cycle; a running/ambiguous one is never replaced.
         memos = {}
+        verify_local_branch_head(
+            repo_root, branch=branch, expected_base=base_sha, expected_head=head_sha,
+        )
     checkpoint = CycleCheckpoint(cycle_id, owner_id, branch, base_sha, head_sha, phase, "running", memos)
     _write_checkpoint(path, checkpoint)
     return checkpoint
@@ -284,8 +296,9 @@ def verify_local_branch_head(
 def complete_phase(
     state_dir: Path, *, owner_id: str, cycle_id: str, branch: str,
     base_sha: str, head_sha: str, phase: str, repo_root: Path,
+    integration_receipt: dict[str, Any] | None = None,
 ) -> CycleCheckpoint:
-    """Mark a phase complete only after effect and exact local branch head are verified."""
+    """Complete a local phase, or integration with an exact verified receipt."""
     path = _path(state_dir)
     current = load_checkpoint(state_dir, owner_id=owner_id)
     if current is None or current.status != "running":
@@ -294,28 +307,98 @@ def complete_phase(
         cycle_id, branch, base_sha, head_sha, phase,
     ):
         raise CheckpointHeldError("completion does not match the durable phase checkpoint")
-    verify_local_branch_head(
-        repo_root, branch=branch, expected_base=base_sha, expected_head=head_sha,
-    )
+    memos = dict(current.memos)
+    if phase == "integration":
+        main_sha = _verify_integration_receipt(
+            repo_root, cycle_id=cycle_id, branch=branch, base_sha=base_sha,
+            cycle_head_sha=head_sha, receipt=integration_receipt,
+        )
+        if "integration_main_sha" in memos:
+            raise CheckpointHeldError("integration main revision was already memoized")
+        memos["integration_main_sha"] = main_sha
+    else:
+        if integration_receipt is not None:
+            raise CheckpointError("integration receipt is only valid for the integration phase")
+        if phase == "reflection":
+            _verify_completed_integration(
+                repo_root, cycle_id=cycle_id, branch=branch, base_sha=base_sha,
+                cycle_head_sha=head_sha, main_sha=memos.get("integration_main_sha"),
+            )
+        else:
+            verify_local_branch_head(
+                repo_root, branch=branch, expected_base=base_sha, expected_head=head_sha,
+            )
     completed = CycleCheckpoint(
         current.cycle_id, current.owner_id, current.branch, current.base_sha,
-        current.head_sha, current.phase, "complete", dict(current.memos),
+        current.head_sha, current.phase, "complete", memos,
     )
     _write_checkpoint(path, completed)
     return completed
 
 
+def _verify_integration_receipt(
+    repo_root: Path, *, cycle_id: str, branch: str, base_sha: str,
+    cycle_head_sha: str, receipt: dict[str, Any] | None,
+) -> str:
+    """Verify a successful bridge push against the retained cycle ref and merge parents."""
+    if type(receipt) is not dict or set(receipt) != {"ok", "push_confirmed", "main_sha_after"}:
+        raise CheckpointHeldError("integration receipt is missing or malformed")
+    main_sha = receipt["main_sha_after"]
+    if receipt["ok"] is not True or receipt["push_confirmed"] is not True:
+        raise CheckpointHeldError("integration push is not confirmed")
+    if type(main_sha) is not str or not _SHA_RX.fullmatch(main_sha):
+        raise CheckpointHeldError("integration main revision is invalid")
+    branch_sha = _git_sha(repo_root, f"refs/heads/{branch}")
+    if branch_sha != cycle_head_sha.lower():
+        raise CheckpointHeldError("integration cycle branch head changed")
+    actual_main = _git_sha(repo_root, "refs/heads/main")
+    actual_origin = _git_sha(repo_root, "refs/remotes/origin/main")
+    if actual_main != main_sha.lower() or actual_origin != main_sha.lower():
+        raise CheckpointHeldError("integration receipt does not match local and pushed main")
+    import subprocess
+
+    parents_result = subprocess.run(
+        ["git", "-C", str(repo_root), "show", "-s", "--format=%P", main_sha.lower()],
+        capture_output=True, text=True, timeout=10,
+    )
+    if parents_result.returncode != 0:
+        raise CheckpointHeldError("integration merge evidence unavailable")
+    parents = parents_result.stdout.split()
+    cycle_id_result = subprocess.run(
+        ["git", "-C", str(repo_root), "show", "-s", "--format=%(trailers:key=Selfevo-Cycle,valueonly)", main_sha.lower()],
+        capture_output=True, text=True, timeout=10,
+    )
+    if cycle_id_result.returncode != 0 or cycle_id_result.stdout.strip() != cycle_id:
+        raise CheckpointHeldError("integration cycle identity does not match merge receipt")
+    if len(parents) != 2 or parents[0] != base_sha.lower() or parents[1] != cycle_head_sha.lower():
+        raise CheckpointHeldError("integration merge parents do not match checkpoint revisions")
+    return main_sha.lower()
+
+
+def _verify_completed_integration(
+    repo_root: Path, *, cycle_id: str, branch: str, base_sha: str,
+    cycle_head_sha: str, main_sha: Any,
+) -> None:
+    if type(main_sha) is not str or not _SHA_RX.fullmatch(main_sha):
+        raise CheckpointHeldError("completed integration receipt is missing")
+    _verify_integration_receipt(
+        repo_root, cycle_id=cycle_id, branch=branch, base_sha=base_sha,
+        cycle_head_sha=cycle_head_sha,
+        receipt={"ok": True, "push_confirmed": True, "main_sha_after": main_sha},
+    )
+
+
 def memo(state_dir: Path, *, owner_id: str, key: str, value: Any) -> Any:
     """Persist one small first-write-wins decision within the current running phase."""
-    if type(key) is not str or not _MEMO_KEY_RX.fullmatch(key):
-        raise CheckpointError("invalid memo key")
+    if type(key) is not str or not _MEMO_KEY_RX.fullmatch(key) or key in _RESERVED_MEMO_KEYS:
+        raise CheckpointError("invalid or reserved memo key")
     _validate_memo_value(value)
     current = load_checkpoint(state_dir, owner_id=owner_id)
     if current is None or current.status != "running":
         raise CheckpointHeldError("memos require an active phase")
     if key in current.memos:
         return current.memos[key]
-    if len(current.memos) >= _MAX_MEMOS:
+    if len(current.memos) >= _MAX_MEMOS - len(_RESERVED_MEMO_KEYS):
         raise CheckpointHeldError("memo capacity reached")
     values = dict(current.memos)
     values[key] = value

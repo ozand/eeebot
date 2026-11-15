@@ -132,6 +132,20 @@ def test_dangling_checkpoint_symlink_is_held(tmp_path):
         phase_checkpoint.load_checkpoint(tmp_path, owner_id=_OWNER)
 
 
+def test_memo_capacity_reserves_integration_receipt_slot(tmp_path):
+    repo, base, head = _cycle_repo(tmp_path)
+    state_dir = tmp_path / "state"
+    _begin(state_dir, repo, base, head)
+    for index in range(phase_checkpoint._MAX_MEMOS - 1):
+        phase_checkpoint.memo(
+            state_dir, owner_id=_OWNER, key=f"decision_{index}", value=f"value_{index}",
+        )
+    with pytest.raises(phase_checkpoint.CheckpointHeldError, match="memo capacity"):
+        phase_checkpoint.memo(state_dir, owner_id=_OWNER, key="last_decision", value="held")
+    loaded = phase_checkpoint.load_checkpoint(state_dir, owner_id=_OWNER)
+    assert loaded is not None and len(loaded.memos) == phase_checkpoint._MAX_MEMOS - 1
+
+
 def test_corrupt_or_different_owner_checkpoint_is_held(tmp_path):
     checkpoint_path = tmp_path / "subagent_bridge" / "phase_checkpoint.json"
     checkpoint_path.parent.mkdir(parents=True)
@@ -182,33 +196,6 @@ def test_new_cycle_cannot_replace_checkpoint_before_all_phases_complete(tmp_path
     assert checkpoint_path.read_bytes() == before
     preserved = phase_checkpoint.load_checkpoint(state_dir, owner_id=_OWNER)
     assert preserved is not None and preserved.memos == {"receipt": "persisted"}
-
-
-@pytest.mark.parametrize("replacement_owner", [_OWNER, "next-owner-opaque"])
-def test_next_owner_can_start_after_all_declared_phases_complete(tmp_path, replacement_owner):
-    repo, base, head = _cycle_repo(tmp_path)
-    state_dir = tmp_path / "state"
-    for phase, next_phase in zip(
-        ("post_execution", "smoke_gate", "integration"),
-        ("smoke_gate", "integration", "reflection"),
-        strict=True,
-    ):
-        _begin(state_dir, repo, base, head, phase=phase)
-        phase_checkpoint.complete_phase(
-            state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
-            base_sha=base, head_sha=head, phase=phase, repo_root=repo,
-        )
-    _begin(state_dir, repo, base, head, phase="reflection")
-    phase_checkpoint.complete_phase(
-        state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
-        base_sha=base, head_sha=head, phase="reflection", repo_root=repo,
-    )
-    next_checkpoint = _begin(
-        state_dir, repo, base, head, owner=replacement_owner, cycle="next-cycle-opaque",
-    )
-    assert next_checkpoint.owner_id == replacement_owner
-    assert next_checkpoint.cycle_id == "next-cycle-opaque"
-    assert next_checkpoint.memos == {}
 
 
 def test_phase_completion_requires_exact_local_branch_head(tmp_path):

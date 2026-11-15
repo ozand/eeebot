@@ -1187,7 +1187,10 @@ def _integrate_cycle_to_main(
         }
 
     main_sha_after = _sp_int.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
-    return {'ok': True, 'main_sha_after': main_sha_after, 'reason': None, 'push_attempts': push_attempts}
+    return {
+        'ok': True, 'main_sha_after': main_sha_after, 'reason': None,
+        'push_attempts': push_attempts, 'push_confirmed': True,
+    }
 
 
 def _detect_out_of_band_main(repo_root: 'Path', main_sha_before: str) -> str:
