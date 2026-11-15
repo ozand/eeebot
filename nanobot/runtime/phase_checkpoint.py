@@ -111,9 +111,11 @@ def _payload(checkpoint: CycleCheckpoint) -> dict[str, Any]:
 
 
 def _read_checkpoint(path: Path) -> CycleCheckpoint | None:
+    if path.is_symlink():
+        raise CheckpointError("unsafe checkpoint file")
     if not path.exists():
         return None
-    if path.is_symlink() or not path.is_file():
+    if not path.is_file():
         raise CheckpointError("unsafe checkpoint file")
     try:
         if path.stat().st_size > _MAX_FILE_BYTES:
@@ -215,9 +217,9 @@ def begin_phase(
     current = _read_checkpoint(path)
     if current is not None and current.status == "running":
         raise CheckpointHeldError("previous phase has uncertain settlement")
-    if current is not None and current.owner_id != owner_id:
+    if current is not None and current.cycle_id != cycle_id:
         if current.status != "complete" or current.phase != _PHASES[-1]:
-            raise CheckpointHeldError("previous parent has unfinished phases")
+            raise CheckpointHeldError("previous cycle has unfinished phases")
     if current is not None and current.cycle_id == cycle_id:
         if (current.owner_id, current.branch, current.base_sha, current.head_sha) != (
             owner_id, branch, base_sha, head_sha,
