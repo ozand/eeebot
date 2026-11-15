@@ -899,6 +899,28 @@ def test_bridge_cycle_no_execution_receipt_closes_and_recovers_same_terminal(tmp
     assert journal.provision_route_parent(state_dir, "bridge.cycle") != owner
 
 
+def test_bridge_cycle_phase_writer_cannot_append_after_no_execution_terminal(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    cycle_id = "cycle-noexec-phase-guard"
+    with journal.bridge_cycle_parent_context(state_dir) as owner:
+        pass
+    journal.consume_bridge_cycle_no_execution(
+        state_dir, owner, cycle_id=cycle_id, outcome="no_plan",
+    )
+    before = journal._owner_paths(state_dir, owner)[0].read_bytes()
+    with pytest.raises(JournalUnavailableError, match="close-only"):
+        journal.consume_bridge_cycle_phase(
+            state_dir, owner, cycle_id=cycle_id, phase="post_execution",
+            checkpoint_head_sha="d" * 40, checkpoint_status="complete",
+        )
+    assert journal._owner_paths(state_dir, owner)[0].read_bytes() == before
+    assert journal.close_route_parent(
+        state_dir, "bridge.cycle", owner,
+        no_execution_cycle_id=cycle_id, no_execution_outcome="no_plan",
+    ) is True
+
+
 def test_bridge_cycle_no_execution_rejects_empty_wrong_and_attempted_close(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     state_dir.mkdir()

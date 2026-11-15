@@ -249,6 +249,8 @@ def consume_bridge_cycle_phase(
         if parent.get("active_operation_id") is not None:
             raise JournalUnavailableError("bridge-cycle has an unresolved operation")
         records = _decode(journal, owner_id)
+        if any(row["event"] == "no_execution_consumed" for row in records):
+            raise JournalUnavailableError("no-execution terminal owner is close-only")
         if any(event != "consumed" for event in _latest_attempt_events(records).values()):
             raise JournalUnavailableError("bridge-cycle has unresolved attempt evidence")
         phase_rows = [r for r in records if r["event"] == "phase_consumed" and r["cycle_id"] == cycle_id]
