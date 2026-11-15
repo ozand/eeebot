@@ -791,6 +791,251 @@ def test_bridge_route_holds_existing_owner_and_rotates_only_after_consumption(tm
 
 
 # @lat: [[architecture#Intent-before-effect evidence]]
+def test_bridge_cycle_parent_resumes_same_owner_and_reacknowledges_exact_phase(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    cycle_id = "cycle-opaque-001"
+    head = "a" * 40
+
+    with journal.bridge_cycle_parent_context(state_root) as first_owner:
+        pass
+    with pytest.raises(JournalUnavailableError, match="not complete"):
+        with journal.bridge_cycle_parent_context(
+            state_root, cycle_id=cycle_id, completed_phase="post_execution",
+            checkpoint_head_sha=head, checkpoint_status="running",
+        ):
+            pytest.fail("running checkpoint must not be consumed")
+    assert journal.read_owner_records(state_root, first_owner) == []
+
+    with journal.bridge_cycle_parent_context(
+        state_root, cycle_id=cycle_id, completed_phase="post_execution",
+        checkpoint_head_sha=head, checkpoint_status="complete",
+    ) as resumed_owner:
+        assert resumed_owner == first_owner
+        journal.consume_bridge_cycle_phase(
+            state_root, resumed_owner, cycle_id=cycle_id, phase="post_execution",
+            checkpoint_head_sha=head, checkpoint_status="complete",
+        )
+
+    records = journal.read_owner_records(state_root, first_owner)
+    receipts = [row for row in records if row["event"] == "phase_consumed"]
+    assert len(receipts) == 1
+    assert receipts[0]["checkpoint_head_sha"] == head
+    with pytest.raises(JournalUnavailableError, match="conflicts"):
+        journal.consume_bridge_cycle_phase(
+            state_root, first_owner, cycle_id=cycle_id, phase="post_execution",
+            checkpoint_head_sha="b" * 40, checkpoint_status="complete",
+        )
+    assert journal.read_owner_records(state_root, first_owner) == records
+    assert journal.provision_route_parent(state_root, "bridge.cycle") == first_owner
+
+
+def test_bridge_cycle_close_requires_exact_selected_phase_receipts(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    cycle_id = "cycle-opaque-002"
+    heads = {phase: str(index + 1) * 40 for index, phase in enumerate(
+        ("post_execution", "smoke_gate", "integration", "reflection"),
+    )}
+    with journal.bridge_cycle_parent_context(state_root) as owner:
+        pass
+    for phase, head in heads.items():
+        journal.consume_bridge_cycle_phase(
+            state_root, owner, cycle_id=cycle_id, phase=phase,
+            checkpoint_head_sha=head, checkpoint_status="complete",
+        )
+    wrong_heads = {**heads, "integration": "f" * 40}
+    assert journal.close_route_parent(
+        state_root, "bridge.cycle", owner, cycle_id=cycle_id,
+        required_phase_heads=wrong_heads,
+    ) is False
+    assert journal.close_route_parent(
+        state_root, "bridge.cycle", owner, cycle_id=cycle_id,
+        required_phase_heads={"post_execution": heads["post_execution"]},
+    ) is False
+    assert journal.close_route_parent(
+        state_root, "bridge.cycle", owner, cycle_id=cycle_id,
+        required_phase_heads=heads,
+    ) is True
+
+
+def test_bridge_cycle_no_execution_receipt_closes_and_recovers_same_terminal(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    cycle_id = "cycle-rest-opaque-1"
+    with journal.bridge_cycle_parent_context(state_dir) as owner:
+        pass
+    journal.consume_bridge_cycle_no_execution(
+        state_dir, owner, cycle_id=cycle_id, outcome="rest_unchanged",
+    )
+    before = journal.read_owner_records(state_dir, owner)
+    journal.consume_bridge_cycle_no_execution(
+        state_dir, owner, cycle_id=cycle_id, outcome="rest_unchanged",
+    )
+    assert journal.read_owner_records(state_dir, owner) == before
+    with pytest.raises(JournalUnavailableError, match="attempted work"):
+        journal.consume_bridge_cycle_no_execution(
+            state_dir, owner, cycle_id=cycle_id, outcome="no_plan",
+        )
+    with journal.bridge_cycle_parent_context(
+        state_dir, no_execution_cycle_id=cycle_id, no_execution_outcome="rest_unchanged",
+    ) as resumed_owner:
+        assert resumed_owner == owner
+    assert journal.close_route_parent(
+        state_dir, "bridge.cycle", owner,
+        no_execution_cycle_id=cycle_id, no_execution_outcome="rest_unchanged",
+    ) is True
+    assert journal.provision_route_parent(state_dir, "bridge.cycle") != owner
+
+
+def test_bridge_cycle_no_execution_rejects_empty_wrong_and_attempted_close(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    cycle_id = "cycle-no-plan-opaque"
+    with journal.bridge_cycle_parent_context(state_dir) as owner:
+        pass
+    assert journal.close_route_parent(
+        state_dir, "bridge.cycle", owner, cycle_id=cycle_id, required_phase_heads={},
+    ) is False
+    for outcome in ("exception", "refused", "malformed", "spawn_failed", "timed_out"):
+        with pytest.raises(JournalUnavailableError, match="not allowlisted"):
+            journal.consume_bridge_cycle_no_execution(
+                state_dir, owner, cycle_id=cycle_id, outcome=outcome,
+            )
+    operation_id, attempt_id = str(uuid4()), str(uuid4())
+    journal.admit_attempt(
+        state_dir, owner_id=owner, operation_id=operation_id, attempt_id=attempt_id,
+        component="bridge", target="bridge.cycle", _test_only=True,
+    )
+    with pytest.raises(JournalUnavailableError, match="attempted work"):
+        journal.consume_bridge_cycle_no_execution(
+            state_dir, owner, cycle_id=cycle_id, outcome="no_plan",
+        )
+    assert journal.close_route_parent(
+        state_dir, "bridge.cycle", owner,
+        no_execution_cycle_id=cycle_id, no_execution_outcome="no_plan",
+    ) is False
+
+
+def test_bridge_cycle_no_execution_cannot_follow_selected_phase_receipt(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    cycle_id = "cycle-mixed-opaque"
+    with journal.bridge_cycle_parent_context(state_dir) as owner:
+        pass
+    journal.consume_bridge_cycle_phase(
+        state_dir, owner, cycle_id=cycle_id, phase="post_execution",
+        checkpoint_head_sha="c" * 40, checkpoint_status="complete",
+    )
+    with pytest.raises(JournalUnavailableError, match="attempted work"):
+        journal.consume_bridge_cycle_no_execution(
+            state_dir, owner, cycle_id=cycle_id, outcome="no_plan",
+        )
+    assert journal.provision_route_parent(state_dir, "bridge.cycle") == owner
+
+
+def test_bridge_cycle_cancel_without_terminal_receipt_stays_held(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    cycle_id = "cycle-cancel-opaque"
+    with journal.bridge_cycle_parent_context(state_dir) as owner:
+        pass
+    assert journal.close_route_parent(
+        state_dir, "bridge.cycle", owner,
+        no_execution_cycle_id=cycle_id, no_execution_outcome="no_plan",
+    ) is False
+    with pytest.raises(JournalUnavailableError, match="terminal receipt is missing or mismatched"):
+        with journal.bridge_cycle_parent_context(
+            state_dir, no_execution_cycle_id=cycle_id, no_execution_outcome="no_plan",
+        ):
+            pytest.fail("missing terminal receipt must not reopen owner")
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        [
+            {"event": "no_execution_consumed", "cycle_id": "cycle-a", "outcome": "no_plan"},
+            {"event": "phase_consumed", "cycle_id": "cycle-a", "phase": "post_execution", "checkpoint_head_sha": "a" * 40},
+        ],
+        [
+            {"event": "phase_consumed", "cycle_id": "cycle-a", "phase": "post_execution", "checkpoint_head_sha": "a" * 40},
+            {"event": "no_execution_consumed", "cycle_id": "cycle-a", "outcome": "no_plan"},
+        ],
+        [
+            {"event": "no_execution_consumed", "cycle_id": "cycle-a", "outcome": "no_plan"},
+            {"event": "phase_consumed", "cycle_id": "cycle-b", "phase": "post_execution", "checkpoint_head_sha": "b" * 40},
+        ],
+        [
+            {"event": "phase_consumed", "cycle_id": "cycle-b", "phase": "post_execution", "checkpoint_head_sha": "b" * 40},
+            {"event": "no_execution_consumed", "cycle_id": "cycle-a", "outcome": "no_plan"},
+        ],
+        [
+            {"event": "phase_consumed", "cycle_id": "cycle-a", "phase": "post_execution", "checkpoint_head_sha": "a" * 40},
+            {"event": "phase_consumed", "cycle_id": "cycle-b", "phase": "post_execution", "checkpoint_head_sha": "b" * 40},
+        ],
+    ],
+)
+def test_bridge_cycle_mixed_receipt_history_is_corrupt_and_preserved(tmp_path: Path, events) -> None:
+    import json
+
+    owner = str(uuid4())
+    journal_dir = tmp_path / "intent-journal"
+    journal_dir.mkdir()
+    path = journal_dir / f"{owner}.jsonl"
+    ts = "2026-11-15T08:00:00Z"
+    rows = [
+        {"version": 1, "owner_id": owner, **event, "ts": ts}
+        for event in events
+    ]
+    original = b"".join(json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows)
+    path.write_bytes(original)
+    with pytest.raises(JournalCorruptError, match="mixed cycle or terminal receipts"):
+        journal._decode(path, owner)
+    assert path.read_bytes() == original
+
+
+def test_bridge_cycle_malformed_mixed_history_holds_reopen_and_close(tmp_path: Path) -> None:
+    import json
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    with journal.bridge_cycle_parent_context(state_dir) as owner:
+        pass
+    path = state_dir / "intent-journal" / f"{owner}.jsonl"
+    ts = "2026-11-15T08:00:00Z"
+    rows = [
+        {"version": 1, "owner_id": owner, "cycle_id": "cycle-a", "outcome": "no_plan",
+         "event": "no_execution_consumed", "ts": ts},
+        {"version": 1, "owner_id": owner, "cycle_id": "cycle-b", "phase": "post_execution",
+         "checkpoint_head_sha": "b" * 40, "event": "phase_consumed", "ts": ts},
+    ]
+    original = b"".join(json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows)
+    path.write_bytes(original)
+    with pytest.raises(JournalCorruptError, match="mixed cycle or terminal receipts"):
+        with journal.bridge_cycle_parent_context(
+            state_dir, no_execution_cycle_id="cycle-a", no_execution_outcome="no_plan",
+        ):
+            pytest.fail("mixed receipt history must not reopen")
+    with pytest.raises(JournalCorruptError, match="mixed cycle or terminal receipts"):
+        journal.close_route_parent(
+            state_dir, "bridge.cycle", owner, no_execution_cycle_id="cycle-a",
+            no_execution_outcome="no_plan",
+        )
+    assert path.read_bytes() == original
+
+
+def test_bridge_cycle_unconsumed_phase_cannot_be_replaced_by_fresh_owner(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    with journal.bridge_cycle_parent_context(state_root) as owner:
+        pass
+    with pytest.raises(JournalUnavailableError, match="requires checkpoint (or no-execution )?evidence"):
+        with journal.bridge_cycle_parent_context(state_root):
+            pytest.fail("started cycle owner must not be reopened without checkpoint receipt")
+    assert journal.provision_route_parent(state_root, "bridge.cycle") == owner
+
+
 def test_route_capacity_refuses_new_parent_without_pruning_settled_records(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -960,9 +1205,15 @@ def test_bridge_cycle_resume_uses_same_owner_only_after_consumed_attempt(tmp_pat
     assert journal._read_route(route_path, "bridge.cycle")["owner_id"] == first_owner
     before = journal.read_owner_records(state_root, first_owner)
 
-    with journal.bridge_cycle_parent_context(state_root) as resumed_owner:
+    with journal.bridge_cycle_parent_context(
+        state_root, cycle_id="cycle-bridge-resume", completed_phase="post_execution",
+        checkpoint_head_sha="a" * 40, checkpoint_status="complete",
+    ) as resumed_owner:
         assert resumed_owner == first_owner
-        assert journal.read_owner_records(state_root, resumed_owner) == before
+        resumed_records = journal.read_owner_records(state_root, resumed_owner)
+        assert resumed_records[:-1] == before
+        assert resumed_records[-1]["event"] == "phase_consumed"
+        assert resumed_records[-1]["cycle_id"] == "cycle-bridge-resume"
     assert journal.provision_route_parent(state_root, "bridge.cycle") == first_owner
 
 
@@ -974,8 +1225,11 @@ def test_bridge_cycle_resume_holds_unsettled_attempt_and_preserves_evidence(tmp_
             assert operation is not None
             operation.admit()
     before = journal.read_owner_records(state_root, owner)
-    with pytest.raises(JournalUnavailableError, match="unresolved"):
-        with journal.bridge_cycle_parent_context(state_root):
+    with pytest.raises(JournalUnavailableError, match="unresolved operation"):
+        with journal.bridge_cycle_parent_context(
+            state_root, cycle_id="cycle-unsettled", completed_phase="post_execution",
+            checkpoint_head_sha="d" * 40, checkpoint_status="complete",
+        ):
             pytest.fail("unsettled bridge-cycle attempt must remain held")
     assert journal.read_owner_records(state_root, owner) == before
     assert journal.provision_route_parent(state_root, "bridge.cycle") == owner
