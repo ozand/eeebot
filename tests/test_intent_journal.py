@@ -791,6 +791,85 @@ def test_bridge_route_holds_existing_owner_and_rotates_only_after_consumption(tm
 
 
 # @lat: [[architecture#Intent-before-effect evidence]]
+def test_bridge_cycle_parent_resumes_same_owner_and_reacknowledges_exact_phase(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    cycle_id = "cycle-opaque-001"
+    head = "a" * 40
+
+    with journal.bridge_cycle_parent_context(state_root) as first_owner:
+        pass
+    with pytest.raises(JournalUnavailableError, match="not complete"):
+        with journal.bridge_cycle_parent_context(
+            state_root, cycle_id=cycle_id, completed_phase="post_execution",
+            checkpoint_head_sha=head, checkpoint_status="running",
+        ):
+            pytest.fail("running checkpoint must not be consumed")
+    assert journal.read_owner_records(state_root, first_owner) == []
+
+    with journal.bridge_cycle_parent_context(
+        state_root, cycle_id=cycle_id, completed_phase="post_execution",
+        checkpoint_head_sha=head, checkpoint_status="complete",
+    ) as resumed_owner:
+        assert resumed_owner == first_owner
+        journal.consume_bridge_cycle_phase(
+            state_root, resumed_owner, cycle_id=cycle_id, phase="post_execution",
+            checkpoint_head_sha=head, checkpoint_status="complete",
+        )
+
+    records = journal.read_owner_records(state_root, first_owner)
+    receipts = [row for row in records if row["event"] == "phase_consumed"]
+    assert len(receipts) == 1
+    assert receipts[0]["checkpoint_head_sha"] == head
+    with pytest.raises(JournalUnavailableError, match="conflicts"):
+        journal.consume_bridge_cycle_phase(
+            state_root, first_owner, cycle_id=cycle_id, phase="post_execution",
+            checkpoint_head_sha="b" * 40, checkpoint_status="complete",
+        )
+    assert journal.read_owner_records(state_root, first_owner) == records
+    assert journal.provision_route_parent(state_root, "bridge.cycle") == first_owner
+
+
+def test_bridge_cycle_close_requires_exact_selected_phase_receipts(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    cycle_id = "cycle-opaque-002"
+    heads = {phase: str(index + 1) * 40 for index, phase in enumerate(
+        ("post_execution", "smoke_gate", "integration", "reflection"),
+    )}
+    with journal.bridge_cycle_parent_context(state_root) as owner:
+        pass
+    for phase, head in heads.items():
+        journal.consume_bridge_cycle_phase(
+            state_root, owner, cycle_id=cycle_id, phase=phase,
+            checkpoint_head_sha=head, checkpoint_status="complete",
+        )
+    wrong_heads = {**heads, "integration": "f" * 40}
+    assert journal.close_route_parent(
+        state_root, "bridge.cycle", owner, cycle_id=cycle_id,
+        required_phase_heads=wrong_heads,
+    ) is False
+    assert journal.close_route_parent(
+        state_root, "bridge.cycle", owner, cycle_id=cycle_id,
+        required_phase_heads={"post_execution": heads["post_execution"]},
+    ) is False
+    assert journal.close_route_parent(
+        state_root, "bridge.cycle", owner, cycle_id=cycle_id,
+        required_phase_heads=heads,
+    ) is True
+
+
+def test_bridge_cycle_unconsumed_phase_cannot_be_replaced_by_fresh_owner(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    with journal.bridge_cycle_parent_context(state_root) as owner:
+        pass
+    with pytest.raises(JournalUnavailableError, match="requires checkpoint resume evidence"):
+        with journal.bridge_cycle_parent_context(state_root):
+            pytest.fail("started cycle owner must not be reopened without checkpoint receipt")
+    assert journal.provision_route_parent(state_root, "bridge.cycle") == owner
+
+
 def test_route_capacity_refuses_new_parent_without_pruning_settled_records(
     tmp_path: Path, monkeypatch,
 ) -> None:

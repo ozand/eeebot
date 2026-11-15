@@ -12,12 +12,13 @@ except ImportError:  # Windows development host; production contract requires fl
     fcntl = None  # type: ignore[assignment]
 import json
 import os
+import re
 import stat
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 SCHEMA_VERSION = 1
@@ -34,7 +35,9 @@ _TARGETS = frozenset({
 _ACTIVE_PARENT: ContextVar[tuple[Path, str] | None] = ContextVar("_intent_parent", default=None)
 _ACTIVE_OPERATION: ContextVar["IntentOperation | None"] = ContextVar("_intent_operation", default=None)
 _PARENT_SCHEMA = 3
-_ROUTE_NAME = "planner"
+_ROUTES = frozenset({"planner", "bridge.cycle"})
+_BRIDGE_CYCLE_PHASES = ("post_execution", "smoke_gate", "integration", "reflection")
+_BRIDGE_CYCLE_ID_RX = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 
 class JournalUnavailableError(RuntimeError):
@@ -57,13 +60,13 @@ def _uuid(value: str, field: str) -> str:
 
 
 def _route_owner_id(route: str) -> str:
-    if route != _ROUTE_NAME:
+    if route not in _ROUTES:
         raise ValueError("autonomous parent route is not approved")
-    return str(uuid5(NAMESPACE_URL, "eeebot.intent-journal.parent.planner"))
+    return str(uuid5(NAMESPACE_URL, f"eeebot.intent-journal.parent.{route}"))
 
 
 def _route_paths(state_root: Path, route: str) -> tuple[Path, Path]:
-    if route != _ROUTE_NAME:
+    if route not in _ROUTES:
         raise ValueError("autonomous parent route is not approved")
     root = Path(state_root)
     if not root.is_dir():
@@ -88,7 +91,7 @@ def _route_paths(state_root: Path, route: str) -> tuple[Path, Path]:
     return directory / f"route-{route}.json", directory / f"route-{route}.lock"
 
 
-def _read_route(path: Path) -> dict[str, Any]:
+def _read_route(path: Path, expected_route: str) -> dict[str, Any]:
     if path.with_name(f".{path.name}.tmp").exists():
         raise JournalUnavailableError("route record has an unresolved temporary file")
     try:
@@ -99,7 +102,7 @@ def _read_route(path: Path) -> dict[str, Any]:
         not isinstance(value, dict)
         or set(value) != {"version", "route", "status", "owner_id"}
         or value.get("version") != 1
-        or value.get("route") != _ROUTE_NAME
+        or value.get("route") != expected_route
         or value.get("status") not in {"provisioning", "active", "closed"}
     ):
         raise JournalCorruptError("route-to-parent record is malformed")
@@ -112,7 +115,7 @@ def _read_route(path: Path) -> dict[str, Any]:
 
 def _write_route(path: Path, value: dict[str, Any]) -> None:
     _write_parent(path, value)
-    if _read_route(path) != value:
+    if _read_route(path, value["route"]) != value:
         raise JournalUnavailableError("route-to-parent read-back mismatch")
 
 
@@ -156,7 +159,7 @@ def provision_route_parent(state_root: Path, route: str) -> str:
     legacy_journal, _legacy_lock = _owner_paths(state_root, legacy_id)
     route_was_initialized = route_path.exists() or route_lock.exists()
     with _owner_lock(route_lock):
-        current = _read_route(route_path) if route_path.exists() else None
+        current = _read_route(route_path, route) if route_path.exists() else None
         if current is None and route_was_initialized:
             raise JournalUnavailableError("planner route record is missing after initialization")
         if current is None and legacy_journal.with_suffix(".parent.json").exists():
@@ -199,7 +202,7 @@ def provision_route_parent(state_root: Path, route: str) -> str:
             raise JournalUnavailableError("planner route parent capacity exhausted")
         owner_id = str(uuid4())
         provisioning = {
-            "version": 1, "route": _ROUTE_NAME,
+            "version": 1, "route": route,
             "status": "provisioning", "owner_id": owner_id,
         }
         _write_route(route_path, provisioning)
@@ -209,7 +212,134 @@ def provision_route_parent(state_root: Path, route: str) -> str:
         return owner_id
 
 
+def consume_bridge_cycle_phase(
+    state_dir: Path, owner_id: str, *, cycle_id: str, phase: str,
+    checkpoint_head_sha: str, checkpoint_status: Literal["complete"],
+) -> None:
+    """Record consumption only after the checkpoint reports complete/readback."""
+    owner_id = _uuid(owner_id, "owner_id")
+    state_root = Path(state_dir)
+    if type(cycle_id) is not str or not _BRIDGE_CYCLE_ID_RX.fullmatch(cycle_id):
+        raise JournalUnavailableError("bridge-cycle identifier is invalid")
+    if checkpoint_status != "complete":
+        raise JournalUnavailableError("bridge-cycle checkpoint phase is not complete")
+    if phase not in _BRIDGE_CYCLE_PHASES or type(checkpoint_head_sha) is not str or not re.fullmatch(
+        r"[a-fA-F0-9]{40,64}", checkpoint_head_sha,
+    ):
+        raise JournalUnavailableError("bridge-cycle phase receipt identity is invalid")
+    row = {
+        "version": SCHEMA_VERSION, "owner_id": owner_id, "cycle_id": cycle_id,
+        "phase": phase, "checkpoint_head_sha": checkpoint_head_sha.lower(),
+        "event": "phase_consumed", "ts": _now_iso(),
+    }
+    _validate_record(row, owner_id)
+    route_path, route_lock = _route_paths(state_root, "bridge.cycle")
+    with _owner_lock(route_lock):
+        selected = _read_route(route_path, "bridge.cycle")
+        if selected["status"] != "active" or selected["owner_id"] != owner_id:
+            raise JournalUnavailableError("phase receipt owner is not the active bridge cycle")
+    journal, lock = _owner_paths(state_root, owner_id)
+    with _owner_lock(lock):
+        if not journal.exists():
+            raise JournalUnavailableError("bridge-cycle owner journal is missing")
+        parent = _read_parent(journal.with_suffix(".parent.json"), owner_id)
+        if parent["status"] != "active" or parent["parent_consumed"] or not parent["parent_started"]:
+            raise JournalUnavailableError("bridge-cycle parent is not active")
+        if parent.get("active_operation_id") is not None:
+            raise JournalUnavailableError("bridge-cycle has an unresolved operation")
+        records = _decode(journal, owner_id)
+        if any(event != "consumed" for event in _latest_attempt_events(records).values()):
+            raise JournalUnavailableError("bridge-cycle has unresolved attempt evidence")
+        phase_rows = [r for r in records if r["event"] == "phase_consumed" and r["cycle_id"] == cycle_id]
+        existing = next((r for r in phase_rows if r["phase"] == phase), None)
+        if existing is not None:
+            if existing["checkpoint_head_sha"] == row["checkpoint_head_sha"]:
+                return
+            raise JournalUnavailableError("bridge-cycle phase consumption conflicts with prior receipt")
+        consumed = {r["phase"] for r in phase_rows}
+        next_phase = next((name for name in _BRIDGE_CYCLE_PHASES if name not in consumed), None)
+        if phase != next_phase:
+            raise JournalUnavailableError("bridge-cycle phase receipt is out of order")
+        _append(journal, row, records)
+        observed = _decode(journal, owner_id)
+        if not observed or observed[-1] != row:
+            raise JournalUnavailableError("bridge-cycle phase receipt readback mismatch")
+
+
+@contextmanager
+def bridge_cycle_parent_context(
+    state_dir: Path, *, cycle_id: str | None = None,
+    completed_phase: str | None = None, checkpoint_head_sha: str | None = None,
+    checkpoint_status: Literal["complete"] | None = None,
+) -> Iterator[str]:
+    """Start or resume one bridge cycle under its same durable route owner."""
+    route = "bridge.cycle"
+    state_root = Path(state_dir)
+    owner_id = provision_route_parent(state_root, route)
+    journal, owner_lock = _owner_paths(state_root, owner_id)
+    with _owner_lock(owner_lock):
+        parent = _read_parent(journal.with_suffix(".parent.json"), owner_id)
+    resume_values = (cycle_id, completed_phase, checkpoint_head_sha, checkpoint_status)
+    if not parent["parent_started"]:
+        if any(value is not None for value in resume_values):
+            raise JournalUnavailableError("new bridge-cycle parent cannot accept resume evidence")
+        with bridge_parent_context(state_root, owner_id, route=route):
+            yield owner_id
+        return
+    if any(value is None for value in resume_values):
+        raise JournalUnavailableError("started bridge-cycle parent requires checkpoint resume evidence")
+    with resume_bridge_cycle_parent_context(
+        state_root, owner_id, cycle_id=cycle_id,
+        completed_phase=completed_phase, checkpoint_head_sha=checkpoint_head_sha,
+        checkpoint_status=checkpoint_status,
+    ):
+        yield owner_id
+
+
+@contextmanager
+def resume_bridge_cycle_parent_context(
+    state_dir: Path, owner_id: str, *, cycle_id: str,
+    completed_phase: str, checkpoint_head_sha: str,
+    checkpoint_status: Literal["complete"],
+) -> Iterator[None]:
+    """Reopen the same owner after caller verified the exact completed checkpoint."""
+    owner_id = _uuid(owner_id, "owner_id")
+    state_root = Path(state_dir)
+    if type(cycle_id) is not str or not _BRIDGE_CYCLE_ID_RX.fullmatch(cycle_id):
+        raise JournalUnavailableError("bridge-cycle identifier is invalid")
+    if checkpoint_status != "complete":
+        raise JournalUnavailableError("bridge-cycle checkpoint phase is not complete")
+    if completed_phase not in _BRIDGE_CYCLE_PHASES:
+        raise JournalUnavailableError("bridge-cycle checkpoint phase is not allowlisted")
+    route_path, route_lock = _route_paths(state_root, "bridge.cycle")
+    with _owner_lock(route_lock):
+        selected = _read_route(route_path, "bridge.cycle")
+        if selected["status"] != "active" or selected["owner_id"] != owner_id:
+            raise JournalUnavailableError("bridge-cycle owner is no longer active")
+    consume_bridge_cycle_phase(
+        state_root, owner_id, cycle_id=cycle_id, phase=completed_phase,
+        checkpoint_head_sha=checkpoint_head_sha, checkpoint_status=checkpoint_status,
+    )
+    journal, lock = _owner_paths(state_root, owner_id)
+    with _owner_lock(lock):
+        parent = _read_parent(journal.with_suffix(".parent.json"), owner_id)
+        records = _decode(journal, owner_id)
+        if (
+            parent["status"] != "active" or parent["parent_consumed"]
+            or not parent["parent_started"] or parent.get("active_operation_id") is not None
+            or any(event != "consumed" for event in _latest_attempt_events(records).values())
+        ):
+            raise JournalUnavailableError("bridge-cycle parent has unresolved evidence")
+    token = _ACTIVE_PARENT.set((Path(state_root), owner_id))
+    try:
+        yield
+    finally:
+        _ACTIVE_PARENT.reset(token)
+
+
 def _settled_marker_path(state_root: Path, route: str, owner_id: str) -> Path:
+    if route not in _ROUTES:
+        raise ValueError("autonomous parent route is not approved")
     return Path(state_root) / "intent-journal" / f"route-{route}-{owner_id}.closed.json"
 
 
@@ -263,12 +393,20 @@ def _settled_route_owners(state_root: Path, route: str) -> set[str]:
     return owners
 
 
-def close_route_parent(state_root: Path, route: str, owner_id: str) -> bool:
-    """Record parent consumption and closure before allowing a successor token."""
+def close_route_parent(
+    state_root: Path, route: str, owner_id: str, *,
+    cycle_id: str | None = None, required_phase_heads: dict[str, str] | None = None,
+) -> bool:
+    """Close after attempt settlement and, for bridge cycles, selected phase receipts."""
     owner_id = _uuid(owner_id, "owner_id")
+    if route == "bridge.cycle":
+        if cycle_id is None or required_phase_heads is None:
+            return False
+    elif cycle_id is not None or required_phase_heads is not None:
+        raise JournalUnavailableError("phase receipt arguments are only valid for bridge.cycle")
     route_path, route_lock = _route_paths(state_root, route)
     with _owner_lock(route_lock):
-        selected = _read_route(route_path)
+        selected = _read_route(route_path, route)
         if selected["status"] != "active" or selected["owner_id"] != owner_id:
             raise JournalUnavailableError("route does not select this active parent")
         journal, owner_lock = _owner_paths(state_root, owner_id)
@@ -286,6 +424,30 @@ def close_route_parent(state_root: Path, route: str, owner_id: str) -> bool:
             records = _decode(journal, owner_id)
             if any(event != "consumed" for event in _latest_attempt_events(records).values()):
                 return False
+            if route == "bridge.cycle":
+                if cycle_id is None or required_phase_heads is None:
+                    return False
+                if type(cycle_id) is not str or not _BRIDGE_CYCLE_ID_RX.fullmatch(cycle_id):
+                    return False
+                selected_phases = list(required_phase_heads)
+                if (
+                    not selected_phases
+                    or selected_phases != [phase for phase in _BRIDGE_CYCLE_PHASES if phase in selected_phases]
+                    or any(phase not in _BRIDGE_CYCLE_PHASES for phase in selected_phases)
+                ):
+                    return False
+                expected_heads = {}
+                for phase, head in required_phase_heads.items():
+                    if type(head) is not str or not re.fullmatch(r"[a-fA-F0-9]{40,64}", head):
+                        return False
+                    expected_heads[phase] = head.lower()
+                phase_rows = [
+                    row for row in records
+                    if row["event"] == "phase_consumed" and row["cycle_id"] == cycle_id
+                ]
+                observed_heads = {row["phase"]: row["checkpoint_head_sha"] for row in phase_rows}
+                if observed_heads != expected_heads:
+                    return False
             parent["parent_consumed"] = True
             parent["status"] = "resolved"
             parent["resolved_at"] = _now_iso()
@@ -481,12 +643,14 @@ def _write_parent(path: Path, value: dict[str, Any]) -> None:
 
 
 @contextmanager
-def bridge_parent_context(state_root: Path, owner_id: str) -> Iterator[None]:
-    """Validate the bridge token; production cycle serialization stays in bridge.lock."""
-    route_path, route_lock = _route_paths(state_root, _ROUTE_NAME)
+def bridge_parent_context(
+    state_root: Path, owner_id: str, route: str = "planner",
+) -> Iterator[None]:
+    """Validate an initial bridge parent token; serialization stays in bridge.lock."""
+    route_path, route_lock = _route_paths(state_root, route)
     with _owner_lock(route_lock):
-        route = _read_route(route_path)
-        if route["status"] != "active" or route["owner_id"] != _uuid(owner_id, "owner_id"):
+        selected_route = _read_route(route_path, route)
+        if selected_route["status"] != "active" or selected_route["owner_id"] != _uuid(owner_id, "owner_id"):
             raise JournalUnavailableError("bridge parent token is not the active route owner")
     journal, owner_lock = _owner_paths(state_root, owner_id)
     with _owner_lock(owner_lock):
@@ -528,6 +692,8 @@ def _latest_attempt_events(
 ) -> dict[tuple[str, str], str]:
     latest: dict[tuple[str, str], str] = {}
     for row in records:
+        if row["event"] == "phase_consumed":
+            continue
         if operation_id is None or row["operation_id"] == operation_id:
             latest[(row["operation_id"], row["attempt_id"])] = row["event"]
     return latest
@@ -700,6 +866,7 @@ def _decode(path: Path, owner_id: str) -> list[dict[str, Any]]:
         raise JournalCorruptError("owner journal has a truncated final record")
     records: list[dict[str, Any]] = []
     states: dict[tuple[str, str], str] = {}
+    phases_by_cycle: dict[str, dict[str, str]] = {}
     for line in raw.splitlines():
         if not line or len(line) > MAX_RECORD_BYTES:
             raise JournalCorruptError("owner journal has an empty or oversized record")
@@ -710,6 +877,20 @@ def _decode(path: Path, owner_id: str) -> list[dict[str, Any]]:
             raise JournalCorruptError("owner journal contains an invalid record") from exc
         if len(records) >= MAX_OWNER_RECORDS:
             raise JournalCorruptError("owner journal exceeds record limit")
+        if row["event"] == "phase_consumed":
+            phases = phases_by_cycle.setdefault(row["cycle_id"], {})
+            if row["phase"] in phases:
+                raise JournalCorruptError("duplicate bridge-cycle phase receipt")
+            previous = [phase for phase in _BRIDGE_CYCLE_PHASES if phase in phases]
+            if (
+                (not previous and row["phase"] != _BRIDGE_CYCLE_PHASES[0])
+                or (previous and _BRIDGE_CYCLE_PHASES.index(row["phase"]) <= _BRIDGE_CYCLE_PHASES.index(previous[-1]))
+                or len(phases_by_cycle) > 1
+            ):
+                raise JournalCorruptError("bridge-cycle phase receipts are out of order")
+            phases[row["phase"]] = row["checkpoint_head_sha"]
+            records.append(row)
+            continue
         key = (row["operation_id"], row["attempt_id"])
         if row["event"] == "intent":
             if key in states:
@@ -728,6 +909,30 @@ def _decode(path: Path, owner_id: str) -> list[dict[str, Any]]:
 
 
 def _validate_record(row: Any, owner_id: str) -> None:
+    phase_fields = {"version", "owner_id", "cycle_id", "phase", "checkpoint_head_sha", "event", "ts"}
+    if isinstance(row, dict) and row.get("event") == "phase_consumed":
+        if set(row) != phase_fields:
+            raise ValueError("phase receipt schema mismatch")
+        if type(row["version"]) is not int or row["version"] != SCHEMA_VERSION or row["owner_id"] != owner_id:
+            raise ValueError("phase receipt version or owner mismatch")
+        if type(row["cycle_id"]) is not str or not _BRIDGE_CYCLE_ID_RX.fullmatch(row["cycle_id"]):
+            raise ValueError("phase receipt cycle identity is invalid")
+        if type(row["phase"]) is not str or row["phase"] not in _BRIDGE_CYCLE_PHASES:
+            raise ValueError("phase receipt phase is not allowlisted")
+        if type(row["checkpoint_head_sha"]) is not str or not re.fullmatch(
+            r"[a-f0-9]{40,64}", row["checkpoint_head_sha"],
+        ):
+            raise ValueError("phase receipt checkpoint head is invalid")
+        if not isinstance(row["ts"], str) or len(row["ts"]) > 40:
+            raise ValueError("phase receipt timestamp is invalid")
+        from datetime import datetime
+        try:
+            parsed_ts = datetime.fromisoformat(row["ts"].replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("phase receipt timestamp is invalid") from exc
+        if parsed_ts.tzinfo is None:
+            raise ValueError("phase receipt timestamp needs timezone")
+        return
     common = {"version", "owner_id", "operation_id", "attempt_id", "event", "component", "target", "ts"}
     if not isinstance(row, dict) or set(row) != common:
         raise ValueError("record schema mismatch")
