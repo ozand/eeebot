@@ -12,8 +12,10 @@ clean and usable.
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -1322,7 +1324,62 @@ class TestLineSwitchRetired:
         assert offenders == [], offenders
 
 
+@dataclass(frozen=True)
+class _DisposableCheckpointOwner:
+    """Test-only identity for a disposable producer path; never trusted in production."""
+
+    owner_id: str
+
+
 class TestIntegrationPhaseCheckpoint:
+    def test_disposable_producer_checkpoint_holds_after_cancel_before_receipt(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        lock = bridge._acquire_bridge_lock(state_dir)
+        assert lock is not None
+        try:
+            cycle_id = "disposable-producer-checkpoint"
+            setup = bridge._setup_cycle_branch(work, cycle_id)
+            assert setup["ok"]
+            branch = setup["branch"]
+            owner = _DisposableCheckpointOwner("disposable-owner-not-authoritative")
+            producer_runs = 0
+
+            # The fake producer changes only this temporary cycle branch. This
+            # deliberately exercises phase_checkpoint directly; production has
+            # no executor owner token in the current #2178 planner-only API.
+            (work / "producer.py").write_text("produced = True\\n", encoding="utf-8")
+            _run(work, "add", ".")
+            _run(work, "commit", "-m", "disposable producer output")
+            producer_runs += 1
+            head = _run(work, "rev-parse", f"refs/heads/{branch}").stdout.strip()
+            checkpoint = phase_checkpoint.begin_phase(
+                state_dir, owner_id=owner.owner_id, cycle_id=cycle_id, branch=branch,
+                base_sha=setup["main_sha"], head_sha=head, phase="post_execution", repo_root=work,
+            )
+            assert checkpoint.status == "running"
+            recovery_effects = []
+            try:
+                # Represents one local post-execution recovery action after
+                # durable admission but before its completion receipt.
+                (work / "recovery.txt").write_text("reconciled once\\n", encoding="utf-8")
+                recovery_effects.append("reconciled")
+                raise asyncio.CancelledError()
+            except asyncio.CancelledError:
+                pass
+            with pytest.raises(phase_checkpoint.CheckpointHeldError, match="uncertain settlement"):
+                phase_checkpoint.begin_phase(
+                    state_dir, owner_id=owner.owner_id, cycle_id=cycle_id, branch=branch,
+                    base_sha=setup["main_sha"], head_sha=head, phase="post_execution", repo_root=work,
+                )
+            retained = phase_checkpoint.load_checkpoint(state_dir, owner_id=owner.owner_id)
+            assert retained is not None and retained.phase == "post_execution" and retained.status == "running"
+            assert producer_runs == 1
+            assert recovery_effects == ["reconciled"]
+            assert _origin_main_sha(origin) == setup["main_sha"]
+        finally:
+            lock.close()
     @staticmethod
     def _prepared_cycle(tmp_path, cycle_id="checkpoint-integration", owner_id="owner-checkpoint-1"):
         origin, work = _init_repo(tmp_path)
