@@ -19,7 +19,7 @@ _RELATIVE_PATH = Path("subagent_bridge") / "phase_checkpoint.json"
 _MAX_FILE_BYTES = 16_384
 _MAX_MEMOS = 16
 _MAX_MEMO_VALUE_BYTES = 128
-_RESERVED_MEMO_KEYS = frozenset({"integration_main_sha"})
+_RESERVED_MEMO_KEYS = frozenset({"integration_main_sha", "smoke_gate_receipt"})
 # This increment checkpoints only the selected post-execution path. Expanding
 # phase coverage is an explicit #2180 follow-up; unknown phases fail closed.
 _PHASES = ("post_execution", "smoke_gate", "integration", "reflection")
@@ -85,12 +85,24 @@ def _identity(payload: dict[str, Any]) -> CycleCheckpoint:
     for key, value in memos.items():
         if type(key) is not str or not _MEMO_KEY_RX.fullmatch(key):
             raise CheckpointError("invalid checkpoint memo key")
-        _validate_memo_value(value)
+        if key == "smoke_gate_receipt":
+            _validate_smoke_gate_receipt(value)
+        else:
+            _validate_memo_value(value)
     return CycleCheckpoint(
         cycle_id=payload["cycle_id"], owner_id=payload["owner_id"], branch=payload["branch"],
         base_sha=payload["base_sha"], head_sha=payload["head_sha"], phase=payload["phase"],
         status=payload["status"], memos=dict(memos),
     )
+
+
+def _validate_smoke_gate_receipt(value: Any) -> None:
+    if (
+        type(value) is not dict or set(value) != {"passed", "tested_head"}
+        or value.get("passed") is not True or type(value.get("tested_head")) is not str
+        or not _SHA_RX.fullmatch(value["tested_head"])
+    ):
+        raise CheckpointError("invalid smoke-gate receipt")
 
 
 def _validate_memo_value(value: Any) -> None:
@@ -226,7 +238,17 @@ def begin_phase(
         if _PHASES.index(phase) != _PHASES.index(current.phase) + 1:
             raise CheckpointHeldError("phase transition is not the next bounded phase")
         memos = dict(current.memos)
-        if phase == "reflection":
+        if phase == "integration":
+            smoke_receipt = memos.get("smoke_gate_receipt")
+            if (
+                current.phase != "smoke_gate" or type(smoke_receipt) is not dict
+                or smoke_receipt != {"passed": True, "tested_head": head_sha.lower()}
+            ):
+                raise CheckpointHeldError("integration requires a matching smoke-gate receipt")
+            verify_local_branch_head(
+                repo_root, branch=branch, expected_base=base_sha, expected_head=head_sha,
+            )
+        elif phase == "reflection":
             if current.phase != "integration" or current.status != "complete":
                 raise CheckpointHeldError("reflection requires a completed integration receipt")
             _verify_completed_integration(
@@ -293,6 +315,17 @@ def verify_local_branch_head(
         raise CheckpointHeldError("checkout branch identity changed")
 
 
+def _verify_clean_phase_tree(repo_root: Path) -> None:
+    import subprocess
+
+    status = subprocess.run(
+        ["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=all"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if status.returncode != 0 or status.stdout:
+        raise CheckpointHeldError("phase checkout has uncommitted changes")
+
+
 def _verify_committed_phase_tip(
     repo_root: Path, *, branch: str, expected_base: str, expected_head: str,
 ) -> str:
@@ -321,12 +354,7 @@ def _verify_committed_phase_tip(
     )
     if checkout.returncode != 0 or checkout.stdout.strip() != branch:
         raise CheckpointHeldError("checkout branch identity changed")
-    status = subprocess.run(
-        ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all"],
-        capture_output=True, text=True, timeout=10,
-    )
-    if status.returncode != 0 or status.stdout:
-        raise CheckpointHeldError("phase checkout has uncommitted changes")
+    _verify_clean_phase_tree(repo)
     return actual
 
 
@@ -334,6 +362,7 @@ def complete_phase(
     state_dir: Path, *, owner_id: str, cycle_id: str, branch: str,
     base_sha: str, head_sha: str, phase: str, repo_root: Path,
     integration_receipt: dict[str, Any] | None = None,
+    smoke_gate_result: dict[str, Any] | None = None,
 ) -> CycleCheckpoint:
     """Complete a local phase, or integration with an exact verified receipt."""
     path = _path(state_dir)
@@ -345,6 +374,24 @@ def complete_phase(
     ):
         raise CheckpointHeldError("completion does not match the durable phase checkpoint")
     memos = dict(current.memos)
+    if phase == "smoke_gate":
+        if type(smoke_gate_result) is not dict or set(smoke_gate_result) != {"passed", "tested_head"}:
+            raise CheckpointHeldError("smoke-gate result is missing or malformed")
+        if smoke_gate_result["passed"] is not True:
+            raise CheckpointHeldError("smoke-gate pass is not confirmed")
+        if type(smoke_gate_result["tested_head"]) is not str or smoke_gate_result["tested_head"].lower() != head_sha.lower():
+            raise CheckpointHeldError("smoke-gate result is stale for the current branch head")
+        if integration_receipt is not None:
+            raise CheckpointError("integration receipt is only valid for the integration phase")
+        verify_local_branch_head(
+            repo_root, branch=branch, expected_base=base_sha, expected_head=head_sha,
+        )
+        _verify_clean_phase_tree(repo_root)
+        if "smoke_gate_receipt" in memos:
+            raise CheckpointHeldError("smoke-gate receipt was already memoized")
+        memos["smoke_gate_receipt"] = {"passed": True, "tested_head": head_sha.lower()}
+    elif smoke_gate_result is not None:
+        raise CheckpointError("smoke-gate result is only valid for the smoke_gate phase")
     if phase == "integration":
         main_sha = _verify_integration_receipt(
             repo_root, cycle_id=cycle_id, branch=branch, base_sha=base_sha,

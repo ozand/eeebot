@@ -136,14 +136,14 @@ def test_memo_capacity_reserves_integration_receipt_slot(tmp_path):
     repo, base, head = _cycle_repo(tmp_path)
     state_dir = tmp_path / "state"
     _begin(state_dir, repo, base, head)
-    for index in range(phase_checkpoint._MAX_MEMOS - 1):
+    for index in range(phase_checkpoint._MAX_MEMOS - len(phase_checkpoint._RESERVED_MEMO_KEYS)):
         phase_checkpoint.memo(
             state_dir, owner_id=_OWNER, key=f"decision_{index}", value=f"value_{index}",
         )
     with pytest.raises(phase_checkpoint.CheckpointHeldError, match="memo capacity"):
         phase_checkpoint.memo(state_dir, owner_id=_OWNER, key="last_decision", value="held")
     loaded = phase_checkpoint.load_checkpoint(state_dir, owner_id=_OWNER)
-    assert loaded is not None and len(loaded.memos) == phase_checkpoint._MAX_MEMOS - 1
+    assert loaded is not None and len(loaded.memos) == phase_checkpoint._MAX_MEMOS - len(phase_checkpoint._RESERVED_MEMO_KEYS)
 
 
 def test_corrupt_or_different_owner_checkpoint_is_held(tmp_path):
@@ -175,8 +175,30 @@ def test_completed_phase_advances_once_and_does_not_reset_memos(tmp_path):
     next_phase = _begin(state_dir, repo, base, head, phase="smoke_gate")
     assert next_phase.status == "running"
     assert next_phase.memos == {"receipt": "verified"}
-    with pytest.raises(phase_checkpoint.CheckpointHeldError, match="uncertain settlement"):
-        _begin(state_dir, repo, base, head, phase="smoke_gate")
+    with pytest.raises(phase_checkpoint.CheckpointHeldError, match="smoke-gate pass"):
+        phase_checkpoint.complete_phase(
+            state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+            base_sha=base, head_sha=head, phase="smoke_gate", repo_root=repo,
+            smoke_gate_result={"passed": False, "tested_head": head},
+        )
+    with pytest.raises(phase_checkpoint.CheckpointHeldError, match="smoke-gate result is missing"):
+        phase_checkpoint.complete_phase(
+            state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+            base_sha=base, head_sha=head, phase="smoke_gate", repo_root=repo,
+        )
+    with pytest.raises(phase_checkpoint.CheckpointHeldError, match="stale"):
+        phase_checkpoint.complete_phase(
+            state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+            base_sha=base, head_sha=head, phase="smoke_gate", repo_root=repo,
+            smoke_gate_result={"passed": True, "tested_head": "0" * 40},
+        )
+    completed = phase_checkpoint.complete_phase(
+        state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+        base_sha=base, head_sha=head, phase="smoke_gate", repo_root=repo,
+        smoke_gate_result={"passed": True, "tested_head": head},
+    )
+    assert completed.status == "complete"
+    assert completed.memos["smoke_gate_receipt"] == {"passed": True, "tested_head": head}
 
 
 @pytest.mark.parametrize("replacement_owner", [_OWNER, "replacement-owner"])
@@ -235,6 +257,34 @@ def test_post_execution_completion_holds_uncommitted_tree_without_receipt(tmp_pa
         )
     held = phase_checkpoint.load_checkpoint(state_dir, owner_id=_OWNER)
     assert held is not None and held.status == "running" and held.head_sha == head
+
+
+def test_integration_admission_holds_when_cycle_head_moved_after_smoke_pass(tmp_path):
+    import subprocess
+
+    repo, base, head = _cycle_repo(tmp_path)
+    state_dir = tmp_path / "state"
+    _begin(state_dir, repo, base, head)
+    phase_checkpoint.complete_phase(
+        state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+        base_sha=base, head_sha=head, phase="post_execution", repo_root=repo,
+    )
+    _begin(state_dir, repo, base, head, phase="smoke_gate")
+    phase_checkpoint.complete_phase(
+        state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+        base_sha=base, head_sha=head, phase="smoke_gate", repo_root=repo,
+        smoke_gate_result={"passed": True, "tested_head": head},
+    )
+    checkpoint_path = state_dir / "subagent_bridge" / "phase_checkpoint.json"
+    before = checkpoint_path.read_bytes()
+    (repo / "tracked.txt").write_text("changed after smoke pass\\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-am", "late change"],
+        check=True, capture_output=True, text=True,
+    )
+    with pytest.raises(phase_checkpoint.CheckpointHeldError, match="cycle branch head changed"):
+        _begin(state_dir, repo, base, head, phase="integration")
+    assert checkpoint_path.read_bytes() == before
 
 
 def test_phase_completion_requires_exact_local_branch_head(tmp_path):

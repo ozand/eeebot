@@ -1397,6 +1397,7 @@ class TestIntegrationPhaseCheckpoint:
             phase_checkpoint.complete_phase(
                 state_dir, owner_id=owner_id, cycle_id=cycle_id, branch=branch,
                 base_sha=setup["main_sha"], head_sha=cycle_head, phase=phase, repo_root=work,
+                **({"smoke_gate_result": {"passed": True, "tested_head": cycle_head}} if phase == "smoke_gate" else {}),
             )
         phase_checkpoint.begin_phase(
             state_dir, owner_id=owner_id, cycle_id=cycle_id, branch=branch,
@@ -1429,7 +1430,6 @@ class TestIntegrationPhaseCheckpoint:
         next_cycle = "checkpoint-next-cycle"
         next_branch = f"selfevo/cycle-{next_cycle}"
         _run(work, "checkout", "-b", next_branch, "main")
-        _commit_file(work, "next.py", "next = True\\n", "feat: next cycle")
         next_base = _origin_main_sha(origin)
         next_head = _run(work, "rev-parse", next_branch).stdout.strip()
         next_checkpoint = phase_checkpoint.begin_phase(
