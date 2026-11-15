@@ -213,10 +213,11 @@ def begin_phase(
         repo_root, branch=branch, expected_base=base_sha, expected_head=head_sha,
     )
     current = _read_checkpoint(path)
-    if current is not None and current.owner_id != owner_id:
-        raise CheckpointHeldError("checkpoint belongs to a different durable parent")
     if current is not None and current.status == "running":
         raise CheckpointHeldError("previous phase has uncertain settlement")
+    if current is not None and current.owner_id != owner_id:
+        if current.status != "complete" or current.phase != _PHASES[-1]:
+            raise CheckpointHeldError("previous parent has unfinished phases")
     if current is not None and current.cycle_id == cycle_id:
         if (current.owner_id, current.branch, current.base_sha, current.head_sha) != (
             owner_id, branch, base_sha, head_sha,

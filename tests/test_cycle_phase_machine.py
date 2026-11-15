@@ -151,7 +151,7 @@ def test_completed_phase_advances_once_and_does_not_reset_memos(tmp_path):
         _begin(state_dir, repo, base, head, phase="smoke_gate")
 
 
-def test_new_cycle_cannot_replace_checkpoint_owned_by_another_parent(tmp_path):
+def test_new_cycle_cannot_replace_checkpoint_before_all_phases_complete(tmp_path):
     repo, base, head = _cycle_repo(tmp_path)
     state_dir = tmp_path / "state"
     _begin(state_dir, repo, base, head)
@@ -161,12 +161,35 @@ def test_new_cycle_cannot_replace_checkpoint_owned_by_another_parent(tmp_path):
     )
     checkpoint_path = state_dir / "subagent_bridge" / "phase_checkpoint.json"
     before = checkpoint_path.read_bytes()
-    with pytest.raises(phase_checkpoint.CheckpointHeldError, match="different durable parent"):
-        _begin(
-            state_dir, repo, base, head, owner="replacement-owner",
-            cycle="next-cycle-opaque",
-        )
+    with pytest.raises(phase_checkpoint.CheckpointHeldError, match="unfinished phases"):
+        _begin(state_dir, repo, base, head, owner="replacement-owner", cycle="next-cycle-opaque")
     assert checkpoint_path.read_bytes() == before
+
+
+def test_next_owner_can_start_after_all_declared_phases_complete(tmp_path):
+    repo, base, head = _cycle_repo(tmp_path)
+    state_dir = tmp_path / "state"
+    for phase, next_phase in zip(
+        ("post_execution", "smoke_gate", "integration"),
+        ("smoke_gate", "integration", "reflection"),
+        strict=True,
+    ):
+        _begin(state_dir, repo, base, head, phase=phase)
+        phase_checkpoint.complete_phase(
+            state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+            base_sha=base, head_sha=head, phase=phase, repo_root=repo,
+        )
+    _begin(state_dir, repo, base, head, phase="reflection")
+    phase_checkpoint.complete_phase(
+        state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+        base_sha=base, head_sha=head, phase="reflection", repo_root=repo,
+    )
+    next_checkpoint = _begin(
+        state_dir, repo, base, head, owner="next-owner-opaque", cycle="next-cycle-opaque",
+    )
+    assert next_checkpoint.owner_id == "next-owner-opaque"
+    assert next_checkpoint.cycle_id == "next-cycle-opaque"
+    assert next_checkpoint.memos == {}
 
 
 def test_phase_completion_requires_exact_local_branch_head(tmp_path):
