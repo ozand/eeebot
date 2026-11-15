@@ -2353,6 +2353,35 @@ def _record_failed_proposer_call(
         pass
 
 
+@contextlib.contextmanager
+def _journaled_proposer_client(client_type, component: str):
+    """Instrument each HTTP send when called inside a durable route parent."""
+    from nanobot.runtime import intent_journal
+
+    with intent_journal.operation_context(component, "provider.chat") as operation:
+        hooks = None
+        client_kwargs = {}
+        if operation is not None:
+            from openai import DefaultHttpxClient
+            hooks = intent_journal.IntentHttpHooks(operation)
+            client_kwargs["http_client"] = DefaultHttpxClient(event_hooks={
+                "request": [hooks.on_request],
+                "response": [hooks.on_response],
+            })
+        try:
+            yield client_kwargs
+            if hooks is not None:
+                hooks.consume_final()
+            if operation is not None:
+                operation.close()
+        except BaseException:
+            if hooks is not None:
+                hooks.consume_final()
+            if operation is not None:
+                operation.close()
+            raise
+
+
 def _propose_with_fallback(state, client_type, base_url, api_key, system_content, user_content, component, provenance_owner=None):
     """ADR-054 enabled path; one shared pass budget, no raw error persistence."""
     global _last_propose_failure
@@ -2369,29 +2398,33 @@ def _propose_with_fallback(state, client_type, base_url, api_key, system_content
         meta = {"operation_id": state["id"], "attempt_index": state["attempts"] + 1,
                 "fallback_count": int(index == 1), "requested_alias": alias}
         try:
-            client = client_type(base_url=base_url, api_key=api_key, timeout=remaining, max_retries=0)
-            remaining = state["deadline"] - time.monotonic()
-            if remaining <= 0:
-                _last_propose_failure = "FallbackBudgetExhausted"
-                return None
-            kwargs = dict(model=state["routes"][alias], messages=[{"role": "system", "content": system_content},
-                {"role": "user", "content": user_content}], max_tokens=400, temperature=0.4, timeout=remaining)
-            effort = bridge_reasoning_effort()
-            if effort:
-                kwargs["reasoning_effort"] = effort
-            state["attempts"] += 1
-            from nanobot.observability.prompt_provenance import current_owner
-            active_owner = provenance_owner or current_owner() or f"proposer:{current_cycle_id() or state['id']}"
-            prompt_request = role_request_for_system(
-                system_content, owner=active_owner,
-                producer_hint=_role_name_for(system_content),
-            )
-            with prompt_request_context(prompt_request):
-                from nanobot.observability.prompt_provenance import prompt_owner_context
-                with prompt_owner_context(prompt_request.owner):
-                    with provider_call_context(kwargs["messages"]) as prompt_call:
-                        prompt_provenance = prompt_call.provenance if prompt_call is not None else None
-                        response = client.chat.completions.create(**kwargs)
+            with _journaled_proposer_client(client_type, component) as client_kwargs:
+                client = client_type(
+                    base_url=base_url, api_key=api_key, timeout=remaining,
+                    max_retries=0, **client_kwargs,
+                )
+                remaining = state["deadline"] - time.monotonic()
+                if remaining <= 0:
+                    _last_propose_failure = "FallbackBudgetExhausted"
+                    return None
+                kwargs = dict(model=state["routes"][alias], messages=[{"role": "system", "content": system_content},
+                    {"role": "user", "content": user_content}], max_tokens=400, temperature=0.4, timeout=remaining)
+                effort = bridge_reasoning_effort()
+                if effort:
+                    kwargs["reasoning_effort"] = effort
+                state["attempts"] += 1
+                from nanobot.observability.prompt_provenance import current_owner
+                active_owner = provenance_owner or current_owner() or f"proposer:{current_cycle_id() or state['id']}"
+                prompt_request = role_request_for_system(
+                    system_content, owner=active_owner,
+                    producer_hint=_role_name_for(system_content),
+                )
+                with prompt_request_context(prompt_request):
+                    from nanobot.observability.prompt_provenance import prompt_owner_context
+                    with prompt_owner_context(prompt_request.owner):
+                        with provider_call_context(kwargs["messages"]) as prompt_call:
+                            prompt_provenance = prompt_call.provenance if prompt_call is not None else None
+                            response = client.chat.completions.create(**kwargs)
         except Exception as exc:
             qualifies = _fallback_qualifies(exc, state["threshold"])
             _last_propose_failure = (
@@ -2509,7 +2542,6 @@ def propose(
         )
     call_start_utc = datetime.now(timezone.utc)
     try:
-        client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         create_kwargs: dict[str, Any] = dict(
             model=requested_model,
             messages=[
@@ -2527,11 +2559,15 @@ def propose(
             system_content, owner=provenance_owner,
             producer_hint=_role_name_for(role_body),
         )
-        with prompt_request_context(prompt_request):
-            with prompt_owner_context(provenance_owner):
-                with provider_call_context(create_kwargs["messages"]) as prompt_call:
-                    prompt_provenance = prompt_call.provenance if prompt_call is not None else None
-                    response = client.chat.completions.create(**create_kwargs)
+        with _journaled_proposer_client(OpenAI, component) as client_kwargs:
+            client = OpenAI(
+                base_url=base_url, api_key=api_key, timeout=timeout, **client_kwargs,
+            )
+            with prompt_request_context(prompt_request):
+                with prompt_owner_context(provenance_owner):
+                    with provider_call_context(create_kwargs["messages"]) as prompt_call:
+                        prompt_provenance = prompt_call.provenance if prompt_call is not None else None
+                        response = client.chat.completions.create(**create_kwargs)
         duration_ms = (time.monotonic() - call_start) * 1000
         usage_obj = getattr(response, "usage", None)
         usage = {

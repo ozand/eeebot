@@ -774,7 +774,7 @@ def test_bridge_route_holds_existing_owner_and_rotates_only_after_consumption(tm
     owner = journal.provision_route_parent(state_root, "planner")
     route_path, _route_lock = journal._route_paths(state_root, "planner")
     assert journal.provision_route_parent(state_root, "planner") == owner
-    assert journal._read_route(route_path)["owner_id"] == owner
+    assert journal._read_route(route_path, "planner")["owner_id"] == owner
 
     parent_path = state_root / "intent-journal" / f"{owner}.parent.json"
     parent_before = __import__("json").loads(parent_path.read_text(encoding="utf-8"))
@@ -809,6 +809,232 @@ def test_route_capacity_refuses_new_parent_without_pruning_settled_records(
     assert (state_root / "intent-journal" / f"{owner}.parent.json").exists()
 
 
+def test_proposer_fallback_sdk_budget_is_journaled_per_dispatch(tmp_path: Path, monkeypatch) -> None:
+    import httpx
+    import openai
+    from nanobot.runtime import llm_proposer
+
+    responses = [429, 200]
+    sends = []
+    def respond(request):
+        sends.append(request)
+        status = responses.pop(0)
+        body = ({"error": {"message": "cooldown"}} if status == 429 else {
+            "model": "an/backup", "choices": [{"finish_reason": "stop", "message": {"content": '{"task_title":"ok"}'}}],
+        })
+        headers = {"Retry-After": "60"} if status == 429 else {}
+        return httpx.Response(status, json=body, headers=headers, request=request)
+
+    class FakeHttpClient(openai.DefaultHttpxClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(respond), **kwargs)
+
+    monkeypatch.setattr(openai, "DefaultHttpxClient", FakeHttpClient)
+    monkeypatch.setattr(llm_proposer, "record_llm_call", lambda **kwargs: None)
+    monkeypatch.setattr(llm_proposer, "record_llm_prompt", lambda **kwargs: None)
+    failures = []
+    monkeypatch.setattr(llm_proposer, "_record_failed_proposer_call", lambda exc, *a, **k: failures.append((type(exc).__name__, type(exc.__cause__).__name__ if exc.__cause__ else None)))
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    state = {"primary": "primary", "alternate": "backup", "routes": {
+        "primary": "cl/primary", "backup": "an/backup"}, "threshold": 60,
+        "deadline": time.monotonic() + 30, "attempts": 0, "id": str(uuid4())}
+
+    with journal.route_parent_context(state_root, "proposer"):
+        result = llm_proposer._propose_with_fallback(
+            state, openai.OpenAI, "https://gateway.invalid", "fake", "system", "user", "proposer",
+        )
+    assert result == {"task_title": "ok"}, (failures, len(sends), responses)
+    assert state["attempts"] == 2 and len(sends) == 2
+    owner = journal._read_route(journal._route_paths(state_root, "proposer")[0], "proposer")["owner_id"]
+    rows = journal.read_owner_records(state_root, owner)
+    assert [row["event"] for row in rows] == ["intent", "terminal", "consumed"] * 2
+    assert len({row["operation_id"] for row in rows}) == 2
+
+
+def test_proposer_primary_sdk_retry_is_journaled_without_changing_sdk_budget(tmp_path: Path, monkeypatch) -> None:
+    import httpx
+    import openai
+    from nanobot.runtime import llm_proposer
+
+    statuses = [429, 200]
+    sends = []
+    def respond(request):
+        sends.append(request)
+        status = statuses.pop(0)
+        body = ({"error": {"message": "retry"}} if status == 429 else {
+            "model": "cl/test", "choices": [{"finish_reason": "stop", "message": {"content": '{"task_title":"ok"}'}}],
+        })
+        return httpx.Response(status, json=body, headers={"Retry-After": "0"}, request=request)
+
+    class FakeHttpClient(openai.DefaultHttpxClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(respond), **kwargs)
+
+    monkeypatch.setattr(openai, "DefaultHttpxClient", FakeHttpClient)
+    monkeypatch.setattr(llm_proposer, "_build_proposer_role_prompt", lambda *args: "system")
+    monkeypatch.setattr(llm_proposer, "_model_name", lambda: "cl/test")
+    monkeypatch.setattr(llm_proposer, "record_llm_call", lambda **kwargs: None)
+    monkeypatch.setattr(llm_proposer, "record_llm_prompt", lambda **kwargs: None)
+    monkeypatch.setattr(llm_proposer, "_record_failed_proposer_call", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm_proposer, "resolve_context_window", lambda *args, **kwargs: None)
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.invalid")
+    monkeypatch.setenv("LITELLM_API_KEY", "fake")
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+
+    with journal.route_parent_context(state_root, "proposer"):
+        result = llm_proposer.propose("context")
+    assert result == {"task_title": "ok"}
+    assert len(sends) == 2 and statuses == []
+    owner = journal._read_route(journal._route_paths(state_root, "proposer")[0], "proposer")["owner_id"]
+    rows = journal.read_owner_records(state_root, owner)
+    assert [row["event"] for row in rows] == ["intent", "terminal", "consumed"] * 2
+    assert len({row["operation_id"] for row in rows}) == 1
+    assert len({row["attempt_id"] for row in rows if row["event"] == "intent"}) == 2
+
+
+def test_route_record_rejects_cross_route_label_corruption(tmp_path: Path) -> None:
+    import json
+
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    journal.provision_route_parent(state_root, "planner")
+    route_path, _lock = journal._route_paths(state_root, "planner")
+    record = journal._read_route(route_path, "planner")
+    record["route"] = "proposer"
+    route_path.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(JournalCorruptError, match="malformed"):
+        journal.provision_route_parent(state_root, "planner")
+
+
+def test_proposer_unknown_transport_settlement_holds_same_parent(tmp_path: Path, monkeypatch) -> None:
+    import httpx
+    import openai
+    from nanobot.runtime import llm_proposer
+
+    sends = []
+    def fail(request):
+        sends.append(request)
+        raise httpx.ConnectError("ambiguous transport failure", request=request)
+
+    class FakeHttpClient(openai.DefaultHttpxClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(fail), **kwargs)
+
+    monkeypatch.setattr(openai, "DefaultHttpxClient", FakeHttpClient)
+    monkeypatch.setattr(openai._base_client.time, "sleep", lambda _delay: None)
+    monkeypatch.setattr(llm_proposer, "_build_proposer_role_prompt", lambda *args: "system")
+    monkeypatch.setattr(llm_proposer, "_model_name", lambda: "cl/test")
+    monkeypatch.setattr(llm_proposer, "_record_failed_proposer_call", lambda *args, **kwargs: None)
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.invalid")
+    monkeypatch.setenv("LITELLM_API_KEY", "fake")
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+
+    with pytest.raises(JournalUnavailableError, match="not verified"):
+        with journal.route_parent_context(state_root, "proposer"):
+            assert llm_proposer.propose("context") is None
+    assert len(sends) == 1
+    route_path, _lock = journal._route_paths(state_root, "proposer")
+    owner = journal._read_route(route_path, "proposer")["owner_id"]
+    rows = journal.read_owner_records(state_root, owner)
+    assert [row["event"] for row in rows] == ["intent"]
+    assert journal.provision_route_parent(state_root, "proposer") == owner
+    with pytest.raises(JournalUnavailableError, match="already started|unresolved active operation"):
+        with journal.bridge_parent_context(state_root, owner, route="proposer"):
+            pytest.fail("unknown proposer settlement must remain held")
+
+
+def test_bridge_cycle_resume_uses_same_owner_only_after_consumed_attempt(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    with journal.bridge_cycle_parent_context(state_root) as first_owner:
+        with operation_context("bridge", "bridge.cycle") as operation:
+            assert operation is not None
+            attempt = operation.admit()
+            operation.returned(attempt)
+            operation.consume(attempt)
+            operation.close()
+    route_path, _lock = journal._route_paths(state_root, "bridge.cycle")
+    assert journal._read_route(route_path, "bridge.cycle")["owner_id"] == first_owner
+    before = journal.read_owner_records(state_root, first_owner)
+
+    with journal.bridge_cycle_parent_context(state_root) as resumed_owner:
+        assert resumed_owner == first_owner
+        assert journal.read_owner_records(state_root, resumed_owner) == before
+    assert journal.provision_route_parent(state_root, "bridge.cycle") == first_owner
+
+
+def test_bridge_cycle_resume_holds_unsettled_attempt_and_preserves_evidence(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    with journal.bridge_cycle_parent_context(state_root) as owner:
+        with operation_context("bridge", "bridge.cycle") as operation:
+            assert operation is not None
+            operation.admit()
+    before = journal.read_owner_records(state_root, owner)
+    with pytest.raises(JournalUnavailableError, match="unresolved"):
+        with journal.bridge_cycle_parent_context(state_root):
+            pytest.fail("unsettled bridge-cycle attempt must remain held")
+    assert journal.read_owner_records(state_root, owner) == before
+    assert journal.provision_route_parent(state_root, "bridge.cycle") == owner
+
+
+def test_autonomous_goal_review_uses_planner_owner_and_sdk_journal(tmp_path: Path, monkeypatch) -> None:
+    import httpx
+    import openai
+    from nanobot.runtime import goal_review, llm_proposer
+
+    sends = []
+    def respond(request):
+        sends.append(request)
+        return httpx.Response(200, json={"model": "cl/test", "choices": [{
+            "finish_reason": "stop", "message": {"content": '{"no_change":true}'},
+        }]}, request=request)
+
+    class FakeHttpClient(openai.DefaultHttpxClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(respond), **kwargs)
+
+    monkeypatch.setattr(openai, "DefaultHttpxClient", FakeHttpClient)
+    monkeypatch.setattr(llm_proposer, "_build_proposer_role_prompt", lambda *args: "system")
+    monkeypatch.setattr(llm_proposer, "_model_name", lambda: "cl/test")
+    monkeypatch.setattr(llm_proposer, "record_llm_call", lambda **kwargs: None)
+    monkeypatch.setattr(llm_proposer, "record_llm_prompt", lambda **kwargs: None)
+    monkeypatch.setattr(llm_proposer, "_record_failed_proposer_call", lambda *args, **kwargs: None)
+    monkeypatch.setattr(llm_proposer, "resolve_context_window", lambda *args, **kwargs: None)
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://gateway.invalid")
+    monkeypatch.setenv("LITELLM_API_KEY", "fake")
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    owner = journal.provision_route_parent(state_root, "planner")
+
+    with journal.bridge_parent_context(state_root, owner):
+        reply = goal_review._call_llm("goal-review context")
+        assert journal.close_route_parent(state_root, "planner", owner) is True
+    assert reply == {"no_change": True} and len(sends) == 1
+    rows = journal.read_owner_records(state_root, owner)
+    assert [row["event"] for row in rows] == ["intent", "terminal", "consumed"]
+    assert rows[0]["component"] == "goal_review"
+
+
+def test_parent_routes_are_independent_and_tokens_are_not_cross_authorized(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    planner = journal.provision_route_parent(state_root, "planner")
+    proposer = journal.provision_route_parent(state_root, "proposer")
+    assert planner != proposer
+
+    with journal.bridge_parent_context(state_root, planner, route="planner"):
+        pass
+    with pytest.raises(JournalUnavailableError, match="active route owner"):
+        with journal.bridge_parent_context(state_root, planner, route="proposer"):
+            pytest.fail("planner token must not authorize proposer route")
+    with journal.bridge_parent_context(state_root, proposer, route="proposer"):
+        pass
+
+
 def test_bridge_parent_start_is_durable_before_effects(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     state_root.mkdir()
@@ -822,7 +1048,7 @@ def test_bridge_parent_start_is_durable_before_effects(tmp_path: Path) -> None:
             operation.admit()
 
     assert journal.provision_route_parent(state_root, "planner") == owner
-    with pytest.raises(JournalUnavailableError, match="already started"):
+    with pytest.raises(JournalUnavailableError, match="already started|unresolved active operation"):
         with journal.bridge_parent_context(state_root, owner):
             pytest.fail("started parent must not be reissued")
 

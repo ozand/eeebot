@@ -4500,7 +4500,17 @@ async def _main_impl_body():
     # so a freshly-authored proposal is visible to THIS SAME planning session
     # via llm_proposer.proposer_candidate_items below.
     _selfevo_repo_for_proposer = STATE_DIR.parent / 'eeebot-self-evolving'
-    _proposer_title = llm_proposer.maybe_propose(STATE_DIR, _selfevo_repo_for_proposer)
+    from nanobot.runtime import intent_journal
+    try:
+        with intent_journal.route_parent_context(STATE_DIR, "proposer"):
+            _proposer_title = llm_proposer.maybe_propose(STATE_DIR, _selfevo_repo_for_proposer)
+    except intent_journal.JournalUnavailableError as exc:
+        append_event(STATE_DIR, {
+            'phase': 'proposer_intent_held', 'cycle_id': '',
+            'reason': type(exc).__name__,
+        })
+        print(f'llm-proposer: intent journal held ({type(exc).__name__}); aborting cycle')
+        return 0
     if _proposer_title:
         print(f'llm-proposer: queued {_proposer_title}')
 
