@@ -857,6 +857,11 @@ def reset_parent_context(token: Token) -> None:
     _ACTIVE_PARENT.reset(token)
 
 
+def _require_effect_admission_allowed(records: list[dict[str, Any]]) -> None:
+    if any(row["event"] == "no_execution_consumed" for row in records):
+        raise JournalUnavailableError("no-execution terminal owner is close-only")
+
+
 def _latest_attempt_events(
     records: list[dict[str, Any]], operation_id: str | None = None,
 ) -> dict[tuple[str, str], str]:
@@ -879,6 +884,7 @@ def _begin_operation(operation: IntentOperation) -> None:
         if not journal.exists():
             raise JournalUnavailableError("active parent journal is missing")
         records = _decode(journal, operation.owner_id)
+        _require_effect_admission_allowed(records)
         if any(event != "consumed" for event in _latest_attempt_events(records).values()):
             raise JournalUnavailableError("parent has unresolved attempts")
         parent["active_operation_id"] = operation.operation_id
@@ -1057,8 +1063,8 @@ def _decode(path: Path, owner_id: str) -> list[dict[str, Any]]:
             elif bridge_cycle_id != row["cycle_id"] or bridge_terminal_kind != kind:
                 raise JournalCorruptError("bridge-cycle owner has mixed cycle or terminal receipts")
             if kind == "no_execution_consumed":
-                if any(item.get("event") == "no_execution_consumed" for item in records):
-                    raise JournalCorruptError("duplicate no-execution terminal receipt")
+                if records:
+                    raise JournalCorruptError("no-execution terminal conflicts with prior owner evidence")
                 records.append(row)
                 continue
             phases = phases_by_cycle.setdefault(row["cycle_id"], {})
@@ -1074,6 +1080,8 @@ def _decode(path: Path, owner_id: str) -> list[dict[str, Any]]:
             phases[row["phase"]] = row["checkpoint_head_sha"]
             records.append(row)
             continue
+        if bridge_terminal_kind == "no_execution_consumed":
+            raise JournalCorruptError("effect record follows no-execution terminal receipt")
         key = (row["operation_id"], row["attempt_id"])
         if row["event"] == "intent":
             if key in states:
@@ -1238,6 +1246,7 @@ def admit_attempt(state_root: Path, *, owner_id: str, operation_id: str,
     with _owner_lock(lock):
         _ensure_journal(journal)
         records = _decode(journal, _uuid(owner_id, "owner_id"))
+        _require_effect_admission_allowed(records)
         parent = _ACTIVE_PARENT.get()
         operation = _ACTIVE_OPERATION.get()
         if not _test_only and (parent != (Path(state_root), row["owner_id"]) or operation is None or (

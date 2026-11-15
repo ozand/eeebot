@@ -877,10 +877,21 @@ def test_bridge_cycle_no_execution_receipt_closes_and_recovers_same_terminal(tmp
         journal.consume_bridge_cycle_no_execution(
             state_dir, owner, cycle_id=cycle_id, outcome="no_plan",
         )
+    dispatches = []
     with journal.bridge_cycle_parent_context(
         state_dir, no_execution_cycle_id=cycle_id, no_execution_outcome="rest_unchanged",
     ) as resumed_owner:
         assert resumed_owner == owner
+        with pytest.raises(JournalUnavailableError, match="close-only"):
+            with operation_context("bridge", "provider.chat"):
+                dispatches.append("must-not-run")
+        with pytest.raises(JournalUnavailableError, match="close-only"):
+            journal.admit_attempt(
+                state_dir, owner_id=owner, operation_id=str(uuid4()), attempt_id=str(uuid4()),
+                component="bridge", target="bridge.cycle",
+            )
+    assert dispatches == []
+    assert journal.read_owner_records(state_dir, owner) == before
     assert journal.close_route_parent(
         state_dir, "bridge.cycle", owner,
         no_execution_cycle_id=cycle_id, no_execution_outcome="rest_unchanged",
@@ -991,6 +1002,28 @@ def test_bridge_cycle_mixed_receipt_history_is_corrupt_and_preserved(tmp_path: P
     original = b"".join(json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows)
     path.write_bytes(original)
     with pytest.raises(JournalCorruptError, match="mixed cycle or terminal receipts"):
+        journal._decode(path, owner)
+    assert path.read_bytes() == original
+
+
+def test_bridge_cycle_no_execution_terminal_cannot_be_followed_by_intent(tmp_path: Path) -> None:
+    import json
+
+    owner = str(uuid4())
+    journal_dir = tmp_path / "intent-journal"
+    journal_dir.mkdir()
+    path = journal_dir / f"{owner}.jsonl"
+    ts = "2026-11-15T08:00:00Z"
+    rows = [
+        {"version": 1, "owner_id": owner, "cycle_id": "cycle-noexec", "outcome": "no_plan",
+         "event": "no_execution_consumed", "ts": ts},
+        {"version": 1, "owner_id": owner, "operation_id": str(uuid4()),
+         "attempt_id": str(uuid4()), "event": "intent", "component": "bridge",
+         "target": "bridge.cycle", "ts": ts},
+    ]
+    original = b"".join(json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in rows)
+    path.write_bytes(original)
+    with pytest.raises(JournalCorruptError, match="effect record follows no-execution terminal"):
         journal._decode(path, owner)
     assert path.read_bytes() == original
 
