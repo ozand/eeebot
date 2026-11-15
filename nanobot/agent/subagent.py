@@ -217,6 +217,7 @@ class SubagentManager:
         planner_deadline: float | None = None,
         planner_phase_budget: bool = False,
         intent_state_root: "Path | None" = None,
+        intent_owner_id: str | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -314,10 +315,10 @@ class SubagentManager:
         self._expected_cycle_branch = (expected_cycle_branch or "").strip() or None
         if intent_state_root is not None and self._telemetry_component != "planner":
             raise ValueError("intent journal is supported only for the planner component")
-        self._intent_owner_id = intent_journal.ensure_parent(
-            intent_state_root, "planner",
-        ) if intent_state_root is not None else None
-        self._intent_state_root = Path(intent_state_root) if self._intent_owner_id else None
+        if intent_state_root is not None and intent_owner_id is None:
+            raise ValueError("intent journal requires a bridge-provided planner owner token")
+        self._intent_owner_id = intent_owner_id
+        self._intent_state_root = Path(intent_state_root) if intent_owner_id else None
 
     async def spawn(
         self,
@@ -401,6 +402,11 @@ class SubagentManager:
         correlation_context = correlation_context or self._build_subagent_correlation_context()
         context_usage = {"peak_tokens": 0, "iterations": []}
         _intent_parent_token = None
+        if self._intent_owner_id:
+            assert self._intent_state_root is not None
+            _intent_parent_token = intent_journal.set_parent_context(
+                self._intent_state_root, self._intent_owner_id,
+            )
 
         try:
             # Build subagent tools (no message tool, no spawn tool)
@@ -523,12 +529,6 @@ class SubagentManager:
                 tools.register(WebSearchTool(config=self.web_search_config, proxy=self.web_proxy))
                 tools.register(WebFetchTool(proxy=self.web_proxy))
 
-            _intent_parent_token = None
-            if self._intent_owner_id:
-                assert self._intent_state_root is not None
-                _intent_parent_token = intent_journal.set_parent_context(
-                    self._intent_state_root, self._intent_owner_id,
-                )
             assert tuple(tools.tool_names) == self.registered_tool_names(), (
                 "registered tool set must match the configured declaration"
             )
@@ -774,8 +774,6 @@ class SubagentManager:
                             _call_provider(), timeout=_call_timeout,
                         )
                 except asyncio.TimeoutError:
-                    if _provider_operation is not None:
-                        _provider_operation.close()
                     logger.warning(
                         "Subagent [{}] model call timed out by progress watchdog ({:.1f}s)",
                         task_id, _watchdog.timeout_secs,

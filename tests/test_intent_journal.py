@@ -460,7 +460,8 @@ async def test_real_planner_manager_journals_provider_retry_attempts(tmp_path: P
 
     state_root = tmp_path / "state"
     state_root.mkdir()
-    owner = journal.ensure_parent(state_root, "planner")
+    owner = journal.provision_route_parent(state_root, "planner")
+    parent_context = journal.bridge_parent_context(state_root, owner)
     if os.name == "nt":
         locks: dict[str, threading.Lock] = {}
         guard = threading.Lock()
@@ -506,10 +507,11 @@ async def test_real_planner_manager_journals_provider_retry_attempts(tmp_path: P
         provider=provider, workspace=tmp_path, bus=MessageBus(),
         telemetry_component="planner", planner_deadline=__import__("time").monotonic() + 600.0,
         tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}",
-        intent_state_root=state_root,
+        intent_state_root=state_root, intent_owner_id=owner,
     )
     await manager.spawn("plan", label="planner", origin_channel="system", origin_chat_id="test")
-    await __import__("asyncio").gather(*manager._running_tasks.values(), return_exceptions=True)
+    with parent_context:
+        await __import__("asyncio").gather(*manager._running_tasks.values(), return_exceptions=True)
 
     rows = read_owner_records(state_root, owner)
     assert provider.physical_calls == 2
@@ -538,7 +540,7 @@ async def test_real_planner_manager_journals_tool_dispatch_between_provider_turn
 
     state_root = tmp_path / "state"
     state_root.mkdir()
-    owner = journal.ensure_parent(state_root, "planner")
+    owner = journal.provision_route_parent(state_root, "planner")
     monkeypatch.setenv("LLM_CALLS_DIR", str(tmp_path / "calls"))
     tool_results: list[str] = []
 
@@ -570,7 +572,7 @@ async def test_real_planner_manager_journals_tool_dispatch_between_provider_turn
         provider=PlannerProvider(), workspace=tmp_path, bus=MessageBus(),
         telemetry_component="planner", planner_deadline=__import__("time").monotonic() + 600.0,
         tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}",
-        intent_state_root=state_root,
+        intent_state_root=state_root, intent_owner_id=owner,
     )
     await manager.spawn("plan", label="planner", origin_channel="system", origin_chat_id="test")
     await __import__("asyncio").gather(*manager._running_tasks.values(), return_exceptions=True)
@@ -600,7 +602,9 @@ async def test_planner_tool_cancellation_leaves_attempt_unknown_and_held(
 
     state_root = tmp_path / "state"
     state_root.mkdir()
-    owner = journal.ensure_parent(state_root, "planner")
+    owner = journal.provision_route_parent(state_root, "planner")
+    other_owner = str(uuid4())
+    create_parent(state_root, other_owner)
 
     class Provider(LLMProvider):
         async def chat(self, **kwargs):
@@ -620,7 +624,7 @@ async def test_planner_tool_cancellation_leaves_attempt_unknown_and_held(
         provider=Provider(), workspace=tmp_path, bus=MessageBus(),
         telemetry_component="planner", planner_deadline=__import__("time").monotonic() + 600.0,
         tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}",
-        intent_state_root=state_root,
+        intent_state_root=state_root, intent_owner_id=owner,
     )
     await manager.spawn("plan", label="planner", origin_channel="system", origin_chat_id="test")
     results = await asyncio.gather(*manager._running_tasks.values(), return_exceptions=True)
@@ -637,8 +641,26 @@ async def test_planner_tool_cancellation_leaves_attempt_unknown_and_held(
         (state_root / "intent-journal" / f"{owner}.parent.json").read_text()
     )
     assert parent["active_operation_id"] == rows[-1]["operation_id"]
-    with pytest.raises(JournalUnavailableError, match="unresolved active operation"):
-        journal.ensure_parent(state_root, "planner")
+
+    if os.name == "nt":
+        locks: dict[str, threading.Lock] = {}
+        guard = threading.Lock()
+
+        @contextmanager
+        def fake_owner_lock(path: Path):
+            path.touch(exist_ok=True)
+            with guard:
+                lock = locks.setdefault(str(path.resolve()), threading.Lock())
+            with lock:
+                yield
+
+        monkeypatch.setattr(journal, "_owner_lock", fake_owner_lock)
+        monkeypatch.setattr(journal, "_fsync_directory", lambda _path: None)
+    assert journal.provision_route_parent(state_root, "planner") == owner
+    with pytest.raises(JournalUnavailableError):
+        with journal.bridge_parent_context(state_root, owner):
+            pytest.fail("cancelled planner parent must remain held")
+    assert read_owner_records(state_root, other_owner) == []
 
 
 @pytest.mark.asyncio
@@ -654,7 +676,7 @@ async def test_tool_intent_persistence_failure_prevents_dispatch(tmp_path: Path,
 
     state_root = tmp_path / "state"
     state_root.mkdir()
-    owner = journal.ensure_parent(state_root, "planner")
+    owner = journal.provision_route_parent(state_root, "planner")
     executed: list[str] = []
 
     class Provider(LLMProvider):
@@ -684,7 +706,7 @@ async def test_tool_intent_persistence_failure_prevents_dispatch(tmp_path: Path,
         provider=Provider(), workspace=tmp_path, bus=MessageBus(),
         telemetry_component="planner", planner_deadline=__import__("time").monotonic() + 600.0,
         tool_profile=PLANNER_PROFILE, role_system_prompt="planner {{TOOL_CAPABILITIES}}",
-        intent_state_root=state_root,
+        intent_state_root=state_root, intent_owner_id=owner,
     )
     await manager.spawn("plan", label="planner", origin_channel="system", origin_chat_id="test")
     await asyncio.gather(*manager._running_tasks.values(), return_exceptions=True)
@@ -740,6 +762,161 @@ def test_parent_operation_keeps_unknown_attempt_held(tmp_path: Path) -> None:
                 pass
     finally:
         reset_parent_context(token)
+
+
+# @lat: [[architecture#Intent-before-effect evidence]]
+def test_bridge_route_holds_existing_owner_and_rotates_only_after_consumption(tmp_path: Path) -> None:
+    if os.name == "nt":
+        pytest.skip("requires POSIX flock and directory fsync")
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+
+    owner = journal.provision_route_parent(state_root, "planner")
+    route_path, _route_lock = journal._route_paths(state_root, "planner")
+    assert journal.provision_route_parent(state_root, "planner") == owner
+    assert journal._read_route(route_path)["owner_id"] == owner
+
+    parent_path = state_root / "intent-journal" / f"{owner}.parent.json"
+    parent_before = __import__("json").loads(parent_path.read_text(encoding="utf-8"))
+    assert parent_before["status"] == "active"
+    assert parent_before["parent_consumed"] is False
+
+    assert journal.close_route_parent(state_root, "planner", owner) is True
+    parent_after = __import__("json").loads(parent_path.read_text(encoding="utf-8"))
+    assert parent_after["status"] == "resolved"
+    assert parent_after["parent_consumed"] is True
+
+    next_owner = journal.provision_route_parent(state_root, "planner")
+    assert next_owner != owner
+
+
+# @lat: [[architecture#Intent-before-effect evidence]]
+def test_route_capacity_refuses_new_parent_without_pruning_settled_records(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    monkeypatch.setattr(journal, "MAX_ROUTE_PARENTS", 1)
+    owner = journal.provision_route_parent(state_root, "planner")
+    with journal.bridge_parent_context(state_root, owner):
+        pass
+    assert journal.close_route_parent(state_root, "planner", owner)
+
+    with pytest.raises(JournalUnavailableError, match="capacity exhausted"):
+        journal.provision_route_parent(state_root, "planner")
+    assert journal._settled_route_owners(state_root, "planner") == {owner}
+    assert (state_root / "intent-journal" / f"{owner}.jsonl").exists()
+    assert (state_root / "intent-journal" / f"{owner}.parent.json").exists()
+
+
+def test_bridge_parent_start_is_durable_before_effects(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    owner = journal.provision_route_parent(state_root, "planner")
+
+    with journal.bridge_parent_context(state_root, owner):
+        parent_path = state_root / "intent-journal" / f"{owner}.parent.json"
+        assert __import__("json").loads(parent_path.read_text())["parent_started"] is True
+        with operation_context("subagent", "provider.chat") as operation:
+            assert operation is not None
+            operation.admit()
+
+    assert journal.provision_route_parent(state_root, "planner") == owner
+    with pytest.raises(JournalUnavailableError, match="already started"):
+        with journal.bridge_parent_context(state_root, owner):
+            pytest.fail("started parent must not be reissued")
+
+
+# @lat: [[architecture#Intent-before-effect evidence]]
+def test_bridge_route_holds_missing_active_parent_journal(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    owner = journal.provision_route_parent(state_root, "planner")
+    journal_path = state_root / "intent-journal" / f"{owner}.jsonl"
+    journal_path.unlink()
+
+    with pytest.raises(JournalUnavailableError, match="journal is missing"):
+        journal.provision_route_parent(state_root, "planner")
+
+
+# @lat: [[architecture#Intent-before-effect evidence]]
+def test_completed_attempt_without_parent_consumption_is_held_in_fresh_process(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    owner = journal.provision_route_parent(state_root, "planner")
+    other_owner = str(uuid4())
+    create_parent(state_root, other_owner)
+    with journal.bridge_parent_context(state_root, owner):
+        with operation_context("subagent", "provider.chat") as operation:
+            assert operation is not None
+            attempt = operation.admit()
+            operation.returned(attempt)
+    assert [row["event"] for row in read_owner_records(state_root, owner)] == ["intent", "terminal"]
+
+    probe = tmp_path / "recovery.json"
+    script = """
+import json, os, sys, threading
+from contextlib import contextmanager
+from pathlib import Path
+import nanobot.runtime.intent_journal as journal
+root = Path(sys.argv[1]); expected = sys.argv[2]; other = sys.argv[3]; out = Path(sys.argv[4])
+if os.name == "nt":
+    locks = {}; guard = threading.Lock()
+    @contextmanager
+    def fake_lock(path):
+        path.touch(exist_ok=True)
+        with guard:
+            lock = locks.setdefault(str(path.resolve()), threading.Lock())
+        with lock:
+            yield
+    journal._owner_lock = fake_lock
+    journal._fsync_directory = lambda _path: None
+actual = journal.provision_route_parent(root, "planner")
+try:
+    with journal.bridge_parent_context(root, actual):
+        held = False
+except journal.JournalUnavailableError:
+    held = True
+healthy = journal.read_owner_records(root, other)
+out.write_text(json.dumps({"same_owner": actual == expected, "held": held, "other_records": len(healthy)}), encoding="utf-8")
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    if os.name == "nt":
+        script = script.replace(
+            "root = Path(sys.argv[1]); expected = sys.argv[2]; other = sys.argv[3]; out = Path(sys.argv[4])",
+            "root = Path(sys.argv[1]); expected = sys.argv[2]; other = sys.argv[3]; out = Path(sys.argv[4])\n"
+            "locks = {}; guard = threading.Lock()\n"
+            "@contextmanager\n"
+            "def fake_lock(path):\n"
+            "    path.touch(exist_ok=True)\n"
+            "    with guard: lock = locks.setdefault(str(path.resolve()), threading.Lock())\n"
+            "    with lock: yield\n"
+            "journal._owner_lock = fake_lock\n"
+            "journal._fsync_directory = lambda _path: None",
+        )
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(state_root), owner, other_owner, str(probe)],
+        env=env, capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    assert __import__("json").loads(probe.read_text(encoding="utf-8")) == {
+        "same_owner": True, "held": True, "other_records": 0,
+    }
+
+
+# @lat: [[architecture#Intent-before-effect evidence]]
+def test_bridge_route_holds_corrupt_parent_evidence(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    owner = journal.provision_route_parent(state_root, "planner")
+    parent_path = state_root / "intent-journal" / f"{owner}.parent.json"
+    parent = __import__("json").loads(parent_path.read_text(encoding="utf-8"))
+    parent["parent_consumed"] = True
+    parent_path.write_text(__import__("json").dumps(parent), encoding="utf-8")
+
+    with pytest.raises(JournalCorruptError, match="lifecycle evidence"):
+        journal.provision_route_parent(state_root, "planner")
 
 
 def test_owner_lock_identity_survives_settlement_and_partitions_threads(tmp_path: Path) -> None:

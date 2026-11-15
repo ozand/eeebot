@@ -88,6 +88,7 @@ def _make_fake_mgr_factory(
             self._planner_phase_budget = kwargs.get("planner_phase_budget", False)
             self._planner_deadline = kwargs.get("planner_deadline")
             self.intent_state_root = kwargs.get("intent_state_root")
+            self.intent_owner_id = kwargs.get("intent_owner_id")
             self.web_tools_enabled = kwargs.get("web_tools_enabled")
             type(self).last_instance = self
             self._running_tasks: dict[str, asyncio.Task] = {}
@@ -133,6 +134,28 @@ def _stub_role_prompt(monkeypatch):
     so patching the attribute here reaches it."""
     import nanobot.runtime.role_prompt as role_prompt_mod
 
+    # Logic-only Windows fixture for journal admission; this fake lock does not
+    # validate OS locking, filesystem durability, or power-loss behavior.
+    if os.name == "nt":
+        import threading
+        from contextlib import contextmanager
+
+        from nanobot.runtime import intent_journal
+
+        locks: dict[str, threading.Lock] = {}
+        guard = threading.Lock()
+
+        @contextmanager
+        def fake_owner_lock(path: Path):
+            path.touch(exist_ok=True)
+            with guard:
+                lock = locks.setdefault(str(path.resolve()), threading.Lock())
+            with lock:
+                yield
+
+        monkeypatch.setattr(intent_journal, "_owner_lock", fake_owner_lock)
+        monkeypatch.setattr(intent_journal, "_fsync_directory", lambda _path: None)
+
     monkeypatch.setattr(
         role_prompt_mod, "build_role_system_prompt",
         lambda role, **kwargs: ("fixed planner prompt", {"role": role}),
@@ -151,6 +174,7 @@ async def _run(**overrides):
         model="an/test-model", cycle_id="cycle-1",
     )
     kwargs.update(overrides)
+    Path(kwargs["state_dir"]).mkdir(parents=True, exist_ok=True)
     return await bridge._run_planning_session(**kwargs)
 
 
@@ -373,6 +397,52 @@ def test_happy_path_writes_the_diary_and_journals_success(tmp_path: Path, monkey
     assert rows[0]["iterations_used"] == 3
     assert rows[0]["iterations_planned"] == 35
     assert rows[0]["task_writing_read"] is True
+
+
+# @lat: [[architecture#Intent-before-effect evidence]]
+def test_parent_start_persistence_failure_prevents_planner_manager_creation(tmp_path: Path, monkeypatch):
+    from nanobot.runtime import intent_journal
+
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    result_obj = {"insight": "must not dispatch", "plan": "must not dispatch", "iterations_planned": 1}
+    manager_factory = _make_fake_mgr_factory(state, result_obj)
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+    real_write_parent = intent_journal._write_parent
+
+    def fail_parent_start(path, value):
+        if value.get("parent_started") is True:
+            raise intent_journal.JournalUnavailableError("injected parent-start persistence failure")
+        return real_write_parent(path, value)
+
+    monkeypatch.setattr(intent_journal, "_write_parent", fail_parent_start)
+    with pytest.raises(intent_journal.JournalUnavailableError, match="parent-start persistence failure"):
+        asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+    assert manager_factory.last_instance is None
+
+
+def test_bridge_planner_runs_rotate_token_only_after_parent_consumption(tmp_path: Path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    result_obj = {"insight": "bounded", "plan": "bounded", "iterations_planned": 1}
+    manager_factory = _make_fake_mgr_factory(state, result_obj)
+    monkeypatch.setattr(bridge, "SubagentManager", manager_factory)
+
+    first = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+    first_owner = manager_factory.last_instance.intent_owner_id
+    first_parent = __import__("json").loads(
+        (state / "intent-journal" / f"{first_owner}.parent.json").read_text(encoding="utf-8")
+    )
+
+    second = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+    second_owner = manager_factory.last_instance.intent_owner_id
+    route_path = state / "intent-journal" / "route-planner.json"
+
+    assert first["ran"] and second["ran"]
+    assert first_parent["status"] == "resolved"
+    assert first_parent["parent_consumed"] is True
+    assert second_owner != first_owner
+    assert __import__("json").loads(route_path.read_text(encoding="utf-8"))["owner_id"] == second_owner
 
 
 def test_a_fitness_sidecar_write_during_planning_spawn_is_detected_and_refused(tmp_path: Path, monkeypatch):

@@ -24,6 +24,7 @@ SCHEMA_VERSION = 1
 MAX_RECORD_BYTES = 4096
 MAX_OWNER_RECORDS = 256
 MAX_OWNER_BYTES = 1_048_576
+MAX_ROUTE_PARENTS = 128
 _COMPONENTS = frozenset({"agent", "subagent", "memory", "heartbeat", "evaluator", "proposer", "bridge"})
 _TARGETS = frozenset({
     "provider.chat", "provider.embedding", "tool.dispatch", "tool.read_file",
@@ -32,7 +33,8 @@ _TARGETS = frozenset({
 })
 _ACTIVE_PARENT: ContextVar[tuple[Path, str] | None] = ContextVar("_intent_parent", default=None)
 _ACTIVE_OPERATION: ContextVar["IntentOperation | None"] = ContextVar("_intent_operation", default=None)
-_PARENT_SCHEMA = 1
+_PARENT_SCHEMA = 3
+_ROUTE_NAME = "planner"
 
 
 class JournalUnavailableError(RuntimeError):
@@ -55,39 +57,245 @@ def _uuid(value: str, field: str) -> str:
 
 
 def _route_owner_id(route: str) -> str:
-    if route != "planner":
+    if route != _ROUTE_NAME:
         raise ValueError("autonomous parent route is not approved")
     return str(uuid5(NAMESPACE_URL, "eeebot.intent-journal.parent.planner"))
 
 
-def ensure_parent(state_root: Path, route: str) -> str:
-    """Return the one persistent parent identity for an approved route."""
-    owner_id = _route_owner_id(route)
+def _route_paths(state_root: Path, route: str) -> tuple[Path, Path]:
+    if route != _ROUTE_NAME:
+        raise ValueError("autonomous parent route is not approved")
+    root = Path(state_root)
+    if not root.is_dir():
+        raise JournalUnavailableError("state root must already exist")
+    directory = root / "intent-journal"
+    created = False
+    try:
+        try:
+            directory.mkdir(mode=0o700)
+            created = True
+        except FileExistsError:
+            pass
+        if not stat.S_ISDIR(directory.lstat().st_mode):
+            raise OSError("journal path is not a real directory")
+        if os.name != "nt":
+            os.chmod(directory, 0o700)
+            if created:
+                _fsync_directory(root)
+                _fsync_directory(directory)
+    except OSError as exc:
+        raise JournalUnavailableError("cannot prepare route journal directory") from exc
+    return directory / f"route-{route}.json", directory / f"route-{route}.lock"
+
+
+def _read_route(path: Path) -> dict[str, Any]:
+    if path.with_name(f".{path.name}.tmp").exists():
+        raise JournalUnavailableError("route record has an unresolved temporary file")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise JournalUnavailableError("route-to-parent record is missing or unreadable") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"version", "route", "status", "owner_id"}
+        or value.get("version") != 1
+        or value.get("route") != _ROUTE_NAME
+        or value.get("status") not in {"provisioning", "active", "closed"}
+    ):
+        raise JournalCorruptError("route-to-parent record is malformed")
+    try:
+        _uuid(value["owner_id"], "owner_id")
+    except ValueError as exc:
+        raise JournalCorruptError("route-to-parent owner is malformed") from exc
+    return value
+
+
+def _write_route(path: Path, value: dict[str, Any]) -> None:
+    _write_parent(path, value)
+    if _read_route(path) != value:
+        raise JournalUnavailableError("route-to-parent read-back mismatch")
+
+
+def _new_parent_record(owner_id: str) -> dict[str, Any]:
+    return {
+        "version": _PARENT_SCHEMA, "owner_id": owner_id, "status": "active",
+        "created_at": _now_iso(), "resolved_at": None,
+        "active_operation_id": None, "last_operation_id": None,
+        "parent_started": False, "parent_consumed": False,
+    }
+
+
+def _provision_route_owner(state_root: Path, owner_id: str) -> None:
     journal, lock = _owner_paths(state_root, owner_id)
     parent_path = journal.with_suffix(".parent.json")
     with _owner_lock(lock):
         if parent_path.exists():
             parent = _read_parent(parent_path, owner_id)
+            if not journal.exists():
+                raise JournalUnavailableError("provisioning parent journal is missing")
+            records = _decode(journal, owner_id)
+            if (
+                parent["status"] != "active" or parent["parent_started"]
+                or parent["parent_consumed"] or parent.get("active_operation_id") is not None or records
+            ):
+                raise JournalUnavailableError("provisioning owner contains non-empty state")
+            return
+        if journal.exists() and _decode(journal, owner_id):
+            raise JournalUnavailableError("provisioning journal is unexpectedly non-empty")
+        _ensure_journal(journal)
+        record = _new_parent_record(owner_id)
+        _write_parent(parent_path, record)
+        if _read_parent(parent_path, owner_id) != record:
+            raise JournalUnavailableError("new parent record read-back mismatch")
+
+
+def provision_route_parent(state_root: Path, route: str) -> str:
+    """Provision a new parent or reject an unconsumed persisted parent."""
+    route_path, route_lock = _route_paths(state_root, route)
+    legacy_id = _route_owner_id(route)
+    legacy_journal, _legacy_lock = _owner_paths(state_root, legacy_id)
+    route_was_initialized = route_path.exists() or route_lock.exists()
+    with _owner_lock(route_lock):
+        current = _read_route(route_path) if route_path.exists() else None
+        if current is None and route_was_initialized:
+            raise JournalUnavailableError("planner route record is missing after initialization")
+        if current is None and legacy_journal.with_suffix(".parent.json").exists():
+            # Schema 1 had no durable parent-consumption transition. Do not
+            # migrate or bypass that still-authoritative route owner.
+            raise JournalUnavailableError("legacy planner parent lacks durable closure evidence")
+        if current is not None and current["status"] == "active":
+            journal, owner_lock = _owner_paths(state_root, current["owner_id"])
+            with _owner_lock(owner_lock):
+                parent_path = journal.with_suffix(".parent.json")
+                parent = _read_parent(parent_path, current["owner_id"])
+                if not journal.exists():
+                    raise JournalUnavailableError("active planner parent journal is missing")
+                records = _decode(journal, current["owner_id"])
+                if parent["status"] == "resolved" and parent["parent_consumed"] and all(
+                    event == "consumed" for event in _latest_attempt_events(records).values()
+                ):
+                    _record_settled_route_parent(state_root, route, current["owner_id"])
+                    current["status"] = "closed"
+                    _write_route(route_path, current)
+                elif parent["status"] == "active":
+                    # Return the same owner after restart. The caller's parent
+                    # context performs the final unresolved-operation/attempt
+                    # admission check before any effect.
+                    return current["owner_id"]
+                else:
+                    raise JournalUnavailableError("planner parent evidence is inconsistent")
+        if current is not None and current["status"] == "provisioning":
+            owner_id = current["owner_id"]
+            _provision_route_owner(state_root, owner_id)
+            current["status"] = "active"
+            _write_route(route_path, current)
+            return owner_id
+        if current is not None and current["status"] not in {"closed"}:
+            raise JournalUnavailableError("planner route state is not safely reusable")
+        settled = _settled_route_owners(state_root, route)
+        if current is not None and current["status"] == "closed":
+            settled.add(current["owner_id"])
+        if len(settled) >= MAX_ROUTE_PARENTS:
+            raise JournalUnavailableError("planner route parent capacity exhausted")
+        owner_id = str(uuid4())
+        provisioning = {
+            "version": 1, "route": _ROUTE_NAME,
+            "status": "provisioning", "owner_id": owner_id,
+        }
+        _write_route(route_path, provisioning)
+        _provision_route_owner(state_root, owner_id)
+        active = {**provisioning, "status": "active"}
+        _write_route(route_path, active)
+        return owner_id
+
+
+def _settled_marker_path(state_root: Path, route: str, owner_id: str) -> Path:
+    return Path(state_root) / "intent-journal" / f"route-{route}-{owner_id}.closed.json"
+
+
+def _record_settled_route_parent(state_root: Path, route: str, owner_id: str) -> None:
+    path = _settled_marker_path(state_root, route, owner_id)
+    expected = {
+        "version": 1, "route": route, "owner_id": owner_id,
+        "closed_at": _now_iso(),
+    }
+    if path.exists():
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise JournalUnavailableError("settled parent marker is unreadable") from exc
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"version", "route", "owner_id", "closed_at"}
+            or value.get("version") != 1 or value.get("route") != route
+            or value.get("owner_id") != owner_id or not isinstance(value.get("closed_at"), str)
+        ):
+            raise JournalCorruptError("settled parent marker is malformed")
+        return
+    _write_parent(path, expected)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise JournalUnavailableError("settled parent marker read-back failed") from exc
+    if value != expected:
+        raise JournalUnavailableError("settled parent marker read-back mismatch")
+
+
+def _settled_route_owners(state_root: Path, route: str) -> set[str]:
+    directory = Path(state_root) / "intent-journal"
+    owners: set[str] = set()
+    for path in directory.glob(f"route-{route}-*.closed.json"):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(record, dict)
+                or set(record) != {"version", "route", "owner_id", "closed_at"}
+                or record.get("version") != 1 or record.get("route") != route
+                or not isinstance(record.get("closed_at"), str)
+            ):
+                raise JournalCorruptError("settled parent marker is malformed")
+            owner_id = _uuid(record["owner_id"], "owner_id")
+            if path != _settled_marker_path(state_root, route, owner_id):
+                raise JournalCorruptError("settled parent marker identity differs from path")
+            owners.add(owner_id)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise JournalUnavailableError("settled parent index is corrupt") from exc
+    return owners
+
+
+def close_route_parent(state_root: Path, route: str, owner_id: str) -> bool:
+    """Record parent consumption and closure before allowing a successor token."""
+    owner_id = _uuid(owner_id, "owner_id")
+    route_path, route_lock = _route_paths(state_root, route)
+    with _owner_lock(route_lock):
+        selected = _read_route(route_path)
+        if selected["status"] != "active" or selected["owner_id"] != owner_id:
+            raise JournalUnavailableError("route does not select this active parent")
+        journal, owner_lock = _owner_paths(state_root, owner_id)
+        with _owner_lock(owner_lock):
+            parent_path = journal.with_suffix(".parent.json")
+            parent = _read_parent(parent_path, owner_id)
+            if parent["status"] != "active" or parent["parent_consumed"]:
+                raise JournalUnavailableError("parent is not active")
+            if not parent["parent_started"]:
+                raise JournalUnavailableError("planner parent was never started")
             if parent.get("active_operation_id") is not None:
-                raise JournalUnavailableError("route parent has unresolved active operation")
-            journal_records = _decode(journal, owner_id) if journal.exists() else []
-            if any(event != "consumed" for event in _latest_attempt_events(journal_records).values()):
-                raise JournalUnavailableError("route parent has unresolved attempts")
-        else:
-            value = {
-                "version": 1, "owner_id": owner_id, "status": "active",
-                "created_at": _now_iso(), "resolved_at": None,
-                "active_operation_id": None, "last_operation_id": None,
-            }
-            _write_parent(parent_path, value)
-            if _read_parent(parent_path, owner_id) != value:
-                raise JournalUnavailableError("parent record read-back mismatch")
-    return owner_id
-
-
-def open_parent_context(state_root: Path, route: str) -> Token:
-    owner_id = ensure_parent(state_root, route)
-    return set_parent_context(state_root, owner_id)
+                return False
+            if not journal.exists():
+                raise JournalUnavailableError("active planner parent journal is missing")
+            records = _decode(journal, owner_id)
+            if any(event != "consumed" for event in _latest_attempt_events(records).values()):
+                return False
+            parent["parent_consumed"] = True
+            parent["status"] = "resolved"
+            parent["resolved_at"] = _now_iso()
+            _write_parent(parent_path, parent)
+            if _read_parent(parent_path, owner_id) != parent:
+                raise JournalUnavailableError("parent consumption/closure read-back mismatch")
+        _record_settled_route_parent(state_root, route, owner_id)
+        selected["status"] = "closed"
+        _write_route(route_path, selected)
+        return True
 
 
 def open_existing_parent_context(state_root: Path, owner_id: str) -> Token:
@@ -200,17 +408,16 @@ def create_parent(state_root: Path, owner_id: str) -> None:
     with _owner_lock(lock):
         if path.exists():
             raise JournalUnavailableError("parent identity already exists")
-        value = {
-            "version": 1, "owner_id": owner_id, "status": "active",
-            "created_at": _now_iso(), "resolved_at": None,
-            "active_operation_id": None, "last_operation_id": None,
-        }
+        _ensure_journal(journal)
+        value = _new_parent_record(owner_id)
         _write_parent(path, value)
         if _read_parent(path, owner_id) != value:
             raise JournalUnavailableError("parent record read-back mismatch")
 
 
 def _read_parent(path: Path, owner_id: str) -> dict[str, Any]:
+    if path.with_name(f".{path.name}.tmp").exists():
+        raise JournalUnavailableError("parent record has an unresolved temporary file")
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
@@ -219,13 +426,30 @@ def _read_parent(path: Path, owner_id: str) -> dict[str, Any]:
         not isinstance(value, dict)
         or set(value) != {
             "version", "owner_id", "status", "created_at", "resolved_at",
-            "active_operation_id", "last_operation_id",
+            "active_operation_id", "last_operation_id", "parent_started", "parent_consumed",
         }
-        or value.get("version") != 1
+        or value.get("version") != _PARENT_SCHEMA
         or value.get("owner_id") != owner_id
         or value.get("status") not in {"active", "resolved"}
+        or not isinstance(value.get("parent_started"), bool)
+        or not isinstance(value.get("parent_consumed"), bool)
+        or not isinstance(value.get("created_at"), str)
     ):
         raise JournalCorruptError("parent record malformed")
+    for field in ("active_operation_id", "last_operation_id"):
+        if value[field] is not None:
+            try:
+                _uuid(value[field], field)
+            except ValueError as exc:
+                raise JournalCorruptError("parent operation identity malformed") from exc
+    if (
+        (value["status"] == "active" and (value["parent_consumed"] or value["resolved_at"] is not None))
+        or (value["status"] == "resolved" and (
+            not value["parent_consumed"] or value["active_operation_id"] is not None
+            or not isinstance(value["resolved_at"], str)
+        ))
+    ):
+        raise JournalCorruptError("parent lifecycle evidence is inconsistent")
     return value
 
 
@@ -256,18 +480,43 @@ def _write_parent(path: Path, value: dict[str, Any]) -> None:
                 pass
 
 
-def set_parent_context(state_root: Path, owner_id: str) -> Token:
-    journal, lock = _owner_paths(state_root, owner_id)
-    with _owner_lock(lock):
+@contextmanager
+def bridge_parent_context(state_root: Path, owner_id: str) -> Iterator[None]:
+    """Validate the bridge token; production cycle serialization stays in bridge.lock."""
+    route_path, route_lock = _route_paths(state_root, _ROUTE_NAME)
+    with _owner_lock(route_lock):
+        route = _read_route(route_path)
+        if route["status"] != "active" or route["owner_id"] != _uuid(owner_id, "owner_id"):
+            raise JournalUnavailableError("bridge parent token is not the active route owner")
+    journal, owner_lock = _owner_paths(state_root, owner_id)
+    with _owner_lock(owner_lock):
         parent = _read_parent(journal.with_suffix(".parent.json"), owner_id)
-        if parent["status"] != "active":
-            raise JournalUnavailableError("parent is resolved")
+        if parent["status"] != "active" or parent["parent_consumed"]:
+            raise JournalUnavailableError("bridge parent is closed")
+        if parent["parent_started"]:
+            raise JournalUnavailableError("planner parent was already started; continuation is held")
+        if not journal.exists():
+            raise JournalUnavailableError("active bridge parent journal is missing")
         if parent.get("active_operation_id") is not None:
-            raise JournalUnavailableError("parent already has an active or unresolved operation")
-        records = _decode(journal, owner_id) if journal.exists() else []
-        if any(event != "consumed" for event in _latest_attempt_events(records).values()):
-            raise JournalUnavailableError("parent has unresolved attempts")
-    return _ACTIVE_PARENT.set((Path(state_root), owner_id))
+            raise JournalUnavailableError("bridge parent has unresolved active operation")
+        records = _decode(journal, owner_id)
+        if records:
+            raise JournalUnavailableError("bridge parent has prior attempts without parent consumption")
+        parent["parent_started"] = True
+        parent_path = journal.with_suffix(".parent.json")
+        _write_parent(parent_path, parent)
+        if _read_parent(parent_path, owner_id) != parent:
+            raise JournalUnavailableError("parent-start transition read-back mismatch")
+    token = _ACTIVE_PARENT.set((Path(state_root), _uuid(owner_id, "owner_id")))
+    try:
+        yield
+    finally:
+        _ACTIVE_PARENT.reset(token)
+
+
+def set_parent_context(state_root: Path, owner_id: str) -> Token:
+    """Set context for focused journal logic tests without bridge routing."""
+    return _ACTIVE_PARENT.set((Path(state_root), _uuid(owner_id, "owner_id")))
 
 
 def reset_parent_context(token: Token) -> None:
@@ -291,7 +540,9 @@ def _begin_operation(operation: IntentOperation) -> None:
         parent = _read_parent(parent_path, operation.owner_id)
         if parent["status"] != "active" or parent.get("active_operation_id") is not None:
             raise JournalUnavailableError("parent already has an active or unresolved operation")
-        records = _decode(journal, operation.owner_id) if journal.exists() else []
+        if not journal.exists():
+            raise JournalUnavailableError("active parent journal is missing")
+        records = _decode(journal, operation.owner_id)
         if any(event != "consumed" for event in _latest_attempt_events(records).values()):
             raise JournalUnavailableError("parent has unresolved attempts")
         parent["active_operation_id"] = operation.operation_id
@@ -303,7 +554,9 @@ def _begin_operation(operation: IntentOperation) -> None:
 def _close_operation(operation: IntentOperation) -> None:
     journal, lock = _owner_paths(operation.state_root, operation.owner_id)
     with _owner_lock(lock):
-        records = _decode(journal, operation.owner_id) if journal.exists() else []
+        if not journal.exists():
+            raise JournalUnavailableError("active operation journal is missing")
+        records = _decode(journal, operation.owner_id)
         selected = [row for row in records if row["operation_id"] == operation.operation_id]
         if any(row["component"] != operation.component or row["target"] != operation.target for row in selected):
             raise JournalUnavailableError("operation identity mismatch")
@@ -585,6 +838,8 @@ def admit_attempt(state_root: Path, *, owner_id: str, operation_id: str,
         )):
             raise JournalUnavailableError("attempt lacks matching active parent operation")
         if not _test_only:
+            if not journal.exists():
+                raise JournalUnavailableError("active parent journal is missing")
             parent_state = _read_parent(journal.with_suffix(".parent.json"), row["owner_id"])
             if (parent_state["status"] != "active"
                     or parent_state.get("active_operation_id") != row["operation_id"]):
