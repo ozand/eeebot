@@ -100,22 +100,23 @@ def test_route_lifecycle_snapshot_recovers_only_verified_completed_checkpoint(tm
     assert still_active.parent_started and not still_active.phase_receipts
     assert intent_journal.provision_route_parent(state_dir, "bridge.cycle") == owner
 
-    # Only after the existing producer proves a committed clean tip and phase
-    # completion is read back may recovery consume the exact head, close the
-    # same owner, then provision a distinct owner for a subsequent invocation.
+    # A valid prefix is still not the complete-cycle terminal: preserve same
+    # owner and refuse any new caller dispatch while smoke/integration remain.
     completed = phase_checkpoint.complete_phase(
         state_dir, owner_id=owner, cycle_id="cycle-recovered", branch=_BRANCH,
         base_sha=base, head_sha=head, phase="post_execution", repo_root=repo,
     )
     assert completed.status == "complete"
-    next_owner = bridge._begin_bridge_cycle_parent(state_dir)
-    assert next_owner != owner
-    closed = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
-    assert closed is not None and closed.owner_id == next_owner and closed.route_status == "active"
-    receipts = intent_journal.read_owner_records(state_dir, owner)
-    assert [row["phase"] for row in receipts if row["event"] == "phase_consumed"] == ["post_execution"]
-    assert receipts[-1]["checkpoint_head_sha"] == head
-    assert phase_checkpoint.load_checkpoint(state_dir, owner_id=owner).status == "complete"
+    checkpoint_before_prefix_hold = checkpoint_path.read_bytes()
+    owner_rows_before_prefix_hold = intent_journal.read_owner_records(state_dir, owner)
+    with pytest.raises(intent_journal.JournalUnavailableError, match="selected bridge phase prefix is incomplete"):
+        bridge._begin_bridge_cycle_parent(state_dir)
+    same_owner = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+    assert same_owner is not None and same_owner.owner_id == owner and same_owner.route_status == "active"
+    assert same_owner.parent_started and same_owner.phase_receipts == ()
+    assert checkpoint_path.read_bytes() == checkpoint_before_prefix_hold
+    assert intent_journal.read_owner_records(state_dir, owner) == owner_rows_before_prefix_hold
+    assert intent_journal.provision_route_parent(state_dir, "bridge.cycle") == owner
 
 
 @pytest.mark.parametrize("checkpoint_state", ["missing", "corrupt"])
@@ -159,6 +160,77 @@ def test_started_owner_without_valid_checkpoint_holds_without_rotation(tmp_path,
     assert snapshot is not None and snapshot.owner_id == owner and snapshot.route_status == "active"
     assert snapshot.parent_started and not snapshot.phase_receipts
     assert intent_journal.provision_route_parent(state_dir, "bridge.cycle") == owner
+
+
+@pytest.mark.parametrize("terminal_phase", ["post_execution", "smoke_gate"])
+def test_verified_incomplete_bridge_phase_prefix_holds_same_owner_without_dispatch(
+    tmp_path, monkeypatch, terminal_phase,
+):
+    import os
+    import threading
+    from contextlib import contextmanager
+
+    from nanobot.runtime import bridge, intent_journal
+
+    if os.name == "nt":
+        locks = {}
+        guard = threading.Lock()
+
+        @contextmanager
+        def owner_lock(path):
+            key = str(path.resolve())
+            path.touch(exist_ok=True)
+            with guard:
+                lock = locks.setdefault(key, threading.Lock())
+            with lock:
+                yield
+
+        monkeypatch.setattr(intent_journal, "_owner_lock", owner_lock)
+        monkeypatch.setattr(intent_journal, "_fsync_directory", lambda _path: None)
+
+    repo, base, head = _cycle_repo(tmp_path, repo_name="eeebot-self-evolving")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    owner = intent_journal.provision_route_parent(state_dir, "bridge.cycle")
+    with intent_journal.bridge_parent_context(state_dir, owner, route="bridge.cycle"):
+        pass
+    phase_checkpoint.begin_phase(
+        state_dir, owner_id=owner, cycle_id="cycle-prefix-hold", branch=_BRANCH,
+        base_sha=base, head_sha=head, phase="post_execution", repo_root=repo,
+    )
+    phase_checkpoint.complete_phase(
+        state_dir, owner_id=owner, cycle_id="cycle-prefix-hold", branch=_BRANCH,
+        base_sha=base, head_sha=head, phase="post_execution", repo_root=repo,
+    )
+    if terminal_phase == "smoke_gate":
+        phase_checkpoint.begin_phase(
+            state_dir, owner_id=owner, cycle_id="cycle-prefix-hold", branch=_BRANCH,
+            base_sha=base, head_sha=head, phase="smoke_gate", repo_root=repo,
+        )
+        phase_checkpoint.complete_phase(
+            state_dir, owner_id=owner, cycle_id="cycle-prefix-hold", branch=_BRANCH,
+            base_sha=base, head_sha=head, phase="smoke_gate", repo_root=repo,
+            smoke_gate_result={"passed": True, "tested_head": head},
+        )
+    checkpoint_before = (state_dir / "subagent_bridge" / "phase_checkpoint.json").read_bytes()
+    owner_rows_before = intent_journal.read_owner_records(state_dir, owner)
+
+    proposer_calls = []
+    planner_calls = []
+    executor_spawns = []
+    monkeypatch.setattr(bridge.llm_proposer, "maybe_propose", lambda *_a, **_k: proposer_calls.append(1))
+    monkeypatch.setattr(bridge, "_run_planning_session", lambda **kwargs: planner_calls.append(kwargs))
+    monkeypatch.setattr(bridge, "SubagentManager", lambda **kwargs: executor_spawns.append(kwargs))
+
+    with pytest.raises(intent_journal.JournalUnavailableError, match="selected bridge phase prefix is incomplete"):
+        bridge._begin_bridge_cycle_parent(state_dir)
+    snapshot = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+    assert snapshot is not None and snapshot.owner_id == owner and snapshot.route_status == "active"
+    assert snapshot.parent_started and snapshot.phase_receipts == ()
+    assert intent_journal.provision_route_parent(state_dir, "bridge.cycle") == owner
+    assert intent_journal.read_owner_records(state_dir, owner) == owner_rows_before
+    assert (state_dir / "subagent_bridge" / "phase_checkpoint.json").read_bytes() == checkpoint_before
+    assert proposer_calls == [] and planner_calls == [] and executor_spawns == []
 
 
 def test_phase_checkpoint_and_memo_idempotency(tmp_path):

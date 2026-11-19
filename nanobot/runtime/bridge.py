@@ -3379,6 +3379,10 @@ def _recover_completed_bridge_phase_prefix(state_dir: 'Path', snapshot) -> None:
             repo_root=Path(state_dir).parent / 'eeebot-self-evolving',
         )
         phases = ("post_execution", "smoke_gate", "integration")
+        if checkpoint.phase != "integration":
+            raise intent_journal.JournalUnavailableError(
+                "selected bridge phase prefix is incomplete; hold same owner without new dispatch",
+            )
         if checkpoint.phase not in phases:
             raise intent_journal.JournalUnavailableError("reflection or unknown phase is not bridge-cycle recoverable")
         cycle_receipts = [item for item in snapshot.phase_receipts if item[0] == checkpoint.cycle_id]
