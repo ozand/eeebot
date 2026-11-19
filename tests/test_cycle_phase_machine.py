@@ -97,6 +97,8 @@ def test_route_lifecycle_snapshot_recovers_only_verified_completed_checkpoint(tm
     assert intent_journal.read_owner_records(state_dir, owner) == owner_rows_before
     still_active = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
     assert still_active is not None and still_active.owner_id == owner and still_active.route_status == "active"
+    assert still_active.parent_started and not still_active.phase_receipts
+    assert intent_journal.provision_route_parent(state_dir, "bridge.cycle") == owner
 
     # Only after the existing producer proves a committed clean tip and phase
     # completion is read back may recovery consume the exact head, close the
@@ -114,6 +116,49 @@ def test_route_lifecycle_snapshot_recovers_only_verified_completed_checkpoint(tm
     assert [row["phase"] for row in receipts if row["event"] == "phase_consumed"] == ["post_execution"]
     assert receipts[-1]["checkpoint_head_sha"] == head
     assert phase_checkpoint.load_checkpoint(state_dir, owner_id=owner).status == "complete"
+
+
+@pytest.mark.parametrize("checkpoint_state", ["missing", "corrupt"])
+def test_started_owner_without_valid_checkpoint_holds_without_rotation(tmp_path, monkeypatch, checkpoint_state):
+    import os
+    import threading
+    from contextlib import contextmanager
+
+    from nanobot.runtime import bridge, intent_journal
+
+    if os.name == "nt":
+        locks = {}
+        guard = threading.Lock()
+
+        @contextmanager
+        def owner_lock(path):
+            key = str(path.resolve())
+            path.touch(exist_ok=True)
+            with guard:
+                lock = locks.setdefault(key, threading.Lock())
+            with lock:
+                yield
+
+        monkeypatch.setattr(intent_journal, "_owner_lock", owner_lock)
+        monkeypatch.setattr(intent_journal, "_fsync_directory", lambda _path: None)
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    owner = intent_journal.provision_route_parent(state_dir, "bridge.cycle")
+    with intent_journal.bridge_parent_context(state_dir, owner, route="bridge.cycle"):
+        pass
+    checkpoint_path = state_dir / "subagent_bridge" / "phase_checkpoint.json"
+    if checkpoint_state == "corrupt":
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_path.write_text("{not-json", encoding="utf-8")
+    before = checkpoint_path.read_bytes() if checkpoint_path.exists() else None
+    with pytest.raises(intent_journal.JournalUnavailableError, match="checkpoint recovery remains held"):
+        bridge._begin_bridge_cycle_parent(state_dir)
+    assert (checkpoint_path.read_bytes() if checkpoint_path.exists() else None) == before
+    snapshot = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+    assert snapshot is not None and snapshot.owner_id == owner and snapshot.route_status == "active"
+    assert snapshot.parent_started and not snapshot.phase_receipts
+    assert intent_journal.provision_route_parent(state_dir, "bridge.cycle") == owner
 
 
 def test_phase_checkpoint_and_memo_idempotency(tmp_path):
