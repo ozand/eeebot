@@ -16,6 +16,7 @@ import re
 import stat
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Literal
@@ -597,6 +598,12 @@ def _verify_settled_route_parent(state_root: Path, route: str, owner_id: str) ->
         or not isinstance(value.get("closed_at"), str) or not value["closed_at"]
     ):
         raise JournalCorruptError("closed route settled marker is malformed")
+    try:
+        closed_at = datetime.fromisoformat(value["closed_at"].replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise JournalCorruptError("closed route settled marker timestamp is malformed") from exc
+    if closed_at.tzinfo is None:
+        raise JournalCorruptError("closed route settled marker timestamp lacks timezone")
 
 
 def _settled_route_owners(state_root: Path, route: str) -> set[str]:

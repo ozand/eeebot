@@ -892,6 +892,37 @@ def test_read_route_parent_state_requires_settled_marker_for_closed_route(tmp_pa
     assert journal.read_route_parent_state(state_root, "bridge.cycle").route_status == "closed"
 
 
+def test_read_route_parent_state_rejects_malformed_settled_marker_timestamp(tmp_path: Path) -> None:
+    import json
+
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    with journal.bridge_cycle_parent_context(state_root) as owner:
+        pass
+    cycle_id = "cycle-marker-timestamp"
+    journal.consume_bridge_cycle_no_execution(
+        state_root, owner, cycle_id=cycle_id, outcome="no_plan",
+    )
+    assert journal.close_route_parent(
+        state_root, "bridge.cycle", owner,
+        no_execution_cycle_id=cycle_id, no_execution_outcome="no_plan",
+    ) is True
+    marker_path = journal._settled_marker_path(state_root, "bridge.cycle", owner)
+    original = marker_path.read_bytes()
+    valid = json.loads(original)
+    assert journal.read_route_parent_state(state_root, "bridge.cycle").route_status == "closed"
+
+    for invalid_timestamp in ("not-a-timestamp", "2026-11-19T20:42:33"):
+        malformed = {**valid, "closed_at": invalid_timestamp}
+        marker_path.write_text(json.dumps(malformed, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        persisted = marker_path.read_bytes()
+        with pytest.raises(JournalCorruptError, match="timestamp"):
+            journal.read_route_parent_state(state_root, "bridge.cycle")
+        assert marker_path.read_bytes() == persisted
+    marker_path.write_bytes(original)
+    assert journal.read_route_parent_state(state_root, "bridge.cycle").route_status == "closed"
+
+
 def test_read_route_parent_state_rejects_settled_marker_without_route_pointer(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     state_root.mkdir()
