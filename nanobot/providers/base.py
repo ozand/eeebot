@@ -104,6 +104,10 @@ class LLMProvider(ABC):
     while maintaining a consistent interface.
     """
 
+    def journal_manages_physical_attempts(self) -> bool:
+        """Whether the provider journals each physical send via a transport hook."""
+        return False
+
     _CHAT_RETRY_DELAYS = (1, 2, 4)
     _TRANSIENT_ERROR_MARKERS = (
         "429",
@@ -253,6 +257,10 @@ class LLMProvider(ABC):
         except UnknownProviderSettlementError:
             raise
         except Exception as exc:
+            from nanobot.runtime.intent_journal import JournalUnavailableError
+
+            if isinstance(exc, JournalUnavailableError):
+                raise
             return LLMResponse(content=f"Error calling LLM: {exc}", finish_reason="error")
 
     async def chat_with_retry(
@@ -387,7 +395,7 @@ class LLMProvider(ABC):
 
         async def _attempt(**attempt_kwargs: Any) -> tuple[LLMResponse, Any, Any]:
             operation = intent_journal.current_operation()
-            if operation is None:
+            if operation is None or self.journal_manages_physical_attempts():
                 return await self._safe_chat(**attempt_kwargs), None, None
             evidence = operation.admit()
             response = await self._safe_chat(**attempt_kwargs)

@@ -796,6 +796,11 @@ class IntentHttpHooks:
         self._operation.returned(pending[0])
         self._pending.set((pending[0], True))
 
+    @property
+    def has_unresolved_attempt(self) -> bool:
+        pending = self._pending.get()
+        return pending is not None and not pending[1]
+
     def consume_final(self) -> None:
         pending = self._pending.get()
         if pending is not None:
