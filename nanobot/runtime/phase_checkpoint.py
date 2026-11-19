@@ -228,13 +228,28 @@ def begin_phase(
     if current is not None and current.status == "running":
         raise CheckpointHeldError("previous phase has uncertain settlement")
     if current is not None and current.cycle_id != cycle_id:
-        if current.status != "complete" or current.phase != _PHASES[-1]:
+        # The route journal validates the exact selected receipt prefix before
+        # the caller can supply a distinct new owner. This phase-local store
+        # does not parse or duplicate that evidence; an unsettled checkpoint
+        # can never be rotated.
+        if current.status != "complete":
             raise CheckpointHeldError("previous cycle has unfinished phases")
+        if current.owner_id == owner_id:
+            raise CheckpointHeldError("new cycle requires a distinct durable owner")
     if current is not None and current.cycle_id == cycle_id:
-        if (current.owner_id, current.branch, current.base_sha, current.head_sha) != (
-            owner_id, branch, base_sha, head_sha,
+        if (current.owner_id, current.branch, current.base_sha) != (
+            owner_id, branch, base_sha,
         ):
-            raise CheckpointHeldError("cycle owner, branch identity, or revision changed")
+            raise CheckpointHeldError("cycle owner, branch identity, or base revision changed")
+        if current.head_sha != head_sha.lower():
+            import subprocess
+
+            advanced = subprocess.run(
+                ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", current.head_sha, head_sha.lower()],
+                capture_output=True, text=True, timeout=10,
+            )
+            if advanced.returncode != 0:
+                raise CheckpointHeldError("phase head is not a committed descendant of previous phase")
         if _PHASES.index(phase) != _PHASES.index(current.phase) + 1:
             raise CheckpointHeldError("phase transition is not the next bounded phase")
         memos = dict(current.memos)
@@ -315,14 +330,29 @@ def verify_local_branch_head(
         raise CheckpointHeldError("checkout branch identity changed")
 
 
-def _verify_clean_phase_tree(repo_root: Path) -> None:
+def _verify_clean_phase_tree(repo_root: Path, *, allow_untracked_pytest_cache: bool = False) -> None:
     import subprocess
 
     status = subprocess.run(
         ["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=all"],
         capture_output=True, text=True, timeout=10,
     )
-    if status.returncode != 0 or status.stdout:
+    if status.returncode != 0:
+        raise CheckpointHeldError("phase checkout status is unavailable")
+    entries = status.stdout.splitlines()
+    if allow_untracked_pytest_cache:
+        def _generated_test_artifact(entry: str) -> bool:
+            if not entry.startswith("?? "):
+                return False
+            path = entry[3:].replace(chr(92), "/")
+            parts = path.split("/")
+            return (
+                any(part == ".pytest_cache" for part in parts)
+                or "__pycache__" in parts
+            )
+
+        entries = [entry for entry in entries if not _generated_test_artifact(entry)]
+    if entries:
         raise CheckpointHeldError("phase checkout has uncommitted changes")
 
 
@@ -354,7 +384,7 @@ def _verify_committed_phase_tip(
     )
     if checkout.returncode != 0 or checkout.stdout.strip() != branch:
         raise CheckpointHeldError("checkout branch identity changed")
-    _verify_clean_phase_tree(repo)
+    _verify_clean_phase_tree(repo, allow_untracked_pytest_cache=True)
     return actual
 
 
@@ -386,7 +416,7 @@ def complete_phase(
         verify_local_branch_head(
             repo_root, branch=branch, expected_base=base_sha, expected_head=head_sha,
         )
-        _verify_clean_phase_tree(repo_root)
+        _verify_clean_phase_tree(repo_root, allow_untracked_pytest_cache=True)
         if "smoke_gate_receipt" in memos:
             raise CheckpointHeldError("smoke-gate receipt was already memoized")
         memos["smoke_gate_receipt"] = {"passed": True, "tested_head": head_sha.lower()}

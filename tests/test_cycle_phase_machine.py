@@ -201,23 +201,104 @@ def test_completed_phase_advances_once_and_does_not_reset_memos(tmp_path):
     assert completed.memos["smoke_gate_receipt"] == {"passed": True, "tested_head": head}
 
 
-@pytest.mark.parametrize("replacement_owner", [_OWNER, "replacement-owner"])
-def test_new_cycle_cannot_replace_checkpoint_before_all_phases_complete(tmp_path, replacement_owner):
+def test_new_cycle_cannot_replace_running_checkpoint(tmp_path):
     repo, base, head = _cycle_repo(tmp_path)
     state_dir = tmp_path / "state"
     _begin(state_dir, repo, base, head)
-    phase_checkpoint.memo(state_dir, owner_id=_OWNER, key="receipt", value="persisted")
+    checkpoint_path = state_dir / "subagent_bridge" / "phase_checkpoint.json"
+    before = checkpoint_path.read_bytes()
+    with pytest.raises(phase_checkpoint.CheckpointHeldError, match="uncertain settlement"):
+        _begin(state_dir, repo, base, head, owner="bridge-owner-next", cycle="next-cycle-opaque")
+    assert checkpoint_path.read_bytes() == before
+    preserved = phase_checkpoint.load_checkpoint(state_dir, owner_id=_OWNER)
+    assert preserved is not None and preserved.status == "running"
+
+
+def test_selected_integration_prefix_rotates_only_to_distinct_owner(tmp_path):
+    import subprocess
+
+    repo, base, head = _cycle_repo(tmp_path)
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], check=True,
+            capture_output=True, text=True,
+        )
+
+    state_dir = tmp_path / "state"
+    _begin(state_dir, repo, base, head)
     phase_checkpoint.complete_phase(
         state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
         base_sha=base, head_sha=head, phase="post_execution", repo_root=repo,
     )
-    checkpoint_path = state_dir / "subagent_bridge" / "phase_checkpoint.json"
-    before = checkpoint_path.read_bytes()
-    with pytest.raises(phase_checkpoint.CheckpointHeldError, match="previous cycle has unfinished phases"):
-        _begin(state_dir, repo, base, head, owner=replacement_owner, cycle="next-cycle-opaque")
-    assert checkpoint_path.read_bytes() == before
-    preserved = phase_checkpoint.load_checkpoint(state_dir, owner_id=_OWNER)
-    assert preserved is not None and preserved.memos == {"receipt": "persisted"}
+    _begin(state_dir, repo, base, head, phase="smoke_gate")
+    phase_checkpoint.complete_phase(
+        state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+        base_sha=base, head_sha=head, phase="smoke_gate", repo_root=repo,
+        smoke_gate_result={"passed": True, "tested_head": head},
+    )
+    _begin(state_dir, repo, base, head, phase="integration")
+    git("checkout", "main")
+    git(
+        "merge", "--no-ff", "-m", f"merge: integrate {_BRANCH}",
+        "-m", f"Selfevo-Cycle: {_CYCLE}", _BRANCH,
+    )
+    git("update-ref", "refs/remotes/origin/main", "main")
+    main_sha = git("rev-parse", "main").stdout.strip()
+    git("checkout", _BRANCH)
+    integration = phase_checkpoint.complete_phase(
+        state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+        base_sha=base, head_sha=head, phase="integration", repo_root=repo,
+        integration_receipt={"ok": True, "push_confirmed": True, "main_sha_after": main_sha},
+    )
+    assert integration.status == "complete" and integration.phase == "integration"
+
+    next_cycle = "cycle-next"
+    next_branch = f"selfevo/cycle-{next_cycle}"
+    git("checkout", "-b", next_branch, "main")
+    next_base = git("rev-parse", "main").stdout.strip()
+    next_head = git("rev-parse", "HEAD").stdout.strip()
+    next_checkpoint = phase_checkpoint.begin_phase(
+        state_dir, owner_id="bridge-owner-next", cycle_id=next_cycle,
+        branch=next_branch, base_sha=next_base, head_sha=next_head,
+        phase="post_execution", repo_root=repo,
+    )
+    assert next_checkpoint.cycle_id == next_cycle
+    assert next_checkpoint.owner_id == "bridge-owner-next"
+    assert next_checkpoint.memos == {}
+
+
+def test_checkpoint_requires_a_distinct_owner_for_a_new_cycle(tmp_path):
+    import subprocess
+
+    repo, base, head = _cycle_repo(tmp_path)
+    state_dir = tmp_path / "state"
+    _begin(state_dir, repo, base, head)
+    phase_checkpoint.complete_phase(
+        state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+        base_sha=base, head_sha=head, phase="post_execution", repo_root=repo,
+    )
+    next_cycle = "cycle-next"
+    next_branch = f"selfevo/cycle-{next_cycle}"
+    git = subprocess.run
+    git(
+        ["git", "-C", str(repo), "checkout", "-b", next_branch, "main"],
+        check=True, capture_output=True, text=True,
+    )
+    next_base = git(
+        ["git", "-C", str(repo), "rev-parse", "main"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    next_head = git(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    rotated = phase_checkpoint.begin_phase(
+        state_dir, owner_id="bridge-owner-next", cycle_id=next_cycle,
+        branch=next_branch, base_sha=next_base, head_sha=next_head,
+        phase="post_execution", repo_root=repo,
+    )
+    assert rotated.cycle_id == next_cycle
 
 
 def test_post_execution_completion_records_clean_committed_descendant(tmp_path):

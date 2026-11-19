@@ -1405,8 +1405,7 @@ class TestIntegrationPhaseCheckpoint:
         )
         return origin, work, state_dir, setup["main_sha"], branch, cycle_id, cycle_head, owner_id
 
-    @pytest.mark.parametrize("next_owner", ["owner-checkpoint-1", "owner-checkpoint-2"])
-    def test_existing_helper_success_completes_integration_and_allows_next_cycle(self, tmp_path, next_owner):
+    def test_existing_helper_success_completes_integration_and_allows_next_cycle(self, tmp_path):
         origin, work, state, base, branch, cycle_id, cycle_head, owner = self._prepared_cycle(tmp_path)
         result = bridge._integrate_cycle_to_main(work, branch, base, cycle_id=cycle_id)
         assert result["ok"] is True and result["push_confirmed"] is True
@@ -1419,24 +1418,16 @@ class TestIntegrationPhaseCheckpoint:
         )
         assert completed.status == "complete"
         assert _origin_main_sha(origin) == result["main_sha_after"]
-        phase_checkpoint.begin_phase(
-            state, owner_id=owner, cycle_id=cycle_id, branch=branch, base_sha=base,
-            head_sha=cycle_head, phase="reflection", repo_root=work,
-        )
-        phase_checkpoint.complete_phase(
-            state, owner_id=owner, cycle_id=cycle_id, branch=branch, base_sha=base,
-            head_sha=cycle_head, phase="reflection", repo_root=work,
-        )
         next_cycle = "checkpoint-next-cycle"
         next_branch = f"selfevo/cycle-{next_cycle}"
         _run(work, "checkout", "-b", next_branch, "main")
         next_base = _origin_main_sha(origin)
         next_head = _run(work, "rev-parse", next_branch).stdout.strip()
         next_checkpoint = phase_checkpoint.begin_phase(
-            state, owner_id=next_owner, cycle_id=next_cycle, branch=next_branch,
+            state, owner_id="owner-checkpoint-2", cycle_id=next_cycle, branch=next_branch,
             base_sha=next_base, head_sha=next_head, phase="post_execution", repo_root=work,
         )
-        assert next_checkpoint.owner_id == next_owner
+        assert next_checkpoint.owner_id == "owner-checkpoint-2"
         assert next_checkpoint.cycle_id == next_cycle
         assert next_checkpoint.memos == {}
 

@@ -598,6 +598,7 @@ def test_real_shaped_no_final_is_not_malformed(tmp_path: Path, monkeypatch, resu
 
     assert outcome['ran'] is True
     assert outcome['iterations_planned'] is None
+    assert outcome['terminal_outcome'] == 'no_plan'
     assert not (repo / diary_relpath()).exists()
     [row] = _ledger_rows(state, 'planning_session')
     assert row['outcome'] == 'no_plan'
@@ -636,6 +637,8 @@ def test_planner_final_response_parse_modes(
     assert row["parse_mode"] == expected_mode
     assert row.get("format_violation") == expected_violation
     assert row.get("reason") == expected_reason
+    if expected_outcome == "malformed":
+        assert "terminal_outcome" not in outcome
     if expected_outcome == "integrated":
         assert row["iterations_planned"] is None
 
@@ -650,11 +653,48 @@ def test_malformed_final_response_degrades_without_touching_the_diary(tmp_path: 
 
     assert outcome["ran"] is True
     assert outcome["iterations_planned"] is None
+    assert "terminal_outcome" not in outcome
     assert (repo / diary_relpath()).exists() == before  # diary untouched
 
     rows = _ledger_rows(state, "planning_session")
     assert rows[0]["outcome"] == "malformed"
     assert rows[0]["iterations_planned"] is None
+
+
+def test_valid_rest_returns_explicit_no_execution_outcome(tmp_path: Path, monkeypatch):
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    monkeypatch.setattr(
+        bridge, "SubagentManager",
+        _make_fake_mgr_factory(state, {
+            "rest": {
+                "wake_condition": {"kind": "main_commit"},
+                "deadline": "2099-01-01T00:00:00Z",
+            },
+        }),
+    )
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["plan"] is None
+    assert outcome["terminal_outcome"] == "rest"
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["outcome"] == "rest"
+
+
+def test_unchanged_rest_returns_explicit_no_execution_outcome(tmp_path: Path, monkeypatch):
+    from nanobot.runtime import planner_rest
+
+    repo = _init_repo_with_origin(tmp_path)
+    state = tmp_path / "state"
+    monkeypatch.setattr(planner_rest, "precheck", lambda *_args: (False, "unchanged"))
+
+    outcome = asyncio.run(_run(state_dir=state, selfevo_repo=repo, denied_paths=set()))
+
+    assert outcome["plan"] is None
+    assert outcome["terminal_outcome"] == "rest_unchanged"
+    [row] = _ledger_rows(state, "planning_session")
+    assert row["outcome"] == "rest_unchanged"
 
 
 def test_spawn_failure_degrades_to_the_ranked_queue(tmp_path: Path, monkeypatch):
@@ -669,6 +709,7 @@ def test_spawn_failure_degrades_to_the_ranked_queue(tmp_path: Path, monkeypatch)
     assert outcome == {
         "ran": False, "iterations_used": None, "iterations_planned": None, "tampered_files": [], "plan": None,
     }
+    assert "terminal_outcome" not in outcome
     rows = _ledger_rows(state, "planning_session")
     assert rows[0]["outcome"] == "spawn_failed"
 
@@ -912,6 +953,7 @@ def test_refuses_without_spawning_when_charter_exceeds_role_prompt_limit(tmp_pat
     assert manager_factory.last_task is None
     [row] = _ledger_rows(state, "planning_session")
     assert row["outcome"] == "refused"
+    assert "terminal_outcome" not in outcome
     assert "maximum is 8000" in row["reason"]
 
 

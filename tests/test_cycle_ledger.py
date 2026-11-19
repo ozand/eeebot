@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from nanobot.runtime import bridge, cycle_ledger, state, state_access
+from nanobot.runtime import intent_journal
 from nanobot.runtime.service_paths import is_delivered
 
 
@@ -620,7 +621,9 @@ def _init_selfevo_repo(base: Path) -> tuple[Path, Path]:
     # pyproject.toml with coverage addopts) when this synthetic clone lives
     # under tmp_path. Keep the bridge's real smoke subprocess rooted in this
     # disposable repo without inheriting unrelated host/test-runner settings.
-    (work / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (work / "pytest.ini").write_text(
+        "[pytest]\naddopts = -p no:cacheprovider\n", encoding="utf-8",
+    )
     (work / "mod.py").write_text("def ok():\n    return True\n")
     _run(work, "add", ".")
     _run(work, "commit", "-m", "init")
@@ -759,10 +762,48 @@ def _stub_planning_session(monkeypatch, plan_text: str = "a novel bounded increm
 
 
 class TestBridgeIntegrationLedgerRows:
+    @staticmethod
+    def _run_under_test_lock(monkeypatch):
+        TestBridgeIntegrationLedgerRows._enable_test_lock(monkeypatch)
+        return asyncio.run(bridge.main())
+
+    @staticmethod
+    def _enable_test_lock(monkeypatch):
+        class _LockHandle:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(bridge, "_acquire_bridge_lock", lambda _state_dir: _LockHandle())
+
+    @staticmethod
+    def _enable_intent_journal_for_windows(monkeypatch):
+        """Supply only process-local lock/fsync primitives for logic tests on Windows."""
+        import os
+        import threading
+        from contextlib import contextmanager
+
+        if os.name != "nt":
+            return
+        locks = {}
+        guard = threading.Lock()
+
+        @contextmanager
+        def _lock(path):
+            key = str(path.resolve())
+            path.touch(exist_ok=True)
+            with guard:
+                lock = locks.setdefault(key, threading.Lock())
+            with lock:
+                yield
+
+        monkeypatch.setattr(intent_journal, "_owner_lock", _lock)
+        monkeypatch.setattr(intent_journal, "_fsync_directory", lambda _path: None)
+
     def test_skill_hygiene_violation_reaches_production_gate_journal(self, tmp_path, monkeypatch):
         base = tmp_path
         state_dir = base / "state"
         state_dir.mkdir()
+        self._enable_intent_journal_for_windows(monkeypatch)
         _init_selfevo_repo(base)
 
         monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
@@ -784,10 +825,103 @@ class TestBridgeIntegrationLedgerRows:
             for violation in gate_rows[-1]["violations"]
         )
 
+    def test_explicit_no_plan_receipt_closes_without_executor_or_phase(self, tmp_path, monkeypatch):
+        base = tmp_path
+        state_dir = base / "state"
+        state_dir.mkdir()
+        self._enable_intent_journal_for_windows(monkeypatch)
+        _init_selfevo_repo(base)
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+        monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        monkeypatch.setattr(bridge.llm_proposer, "maybe_propose", lambda *_a, **_k: None)
+        self._enable_test_lock(monkeypatch)
+        _seed_bridge_request(state_dir, "req-no-plan", "cycle-no-plan")
+        owners = []
+        original_begin = bridge._begin_bridge_cycle_parent
+
+        def _capture_owner(state_root):
+            owner_id = original_begin(state_root)
+            owners.append(owner_id)
+            return owner_id
+
+        planning_calls = []
+
+        async def _no_plan(**kwargs):
+            planning_calls.append(kwargs.get("cycle_id"))
+            return {
+                "ran": True, "iterations_used": 1, "iterations_planned": None,
+                "tampered_files": [], "plan": None, "terminal_outcome": "no_plan",
+            }
+
+        monkeypatch.setattr(bridge, "_begin_bridge_cycle_parent", _capture_owner)
+        monkeypatch.setattr(bridge, "_run_planning_session", _no_plan)
+        assert self._run_under_test_lock(monkeypatch) == 0
+        assert len(owners) == 1
+        rows = intent_journal.read_owner_records(state_dir, owners[0])
+        assert [row["event"] for row in rows] == ["no_execution_consumed"]
+        assert rows[0]["cycle_id"].startswith("cycle-")
+        assert rows[0]["outcome"] == "no_plan"
+        # The no-plan receipt is terminal and cannot be amended as execution.
+        with pytest.raises(intent_journal.JournalUnavailableError):
+            intent_journal.consume_bridge_cycle_phase(
+                state_dir, owners[0], cycle_id=rows[0]["cycle_id"],
+                phase="post_execution", checkpoint_head_sha="a" * 40,
+                checkpoint_status="complete",
+            )
+
+        assert self._run_under_test_lock(monkeypatch) == 0
+        assert len(planning_calls) == 2 and planning_calls[1] != planning_calls[0]
+        assert len(owners) == 2 and owners[1] != owners[0]
+        next_rows = intent_journal.read_owner_records(state_dir, owners[1])
+        assert len(next_rows) == 1 and next_rows[0]["event"] == "no_execution_consumed"
+
+    def test_planner_exception_is_not_no_execution_and_restart_holds_before_planner(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        self._enable_intent_journal_for_windows(monkeypatch)
+        _init_selfevo_repo(tmp_path)
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "target_workspace")
+        monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        monkeypatch.setattr(bridge.llm_proposer, "maybe_propose", lambda *_a, **_k: None)
+        _seed_bridge_request(state_dir, "req-planner-error", "cycle-planner-error")
+        owners = []
+        planning_calls = []
+        original_begin = bridge._begin_bridge_cycle_parent
+
+        def _capture_owner(state_root):
+            owner_id = original_begin(state_root)
+            owners.append(owner_id)
+            return owner_id
+
+        async def _planner_error(**kwargs):
+            planning_calls.append(kwargs.get("cycle_id"))
+            raise RuntimeError("planner failed before terminal result")
+
+        monkeypatch.setattr(bridge, "_begin_bridge_cycle_parent", _capture_owner)
+        monkeypatch.setattr(bridge, "_run_planning_session", _planner_error)
+        assert self._run_under_test_lock(monkeypatch) == 0
+        assert len(owners) == 1
+        assert intent_journal.read_owner_records(state_dir, owners[0]) == []
+
+        async def _planner_unexpected(**kwargs):
+            planning_calls.append(kwargs.get("cycle_id"))
+            raise AssertionError("started-empty owner must hold before planner")
+
+        monkeypatch.setattr(bridge, "_run_planning_session", _planner_unexpected)
+        assert self._run_under_test_lock(monkeypatch) == 0
+        assert len(planning_calls) == 1
+        assert owners == [owners[0]]
+        assert intent_journal.read_owner_records(state_dir, owners[0]) == []
+
     def test_full_green_cycle_writes_started_gate_success(self, tmp_path, monkeypatch):
         base = tmp_path
         state_dir = base / "state"
         state_dir.mkdir()
+        self._enable_intent_journal_for_windows(monkeypatch)
         _init_selfevo_repo(base)
 
         monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
@@ -800,8 +934,17 @@ class TestBridgeIntegrationLedgerRows:
         _stub_planning_session(monkeypatch)
 
         _seed_bridge_request(state_dir, "req-green", "cycle-green")
+        bridge_owners = []
+        original_begin = bridge._begin_bridge_cycle_parent
 
-        result = asyncio.run(bridge._main_impl())
+        def _capture_owner(state_root):
+            owner_id = original_begin(state_root)
+            bridge_owners.append(owner_id)
+            return owner_id
+
+        monkeypatch.setattr(bridge, "_begin_bridge_cycle_parent", _capture_owner)
+
+        result = self._run_under_test_lock(monkeypatch)
         assert result == 0
 
         rows = _read_ledger(state_dir)
@@ -809,7 +952,8 @@ class TestBridgeIntegrationLedgerRows:
         assert phases[0] == "started"
         assert "dedup" in phases
         assert "gate" in phases
-        assert phases[-1] == "outcome"
+        assert phases[-2] == "outcome"
+        assert phases[-1] == "cycle_cost"
 
         gate_rows = [r for r in rows if r["phase"] == "gate"]
         assert gate_rows[-1]["allowed"] is True
@@ -818,6 +962,19 @@ class TestBridgeIntegrationLedgerRows:
         assert outcome_rows[-1]["outcome"] == "success"
         assert outcome_rows[-1]["change_tier"] == "code-bearing"
         assert "scripts/feature.py" in outcome_rows[-1]["files_changed"]
+
+        phase_rows = intent_journal.read_owner_records(state_dir, bridge_owners[0])
+        assert [row["phase"] for row in phase_rows if row["event"] == "phase_consumed"] == [
+            "post_execution", "smoke_gate", "integration",
+        ]
+        from nanobot.runtime import phase_checkpoint
+
+        checkpoint = phase_checkpoint.load_checkpoint(
+            state_dir, owner_id=bridge_owners[0],
+        )
+        assert checkpoint is not None and checkpoint.phase == "integration"
+        assert checkpoint.status == "complete"
+        assert len(bridge_owners) == 1
 
     def test_exact_tag_skip_writes_started_then_skipped(self, tmp_path, monkeypatch):
         state_dir = tmp_path / "state"
@@ -830,13 +987,16 @@ class TestBridgeIntegrationLedgerRows:
         _stub_planning_session(monkeypatch)
 
         _seed_bridge_request(state_dir, "req-tagged", "cycle-tagged")
-        assert asyncio.run(bridge._main_impl()) == 0
+        self._enable_intent_journal_for_windows(monkeypatch)
+        assert self._run_under_test_lock(monkeypatch) == 0
 
         rows = _read_ledger(state_dir)
         # ADR-035 rest amendment (#1964): a dedup match now also feeds
         # planner_dedup_evidence.record_rejected_duplicate, so the next
         # planning session sees why -- an extra trailing ledger row.
-        assert [row["phase"] for row in rows] == ["started", "dedup", "outcome", "rejected_duplicate"]
+        assert [row["phase"] for row in rows] == [
+            "started", "dedup", "outcome", "rejected_duplicate", "cycle_cost",
+        ]
         assert rows[1]["decision"] == "skipped_duplicate"
         assert rows[2]["outcome"] == "skipped-duplicate"
         assert rows[2]["reason"] == "already_done_tag"
