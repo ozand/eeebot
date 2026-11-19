@@ -9,7 +9,12 @@ from typing import Any
 import json_repair
 from loguru import logger
 
-from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from nanobot.providers.base import (
+    LLMProvider,
+    LLMResponse,
+    ToolCallRequest,
+    UnknownProviderSettlementError,
+)
 from nanobot.providers.registry import find_by_model, find_gateway
 
 # `litellm` (and, transitively, `tiktoken`) is imported lazily on first use
@@ -320,6 +325,12 @@ class LiteLLMProvider(LLMProvider):
             response = await acompletion(**kwargs)
             return self._parse_response(response)
         except Exception as e:
+            from nanobot.runtime import intent_journal
+
+            if intent_journal.current_operation() is not None and getattr(e, "response", None) is None:
+                raise UnknownProviderSettlementError(
+                    "journalled provider attempt ended without a verifiable response"
+                ) from e
             # Preserve safe transport metadata for the shared failure writer;
             # never include response body or prompt in the failure stream.
             status = getattr(e, "status_code", None)

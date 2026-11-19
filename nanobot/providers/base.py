@@ -53,6 +53,10 @@ class ToolCallRequest:
         return tool_call
 
 
+class UnknownProviderSettlementError(RuntimeError):
+    """A journalled provider dispatch ended without a verifiable response."""
+
+
 @dataclass
 class LLMResponse:
     """Response from an LLM provider."""
@@ -245,6 +249,8 @@ class LLMProvider(ABC):
         try:
             return await self.chat(**kwargs)
         except asyncio.CancelledError:
+            raise
+        except UnknownProviderSettlementError:
             raise
         except Exception as exc:
             return LLMResponse(content=f"Error calling LLM: {exc}", finish_reason="error")
