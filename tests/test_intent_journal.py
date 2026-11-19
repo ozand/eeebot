@@ -55,6 +55,12 @@ def _test_backend(monkeypatch):
         monkeypatch.setattr(journal, "_fsync_directory", lambda path: None)
 
 
+def _sdk_httpx():
+    from openai import _base_client
+
+    return getattr(_base_client, "httpx2", None) or _base_client.httpx
+
+
 def _ids() -> tuple[str, str, str]:
     return str(uuid4()), str(uuid4()), str(uuid4())
 
@@ -192,16 +198,19 @@ def test_child_death_preserves_intent_and_terminal_without_replay(tmp_path: Path
     script = """
 import sys, time
 from pathlib import Path
-from nanobot.runtime.intent_journal import admit_attempt, record_returned, _owner_lock
-root = Path(sys.argv[1]); owner, operation, attempt = sys.argv[2:5]
+from nanobot.runtime.intent_journal import create_parent, operation_context, set_parent_context, _owner_lock
+root = Path(sys.argv[1]); owner, operation_id, attempt_id = sys.argv[2:5]
 ready = Path(sys.argv[6]); terminal = sys.argv[5] == "terminal"
-admit_attempt(root, owner_id=owner, operation_id=operation, attempt_id=attempt, component="agent", target="provider.chat")
-if terminal:
-    record_returned(root, owner_id=owner, operation_id=operation, attempt_id=attempt, component="agent", target="provider.chat")
-with _owner_lock(root / "intent-journal" / f"{owner}.lock"):
-    ready.write_text("ready")
-    while True:
-        time.sleep(1)
+create_parent(root, owner)
+set_parent_context(root, owner)
+with operation_context("agent", "provider.chat") as operation:
+    attempt = operation.admit()
+    if terminal:
+        operation.returned(attempt)
+    with _owner_lock(root / "intent-journal" / f"{owner}.lock"):
+        ready.write_text("ready")
+        while True:
+            time.sleep(1)
 """
     env = dict(os.environ)
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
@@ -227,8 +236,13 @@ with _owner_lock(root / "intent-journal" / f"{owner}.lock"):
         rows = read_owner_records(tmp_path, owner)
         expected = ["intent", "terminal"] if terminal == "terminal" else ["intent"]
         assert [row["event"] for row in rows] == expected
-        with pytest.raises(JournalUnavailableError, match="durable parent-resolution"):
-            _intent(tmp_path, owner, str(uuid4()), str(uuid4()))
+        token = set_parent_context(tmp_path, owner)
+        try:
+            with pytest.raises(JournalUnavailableError, match="active or unresolved"):
+                with operation_context("agent", "provider.chat"):
+                    pytest.fail("child-death owner must remain held")
+        finally:
+            reset_parent_context(token)
         # Isolate the second subprocess run under a distinct stable owner.
         owner, operation, attempt = _ids()
 
@@ -315,8 +329,8 @@ def test_append_fsync_failure_rolls_back_unverified_record(tmp_path: Path, monke
 def test_directory_fsync_failure_denies_admission_and_holds_visible_intent(tmp_path: Path, monkeypatch) -> None:
     if os.name == "nt":
         pytest.skip("Windows test backend replaces directory sync")
-    owner, operation, attempt = _ids()
-    _intent(tmp_path, owner, operation, attempt)
+    owner, _operation_id, _attempt_id = _ids()
+    create_parent(tmp_path, owner)
     real_sync = journal._fsync_directory
     injected = False
     journal_path = tmp_path / "intent-journal" / f"{owner}.jsonl"
@@ -331,36 +345,53 @@ def test_directory_fsync_failure_denies_admission_and_holds_visible_intent(tmp_p
         real_sync(path)
 
     monkeypatch.setattr(journal, "_fsync_directory", fail_after_replace)
-    with pytest.raises(JournalUnavailableError, match="not verified"):
-        record_returned(
-            tmp_path, owner_id=owner, operation_id=operation, attempt_id=attempt,
-            component="agent", target="provider.chat",
-        )
-    monkeypatch.setattr(journal, "_fsync_directory", real_sync)
+    token = set_parent_context(tmp_path, owner)
+    try:
+        with operation_context("agent", "provider.chat") as active_operation:
+            assert active_operation is not None
+            attempt = active_operation.admit()
+            with pytest.raises(JournalUnavailableError, match="not verified"):
+                active_operation.returned(attempt)
+    finally:
+        reset_parent_context(token)
+        monkeypatch.setattr(journal, "_fsync_directory", real_sync)
     assert injected
     # The atomic replace succeeded before directory sync failed. The API
     # denied result release, but the complete terminal is visible in-process.
     # A fresh process also reopens it and sees the same held owner; neither
     # assertion claims power-loss or crash-durability after the failed fsync.
     assert [row["event"] for row in read_owner_records(tmp_path, owner)] == ["intent", "terminal"]
-    fresh_operation, fresh_attempt = str(uuid4()), str(uuid4())
-    with pytest.raises(JournalUnavailableError, match="durable parent-resolution"):
-        admit_attempt(
-            tmp_path, owner_id=owner, operation_id=fresh_operation,
-            attempt_id=fresh_attempt, component="agent", target="provider.chat",
-        )
+    token = set_parent_context(tmp_path, owner)
+    try:
+        with pytest.raises(JournalUnavailableError, match="active or unresolved"):
+            with operation_context("agent", "provider.chat"):
+                pytest.fail("owner with unclosed operation must remain held")
+    finally:
+        reset_parent_context(token)
     script = """
-import sys
+import sys, threading
+from contextlib import contextmanager
 from pathlib import Path
-from nanobot.runtime.intent_journal import JournalUnavailableError, admit_attempt, read_owner_records
-root = Path(sys.argv[1]); owner, operation, attempt = sys.argv[2:5]
-assert [row["event"] for row in read_owner_records(root, owner)] == ["intent", "terminal"]
+import nanobot.runtime.intent_journal as journal
+root = Path(sys.argv[1]); owner = sys.argv[2]
+locks = {}; guard = threading.Lock()
+@contextmanager
+def fake_lock(path):
+    path.touch(exist_ok=True)
+    with guard: lock = locks.setdefault(str(path.resolve()), threading.Lock())
+    with lock: yield
+journal._owner_lock = fake_lock
+journal._fsync_directory = lambda _path: None
+assert [row["event"] for row in journal.read_owner_records(root, owner)] == ["intent", "terminal"]
+token = journal.set_parent_context(root, owner)
 try:
-    admit_attempt(root, owner_id=owner, operation_id=operation, attempt_id=attempt, component="agent", target="provider.chat")
-except JournalUnavailableError as exc:
-    assert "durable parent-resolution" in str(exc)
-else:
-    raise SystemExit("fresh process admitted an unresolved owner")
+    try:
+        with journal.operation_context("agent", "provider.chat"):
+            raise SystemExit("fresh process admitted an unresolved owner")
+    except journal.JournalUnavailableError as exc:
+        assert "active or unresolved operation" in str(exc)
+finally:
+    journal.reset_parent_context(token)
 """
     env = dict(os.environ)
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
@@ -732,11 +763,13 @@ def test_parent_operation_consumes_and_closes_before_next_provider_call(tmp_path
             attempt = operation.admit()
             operation.returned(attempt)
             operation.consume(attempt)
+            operation.close()
         with operation_context("subagent", "provider.chat") as second:
             assert second is not None
             attempt = second.admit()
             second.returned(attempt)
             second.consume(attempt)
+            second.close()
         rows = read_owner_records(tmp_path, owner)
         assert [row["event"] for row in rows] == [
             "intent", "terminal", "consumed", "intent", "terminal", "consumed",
@@ -775,6 +808,8 @@ def test_bridge_route_holds_existing_owner_and_rotates_only_after_consumption(tm
     route_path, _route_lock = journal._route_paths(state_root, "planner")
     assert journal.provision_route_parent(state_root, "planner") == owner
     assert journal._read_route(route_path, "planner")["owner_id"] == owner
+    with journal.bridge_parent_context(state_root, owner):
+        pass
 
     parent_path = state_root / "intent-journal" / f"{owner}.parent.json"
     parent_before = __import__("json").loads(parent_path.read_text(encoding="utf-8"))
@@ -791,6 +826,242 @@ def test_bridge_route_holds_existing_owner_and_rotates_only_after_consumption(tm
 
 
 # @lat: [[architecture#Intent-before-effect evidence]]
+def test_read_route_parent_state_distinguishes_fresh_started_and_terminal_owners(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    assert journal.read_route_parent_state(state_root, "bridge.cycle") is None
+    assert not (state_root / "intent-journal").exists()
+    owner = journal.provision_route_parent(state_root, "bridge.cycle")
+    fresh = journal.read_route_parent_state(state_root, "bridge.cycle")
+    assert fresh is not None
+    assert fresh.owner_id == owner
+    assert fresh.route_status == "active"
+    assert fresh.parent_status == "active"
+    assert fresh.parent_started is False
+    assert fresh.parent_consumed is False
+    assert fresh.active_operation_id is None
+    assert fresh.no_execution_receipt is None
+
+    with journal.bridge_parent_context(state_root, owner, route="bridge.cycle"):
+        pass
+    started_empty = journal.read_route_parent_state(state_root, "bridge.cycle")
+    assert started_empty is not None
+    assert started_empty.owner_id == owner
+    assert started_empty.parent_started is True
+    assert started_empty.has_attempt_evidence is False
+    assert started_empty.no_execution_receipt is None
+
+    journal.consume_bridge_cycle_no_execution(
+        state_root, owner, cycle_id="cycle-status-noexec", outcome="no_plan",
+    )
+    terminal = journal.read_route_parent_state(state_root, "bridge.cycle")
+    assert terminal is not None
+    assert terminal.no_execution_receipt == ("cycle-status-noexec", "no_plan")
+    assert terminal.has_attempt_evidence is False
+    assert terminal.has_unresolved_attempts is False
+
+
+def test_read_route_parent_state_requires_settled_marker_for_closed_route(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    with journal.bridge_cycle_parent_context(state_root) as owner:
+        pass
+    cycle_id = "cycle-closed-marker"
+    journal.consume_bridge_cycle_no_execution(
+        state_root, owner, cycle_id=cycle_id, outcome="no_plan",
+    )
+    assert journal.close_route_parent(
+        state_root, "bridge.cycle", owner,
+        no_execution_cycle_id=cycle_id, no_execution_outcome="no_plan",
+    ) is True
+    directory = state_root / "intent-journal"
+    route_path, _route_lock = journal._route_paths(state_root, "bridge.cycle")
+    parent_path = directory / f"{owner}.parent.json"
+    journal_path = directory / f"{owner}.jsonl"
+    marker_path = journal._settled_marker_path(state_root, "bridge.cycle", owner)
+    protected = {path: path.read_bytes() for path in (route_path, parent_path, journal_path)}
+    marker = marker_path.read_bytes()
+    assert journal.read_route_parent_state(state_root, "bridge.cycle").route_status == "closed"
+
+    marker_path.unlink()
+    with pytest.raises(JournalUnavailableError, match="settled marker is missing"):
+        journal.read_route_parent_state(state_root, "bridge.cycle")
+    assert not marker_path.exists()
+    assert {path: path.read_bytes() for path in protected} == protected
+    marker_path.write_bytes(marker)
+    assert journal.read_route_parent_state(state_root, "bridge.cycle").route_status == "closed"
+
+
+def test_read_route_parent_state_rejects_malformed_settled_marker_timestamp(tmp_path: Path) -> None:
+    import json
+
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    with journal.bridge_cycle_parent_context(state_root) as owner:
+        pass
+    cycle_id = "cycle-marker-timestamp"
+    journal.consume_bridge_cycle_no_execution(
+        state_root, owner, cycle_id=cycle_id, outcome="no_plan",
+    )
+    assert journal.close_route_parent(
+        state_root, "bridge.cycle", owner,
+        no_execution_cycle_id=cycle_id, no_execution_outcome="no_plan",
+    ) is True
+    marker_path = journal._settled_marker_path(state_root, "bridge.cycle", owner)
+    original = marker_path.read_bytes()
+    valid = json.loads(original)
+    assert journal.read_route_parent_state(state_root, "bridge.cycle").route_status == "closed"
+
+    for invalid_timestamp in ("not-a-timestamp", "2026-11-19T20:42:33"):
+        malformed = {**valid, "closed_at": invalid_timestamp}
+        marker_path.write_text(json.dumps(malformed, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        persisted = marker_path.read_bytes()
+        with pytest.raises(JournalCorruptError, match="timestamp"):
+            journal.read_route_parent_state(state_root, "bridge.cycle")
+        assert marker_path.read_bytes() == persisted
+    marker_path.write_bytes(original)
+    assert journal.read_route_parent_state(state_root, "bridge.cycle").route_status == "closed"
+
+
+def test_read_route_parent_state_rejects_settled_marker_without_route_pointer(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    with journal.bridge_cycle_parent_context(state_root) as owner:
+        pass
+    cycle_id = "cycle-orphan-marker"
+    journal.consume_bridge_cycle_no_execution(
+        state_root, owner, cycle_id=cycle_id, outcome="rest",
+    )
+    assert journal.close_route_parent(
+        state_root, "bridge.cycle", owner,
+        no_execution_cycle_id=cycle_id, no_execution_outcome="rest",
+    ) is True
+    directory = state_root / "intent-journal"
+    route_path, route_lock = journal._route_paths(state_root, "bridge.cycle")
+    marker_path = journal._settled_marker_path(state_root, "bridge.cycle", owner)
+    protected = {path: path.read_bytes() for path in (
+        marker_path, directory / f"{owner}.parent.json", directory / f"{owner}.jsonl",
+    )}
+    route_path.unlink()
+    route_lock.unlink()
+    with pytest.raises(JournalUnavailableError, match="settled route owner remains"):
+        journal.read_route_parent_state(state_root, "bridge.cycle")
+    assert not route_path.exists() and not route_lock.exists()
+    assert {path: path.read_bytes() for path in protected} == protected
+
+
+def test_read_route_parent_state_reports_attempt_and_phase_without_authorizing_resume(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    with journal.bridge_cycle_parent_context(state_root) as owner:
+        with operation_context("bridge", "provider.chat") as operation:
+            assert operation is not None
+            operation.admit()
+    attempted = journal.read_route_parent_state(state_root, "bridge.cycle")
+    assert attempted is not None
+    assert attempted.owner_id == owner
+    assert attempted.parent_started is True
+    assert attempted.active_operation_id is not None
+    assert attempted.has_attempt_evidence is True
+    assert attempted.has_unresolved_attempts is True
+    assert attempted.no_execution_receipt is None
+
+    phase_root = tmp_path / "phase-state"
+    phase_root.mkdir()
+    with journal.bridge_cycle_parent_context(phase_root) as phase_owner:
+        pass
+    journal.consume_bridge_cycle_phase(
+        phase_root, phase_owner, cycle_id="cycle-status-phase", phase="post_execution",
+        checkpoint_head_sha="e" * 40, checkpoint_status="complete",
+    )
+    phase = journal.read_route_parent_state(phase_root, "bridge.cycle")
+    assert phase is not None
+    assert phase.phase_receipts == (("cycle-status-phase", "post_execution", "e" * 40),)
+    assert phase.no_execution_receipt is None
+
+
+def test_read_route_parent_state_takes_route_then_owner_lock(tmp_path: Path, monkeypatch) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    with journal.bridge_cycle_parent_context(state_root) as owner:
+        pass
+    _route_path, route_lock = journal._route_paths(state_root, "bridge.cycle")
+    _journal, owner_lock = journal._owner_paths(state_root, owner)
+    real_lock = journal._owner_lock
+    acquired = []
+
+    @contextmanager
+    def tracked_lock(path: Path):
+        acquired.append(path)
+        with real_lock(path):
+            yield
+
+    monkeypatch.setattr(journal, "_owner_lock", tracked_lock)
+    snapshot = journal.read_route_parent_state(state_root, "bridge.cycle")
+    assert snapshot is not None and snapshot.owner_id == owner
+    assert acquired == [route_lock, owner_lock]
+
+
+def test_read_route_parent_state_fails_closed_on_missing_route_and_route_temp(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    assert journal.read_route_parent_state(state_root, "bridge.cycle") is None
+    directory = state_root / "intent-journal"
+    directory.mkdir()
+    route_path, route_lock = journal._route_paths(state_root, "bridge.cycle")
+    route_lock.touch()
+    with pytest.raises(JournalUnavailableError, match="initialized route record is missing"):
+        journal.read_route_parent_state(state_root, "bridge.cycle")
+    route_lock.unlink()
+    route_path.with_name(f".{route_path.name}.tmp").write_text("partial", encoding="utf-8")
+    with pytest.raises(JournalUnavailableError, match="temporary file"):
+        journal.read_route_parent_state(state_root, "bridge.cycle")
+    route_path.with_name(f".{route_path.name}.tmp").unlink()
+    (directory / "route-bridge.cycle.lock").touch()
+    with pytest.raises(JournalUnavailableError, match="initialized route record is missing"):
+        journal.read_route_parent_state(state_root, "bridge.cycle")
+
+
+def test_read_route_parent_state_fails_closed_on_missing_or_corrupt_owner_files(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    owner = journal.provision_route_parent(state_root, "bridge.cycle")
+    parent_path = state_root / "intent-journal" / f"{owner}.parent.json"
+    original = parent_path.read_bytes()
+    parent_path.unlink()
+    with pytest.raises(JournalUnavailableError, match="parent record missing"):
+        journal.read_route_parent_state(state_root, "bridge.cycle")
+    parent_path.with_name(f".{parent_path.name}.tmp").write_text("partial", encoding="utf-8")
+    with pytest.raises(JournalUnavailableError, match="temporary file"):
+        journal.read_route_parent_state(state_root, "bridge.cycle")
+    parent_path.with_name(f".{parent_path.name}.tmp").unlink()
+    parent_path.write_bytes(original)
+
+    journal_path = state_root / "intent-journal" / f"{owner}.jsonl"
+    original_journal = journal_path.read_bytes()
+    journal_path.unlink()
+    with pytest.raises(JournalUnavailableError, match="journal is missing"):
+        journal.read_route_parent_state(state_root, "bridge.cycle")
+    journal_path.write_bytes(original_journal)
+    original_journal = journal_path.read_bytes()
+    journal_path.write_bytes(b'{"partial":')
+    with pytest.raises(JournalCorruptError, match="truncated"):
+        journal.read_route_parent_state(state_root, "bridge.cycle")
+    assert journal_path.read_bytes() == b'{"partial":'
+    journal_path.write_bytes(original_journal)
+
+
+def test_read_route_parent_state_rejects_evidence_on_unstarted_parent(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    owner = journal.provision_route_parent(state_root, "bridge.cycle")
+    journal_path, _owner_lock = journal._owner_paths(state_root, owner)
+    _intent(state_root, owner, str(uuid4()), str(uuid4()), component="bridge", target="bridge.cycle")
+    with pytest.raises(JournalCorruptError, match="unstarted route parent contains lifecycle evidence"):
+        journal.read_route_parent_state(state_root, "bridge.cycle")
+    assert journal_path.exists()
+
+
 def test_bridge_cycle_parent_resumes_same_owner_and_reacknowledges_exact_phase(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     state_root.mkdir()
@@ -1110,10 +1381,10 @@ def test_route_capacity_refuses_new_parent_without_pruning_settled_records(
 
 
 def test_proposer_fallback_sdk_budget_is_journaled_per_dispatch(tmp_path: Path, monkeypatch) -> None:
-    import httpx
     import openai
     from nanobot.runtime import llm_proposer
 
+    sdk_httpx = _sdk_httpx()
     responses = [429, 200]
     sends = []
     def respond(request):
@@ -1123,11 +1394,11 @@ def test_proposer_fallback_sdk_budget_is_journaled_per_dispatch(tmp_path: Path, 
             "model": "an/backup", "choices": [{"finish_reason": "stop", "message": {"content": '{"task_title":"ok"}'}}],
         })
         headers = {"Retry-After": "60"} if status == 429 else {}
-        return httpx.Response(status, json=body, headers=headers, request=request)
+        return sdk_httpx.Response(status, json=body, headers=headers, request=request)
 
     class FakeHttpClient(openai.DefaultHttpxClient):
         def __init__(self, **kwargs):
-            super().__init__(transport=httpx.MockTransport(respond), **kwargs)
+            super().__init__(transport=sdk_httpx.MockTransport(respond), **kwargs)
 
     monkeypatch.setattr(openai, "DefaultHttpxClient", FakeHttpClient)
     monkeypatch.setattr(llm_proposer, "record_llm_call", lambda **kwargs: None)
@@ -1153,10 +1424,10 @@ def test_proposer_fallback_sdk_budget_is_journaled_per_dispatch(tmp_path: Path, 
 
 
 def test_proposer_primary_sdk_retry_is_journaled_without_changing_sdk_budget(tmp_path: Path, monkeypatch) -> None:
-    import httpx
     import openai
     from nanobot.runtime import llm_proposer
 
+    sdk_httpx = _sdk_httpx()
     statuses = [429, 200]
     sends = []
     def respond(request):
@@ -1165,11 +1436,11 @@ def test_proposer_primary_sdk_retry_is_journaled_without_changing_sdk_budget(tmp
         body = ({"error": {"message": "retry"}} if status == 429 else {
             "model": "cl/test", "choices": [{"finish_reason": "stop", "message": {"content": '{"task_title":"ok"}'}}],
         })
-        return httpx.Response(status, json=body, headers={"Retry-After": "0"}, request=request)
+        return sdk_httpx.Response(status, json=body, headers={"Retry-After": "0"}, request=request)
 
     class FakeHttpClient(openai.DefaultHttpxClient):
         def __init__(self, **kwargs):
-            super().__init__(transport=httpx.MockTransport(respond), **kwargs)
+            super().__init__(transport=sdk_httpx.MockTransport(respond), **kwargs)
 
     monkeypatch.setattr(openai, "DefaultHttpxClient", FakeHttpClient)
     monkeypatch.setattr(llm_proposer, "_build_proposer_role_prompt", lambda *args: "system")
@@ -1209,18 +1480,18 @@ def test_route_record_rejects_cross_route_label_corruption(tmp_path: Path) -> No
 
 
 def test_proposer_unknown_transport_settlement_holds_same_parent(tmp_path: Path, monkeypatch) -> None:
-    import httpx
     import openai
     from nanobot.runtime import llm_proposer
 
+    sdk_httpx = _sdk_httpx()
     sends = []
     def fail(request):
         sends.append(request)
-        raise httpx.ConnectError("ambiguous transport failure", request=request)
+        raise sdk_httpx.ConnectError("ambiguous transport failure", request=request)
 
     class FakeHttpClient(openai.DefaultHttpxClient):
         def __init__(self, **kwargs):
-            super().__init__(transport=httpx.MockTransport(fail), **kwargs)
+            super().__init__(transport=sdk_httpx.MockTransport(fail), **kwargs)
 
     monkeypatch.setattr(openai, "DefaultHttpxClient", FakeHttpClient)
     monkeypatch.setattr(openai._base_client.time, "sleep", lambda _delay: None)
@@ -1291,20 +1562,20 @@ def test_bridge_cycle_resume_holds_unsettled_attempt_and_preserves_evidence(tmp_
 
 
 def test_autonomous_goal_review_uses_planner_owner_and_sdk_journal(tmp_path: Path, monkeypatch) -> None:
-    import httpx
     import openai
     from nanobot.runtime import goal_review, llm_proposer
 
+    sdk_httpx = _sdk_httpx()
     sends = []
     def respond(request):
         sends.append(request)
-        return httpx.Response(200, json={"model": "cl/test", "choices": [{
+        return sdk_httpx.Response(200, json={"model": "cl/test", "choices": [{
             "finish_reason": "stop", "message": {"content": '{"no_change":true}'},
         }]}, request=request)
 
     class FakeHttpClient(openai.DefaultHttpxClient):
         def __init__(self, **kwargs):
-            super().__init__(transport=httpx.MockTransport(respond), **kwargs)
+            super().__init__(transport=sdk_httpx.MockTransport(respond), **kwargs)
 
     monkeypatch.setattr(openai, "DefaultHttpxClient", FakeHttpClient)
     monkeypatch.setattr(llm_proposer, "_build_proposer_role_prompt", lambda *args: "system")

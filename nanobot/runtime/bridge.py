@@ -3329,11 +3329,94 @@ def _parse_planner_final_response(raw_result: str) -> tuple[dict[str, Any] | Non
 
 
 def _begin_bridge_cycle_parent(state_dir: 'Path') -> str:
-    """Start a fresh bridge-cycle owner; started owners require reviewed recovery."""
+    """Close only a reader- and checkpoint-verified prior owner, then open fresh."""
     from nanobot.runtime import intent_journal
+
+    snapshot = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+    if snapshot is not None and snapshot.route_status == "active":
+        if snapshot.parent_status != "active" or snapshot.parent_consumed:
+            raise intent_journal.JournalCorruptError("active bridge-cycle route has inconsistent parent state")
+        if snapshot.active_operation_id is not None or snapshot.has_unresolved_attempts:
+            raise intent_journal.JournalUnavailableError(
+                "bridge-cycle owner has unresolved operation attempts; holding before dispatch",
+            )
+        if snapshot.has_attempt_evidence:
+            raise intent_journal.JournalUnavailableError(
+                "bridge-cycle operation history requires its owner-specific recovery contract",
+            )
+        if snapshot.no_execution_receipt is not None:
+            cycle_id, outcome = snapshot.no_execution_receipt
+            if not snapshot.parent_started:
+                raise intent_journal.JournalCorruptError("no-execution receipt belongs to an unstarted parent")
+            if not intent_journal.close_route_parent(
+                state_dir, "bridge.cycle", snapshot.owner_id,
+                no_execution_cycle_id=cycle_id, no_execution_outcome=outcome,
+            ):
+                raise intent_journal.JournalUnavailableError("no-execution parent close could not be verified")
+        elif snapshot.phase_receipts or snapshot.parent_started:
+            _recover_completed_bridge_phase_prefix(state_dir, snapshot)
+
+        closed = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+        if closed is None or closed.owner_id != snapshot.owner_id or closed.route_status != "closed":
+            raise intent_journal.JournalUnavailableError("prior bridge-cycle owner closure readback failed")
 
     with intent_journal.bridge_cycle_parent_context(state_dir) as owner_id:
         return owner_id
+
+
+def _recover_completed_bridge_phase_prefix(state_dir: 'Path', snapshot) -> None:
+    """Reconcile a completed checkpoint prefix; never infer task settlement or retry."""
+    from nanobot.runtime import intent_journal, phase_checkpoint
+
+    try:
+        if not snapshot.parent_started or snapshot.no_execution_receipt is not None:
+            raise intent_journal.JournalCorruptError("bridge-cycle phase recovery lifecycle is inconsistent")
+        if snapshot.active_operation_id is not None or snapshot.has_attempt_evidence or snapshot.has_unresolved_attempts:
+            raise intent_journal.JournalUnavailableError("bridge-cycle phase recovery has attempt evidence")
+        checkpoint = phase_checkpoint.verify_completed_phase(
+            state_dir, owner_id=snapshot.owner_id,
+            cycle_id=(snapshot.phase_receipts[-1][0] if snapshot.phase_receipts else _checkpoint_cycle_id(state_dir, snapshot.owner_id)),
+            repo_root=Path(state_dir).parent / 'eeebot-self-evolving',
+        )
+        phases = ("post_execution", "smoke_gate", "integration")
+        if checkpoint.phase not in phases:
+            raise intent_journal.JournalUnavailableError("reflection or unknown phase is not bridge-cycle recoverable")
+        cycle_receipts = [item for item in snapshot.phase_receipts if item[0] == checkpoint.cycle_id]
+        if len(cycle_receipts) != len(snapshot.phase_receipts):
+            raise intent_journal.JournalUnavailableError("bridge-cycle owner contains receipts for a different cycle")
+        observed_phases = [phase for _cycle, phase, _head in cycle_receipts]
+        expected_previous = list(phases[:phases.index(checkpoint.phase)])
+        if observed_phases not in (expected_previous, expected_previous + [checkpoint.phase]):
+            raise intent_journal.JournalUnavailableError("bridge-cycle receipts do not match a completed phase prefix")
+        phase_heads = {phase: head for _cycle, phase, head in cycle_receipts}
+        if checkpoint.phase in phase_heads:
+            if phase_heads[checkpoint.phase] != checkpoint.head_sha:
+                raise intent_journal.JournalUnavailableError("checkpoint head differs from its consumed phase receipt")
+        else:
+            intent_journal.consume_bridge_cycle_phase(
+                state_dir, snapshot.owner_id, cycle_id=checkpoint.cycle_id,
+                phase=checkpoint.phase, checkpoint_head_sha=checkpoint.head_sha,
+                checkpoint_status="complete",
+            )
+            phase_heads[checkpoint.phase] = checkpoint.head_sha
+        if not intent_journal.close_route_parent(
+            state_dir, "bridge.cycle", snapshot.owner_id, cycle_id=checkpoint.cycle_id,
+            required_phase_heads={phase: phase_heads[phase] for phase in phases if phase in phase_heads},
+        ):
+            raise intent_journal.JournalUnavailableError("verified bridge-cycle phase prefix close failed")
+    except phase_checkpoint.CheckpointError as exc:
+        raise intent_journal.JournalUnavailableError(
+            f"bridge-cycle checkpoint recovery remains held ({type(exc).__name__})",
+        ) from exc
+
+
+def _checkpoint_cycle_id(state_dir: 'Path', owner_id: str) -> str:
+    from nanobot.runtime import phase_checkpoint
+
+    checkpoint = phase_checkpoint.load_checkpoint(state_dir, owner_id=owner_id)
+    if checkpoint is None:
+        raise phase_checkpoint.CheckpointHeldError("bridge-cycle checkpoint is missing")
+    return checkpoint.cycle_id
 
 
 def _close_bridge_no_execution(

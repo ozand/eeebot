@@ -216,6 +216,49 @@ def load_checkpoint(state_dir: Path, *, owner_id: str) -> CycleCheckpoint | None
     return checkpoint
 
 
+def verify_completed_phase(
+    state_dir: Path, *, owner_id: str, cycle_id: str, repo_root: Path,
+) -> CycleCheckpoint:
+    """Revalidate one completed checkpoint before caller-owned receipt recovery.
+
+    This reads checkpoint state only. It never mints phase or journal receipts;
+    callers must separately reconcile the same owner through the intent journal.
+    """
+    checkpoint = load_checkpoint(state_dir, owner_id=owner_id)
+    if checkpoint is None or checkpoint.status != "complete":
+        raise CheckpointHeldError("completed checkpoint is unavailable")
+    if checkpoint.cycle_id != cycle_id:
+        raise CheckpointHeldError("completed checkpoint belongs to a different cycle")
+    branch_head = _git_sha(repo_root, f"refs/heads/{checkpoint.branch}")
+    if branch_head != checkpoint.head_sha.lower():
+        raise CheckpointHeldError("completed checkpoint branch head changed")
+    import subprocess
+
+    ancestry = subprocess.run(
+        ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", checkpoint.base_sha.lower(), branch_head],
+        capture_output=True, text=True, timeout=10,
+    )
+    if ancestry.returncode != 0:
+        raise CheckpointHeldError("completed checkpoint base ancestry changed")
+    _verify_clean_phase_tree(repo_root, allow_untracked_pytest_cache=True)
+    if checkpoint.phase == "post_execution":
+        pass
+    elif checkpoint.phase == "smoke_gate":
+        if checkpoint.memos.get("smoke_gate_receipt") != {
+            "passed": True, "tested_head": checkpoint.head_sha.lower(),
+        }:
+            raise CheckpointHeldError("completed smoke-gate receipt is missing or stale")
+    elif checkpoint.phase == "integration":
+        _verify_completed_integration(
+            repo_root, cycle_id=cycle_id, branch=checkpoint.branch,
+            base_sha=checkpoint.base_sha, cycle_head_sha=checkpoint.head_sha,
+            main_sha=checkpoint.memos.get("integration_main_sha"),
+        )
+    else:
+        raise CheckpointHeldError("reflection is owned by its separate timer")
+    return checkpoint
+
+
 def begin_phase(
     state_dir: Path, *, owner_id: str, cycle_id: str, branch: str,
     base_sha: str, head_sha: str, phase: str, repo_root: Path,

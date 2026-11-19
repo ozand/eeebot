@@ -825,6 +825,55 @@ class TestBridgeIntegrationLedgerRows:
             for violation in gate_rows[-1]["violations"]
         )
 
+    def test_started_bridge_owner_holds_before_proposer_and_keeps_same_owner(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        self._enable_intent_journal_for_windows(monkeypatch)
+        _init_selfevo_repo(tmp_path)
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "target_workspace")
+        monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        proposer_calls = []
+        planning_calls = []
+        executor_spawns = []
+        monkeypatch.setattr(
+            bridge.llm_proposer, "maybe_propose",
+            lambda *_a, **_k: proposer_calls.append("called"),
+        )
+        monkeypatch.setattr(bridge, "SubagentManager", lambda **_kwargs: executor_spawns.append("spawn"))
+        _seed_bridge_request(state_dir, "req-started-owner", "cycle-started-owner")
+        self._enable_test_lock(monkeypatch)
+
+        from nanobot.runtime import phase_checkpoint
+        from tests.test_cycle_phase_machine import _cycle_repo
+        repo, base, head = _cycle_repo(tmp_path)
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        owner = bridge._begin_bridge_cycle_parent(state_dir)
+        bridge._begin_bridge_checkpoint_phase(
+            state_dir, owner, cycle_id="cycle-started-owner", branch="selfevo/cycle-cycle-opaque-001",
+            base_sha=base, head_sha=head, phase="post_execution", repo_root=repo,
+        )
+        # The checkpoint is running, the journal lifecycle is started-empty,
+        # and the reader must hold before proposer/planner/executor dispatch.
+        owner_rows_before = intent_journal.read_owner_records(state_dir, owner)
+        route_before = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+        assert route_before is not None and route_before.owner_id == owner and route_before.parent_started
+
+        async def unexpected_planner(**kwargs):
+            planning_calls.append(kwargs.get("cycle_id"))
+            raise AssertionError("started owner must hold before planner dispatch")
+
+        monkeypatch.setattr(bridge, "_run_planning_session", unexpected_planner)
+        assert self._run_under_test_lock(monkeypatch) == 0
+        route_after = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+        assert route_after is not None and route_after.owner_id == owner and route_after.parent_started
+        assert intent_journal.provision_route_parent(state_dir, "bridge.cycle") == owner
+        assert intent_journal.read_owner_records(state_dir, owner) == owner_rows_before
+        assert proposer_calls == [] and planning_calls == [] and executor_spawns == []
+        checkpoint = phase_checkpoint.load_checkpoint(state_dir, owner_id=owner)
+        assert checkpoint is not None and checkpoint.status == "running"
+
     def test_explicit_no_plan_receipt_closes_without_executor_or_phase(self, tmp_path, monkeypatch):
         base = tmp_path
         state_dir = base / "state"

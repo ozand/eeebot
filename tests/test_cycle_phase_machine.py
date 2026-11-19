@@ -14,10 +14,10 @@ _BASE = "a" * 40
 _HEAD = "b" * 40
 
 
-def _cycle_repo(tmp_path, *, branch_content="candidate\\n"):
+def _cycle_repo(tmp_path, *, branch_content="candidate\\n", repo_name="repo"):
     import subprocess
 
-    repo = tmp_path / "repo"
+    repo = tmp_path / repo_name
     repo.mkdir()
     def git(*args):
         return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
@@ -40,6 +40,80 @@ def _begin(state_dir, repo, base, head, phase="post_execution", *, owner=_OWNER,
         state_dir, owner_id=owner, cycle_id=cycle, branch=_BRANCH,
         base_sha=base, head_sha=head, phase=phase, repo_root=repo,
     )
+
+
+def test_route_lifecycle_snapshot_recovers_only_verified_completed_checkpoint(tmp_path, monkeypatch):
+    import os
+    import threading
+    from contextlib import contextmanager
+
+    from nanobot.runtime import bridge, intent_journal
+
+    if os.name == "nt":
+        locks = {}
+        guard = threading.Lock()
+
+        @contextmanager
+        def owner_lock(path):
+            key = str(path.resolve())
+            path.touch(exist_ok=True)
+            with guard:
+                lock = locks.setdefault(key, threading.Lock())
+            with lock:
+                yield
+
+        monkeypatch.setattr(intent_journal, "_owner_lock", owner_lock)
+        monkeypatch.setattr(intent_journal, "_fsync_directory", lambda _path: None)
+
+    repo, base, head = _cycle_repo(tmp_path, repo_name="eeebot-self-evolving")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    # Fresh state has no lifecycle; provisioning is not the same as started.
+    assert intent_journal.read_route_parent_state(state_dir, "bridge.cycle") is None
+    owner = intent_journal.provision_route_parent(state_dir, "bridge.cycle")
+    fresh_snapshot = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+    assert fresh_snapshot is not None
+    assert fresh_snapshot.owner_id == owner
+    assert fresh_snapshot.route_status == "active" and not fresh_snapshot.parent_started
+
+    # A start transition without a matching completion receipt simulates the
+    # conservative crash window. The lifecycle reader can identify it but not
+    # make it retryable.
+    with intent_journal.bridge_parent_context(state_dir, owner, route="bridge.cycle"):
+        pass
+    _begin(state_dir, repo, base, head, owner=owner, cycle="cycle-recovered")
+    running_snapshot = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+    assert running_snapshot is not None and running_snapshot.parent_started
+    checkpoint_path = state_dir / "subagent_bridge" / "phase_checkpoint.json"
+    checkpoint_before = checkpoint_path.read_bytes()
+    owner_rows_before = intent_journal.read_owner_records(state_dir, owner)
+
+    # Running checkpoint means uncertain producer completion; lifecycle evidence
+    # may not be rotated, completed, or converted into phase receipts.
+    with pytest.raises(intent_journal.JournalUnavailableError, match="checkpoint recovery remains held"):
+        bridge._begin_bridge_cycle_parent(state_dir)
+    assert checkpoint_path.read_bytes() == checkpoint_before
+    assert intent_journal.read_owner_records(state_dir, owner) == owner_rows_before
+    still_active = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+    assert still_active is not None and still_active.owner_id == owner and still_active.route_status == "active"
+
+    # Only after the existing producer proves a committed clean tip and phase
+    # completion is read back may recovery consume the exact head, close the
+    # same owner, then provision a distinct owner for a subsequent invocation.
+    completed = phase_checkpoint.complete_phase(
+        state_dir, owner_id=owner, cycle_id="cycle-recovered", branch=_BRANCH,
+        base_sha=base, head_sha=head, phase="post_execution", repo_root=repo,
+    )
+    assert completed.status == "complete"
+    next_owner = bridge._begin_bridge_cycle_parent(state_dir)
+    assert next_owner != owner
+    closed = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+    assert closed is not None and closed.owner_id == next_owner and closed.route_status == "active"
+    receipts = intent_journal.read_owner_records(state_dir, owner)
+    assert [row["phase"] for row in receipts if row["event"] == "phase_consumed"] == ["post_execution"]
+    assert receipts[-1]["checkpoint_head_sha"] == head
+    assert phase_checkpoint.load_checkpoint(state_dir, owner_id=owner).status == "complete"
 
 
 def test_phase_checkpoint_and_memo_idempotency(tmp_path):

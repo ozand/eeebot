@@ -184,6 +184,6 @@ def test_planner_bridge_wiring_selects_explicit_profile():
 
     from nanobot.runtime import bridge
 
-    source = inspect.getsource(bridge._run_planning_session)
+    source = inspect.getsource(bridge._run_planning_session_inner)
     assert "tool_profile='planner'" in source
     assert "restrict_to_workspace=" not in source
