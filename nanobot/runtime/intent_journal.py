@@ -205,6 +205,8 @@ def read_route_parent_state(
             raise JournalUnavailableError("initialized route record is missing")
         if legacy_journal.with_suffix(".parent.json").exists():
             raise JournalUnavailableError("legacy route parent lacks durable closure evidence")
+        if any(directory.glob(f"route-{route}-*.closed.json")):
+            raise JournalUnavailableError("settled route owner remains without its route pointer")
         return None
     if not route_lock.exists():
         raise JournalUnavailableError("route lock is missing after initialization")
@@ -226,8 +228,10 @@ def read_route_parent_state(
             records = _decode(journal, owner_id)
             if any(path.name.startswith(f".{journal.name}.") for path in directory.iterdir()):
                 raise JournalUnavailableError("route owner has unresolved journal temp file")
-            if selected["status"] == "closed" and parent["status"] != "resolved":
-                raise JournalCorruptError("closed route has an active parent")
+            if selected["status"] == "closed":
+                if parent["status"] != "resolved":
+                    raise JournalCorruptError("closed route has an active parent")
+                _verify_settled_route_parent(root, route, owner_id)
             if selected["status"] == "active" and parent["status"] == "resolved":
                 raise JournalCorruptError("active route has a resolved parent")
             if not parent["parent_started"] and (
@@ -572,6 +576,27 @@ def _record_settled_route_parent(state_root: Path, route: str, owner_id: str) ->
         raise JournalUnavailableError("settled parent marker read-back failed") from exc
     if value != expected:
         raise JournalUnavailableError("settled parent marker read-back mismatch")
+
+
+def _verify_settled_route_parent(state_root: Path, route: str, owner_id: str) -> None:
+    """Require the exact read-only closure marker for a closed route owner."""
+    path = _settled_marker_path(state_root, route, owner_id)
+    if path.with_name(f".{path.name}.tmp").exists():
+        raise JournalUnavailableError("settled parent marker has an unresolved temporary file")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise JournalUnavailableError("closed route settled marker is missing") from exc
+    except Exception as exc:
+        raise JournalUnavailableError("closed route settled marker is unreadable") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"version", "route", "owner_id", "closed_at"}
+        or type(value.get("version")) is not int or value["version"] != 1
+        or value.get("route") != route or value.get("owner_id") != owner_id
+        or not isinstance(value.get("closed_at"), str) or not value["closed_at"]
+    ):
+        raise JournalCorruptError("closed route settled marker is malformed")
 
 
 def _settled_route_owners(state_root: Path, route: str) -> set[str]:

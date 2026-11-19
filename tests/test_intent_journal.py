@@ -861,6 +861,64 @@ def test_read_route_parent_state_distinguishes_fresh_started_and_terminal_owners
     assert terminal.has_unresolved_attempts is False
 
 
+def test_read_route_parent_state_requires_settled_marker_for_closed_route(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    with journal.bridge_cycle_parent_context(state_root) as owner:
+        pass
+    cycle_id = "cycle-closed-marker"
+    journal.consume_bridge_cycle_no_execution(
+        state_root, owner, cycle_id=cycle_id, outcome="no_plan",
+    )
+    assert journal.close_route_parent(
+        state_root, "bridge.cycle", owner,
+        no_execution_cycle_id=cycle_id, no_execution_outcome="no_plan",
+    ) is True
+    directory = state_root / "intent-journal"
+    route_path, _route_lock = journal._route_paths(state_root, "bridge.cycle")
+    parent_path = directory / f"{owner}.parent.json"
+    journal_path = directory / f"{owner}.jsonl"
+    marker_path = journal._settled_marker_path(state_root, "bridge.cycle", owner)
+    protected = {path: path.read_bytes() for path in (route_path, parent_path, journal_path)}
+    marker = marker_path.read_bytes()
+    assert journal.read_route_parent_state(state_root, "bridge.cycle").route_status == "closed"
+
+    marker_path.unlink()
+    with pytest.raises(JournalUnavailableError, match="settled marker is missing"):
+        journal.read_route_parent_state(state_root, "bridge.cycle")
+    assert not marker_path.exists()
+    assert {path: path.read_bytes() for path in protected} == protected
+    marker_path.write_bytes(marker)
+    assert journal.read_route_parent_state(state_root, "bridge.cycle").route_status == "closed"
+
+
+def test_read_route_parent_state_rejects_settled_marker_without_route_pointer(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    with journal.bridge_cycle_parent_context(state_root) as owner:
+        pass
+    cycle_id = "cycle-orphan-marker"
+    journal.consume_bridge_cycle_no_execution(
+        state_root, owner, cycle_id=cycle_id, outcome="rest",
+    )
+    assert journal.close_route_parent(
+        state_root, "bridge.cycle", owner,
+        no_execution_cycle_id=cycle_id, no_execution_outcome="rest",
+    ) is True
+    directory = state_root / "intent-journal"
+    route_path, route_lock = journal._route_paths(state_root, "bridge.cycle")
+    marker_path = journal._settled_marker_path(state_root, "bridge.cycle", owner)
+    protected = {path: path.read_bytes() for path in (
+        marker_path, directory / f"{owner}.parent.json", directory / f"{owner}.jsonl",
+    )}
+    route_path.unlink()
+    route_lock.unlink()
+    with pytest.raises(JournalUnavailableError, match="settled route owner remains"):
+        journal.read_route_parent_state(state_root, "bridge.cycle")
+    assert not route_path.exists() and not route_lock.exists()
+    assert {path: path.read_bytes() for path in protected} == protected
+
+
 def test_read_route_parent_state_reports_attempt_and_phase_without_authorizing_resume(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     state_root.mkdir()
