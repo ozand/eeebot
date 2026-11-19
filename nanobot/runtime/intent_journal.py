@@ -49,6 +49,24 @@ class JournalCorruptError(JournalUnavailableError):
     """The owner journal is malformed or inconsistent; preserve it unchanged."""
 
 
+@dataclass(frozen=True)
+class RouteParentSnapshot:
+    """Validated read-only lifecycle view for one selected autonomous parent."""
+
+    route: str
+    route_status: str
+    owner_id: str
+    parent_status: str
+    parent_started: bool
+    parent_consumed: bool
+    active_operation_id: str | None
+    last_operation_id: str | None
+    no_execution_receipt: tuple[str, str] | None
+    phase_receipts: tuple[tuple[str, str, str], ...]
+    has_attempt_evidence: bool
+    has_unresolved_attempts: bool
+
+
 def _uuid(value: str, field: str) -> str:
     try:
         parsed = UUID(value)
@@ -151,6 +169,95 @@ def _provision_route_owner(state_root: Path, owner_id: str) -> None:
         _write_parent(parent_path, record)
         if _read_parent(parent_path, owner_id) != record:
             raise JournalUnavailableError("new parent record read-back mismatch")
+
+
+def read_route_parent_state(
+    state_root: Path, route: str,
+) -> RouteParentSnapshot | None:
+    """Read validated lifecycle/evidence for the selected owner without writes.
+
+    ``None`` means the route has never been initialized. Once route metadata
+    or its lock exists, missing files are unavailable, never evidence of a
+    fresh owner. Lock ordering matches close/provision: route, then owner.
+    """
+    if route not in _ROUTES:
+        raise ValueError("autonomous parent route is not approved")
+    root = Path(state_root)
+    if not root.is_dir():
+        raise JournalUnavailableError("state root must already exist")
+    directory = root / "intent-journal"
+    if not directory.exists():
+        return None
+    try:
+        if not stat.S_ISDIR(directory.lstat().st_mode):
+            raise OSError("journal path is not a real directory")
+    except OSError as exc:
+        raise JournalUnavailableError("cannot inspect route journal directory") from exc
+
+    route_path = directory / f"route-{route}.json"
+    route_lock = directory / f"route-{route}.lock"
+    route_temp = route_path.with_name(f".{route_path.name}.tmp")
+    if route_temp.exists():
+        raise JournalUnavailableError("route record has an unresolved temporary file")
+    if not route_path.exists():
+        legacy_journal = directory / f"{_route_owner_id(route)}.jsonl"
+        if route_lock.exists():
+            raise JournalUnavailableError("initialized route record is missing")
+        if legacy_journal.with_suffix(".parent.json").exists():
+            raise JournalUnavailableError("legacy route parent lacks durable closure evidence")
+        return None
+    if not route_lock.exists():
+        raise JournalUnavailableError("route lock is missing after initialization")
+
+    with _owner_lock(route_lock):
+        selected = _read_route(route_path, route)
+        if selected["status"] == "provisioning":
+            raise JournalUnavailableError("route parent provisioning is incomplete")
+        owner_id = _uuid(selected["owner_id"], "owner_id")
+        journal = directory / f"{owner_id}.jsonl"
+        owner_lock = directory / f"{owner_id}.lock"
+        parent_path = journal.with_suffix(".parent.json")
+        if not owner_lock.exists():
+            raise JournalUnavailableError("active route owner lock is missing")
+        with _owner_lock(owner_lock):
+            if not journal.exists():
+                raise JournalUnavailableError("active route owner journal is missing")
+            parent = _read_parent(parent_path, owner_id)
+            records = _decode(journal, owner_id)
+            if any(path.name.startswith(f".{journal.name}.") for path in directory.iterdir()):
+                raise JournalUnavailableError("route owner has unresolved journal temp file")
+            if selected["status"] == "closed" and parent["status"] != "resolved":
+                raise JournalCorruptError("closed route has an active parent")
+            if selected["status"] == "active" and parent["status"] == "resolved":
+                raise JournalCorruptError("active route has a resolved parent")
+            if not parent["parent_started"] and (
+                parent.get("active_operation_id") is not None or records
+            ):
+                raise JournalCorruptError("unstarted route parent contains lifecycle evidence")
+            latest = _latest_attempt_events(records)
+            no_execution_rows = [row for row in records if row["event"] == "no_execution_consumed"]
+            no_execution_receipt = None
+            if len(no_execution_rows) == 1 and len(records) == 1:
+                row = no_execution_rows[0]
+                no_execution_receipt = (row["cycle_id"], row["outcome"])
+            phases = tuple(
+                (row["cycle_id"], row["phase"], row["checkpoint_head_sha"])
+                for row in records if row["event"] == "phase_consumed"
+            )
+            return RouteParentSnapshot(
+                route=route,
+                route_status=selected["status"],
+                owner_id=owner_id,
+                parent_status=parent["status"],
+                parent_started=parent["parent_started"],
+                parent_consumed=parent["parent_consumed"],
+                active_operation_id=parent["active_operation_id"],
+                last_operation_id=parent["last_operation_id"],
+                no_execution_receipt=no_execution_receipt,
+                phase_receipts=phases,
+                has_attempt_evidence=any(row["event"] == "intent" for row in records),
+                has_unresolved_attempts=any(event != "consumed" for event in latest.values()),
+            )
 
 
 def provision_route_parent(state_root: Path, route: str) -> str:
