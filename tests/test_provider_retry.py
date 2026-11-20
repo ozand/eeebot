@@ -60,11 +60,38 @@ async def test_litellm_per_send_guard_preserves_known_retry_and_holds_lost_respo
     _enable_journal_logic_backend(monkeypatch)
     sdk_httpx = getattr(_base_client, "httpx2", None) or _base_client.httpx
     default_client = openai.DefaultAsyncHttpxClient
+    from litellm.llms.custom_httpx.http_handler import get_ssl_configuration
 
-    async def run(name: str, outcomes: list[str], expected_sends: int, expected_events: list[str]):
+    original_get_ssl_configuration = get_ssl_configuration
+    def synthetic_ssl_configuration(ssl_verify=None):
+        if ssl_verify == "synthetic-call-ca":
+            return "synthetic-call-ca"
+        if ssl_verify is not None:
+            return original_get_ssl_configuration(ssl_verify)
+        return "synthetic-env-ca"
+
+    monkeypatch.setattr(
+        "litellm.llms.custom_httpx.http_handler.get_ssl_configuration", synthetic_ssl_configuration,
+    )
+    monkeypatch.setattr(litellm, "ssl_certificate", "synthetic-global-client.pem")
+    monkeypatch.setenv("SSL_CERTIFICATE", "synthetic-env-client.pem")
+    assert LiteLLMProvider._journal_tls_options(None) == (
+        "synthetic-env-ca", "synthetic-env-client.pem",
+    )
+    monkeypatch.delenv("SSL_CERTIFICATE")
+    assert LiteLLMProvider._journal_tls_options("synthetic-call-ca") == (
+        "synthetic-call-ca", "synthetic-global-client.pem",
+    )
+    monkeypatch.setenv("SSL_CERTIFICATE", "synthetic-env-client.pem")
+
+    async def run(
+        name: str, outcomes: list[str], expected_sends: int, expected_events: list[str],
+        *, model_override: str | None = None, expect_success: bool = False,
+    ):
         sent: list[bytes] = []
         request_routes: list[tuple[str, str | None]] = []
         scripted = list(outcomes)
+        tls_options: list[tuple[object, object]] = []
 
         def transport(request):
             sent.append(request.content)
@@ -88,6 +115,7 @@ async def test_litellm_per_send_guard_preserves_known_retry_and_holds_lost_respo
         class Client(default_client):
             def __init__(self, **kwargs):
                 kwargs.pop("transport", None)
+                tls_options.append((kwargs.get("verify"), kwargs.get("cert")))
                 super().__init__(transport=sdk_httpx.MockTransport(transport), **kwargs)
 
         monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", Client)
@@ -109,12 +137,16 @@ async def test_litellm_per_send_guard_preserves_known_retry_and_holds_lost_respo
                             messages=[{"role": "user", "content": "same exact body"}],
                         )
                 elif name == "http200":
-                    response = await provider.chat(messages=[{"role": "user", "content": "same exact body"}])
+                    response = await provider.chat(
+                        messages=[{"role": "user", "content": "same exact body"}], model=model_override,
+                    )
                     assert response.content == "ok"
                     assert response.finish_reason == "stop"
                 else:
-                    response = await provider.chat(messages=[{"role": "user", "content": "same exact body"}])
-                    assert response.finish_reason == "error"
+                    response = await provider.chat(
+                        messages=[{"role": "user", "content": "same exact body"}], model=model_override,
+                    )
+                    assert response.finish_reason == ("stop" if expect_success else "error")
         rows = intent_journal.read_owner_records(state_root, owner)
         if name == "lost":
             journal_path = state_root / "intent-journal" / f"{owner}.jsonl"
@@ -135,10 +167,15 @@ async def test_litellm_per_send_guard_preserves_known_retry_and_holds_lost_respo
         assert [row["event"] for row in rows] == expected_events
         assert all(url == "https://mock.invalid/v1/chat/completions" for url, _ in request_routes)
         assert all(header == "provider-header" for _, header in request_routes)
+        assert tls_options == [("synthetic-env-ca", "synthetic-env-client.pem")]
         return sent, rows
 
     successful, successful_rows = await run(
         "http200", ["200"], 1, ["intent", "terminal", "consumed"],
+    )
+    override_success, _override_rows = await run(
+        "supported-override", ["200"], 1, ["intent", "terminal", "consumed"],
+        model_override="gpt-4.1-mini", expect_success=True,
     )
     confirmed, confirmed_rows = await run(
         "http500", ["500", "500", "500"], 3,
@@ -146,6 +183,7 @@ async def test_litellm_per_send_guard_preserves_known_retry_and_holds_lost_respo
     )
     lost, lost_rows = await run("lost", ["lost"], 1, ["intent"])
     assert len(successful) == 1
+    assert len(override_success) == 1
     assert [row["event"] for row in successful_rows] == ["intent", "terminal", "consumed"]
     assert hashlib.sha256(confirmed[0]).hexdigest() == hashlib.sha256(lost[0]).hexdigest()
     assert all(body == confirmed[0] for body in confirmed)
@@ -186,6 +224,30 @@ async def test_litellm_per_send_guard_preserves_known_retry_and_holds_lost_respo
     assert baseline_routes == [
         ("https://mock.invalid/v1/chat/completions", "provider-header"),
     ] * 3
+
+    # A per-call unsupported model override is rejected before the OpenAI guard sends.
+    override_sent: list[bytes] = []
+
+    class OverrideClient(default_client):
+        def __init__(self, **kwargs):
+            kwargs.pop("transport", None)
+            super().__init__(transport=sdk_httpx.MockTransport(
+                lambda request: (override_sent.append(request.content), sdk_httpx.Response(200, json={}, request=request))[1],
+            ), **kwargs)
+
+    monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", OverrideClient)
+    override_root = tmp_path / "override" / "state"
+    override_root.mkdir(parents=True)
+    override_owner = provision_route_parent(override_root, "bridge.cycle")
+    with bridge_parent_context(override_root, override_owner, route="bridge.cycle"):
+        with intent_journal.operation_context("subagent", "provider.chat"):
+            with pytest.raises(JournalUnavailableError, match="no supported per-send client guard"):
+                await baseline_provider.chat(
+                    messages=[{"role": "user", "content": "must refuse override"}],
+                    model="anthropic/claude-3-5-haiku-latest",
+                )
+    assert override_sent == []
+    assert intent_journal.read_owner_records(override_root, override_owner) == []
 
     # Unsupported provider families hold before transport and admit no attempt.
     unsupported_sent: list[bytes] = []

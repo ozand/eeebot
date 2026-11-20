@@ -114,7 +114,7 @@ class LiteLLMProvider(LLMProvider):
         return intent_journal.current_operation() is not None
 
     def _supports_journal_route(self, model: str, kwargs: dict[str, Any] | None = None) -> bool:
-        """Use LiteLLM's own resolver and guard only its direct OpenAI SDK route."""
+        """Use LiteLLM's resolver for the effective call model and guard OpenAI SDK."""
         if self._gateway is not None and self._gateway.name != "aihubmix":
             return False
         kwargs = kwargs or {}
@@ -138,7 +138,7 @@ class LiteLLMProvider(LLMProvider):
         try:
             import litellm
             resolved_model, provider, _dynamic_key, _api_base = litellm.get_llm_provider(
-                model=self._resolve_model(model),
+                model=model,
                 api_base=kwargs.get("api_base") or self.api_base,
                 api_key=kwargs.get("api_key") or self.api_key,
                 custom_llm_provider=kwargs.get("custom_llm_provider"),
@@ -154,12 +154,23 @@ class LiteLLMProvider(LLMProvider):
             return False
         return provider == "openai" and response_info.get("mode") != "responses"
 
+    @staticmethod
+    def _journal_tls_options(ssl_verify: Any) -> tuple[Any, str | None]:
+        """Match LiteLLM 1.98 CA and client-certificate configuration precedence."""
+        import litellm
+        from litellm.llms.custom_httpx.http_handler import get_ssl_configuration
+
+        ssl_config = get_ssl_configuration(ssl_verify)
+        cert = os.getenv("SSL_CERTIFICATE", litellm.ssl_certificate)
+        return ssl_config, cert
+
     @asynccontextmanager
     async def _journaled_openai_client(self, kwargs: dict[str, Any]):
         operation = intent_journal.current_operation()
         if operation is None:
             raise JournalUnavailableError("journalled OpenAI client requires an active owner operation")
-        if not self._supports_journal_route(self.default_model, kwargs):
+        effective_model = kwargs.get("model")
+        if not isinstance(effective_model, str) or not self._supports_journal_route(effective_model, kwargs):
             raise JournalUnavailableError("journalled LiteLLM route has no supported per-send client guard")
         import litellm
         import openai
@@ -173,12 +184,9 @@ class LiteLLMProvider(LLMProvider):
         async def on_response(response: Any) -> None:
             hooks.on_response(response)
 
-        from litellm.llms.custom_httpx.http_handler import (
-            AsyncHTTPHandler,
-            get_ssl_configuration,
-        )
+        from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
         ssl_verify = kwargs.get("ssl_verify")
-        ssl_config = get_ssl_configuration(ssl_verify)
+        ssl_config, cert = self._journal_tls_options(ssl_verify)
         transport = None
         if litellm.aclient_session is None:
             transport = AsyncHTTPHandler._create_async_transport(
@@ -188,7 +196,7 @@ class LiteLLMProvider(LLMProvider):
         try:
             http_client = openai.DefaultAsyncHttpxClient(
                 event_hooks={"request": [on_request], "response": [on_response]},
-                verify=ssl_config, follow_redirects=True, transport=transport,
+                verify=ssl_config, cert=cert, follow_redirects=True, transport=transport,
                 trust_env=not litellm.disable_aiohttp_trust_env,
             )
         except BaseException:
@@ -476,10 +484,6 @@ class LiteLLMProvider(LLMProvider):
         hooks = None
         try:
             if intent_journal.current_operation() is not None:
-                if not self._supports_journal_route(original_model, kwargs):
-                    raise JournalUnavailableError(
-                        "journalled LiteLLM route has no supported per-send client guard"
-                    )
                 async with self._journaled_openai_client(kwargs) as (client, hooks):
                     try:
                         response = await acompletion(**kwargs, client=client)
