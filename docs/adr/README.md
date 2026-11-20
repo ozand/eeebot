@@ -83,6 +83,7 @@ that acceptance is already effective.
 | [ADR-057](ADR-057-assemble-named-prompt-sections-and-record-hash-deltas.md) | Assemble named prompt sections and record hash deltas | accepted |
 | [ADR-058](ADR-058-execute-cycles-as-checkpointed-phases-with-step-memos.md) | Execute checkpointed phases with step memos | accepted |
 | [ADR-059](ADR-059-consolidate-hot-operational-state-in-stdlib-sqlite-wal.md) | Evaluate transactional hot state before selecting SQLite WAL | proposed |
+| [ADR-060](ADR-060-render-one-dashboard-snapshot-for-both-destinations.md) | Render one selected dashboard snapshot for both destinations | proposed |
 
 ## Acceptance
 
