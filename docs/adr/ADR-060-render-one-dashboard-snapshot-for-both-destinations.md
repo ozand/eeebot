@@ -21,7 +21,7 @@ A local control on equivalent reviewed dashboard source `f0cad4372637f25f5dec1a1
 
 ## Decision
 
-Propose one selected dataset, one render, and one versioned artifact map for both destinations. Use the existing typed public projection as the ceiling, not the raw input dictionary or a union with the LAN overlay. Keep the LAN atomic swap and GitHub ref update independent; equal artifacts for a snapshot do not imply equal freshness at both locations.
+Propose one selected dataset, one render, and one versioned artifact map for both destinations. Use the existing typed public projection as the ceiling, not the raw input dictionary or a union with the LAN overlay. Keep the LAN atomic swap first and the GitHub ref update second, with independent sink outcomes; equal artifacts for a snapshot do not imply equal freshness at both locations.
 
 Remove duplicate checks of identical bytes, not the sole check covering them. Preserve effective validation of the exact bytes each destination receives, including retained GitHub blobs if still inherited. Validate the shared artifact map before using it for either destination. GitHub-only validation of inherited content must not hold up the LAN swap. If a path is absent from the shared manifest, it is not part of the snapshot: do not silently carry it forward. Blob reuse may change transfer cost, not the files or bytes served. A retained cycle archive must belong to that same manifest and be available to both sinks; otherwise mark that coverage unavailable rather than claim parity. Preserve version checks, regular-file-only writes and explicit relative output names. Do not rely on secrecy of a URL or on the scanner to enforce allowed paths.
 
@@ -34,7 +34,7 @@ Remove duplicate checks of identical bytes, not the sole check covering them. Pr
 | Configured instance repository | Selected own lesson fields, bounded `AGENTS.md`, skills and memory, and existing cycle title/file metadata; no repository walk as a source of arbitrary file bodies. |
 | Publisher configuration and CI | Validated display label, generator identity, snapshot metadata and typed CI freshness. The authenticated GitHub transport returns only projected observations to the generator; credentials are not data inputs. |
 
-Keep source roots separate and preserve descriptor-relative, regular-file, bounded reads and explicit provenance checks for admitted own text. Do not add a reader for credentials, environment/auth files, actual operator or third-party content, or raw call/session history. A named path alone does not prove containment; any selected reader that cannot enforce its root must be constrained before shared delivery or remain unavailable. An unsupported safe-open platform must not fall back to following links. Unknown values are not repaired by guessing. Keep these exclusions independent of content checks.
+Keep source roots separate and preserve descriptor-relative, regular-file, bounded reads and explicit provenance checks for admitted own text. Exclude credentials, environment/auth files, and unrelated private operator or third-party data. This increment neither adds a per-call history reader nor copies raw LAN history. These are limits on this increment, not a publication ban on bounded, authorized own sessions, requests, responses or tool history under ADR-036 §2. A named path alone does not prove containment; any selected reader that cannot enforce its root must be constrained before shared delivery or remain unavailable. An unsupported safe-open platform must not fall back to following links. Keep source exclusions independent of content checks.
 
 ### LAN-only displays
 
@@ -45,7 +45,9 @@ Keep source roots separate and preserve descriptor-relative, regular-file, bound
 | Per-cycle route and LAN detail unavailable page | Retire the routing override and standalone pages; both destinations use existing `cycle.html` with the same availability evidence. |
 | Cycle summary and reflection counts | Reuse already projected cycle and reflection fields; no private merge needed. Private-derived model-call totals and completeness are not carried over unless supported by selected authoritative data. |
 | Attempt classifications, outcomes, counts and completeness; attempt/session roles, token/duration totals and tool sequence; fallback session list | Preserve already supported public aggregates and selected subagent records. Retire the private reconstruction; any missing per-attempt or per-session value remains unavailable. Do not infer chronology, duration or causality; dashboard #443 remains separate. |
-| Per-model and per-tool steps, including requests, responses, reasoning, arguments and results | Retire this private transcript view. Existing bounded cycle prompts and selected subagent summaries still appear in the shared view; they do not reconstruct turns. No read of per-call prompt logs for this view. |
+| Per-model and per-tool steps, including requests, responses, reasoning, arguments and results | Retire the LAN-only transcript route in this increment without exporting its data. Keep already selected bounded cycle prompts and subagent summaries; they are not reconstructed turns. |
+
+Only the destination-specific display and routing are replaced by this proposal. ADR-036 §4's recorder and detail requirements remain applicable to separately authorized work: per-attempt rows, model/tool distinction, duration and completeness semantics, reconstruction attribution, and the tool-step recording and test obligations. A future authorized detail view uses the same shared dataset contract; this proposal neither adds it nor deletes its source records or collection requirements.
 
 ### When the last scan can go
 
@@ -68,7 +70,7 @@ One selected projection, one render, and no destination-specific content. Users 
 | Existing selection does not replace the content check | Compare two synthetic lessons through projection, render and scan, as described above | Executed on `f0cad437`; both render, only the marker is rejected |
 | Both destinations receive the same snapshot | With two recording sinks, assert one render and equal version, paths and bytes; simulate failure of each sink independently | Not implemented |
 | Containment survives consolidation | Exercise disallowed fields and sources, out-of-root and non-regular inputs, invalid paths, and extra/stale inherited blobs; assert no publication of rejected artifacts | Not implemented for the shared pipeline |
-| Shared cycle view does not imply private data retention | Assert the common route has no LAN redirect or per-call export; selected own detail is retained and missing attempt facts remain unavailable | Not implemented |
+| Shared cycle view does not copy the LAN overlay | Assert the common route has no LAN redirect or raw transcript export; currently selected own detail is retained and missing attempt facts remain unavailable. No change to recorder duties or future eligibility | Not implemented |
 
 ## References
 
