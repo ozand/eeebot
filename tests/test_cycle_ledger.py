@@ -876,6 +876,7 @@ class TestBridgeIntegrationLedgerRows:
 
     def test_persisted_rest_precheck_blocks_until_deadline_across_restart(self, tmp_path, monkeypatch):
         from datetime import datetime, timedelta, timezone
+        import sys
 
         from nanobot.runtime import planner_rest
 
@@ -910,10 +911,37 @@ class TestBridgeIntegrationLedgerRows:
         _seed_bridge_request(state_dir, "req-rest-deadline", "cycle-rest-deadline")
         # Persist the existing rest decision before bridge entry, exactly as a
         # prior normal planner cycle does.
-        wc = planner_rest.WakeCondition(kind="main_commit")
+        wake_file = tmp_path / "wake-input.txt"
+        wake_file.write_text("unchanged", encoding="utf-8")
         deadline = (clock["now"] + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
-        planner_rest.record_rest(state_dir, "cycle-prior-rest", wc, deadline, state_dir.parent / "eeebot-self-evolving")
-        assert planner_rest.precheck(state_dir, state_dir.parent / "eeebot-self-evolving") == (False, "unchanged")
+        writer = (
+            "import sys; from nanobot.runtime import planner_rest; "
+            "planner_rest.record_rest(sys.argv[1], 'cycle-prior-rest', "
+            "planner_rest.WakeCondition(kind='file', ref=sys.argv[3]), "
+            "sys.argv[4], sys.argv[2])"
+        )
+        subprocess.run(
+            [sys.executable, "-c", writer, str(state_dir), str(state_dir.parent / "eeebot-self-evolving"), str(wake_file), deadline],
+            cwd=Path(__file__).resolve().parents[1], check=True,
+        )
+
+        def _fresh_process_precheck(now):
+            script = (
+                "import json, sys; from datetime import datetime, timezone; "
+                "from nanobot.runtime import planner_rest; "
+                "now = datetime.fromisoformat(sys.argv[3]); "
+                "planner_rest.datetime = type('Clock', (), {"
+                "'now': staticmethod(lambda _tz=None: now), "
+                "'fromisoformat': datetime.fromisoformat}); "
+                "print(json.dumps(planner_rest.precheck(sys.argv[1], sys.argv[2])))"
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", script, str(state_dir), str(state_dir.parent / "eeebot-self-evolving"), now.isoformat()],
+                cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=True,
+            )
+            return tuple(json.loads(result.stdout.strip()))
+
+        assert _fresh_process_precheck(clock["now"] + timedelta(minutes=4)) == (False, "unchanged")
         # Existing bridge entry honors persisted state before proposer/planner.
         asyncio.run(bridge.main())
         assert calls == {"proposer": 0, "planner": 0, "executor": 0}
@@ -925,7 +953,7 @@ class TestBridgeIntegrationLedgerRows:
         # New process/tick sees the persisted deadline and remains held before
         # it, still with no owner/proposer/planner/executor dispatch.
         clock["now"] += timedelta(minutes=4)
-        assert planner_rest.precheck(state_dir, state_dir.parent / "eeebot-self-evolving") == (False, "unchanged")
+        assert _fresh_process_precheck(clock["now"]) == (False, "unchanged")
         asyncio.run(bridge.main())
         assert calls == {"proposer": 0, "planner": 0, "executor": 0}
         held_again = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
@@ -934,7 +962,7 @@ class TestBridgeIntegrationLedgerRows:
         # At the persisted deadline the same existing precheck permits normal
         # cycle flow through proposer/planner; no timer or new scheduler is introduced.
         clock["now"] += timedelta(minutes=1)
-        assert planner_rest.precheck(state_dir, state_dir.parent / "eeebot-self-evolving") == (True, "deadline_passed")
+        assert _fresh_process_precheck(clock["now"]) == (True, "deadline_passed")
         monkeypatch.setattr(bridge, "_prepare_repository_for_cycle", lambda *_args: {"restored": True})
         asyncio.run(bridge.main())
         assert calls == {"proposer": 1, "planner": 1, "executor": 0}
