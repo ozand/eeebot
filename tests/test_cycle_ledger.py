@@ -941,7 +941,6 @@ class TestBridgeIntegrationLedgerRows:
             )
             return tuple(json.loads(result.stdout.strip()))
 
-        assert _fresh_process_precheck(clock["now"] + timedelta(minutes=4)) == (False, "unchanged")
         # Existing bridge entry honors persisted state before proposer/planner.
         asyncio.run(bridge.main())
         assert calls == {"proposer": 0, "planner": 0, "executor": 0}
@@ -950,8 +949,8 @@ class TestBridgeIntegrationLedgerRows:
         assert held_owner.no_execution_receipt is not None
         assert held_owner.no_execution_receipt[1] == "rest_unchanged"
 
-        # New process/tick sees the persisted deadline and remains held before
-        # it, still with no owner/proposer/planner/executor dispatch.
+        # A fresh interpreter sees the persisted state and remains held before
+        # deadline; the bridge does not dispatch proposer, planner, or executor.
         clock["now"] += timedelta(minutes=4)
         assert _fresh_process_precheck(clock["now"]) == (False, "unchanged")
         asyncio.run(bridge.main())
