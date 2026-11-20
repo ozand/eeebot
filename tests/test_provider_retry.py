@@ -60,6 +60,7 @@ async def test_litellm_per_send_guard_preserves_known_retry_and_holds_lost_respo
     _enable_journal_logic_backend(monkeypatch)
     sdk_httpx = getattr(_base_client, "httpx2", None) or _base_client.httpx
     default_client = openai.DefaultAsyncHttpxClient
+    import inspect
     from litellm.llms.custom_httpx.http_handler import get_ssl_configuration
 
     original_get_ssl_configuration = get_ssl_configuration
@@ -78,6 +79,26 @@ async def test_litellm_per_send_guard_preserves_known_retry_and_holds_lost_respo
     assert LiteLLMProvider._journal_tls_options(None) == (
         "synthetic-env-ca", "synthetic-env-client.pem",
     )
+    assert LiteLLMProvider._journal_timeout({"stream": False}) == 600
+    import enum
+    from litellm.litellm_core_utils import completion_timeout as timeout_module
+
+    CompletionTimeout = timeout_module.CompletionTimeout
+    StreamKind = enum.Enum("StreamKind", {"NOT_STREAMED": "not_streamed"})
+    observed_stream_kind: list[object] = []
+
+    def newer_timeout_resolve(
+        _model_timeout, _kwargs, _provider, *, global_timeout, supports_httpx_timeout, stream_kind,
+    ):
+        observed_stream_kind.append(stream_kind)
+        return 123.0
+
+    with monkeypatch.context() as patch:
+        patch.setattr(timeout_module, "StreamKind", StreamKind, raising=False)
+        patch.setattr(CompletionTimeout, "resolve", staticmethod(newer_timeout_resolve))
+        assert LiteLLMProvider._journal_timeout({"stream": False}) == 123.0
+        assert "stream_kind" in inspect.signature(CompletionTimeout.resolve).parameters
+    assert observed_stream_kind == [StreamKind.NOT_STREAMED]
     monkeypatch.delenv("SSL_CERTIFICATE")
     assert LiteLLMProvider._journal_tls_options("synthetic-call-ca") == (
         "synthetic-call-ca", "synthetic-global-client.pem",

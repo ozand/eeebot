@@ -118,7 +118,7 @@ class LiteLLMProvider(LLMProvider):
         if self._gateway is not None and self._gateway.name != "aihubmix":
             return False
         kwargs = kwargs or {}
-        if kwargs.get("custom_llm_provider") not in (None, "openai"):
+        if kwargs.get("custom_llm_provider") not in (None, "openai") or kwargs.get("stream"):
             return False
         if any(kwargs.get(key) for key in ("model_list", "fallbacks", "router", "client", "shared_session")):
             return False
@@ -163,6 +163,27 @@ class LiteLLMProvider(LLMProvider):
         ssl_config = get_ssl_configuration(ssl_verify)
         cert = os.getenv("SSL_CERTIFICATE", litellm.ssl_certificate)
         return ssl_config, cert
+
+    @staticmethod
+    def _journal_timeout(kwargs: dict[str, Any]) -> Any:
+        from litellm.litellm_core_utils.completion_timeout import CompletionTimeout
+        from litellm.litellm_core_utils.request_timeout_resolver import get_configured_request_timeout
+        from litellm.utils import supports_httpx_timeout
+
+        timeout_options = {
+            "global_timeout": get_configured_request_timeout(),
+            "supports_httpx_timeout": supports_httpx_timeout,
+        }
+        import inspect
+        if "stream_kind" in inspect.signature(CompletionTimeout.resolve).parameters:
+            try:
+                from litellm.litellm_core_utils.completion_timeout import StreamKind
+            except ImportError:
+                from litellm.main import StreamKind
+            timeout_options["stream_kind"] = StreamKind.NOT_STREAMED
+        return CompletionTimeout.resolve(
+            kwargs.get("timeout"), kwargs, "openai", **timeout_options,
+        )
 
     @asynccontextmanager
     async def _journaled_openai_client(self, kwargs: dict[str, Any]):
@@ -217,15 +238,9 @@ class LiteLLMProvider(LLMProvider):
         if not api_key:
             await http_client.aclose()
             raise JournalUnavailableError("journalled OpenAI route has no resolved API key")
-        from litellm.litellm_core_utils.completion_timeout import CompletionTimeout
         from litellm.litellm_core_utils.request_timeout_resolver import get_configured_request_timeout
-        from litellm.utils import supports_httpx_timeout
         global_timeout = get_configured_request_timeout()
-        timeout = CompletionTimeout.resolve(
-            kwargs.get("timeout"), kwargs, "openai",
-            global_timeout=global_timeout,
-            supports_httpx_timeout=supports_httpx_timeout,
-        )
+        timeout = self._journal_timeout(kwargs)
         if (
             kwargs.get("timeout") is None
             and kwargs.get("request_timeout") is None
