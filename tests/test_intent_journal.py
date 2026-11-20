@@ -8,6 +8,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -1804,3 +1805,138 @@ def test_independent_owner_partitions_do_not_cross_block(tmp_path: Path) -> None
     other_owner, op2, attempt2 = _ids()
     _intent(tmp_path, other_owner, op2, attempt2)
     assert len(read_owner_records(tmp_path, other_owner)) == 1
+
+
+# @lat: [[architecture#Intent-before-effect evidence]]
+def test_late_duplicate_terminal_cannot_settle_next_attempt(tmp_path: Path) -> None:
+    owner, first_operation, first_attempt = str(uuid4()), str(uuid4()), str(uuid4())
+    second_operation, second_attempt = str(uuid4()), str(uuid4())
+    _intent(tmp_path, owner, first_operation, first_attempt)
+    record_returned(
+        tmp_path, owner_id=owner, operation_id=first_operation,
+        attempt_id=first_attempt, component="agent", target="provider.chat",
+    )
+    journal._record_consumed(
+        tmp_path, owner_id=owner, operation_id=first_operation,
+        attempt_id=first_attempt, component="agent", target="provider.chat",
+    )
+
+    # Construct the next operation after the prior result was consumed. The
+    # helper's test-only writer cannot model parent rollover, so append a
+    # synthetic intent record for the independent operation.
+    owner_path, owner_lock = journal._owner_paths(tmp_path, owner)
+    second_intent = journal._record(
+        owner, second_operation, second_attempt, "intent", "agent", "provider.chat", None,
+    )
+    with journal._owner_lock(owner_lock):
+        journal._append(owner_path, second_intent, journal._decode(owner_path, owner))
+    before = read_owner_records(tmp_path, owner)
+
+    with pytest.raises(JournalUnavailableError, match="terminal does not match"):
+        record_returned(
+            tmp_path, owner_id=owner, operation_id=first_operation,
+            attempt_id=first_attempt, component="agent", target="provider.chat",
+        )
+    assert read_owner_records(tmp_path, owner) == before
+    latest = journal._latest_attempt_events(before)
+    assert latest[(first_operation, first_attempt)] == "consumed"
+    assert latest[(second_operation, second_attempt)] == "intent"
+    with pytest.raises(JournalUnavailableError, match="parent-resolution evidence"):
+        _intent(tmp_path, owner, str(uuid4()), str(uuid4()))
+
+
+# @lat: [[architecture#Intent-before-effect evidence]]
+def test_concurrent_same_owner_recovery_reuses_owner_and_preserves_hold(
+    tmp_path: Path,
+) -> None:
+    owner = journal.provision_route_parent(tmp_path, "planner")
+    with journal.bridge_parent_context(tmp_path, owner):
+        with operation_context("subagent", "provider.chat") as operation:
+            assert operation is not None
+            operation.admit()
+    before = read_owner_records(tmp_path, owner)
+    barrier = threading.Barrier(8)
+    outcomes: list[tuple[str, str]] = []
+    outcomes_lock = threading.Lock()
+
+    def recover(index: int) -> None:
+        barrier.wait(timeout=5)
+        try:
+            selected = journal.provision_route_parent(tmp_path, "planner")
+            try:
+                with journal.bridge_parent_context(tmp_path, selected):
+                    result = "admitted"
+            except JournalUnavailableError:
+                result = "held"
+            outcome = (selected, result)
+        except BaseException as exc:
+            outcome = ("error", type(exc).__name__)
+        with outcomes_lock:
+            outcomes.append(outcome)
+
+    threads = [threading.Thread(target=recover, args=(index,)) for index in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(outcomes) == 8
+    assert all(outcome == (owner, "held") for outcome in outcomes)
+    assert read_owner_records(tmp_path, owner) == before
+
+
+# @lat: [[architecture#Intent-before-effect evidence]]
+def test_replay_policy_is_unsafe_by_default_and_inputs_are_not_retained(tmp_path: Path) -> None:
+    from nanobot.agent.tools.base import Tool
+    from nanobot.agent.tools.registry import ToolRegistry
+
+    class ReadOnlyFixture(Tool):
+        @property
+        def name(self) -> str:
+            return "read_fixture"
+
+        @property
+        def description(self) -> str:
+            return "return a fixture without mutating external state"
+
+        @property
+        def parameters(self) -> dict[str, Any]:
+            return {"type": "object", "properties": {"key": {"type": "string"}}}
+
+        async def execute(self, **kwargs: Any) -> str:
+            return str(kwargs["key"])
+
+    tool = ReadOnlyFixture()
+    assert tool.replay_policy == "unsafe"
+    assert "replay_policy" not in tool.to_schema()["function"]
+    registry = ToolRegistry()
+    registry.register(tool)
+
+    import asyncio
+
+    owner = str(uuid4())
+    root = tmp_path
+    create_parent(root, owner)
+    token = set_parent_context(root, owner)
+    secret_input = "synthetic-sensitive-tool-input-42"
+
+    async def execute_and_settle() -> None:
+        with operation_context("subagent", "tool.dispatch") as operation:
+            assert operation is not None
+            attempt = operation.admit()
+            assert await registry.execute(tool.name, {"key": secret_input}) == secret_input
+            operation.returned(attempt)
+            operation.consume(attempt)
+            operation.close()
+
+    try:
+        asyncio.run(execute_and_settle())
+    finally:
+        reset_parent_context(token)
+
+    rows = read_owner_records(root, owner)
+    encoded = (root / "intent-journal" / f"{owner}.jsonl").read_text(encoding="utf-8")
+    assert [row["event"] for row in rows] == ["intent", "terminal", "consumed"]
+    assert all("component" in row and "target" in row and "attempt_id" in row for row in rows)
+    for forbidden in (secret_input, "prompt", "arguments", "private payload", "fingerprint"):
+        assert forbidden not in encoded.lower()

@@ -9,7 +9,7 @@ tags: [runtime, durability, tools, recovery]
 
 # Status
 
-Accepted as a provisional candidate; not effective until independent PASS review and required checks on the exact candidate revision, followed by authorized merge of that unchanged revision. The #2178 delivery executor is delegated technical acceptance upon that merge; this does not imply personal operator acceptance. Acceptance is planned through the #2178 PR, with the exact candidate SHA and acceptance evidence retained there. Runtime behavior remains unimplemented pending effective acceptance and separately reviewed implementation. The bounded design review passed on proposal blob `3a6c6d9a7a9e928a7f72f59add2e4b6e2ccdc616`; that review does not cover this candidate.
+Accepted as a provisional candidate; not effective until independent PASS review and required checks on the exact candidate revision, followed by authorized merge of that unchanged revision. The #2178 delivery executor is delegated technical acceptance upon that merge; this does not imply personal operator acceptance. Acceptance is planned through the #2178 PR, with the exact candidate SHA and acceptance evidence retained there. Implementation is partial on the published #2178 candidate; runtime behavior and full contract acceptance are not complete until the remaining selected-path obligations are verified and the final candidate passes independent review/checks. The bounded design review passed on proposal blob `3a6c6d9a7a9e928a7f72f59add2e4b6e2ccdc616`; that review does not cover this candidate.
 
 # Context
 
