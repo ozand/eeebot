@@ -775,19 +775,28 @@ class IntentHttpHooks:
 
     def __init__(self, operation: "IntentOperation") -> None:
         self._operation = operation
+        self.failure: BaseException | None = None
         self._pending: ContextVar[tuple[IntentAttempt, bool] | None] = ContextVar(
             f"_intent_http_attempt_{id(self)}", default=None,
         )
+        self._seen: ContextVar[bool] = ContextVar(
+            f"_intent_http_seen_{id(self)}", default=False,
+        )
 
     def on_request(self, request: Any) -> None:
-        previous = self._pending.get()
-        if previous is not None:
-            attempt, returned = previous
-            if not returned:
-                raise JournalUnavailableError("previous HTTP attempt has unknown settlement")
-            self._operation.consume(attempt)
-        attempt = self._operation.admit()
-        self._pending.set((attempt, False))
+        try:
+            previous = self._pending.get()
+            if previous is not None:
+                attempt, returned = previous
+                if not returned:
+                    raise JournalUnavailableError("previous HTTP attempt has unknown settlement")
+                self._operation.consume(attempt)
+            attempt = self._operation.admit()
+            self._pending.set((attempt, False))
+            self._seen.set(True)
+        except BaseException as exc:
+            self.failure = exc
+            raise
 
     def on_response(self, response: Any) -> None:
         pending = self._pending.get()
@@ -795,6 +804,10 @@ class IntentHttpHooks:
             raise JournalUnavailableError("HTTP response has no unique admitted intent")
         self._operation.returned(pending[0])
         self._pending.set((pending[0], True))
+
+    @property
+    def has_seen_request(self) -> bool:
+        return self._seen.get()
 
     @property
     def has_unresolved_attempt(self) -> bool:

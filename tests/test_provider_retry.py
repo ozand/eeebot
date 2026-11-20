@@ -48,6 +48,177 @@ class ScriptedProvider(LLMProvider):
 
 
 @pytest.mark.asyncio
+async def test_litellm_per_send_guard_preserves_known_retry_and_holds_lost_response(tmp_path, monkeypatch) -> None:
+    import hashlib
+    import openai
+    import litellm
+    from openai import _base_client
+    from nanobot.runtime.intent_journal import JournalUnavailableError
+    from nanobot.providers.litellm_provider import LiteLLMProvider
+    from nanobot.runtime.intent_journal import bridge_parent_context, provision_route_parent
+
+    _enable_journal_logic_backend(monkeypatch)
+    sdk_httpx = getattr(_base_client, "httpx2", None) or _base_client.httpx
+    default_client = openai.DefaultAsyncHttpxClient
+
+    async def run(name: str, outcomes: list[str], expected_sends: int, expected_events: list[str]):
+        sent: list[bytes] = []
+        request_routes: list[tuple[str, str | None]] = []
+        scripted = list(outcomes)
+
+        def transport(request):
+            sent.append(request.content)
+            request_routes.append((str(request.url), request.headers.get("x-route-test")))
+            outcome = scripted.pop(0)
+            if outcome == "lost":
+                raise sdk_httpx.ConnectError("lost after transport receipt", request=request)
+            status = int(outcome)
+            if status == 200:
+                body = {
+                    "id": "chatcmpl-test", "object": "chat.completion", "created": 0,
+                    "model": "gpt-4o-mini",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                }
+            else:
+                body = {"error": {"message": f"confirmed HTTP {status}", "type": "server_error"}}
+            return sdk_httpx.Response(status, json=body, request=request)
+
+        class Client(default_client):
+            def __init__(self, **kwargs):
+                kwargs.pop("transport", None)
+                super().__init__(transport=sdk_httpx.MockTransport(transport), **kwargs)
+
+        monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", Client)
+        monkeypatch.setattr(litellm, "num_retries", None)
+        monkeypatch.setattr(litellm, "route_all_chat_openai_to_responses", False)
+        provider = LiteLLMProvider(
+            api_key="fake", api_base="https://mock.invalid/v1", default_model="gpt-4o-mini",
+            extra_headers={"X-Route-Test": "provider-header"},
+        )
+        state_root = tmp_path / name / "state"
+        state_root.mkdir(parents=True)
+        owner = provision_route_parent(state_root, "bridge.cycle")
+        with bridge_parent_context(state_root, owner, route="bridge.cycle"):
+            with intent_journal.operation_context("subagent", "provider.chat"):
+                assert provider.journal_manages_physical_attempts(provider.get_default_model()) is True
+                if name == "lost":
+                    with pytest.raises(JournalUnavailableError, match="unknown settlement"):
+                        await provider.chat_with_retry(
+                            messages=[{"role": "user", "content": "same exact body"}],
+                        )
+                elif name == "http200":
+                    response = await provider.chat(messages=[{"role": "user", "content": "same exact body"}])
+                    assert response.content == "ok"
+                    assert response.finish_reason == "stop"
+                else:
+                    response = await provider.chat(messages=[{"role": "user", "content": "same exact body"}])
+                    assert response.finish_reason == "error"
+        rows = intent_journal.read_owner_records(state_root, owner)
+        if name == "lost":
+            journal_path = state_root / "intent-journal" / f"{owner}.jsonl"
+            parent_path = journal_path.with_suffix(".parent.json")
+            preserved = (journal_path.read_bytes(), parent_path.read_bytes())
+            with pytest.raises(JournalUnavailableError, match="unresolved|active"):
+                with intent_journal.resume_bridge_cycle_parent_context(
+                    state_root, owner, cycle_id="resume-after-provider-loss",
+                    completed_phase="post_execution", checkpoint_head_sha="a" * 40,
+                    checkpoint_status="complete",
+                ):
+                    await provider.chat_with_retry(
+                        messages=[{"role": "user", "content": "same exact body"}],
+                    )
+            assert (journal_path.read_bytes(), parent_path.read_bytes()) == preserved
+            assert len(sent) == 1
+        assert len(sent) == expected_sends
+        assert [row["event"] for row in rows] == expected_events
+        assert all(url == "https://mock.invalid/v1/chat/completions" for url, _ in request_routes)
+        assert all(header == "provider-header" for _, header in request_routes)
+        return sent, rows
+
+    successful, successful_rows = await run(
+        "http200", ["200"], 1, ["intent", "terminal", "consumed"],
+    )
+    confirmed, confirmed_rows = await run(
+        "http500", ["500", "500", "500"], 3,
+        ["intent", "terminal", "consumed"] * 3,
+    )
+    lost, lost_rows = await run("lost", ["lost"], 1, ["intent"])
+    assert len(successful) == 1
+    assert [row["event"] for row in successful_rows] == ["intent", "terminal", "consumed"]
+    assert hashlib.sha256(confirmed[0]).hexdigest() == hashlib.sha256(lost[0]).hexdigest()
+    assert all(body == confirmed[0] for body in confirmed)
+    assert len({row["attempt_id"] for row in confirmed_rows if row["event"] == "intent"}) == 3
+    assert lost_rows[0]["event"] == "intent"
+
+    # Compare the actual outbound baseline route/options against the guarded path.
+    baseline_sent: list[bytes] = []
+    baseline_routes: list[tuple[str, str | None]] = []
+
+    def baseline_transport(request):
+        baseline_sent.append(request.content)
+        baseline_routes.append((str(request.url), request.headers.get("x-route-test")))
+        raise sdk_httpx.ConnectError("nonjournal baseline response loss", request=request)
+
+    class BaselineClient(default_client):
+        def __init__(self, **kwargs):
+            kwargs.pop("transport", None)
+            super().__init__(transport=sdk_httpx.MockTransport(baseline_transport), **kwargs)
+
+    monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", BaselineClient)
+    monkeypatch.setattr(litellm, "route_all_chat_openai_to_responses", False)
+    monkeypatch.setattr(litellm, "num_retries", None)
+    baseline_http = sdk_httpx.AsyncClient(transport=sdk_httpx.MockTransport(baseline_transport))
+    monkeypatch.setattr(litellm, "aclient_session", baseline_http)
+    baseline_provider = LiteLLMProvider(
+        api_key="fake", api_base="https://mock.invalid/v1", default_model="gpt-4o-mini",
+        extra_headers={"X-Route-Test": "provider-header"},
+    )
+    try:
+        baseline_result = await baseline_provider.chat(messages=[{"role": "user", "content": "same exact body"}])
+    finally:
+        await baseline_http.aclose()
+        monkeypatch.setattr(litellm, "aclient_session", None)
+    assert baseline_result.finish_reason == "error"
+    assert len(baseline_sent) == 3
+    assert all(body == successful[0] for body in baseline_sent)
+    assert baseline_routes == [
+        ("https://mock.invalid/v1/chat/completions", "provider-header"),
+    ] * 3
+
+    # Unsupported provider families hold before transport and admit no attempt.
+    unsupported_sent: list[bytes] = []
+
+    def unsupported_transport(request):
+        unsupported_sent.append(request.content)
+        return sdk_httpx.Response(200, json={}, request=request)
+
+    class UnsupportedClient(default_client):
+        def __init__(self, **kwargs):
+            kwargs.pop("transport", None)
+            super().__init__(transport=sdk_httpx.MockTransport(unsupported_transport), **kwargs)
+
+    monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", UnsupportedClient)
+    unsupported = LiteLLMProvider(
+        api_key="fake", default_model="anthropic/claude-3-5-haiku-latest",
+    )
+    unsupported_root = tmp_path / "unsupported" / "state"
+    unsupported_root.mkdir(parents=True)
+    unsupported_owner = provision_route_parent(unsupported_root, "bridge.cycle")
+    with bridge_parent_context(unsupported_root, unsupported_owner, route="bridge.cycle"):
+        with intent_journal.operation_context("subagent", "provider.chat"):
+            with pytest.raises(JournalUnavailableError, match="no supported per-send client guard"):
+                await unsupported.chat_with_retry(messages=[{"role": "user", "content": "must not dispatch"}])
+    assert unsupported_sent == []
+    assert intent_journal.read_owner_records(unsupported_root, unsupported_owner) == []
+
+    # Without an active journal operation, keep the regular LiteLLM route.
+    provider = LiteLLMProvider(api_key="fake", api_base="https://mock.invalid/v1", default_model="gpt-4o-mini")
+    assert provider.journal_manages_physical_attempts(provider.get_default_model()) is False
+
+
+@pytest.mark.asyncio
 async def test_real_chat_with_retry_journals_each_planner_attempt_and_closes(tmp_path, monkeypatch) -> None:
     from uuid import uuid4
 

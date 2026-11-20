@@ -100,7 +100,7 @@ class LLMProvider(ABC):
     while maintaining a consistent interface.
     """
 
-    def journal_manages_physical_attempts(self) -> bool:
+    def journal_manages_physical_attempts(self, model: str | None = None) -> bool:
         """Whether the provider journals each physical send via a transport hook."""
         return False
 
@@ -389,8 +389,10 @@ class LLMProvider(ABC):
 
         async def _attempt(**attempt_kwargs: Any) -> tuple[LLMResponse, Any, Any]:
             operation = intent_journal.current_operation()
-            if operation is None or self.journal_manages_physical_attempts():
+            if operation is None:
                 return await self._safe_chat(**attempt_kwargs), None, None
+            if self.journal_manages_physical_attempts(attempt_kwargs.get("model")):
+                return await self._safe_chat(**attempt_kwargs), operation, None
             evidence = operation.admit()
             response = await self._safe_chat(**attempt_kwargs)
             operation.returned(evidence)

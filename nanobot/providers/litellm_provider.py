@@ -4,13 +4,22 @@ import hashlib
 import os
 import secrets
 import string
+import ssl
+from contextlib import asynccontextmanager
 from typing import Any
 
+import httpx
 import json_repair
 from loguru import logger
 
-from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from nanobot.providers.base import (
+    LLMProvider,
+    LLMResponse,
+    ToolCallRequest,
+)
 from nanobot.providers.registry import find_by_model, find_gateway
+from nanobot.runtime import intent_journal
+from nanobot.runtime.intent_journal import JournalUnavailableError
 
 # `litellm` (and, transitively, `tiktoken`) is imported lazily on first use
 # (see `_ensure_litellm` below) rather than at module load time, so that
@@ -98,6 +107,154 @@ class LiteLLMProvider(LLMProvider):
         # (see below), which takes precedence over any module-level litellm
         # default and is correctly scoped to this instance's config.
         self._langsmith_enabled = bool(os.getenv("LANGSMITH_API_KEY"))
+
+    def journal_manages_physical_attempts(self, model: str | None = None) -> bool:
+        # If an operation is active, chat() either guards the resolved route or
+        # refuses it before dispatch. Do not add an application-level intent.
+        return intent_journal.current_operation() is not None
+
+    def _supports_journal_route(self, model: str, kwargs: dict[str, Any] | None = None) -> bool:
+        """Use LiteLLM's own resolver and guard only its direct OpenAI SDK route."""
+        if self._gateway is not None and self._gateway.name != "aihubmix":
+            return False
+        kwargs = kwargs or {}
+        if kwargs.get("custom_llm_provider") not in (None, "openai"):
+            return False
+        if any(kwargs.get(key) for key in ("model_list", "fallbacks", "router", "client", "shared_session")):
+            return False
+        try:
+            import litellm
+            if (
+                litellm.aclient_session is not None
+                or litellm.model_fallbacks is not None
+                or model in litellm.model_alias_map
+                or litellm.route_all_chat_openai_to_responses
+                or (kwargs.get("metadata") or {}).get("model_group") is not None
+                or (kwargs.get("litellm_metadata") or {}).get("model_group") is not None
+            ):
+                return False
+        except AttributeError:
+            return False
+        try:
+            import litellm
+            resolved_model, provider, _dynamic_key, _api_base = litellm.get_llm_provider(
+                model=self._resolve_model(model),
+                api_base=kwargs.get("api_base") or self.api_base,
+                api_key=kwargs.get("api_key") or self.api_key,
+                custom_llm_provider=kwargs.get("custom_llm_provider"),
+            )
+            from litellm.main import responses_api_bridge_check
+            response_info, _routed_model = responses_api_bridge_check(
+                model=resolved_model, custom_llm_provider=provider,
+                web_search_options=kwargs.get("web_search_options"),
+                tools=kwargs.get("tools"), reasoning_effort=kwargs.get("reasoning_effort"),
+                api_base=kwargs.get("api_base") or self.api_base,
+            )
+        except Exception:
+            return False
+        return provider == "openai" and response_info.get("mode") != "responses"
+
+    @asynccontextmanager
+    async def _journaled_openai_client(self, kwargs: dict[str, Any]):
+        operation = intent_journal.current_operation()
+        if operation is None:
+            raise JournalUnavailableError("journalled OpenAI client requires an active owner operation")
+        if not self._supports_journal_route(self.default_model, kwargs):
+            raise JournalUnavailableError("journalled LiteLLM route has no supported per-send client guard")
+        import litellm
+        import openai
+        from nanobot.runtime.intent_journal import IntentHttpHooks
+
+        hooks = IntentHttpHooks(operation)
+
+        async def on_request(request: Any) -> None:
+            hooks.on_request(request)
+
+        async def on_response(response: Any) -> None:
+            hooks.on_response(response)
+
+        from litellm.llms.custom_httpx.http_handler import (
+            AsyncHTTPHandler,
+            get_ssl_configuration,
+        )
+        ssl_verify = kwargs.get("ssl_verify")
+        ssl_config = get_ssl_configuration(ssl_verify)
+        transport = None
+        if litellm.aclient_session is None:
+            transport = AsyncHTTPHandler._create_async_transport(
+                ssl_context=ssl_config if isinstance(ssl_config, ssl.SSLContext) else None,
+                ssl_verify=ssl_config if isinstance(ssl_config, bool) else None,
+            )
+        try:
+            http_client = openai.DefaultAsyncHttpxClient(
+                event_hooks={"request": [on_request], "response": [on_response]},
+                verify=ssl_config, follow_redirects=True, transport=transport,
+                trust_env=not litellm.disable_aiohttp_trust_env,
+            )
+        except BaseException:
+            if transport is not None:
+                close = getattr(transport, "close", None)
+                if close is not None:
+                    close()
+            raise
+        from litellm.secret_managers.main import get_secret_str
+        api_key = (
+            kwargs.get("api_key") or self.api_key or litellm.api_key or litellm.openai_key
+            or (get_secret_str(self._gateway.env_key) if self._gateway and self._gateway.env_key else None)
+        )
+        if not api_key:
+            api_key = get_secret_str("OPENAI_API_KEY")
+        from litellm.main import _resolve_openai_api_base
+        api_base = _resolve_openai_api_base(kwargs.get("api_base"))
+        if not api_key:
+            await http_client.aclose()
+            raise JournalUnavailableError("journalled OpenAI route has no resolved API key")
+        from litellm.litellm_core_utils.completion_timeout import CompletionTimeout
+        from litellm.litellm_core_utils.request_timeout_resolver import get_configured_request_timeout
+        from litellm.utils import supports_httpx_timeout
+        global_timeout = get_configured_request_timeout()
+        timeout = CompletionTimeout.resolve(
+            kwargs.get("timeout"), kwargs, "openai",
+            global_timeout=global_timeout,
+            supports_httpx_timeout=supports_httpx_timeout,
+        )
+        if (
+            kwargs.get("timeout") is None
+            and kwargs.get("request_timeout") is None
+            and global_timeout is None
+        ):
+            timeout = litellm.request_timeout
+        max_retries = kwargs.get("max_retries")
+        if max_retries is None:
+            max_retries = litellm.num_retries
+            if max_retries is None:
+                max_retries = openai.DEFAULT_MAX_RETRIES
+        organization = (
+            kwargs.get("organization") or litellm.organization
+            or get_secret_str("OPENAI_ORGANIZATION") or None
+        )
+        default_headers = dict(litellm.headers or {})
+        default_headers.update(kwargs.get("headers") or {})
+        default_headers.update(kwargs.get("extra_headers") or {})
+        if litellm.proxy_auth is not None:
+            try:
+                from litellm.main import _proxy_auth_headers
+                default_headers.update(_proxy_auth_headers(litellm.proxy_auth))
+            except Exception:
+                logger.warning("Failed to resolve LiteLLM proxy auth headers")
+        try:
+            client = openai.AsyncOpenAI(
+                api_key=api_key, base_url=api_base, timeout=timeout,
+                max_retries=max_retries, organization=organization,
+                default_headers=default_headers or None, http_client=http_client,
+            )
+        except BaseException:
+            await http_client.aclose()
+            raise
+        try:
+            yield client, hooks
+        finally:
+            await client.close()
 
     def _setup_env(self, api_key: str, api_base: str | None, model: str) -> None:
         """Set environment variables based on detected provider."""
@@ -316,10 +473,37 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tool_choice"] = tool_choice or "auto"
 
         _ensure_litellm()
+        hooks = None
         try:
-            response = await acompletion(**kwargs)
+            if intent_journal.current_operation() is not None:
+                if not self._supports_journal_route(original_model, kwargs):
+                    raise JournalUnavailableError(
+                        "journalled LiteLLM route has no supported per-send client guard"
+                    )
+                async with self._journaled_openai_client(kwargs) as (client, hooks):
+                    try:
+                        response = await acompletion(**kwargs, client=client)
+                    except BaseException:
+                        if hooks.failure is not None:
+                            raise hooks.failure
+                        if not hooks.has_unresolved_attempt:
+                            hooks.consume_final()
+                        raise
+                    if hooks.failure is not None:
+                        raise hooks.failure
+                    hooks.consume_final()
+            else:
+                response = await acompletion(**kwargs)
             return self._parse_response(response)
+        except JournalUnavailableError:
+            raise
         except Exception as e:
+            if hooks is not None and hooks.failure is not None:
+                raise hooks.failure from e
+            if hooks is not None and hooks.has_unresolved_attempt:
+                raise JournalUnavailableError(
+                    "journalled provider send has unknown settlement"
+                ) from e
             # Preserve safe transport metadata for the shared failure writer;
             # never include response body or prompt in the failure stream.
             status = getattr(e, "status_code", None)
