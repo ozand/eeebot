@@ -863,7 +863,7 @@ def run_reflector(
             cursor_row = next((row for row in outcomes if str(row.get("cycle_id")) == watermark), None)
             cursor_result = _reflection_result_state(state_dir, watermark)
             if (
-                cursor_row is not None and cursor_result in {"absent", "skipped"}
+                cursor_row is not None and cursor_result == "skipped"
                 and _prompt_records(state_dir, [cursor_row], deadline=deadline).get(watermark)
             ):
                 candidates = [cursor_row, *candidates][:max(1, int(max_cycles))]

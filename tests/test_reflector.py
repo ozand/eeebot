@@ -352,6 +352,26 @@ def test_reflector_result_append_failure_does_not_advance_cursor(tmp_path: Path,
     assert not (tmp_path / "reflector/reflections.jsonl").exists()
 
 
+def test_reflector_known_cursor_without_result_does_not_replay_from_prompt_alone(tmp_path: Path):
+    state = tmp_path / "state"
+    _write(state / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "c0", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+    ])
+    _write(state / "llm_calls/prompts/2026-08-26.jsonl", [
+        {"cycle_id": cycle, "seq": 1, "messages": [{"role": "assistant", "content": f"transcript {cycle}"}]}
+        for cycle in ("c0", "c1")
+    ])
+    (state / "reflector").mkdir(parents=True)
+    (state / "reflector/watermark.json").write_text(json.dumps({"last_processed": "c1"}), encoding="utf-8")
+    calls = []
+    result = reflector.run_reflector(state, llm=lambda *_args: calls.append("called"))
+    assert result["processed"] == 0
+    assert calls == []
+    assert reflector._load_watermark(state) == "c1"
+    assert not (state / "reflector/reflections.jsonl").exists()
+
+
 def test_reflector_skipped_then_error_then_retry_can_recover(tmp_path: Path, monkeypatch):
     state = tmp_path / "state"
     _write(state / "ledger/cycles.jsonl", [
