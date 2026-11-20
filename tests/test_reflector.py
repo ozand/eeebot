@@ -278,7 +278,7 @@ print(json.dumps({"result": result, "watermark": reflector._load_watermark(state
     assert all(reflector._reflection_result_state(state, cycle) == "complete" for cycle in cycles)
 
 
-@pytest.mark.parametrize("evidence", ["truncated", "incomplete", "invalid_utf8", "bad_status"])
+@pytest.mark.parametrize("evidence", ["truncated", "incomplete", "invalid_utf8", "bad_status", "torn_prefix"])
 def test_reflector_ambiguous_prior_result_holds_without_cursor_advance(tmp_path: Path, evidence: str):
     state = tmp_path / "state"
     _seed(state)
@@ -286,6 +286,8 @@ def test_reflector_ambiguous_prior_result_holds_without_cursor_advance(tmp_path:
     journal.parent.mkdir(parents=True, exist_ok=True)
     if evidence == "truncated":
         journal.write_bytes(b'{"cycle_id":"c1","summary":\n')
+    elif evidence == "torn_prefix":
+        journal.write_bytes(b'{"cycle_i')
     elif evidence == "invalid_utf8":
         journal.write_bytes(b'{"cycle_id":"c1","summary":"' + bytes([0xFF]) + b'"}\n')
     elif evidence == "bad_status":
@@ -300,7 +302,7 @@ def test_reflector_ambiguous_prior_result_holds_without_cursor_advance(tmp_path:
     assert not (state / "reflector/watermark.json").exists()
 
 
-@pytest.mark.parametrize("evidence", ["duplicate", "conflicting", "truncated_after_complete"])
+@pytest.mark.parametrize("evidence", ["duplicate", "conflicting", "truncated_after_complete", "complete_without_newline"])
 def test_reflector_conflicting_complete_rows_hold_without_cursor_advance(tmp_path: Path, evidence: str):
     _seed(tmp_path)
     assert reflector.run_reflector(tmp_path, llm=lambda *_args: _answer())["processed"] == 1
@@ -313,10 +315,14 @@ def test_reflector_conflicting_complete_rows_hold_without_cursor_advance(tmp_pat
     elif evidence == "conflicting":
         complete["summary"] = "different complete result"
         extra = json.dumps(complete)
+    elif evidence == "complete_without_newline":
+        journal.write_bytes(json.dumps(complete).encode("utf-8"))
+        extra = None
     else:
         extra = '{"cycle_id":"c1","summary":'
-    with journal.open("a", encoding="utf-8") as handle:
-        handle.write(extra + "\n")
+    if extra is not None:
+        with journal.open("a", encoding="utf-8") as handle:
+            handle.write(extra + "\n")
 
     calls = []
     result = reflector.run_reflector(tmp_path, llm=lambda *_args: calls.append("called"))
@@ -346,6 +352,48 @@ def test_reflector_result_append_failure_does_not_advance_cursor(tmp_path: Path,
     assert not (tmp_path / "reflector/reflections.jsonl").exists()
 
 
+def test_reflector_skipped_then_error_then_retry_can_recover(tmp_path: Path, monkeypatch):
+    state = tmp_path / "state"
+    _write(state / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "c0", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+    ])
+    (state / "reflector").mkdir(parents=True)
+    (state / "reflector/watermark.json").write_text(json.dumps({"last_processed": "c0"}), encoding="utf-8")
+    original_save = reflector._save_watermark
+
+    def fail_after_skip(state_dir, cycle_id):
+        if cycle_id == "c1":
+            raise OSError("injected stop after skip append")
+        original_save(state_dir, cycle_id)
+
+    monkeypatch.setattr(reflector, "_save_watermark", fail_after_skip)
+    held = reflector.run_reflector(state, llm=lambda *_args: pytest.fail("no transcript available"))
+    assert held["status"] == "cursor_reconcile_failed"
+    assert reflector._load_watermark(state) == "c0"
+    rows = [json.loads(line) for line in (state / "reflector/reflections.jsonl").read_text().splitlines()]
+    assert [row.get("status") for row in rows] == ["skipped_pruned"]
+
+    # The transcript later returns and the model fails; the retry error is
+    # legitimate after the prior skip and leaves the old cursor in place.
+    monkeypatch.setattr(reflector, "_save_watermark", original_save)
+    _write(state / "llm_calls/prompts/2026-08-26.jsonl", [
+        {"cycle_id": "c1", "seq": 1, "messages": [{"role": "assistant", "content": "returned transcript"}]},
+    ])
+    calls = []
+    failed = reflector.run_reflector(state, llm=lambda *_args: calls.append("failed") or "bad")
+    assert failed["errors"] == 1 and reflector._load_watermark(state) == "c0"
+    assert reflector._reflection_result_state(state, "c1") == "skipped"
+
+    # A fresh invocation sees skip+error as retryable, calls the model again,
+    # writes one complete result, and advances c1 only after that result.
+    succeeded = reflector.run_reflector(state, llm=lambda *_args: calls.append("ok") or _answer("c1"))
+    assert succeeded["processed"] == 1
+    assert reflector._load_watermark(state) == "c1"
+    assert calls == ["failed", "ok"]
+    assert reflector._reflection_result_state(state, "c1") == "complete"
+
+
 def test_reflector_error_row_does_not_suppress_retry_or_advance_cursor(tmp_path: Path):
     _seed(tmp_path)
     error = {
@@ -363,6 +411,33 @@ def test_reflector_error_row_does_not_suppress_retry_or_advance_cursor(tmp_path:
     rows = [json.loads(line) for line in (tmp_path / "reflector/reflections.jsonl").read_text().splitlines()]
     assert [row.get("status") for row in rows] == ["error", None]
     assert json.loads((tmp_path / "reflector/watermark.json").read_text())["last_processed"] == "c1"
+
+
+def test_reflector_aged_out_cursor_does_not_record_reanchor_before_ambiguous_hold(tmp_path: Path):
+    state = tmp_path / "state"
+    _write(state / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+    ])
+    archive = state / "ledger/cycles-2026-08-25.jsonl.gz"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(archive, "wt", encoding="utf-8") as handle:
+        handle.write(json.dumps({"phase": "outcome", "cycle_id": "lost", "outcome": "success"}) + "\n")
+    (state / "reflector").mkdir(parents=True)
+    (state / "reflector/watermark.json").write_text(json.dumps({"last_processed": "lost"}), encoding="utf-8")
+    journal = state / "reflector/reflections.jsonl"
+    journal.write_text(json.dumps({"cycle_id": "c1", "summary": "incomplete"}) + "\n", encoding="utf-8")
+    before_result = journal.read_bytes()
+    before_watermark = (state / "reflector/watermark.json").read_bytes()
+
+    for _ in range(2):
+        calls = []
+        result = reflector.run_reflector(state, llm=lambda *_args: calls.append("called"))
+        assert result["status"] == "held_ambiguous_result"
+        assert calls == []
+        assert journal.read_bytes() == before_result
+        assert (state / "reflector/watermark.json").read_bytes() == before_watermark
+        assert not (state / "reflector/reanchors.jsonl").exists()
+
 
 
 def test_reflector_journal_watermark_and_prior_tail(tmp_path: Path):

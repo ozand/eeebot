@@ -348,25 +348,32 @@ def _reflection_result_state(state_dir: Path, cycle_id: str) -> str:
         try:
             with opener(path, "rb") as handle:
                 for raw_line in handle:
-                    if needle not in raw_line:
-                        continue
+                    # Journal writers always terminate each append with LF.
+                    # An unframed tail may be too torn to identify as this cycle,
+                    # so never treat it as absent evidence and dispatch again.
+                    if not raw_line.endswith(b"\n"):
+                        return "ambiguous"
                     try:
                         row = json.loads(raw_line.decode("utf-8"), object_pairs_hook=_strict_json_object)
                     except Exception:
+                        # A malformed full line could be a torn record whose
+                        # cycle identity was not fully written. Do not infer
+                        # that it belongs to a different cycle.
                         return "ambiguous"
                     if type(row) is not dict:
-                        if b'"cycle_id"' in raw_line:
-                            return "ambiguous"
+                        return "ambiguous"
+                    if "cycle_id" not in row:
                         continue
-                    if row.get("cycle_id") != cycle_id:
-                        if type(row.get("cycle_id")) is str:
-                            continue
-                        if b'"cycle_id"' in raw_line:
-                            return "ambiguous"
+                    if type(row["cycle_id"]) is not str:
+                        return "ambiguous"
+                    if row["cycle_id"] != cycle_id:
                         continue
                     status = row.get("status")
                     if status == "error" and _is_error_reflection_row(row, cycle_id):
-                        if terminal_complete or terminal_skipped:
+                        # A skipped cycle can later regain its transcript and
+                        # produce retry errors; only a later error after an
+                        # exact completed result conflicts with completion.
+                        if terminal_complete:
                             return "ambiguous"
                         continue
                     if status == "skipped_pruned" and _is_skipped_reflection_row(row, cycle_id):
@@ -472,11 +479,13 @@ def _is_complete_reflection_row(row: dict[str, Any], cycle_id: str) -> bool:
         if type(recommendation) is not dict:
             return False
         normalized = dict(recommendation)
+        has_status = "status" in normalized
+        has_consumed_at = "consumed_at" in normalized
         consumed = normalized.pop("status", None)
         consumed_at = normalized.pop("consumed_at", None)
         if consumed not in (None, "consumed"):
             return False
-        if ("status" in normalized) != ("consumed_at" in normalized):
+        if has_status != has_consumed_at:
             return False
         if (consumed == "consumed") != (consumed_at is not None):
             return False
@@ -848,10 +857,19 @@ def run_reflector(
         candidates = _completed_cycles(active_rows, "")[:max(1, int(max_cycles))]
     else:
         candidates = _completed_cycles(rows, watermark if watermark in known_watermarks else "")[:max(1, int(max_cycles))]
+        if watermark in known_watermarks:
+            # A retryable error or skip whose transcript has returned may be
+            # the cursor cycle itself: inspect it before selecting later work.
+            cursor_row = next((row for row in outcomes if str(row.get("cycle_id")) == watermark), None)
+            cursor_result = _reflection_result_state(state_dir, watermark)
+            if (
+                cursor_row is not None and cursor_result in {"absent", "skipped"}
+                and _prompt_records(state_dir, [cursor_row], deadline=deadline).get(watermark)
+            ):
+                candidates = [cursor_row, *candidates][:max(1, int(max_cycles))]
     if reanchor:
         reanchor["replacement"] = str(candidates[0].get("cycle_id") or "") if candidates else ""
         reanchor["cycles_covered"] = len(candidates)
-        _append_reanchor(state_dir, {"status": "cursor_aged_out", **reanchor})
     result = {
         "candidates": len(candidates),
         "processed": 0,
@@ -871,6 +889,7 @@ def run_reflector(
 
     provenance_owner = f"reflector-job:{uuid4().hex}"
     proposed = {str(row.get("cycle_id")): row for row in rows if row.get("phase") == "proposed"}
+    reanchor_recorded = False
     consecutive_errs = 0
     for outcome in candidates:
         if time.monotonic() >= deadline and result["processed"] > 0:
@@ -882,6 +901,9 @@ def run_reflector(
             result["consecutive_errors"] = consecutive_errs
             result["status"] = "held_ambiguous_result"
             break
+        if reanchor and not reanchor_recorded:
+            _append_reanchor(state_dir, {"status": "cursor_aged_out", **reanchor})
+            reanchor_recorded = True
         transcript = prompts.get(cycle_id)
         if prior_result == "skipped" and transcript:
             # Preserve the existing retry-if-transcript-returns behavior.
