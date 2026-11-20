@@ -372,6 +372,36 @@ def test_reflector_known_cursor_without_result_does_not_replay_from_prompt_alone
     assert not (state / "reflector/reflections.jsonl").exists()
 
 
+def test_reflector_holds_ambiguous_watermark_before_later_cycle_max_limit(tmp_path: Path):
+    state = tmp_path / "state"
+    _write(state / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+        {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": "2026-08-26T00:02:00Z"},
+    ])
+    _write(state / "llm_calls/prompts/2026-08-26.jsonl", [
+        {"cycle_id": cycle, "seq": 1, "messages": [{"role": "assistant", "content": f"transcript {cycle}"}]}
+        for cycle in ("c1", "c2")
+    ])
+    (state / "reflector").mkdir(parents=True)
+    (state / "reflector/watermark.json").write_text(json.dumps({"last_processed": "c1"}), encoding="utf-8")
+    journal = state / "reflector/reflections.jsonl"
+    journal.write_text(json.dumps({"cycle_id": "c1", "summary": "incomplete"}) + "\n", encoding="utf-8")
+    before_journal = journal.read_bytes()
+    before_watermark = (state / "reflector/watermark.json").read_bytes()
+    calls = []
+
+    result = reflector.run_reflector(
+        state, llm=lambda *_args: calls.append("called"), max_cycles=1,
+    )
+
+    assert result["status"] == "held_ambiguous_result"
+    assert result["processed"] == 0
+    assert calls == []
+    assert journal.read_bytes() == before_journal
+    assert (state / "reflector/watermark.json").read_bytes() == before_watermark
+    assert not (state / "reflector/reanchors.jsonl").exists()
+
+
 def test_reflector_skipped_then_error_then_retry_can_recover(tmp_path: Path, monkeypatch):
     state = tmp_path / "state"
     _write(state / "ledger/cycles.jsonl", [

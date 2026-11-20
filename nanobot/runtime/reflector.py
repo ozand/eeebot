@@ -856,12 +856,20 @@ def run_reflector(
     if reanchor:
         candidates = _completed_cycles(active_rows, "")[:max(1, int(max_cycles))]
     else:
-        candidates = _completed_cycles(rows, watermark if watermark in known_watermarks else "")[:max(1, int(max_cycles))]
+        all_after_cursor = _completed_cycles(rows, watermark if watermark in known_watermarks else "")
+        candidates = all_after_cursor[:max(1, int(max_cycles))]
         if watermark in known_watermarks:
             # A retryable error or skip whose transcript has returned may be
             # the cursor cycle itself: inspect it before selecting later work.
             cursor_row = next((row for row in outcomes if str(row.get("cycle_id")) == watermark), None)
             cursor_result = _reflection_result_state(state_dir, watermark)
+            if cursor_result == "ambiguous":
+                result = {
+                    "candidates": 0, "processed": 0, "skipped_pruned": 0,
+                    "errors": 1, "consecutive_errors": 0, "input_truncated": 0,
+                    "status": "held_ambiguous_result",
+                }
+                return result
             if (
                 cursor_row is not None and cursor_result == "skipped"
                 and _prompt_records(state_dir, [cursor_row], deadline=deadline).get(watermark)
