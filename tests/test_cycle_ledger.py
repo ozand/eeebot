@@ -874,6 +874,75 @@ class TestBridgeIntegrationLedgerRows:
         checkpoint = phase_checkpoint.load_checkpoint(state_dir, owner_id=owner)
         assert checkpoint is not None and checkpoint.status == "running"
 
+    def test_persisted_rest_precheck_blocks_until_deadline_across_restart(self, tmp_path, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+
+        from nanobot.runtime import planner_rest
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        self._enable_intent_journal_for_windows(monkeypatch)
+        _init_selfevo_repo(tmp_path)
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "target_workspace")
+        monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        self._enable_test_lock(monkeypatch)
+        clock = {"now": datetime(2026, 11, 19, tzinfo=timezone.utc)}
+        monkeypatch.setattr(planner_rest, "datetime", type("Clock", (), {
+            "now": staticmethod(lambda _tz=None: clock["now"]),
+            "fromisoformat": datetime.fromisoformat,
+        }))
+        calls = {"proposer": 0, "planner": 0, "executor": 0}
+        monkeypatch.setattr(bridge.llm_proposer, "maybe_propose", lambda *_a, **_k: calls.__setitem__("proposer", calls["proposer"] + 1))
+        monkeypatch.setattr(bridge, "SubagentManager", lambda **_kwargs: calls.__setitem__("executor", calls["executor"] + 1))
+
+        def _no_plan_session(**_kwargs):
+            async def _result():
+                calls["planner"] += 1
+                return {
+                    "ran": True, "iterations_used": 1, "iterations_planned": None,
+                    "tampered_files": [], "plan": None, "terminal_outcome": "no_plan",
+                }
+            return _result()
+
+        monkeypatch.setattr(bridge, "_run_planning_session", lambda **kwargs: _no_plan_session(**kwargs))
+        _seed_bridge_request(state_dir, "req-rest-deadline", "cycle-rest-deadline")
+        # Persist the existing rest decision before bridge entry, exactly as a
+        # prior normal planner cycle does.
+        wc = planner_rest.WakeCondition(kind="main_commit")
+        deadline = (clock["now"] + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+        planner_rest.record_rest(state_dir, "cycle-prior-rest", wc, deadline, state_dir.parent / "eeebot-self-evolving")
+        assert planner_rest.precheck(state_dir, state_dir.parent / "eeebot-self-evolving") == (False, "unchanged")
+        # Existing bridge entry honors persisted state before proposer/planner.
+        asyncio.run(bridge.main())
+        assert calls == {"proposer": 0, "planner": 0, "executor": 0}
+        held_owner = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+        assert held_owner is not None and held_owner.route_status == "closed"
+        assert held_owner.no_execution_receipt is not None
+        assert held_owner.no_execution_receipt[1] == "rest_unchanged"
+
+        # New process/tick sees the persisted deadline and remains held before
+        # it, still with no owner/proposer/planner/executor dispatch.
+        clock["now"] += timedelta(minutes=4)
+        assert planner_rest.precheck(state_dir, state_dir.parent / "eeebot-self-evolving") == (False, "unchanged")
+        asyncio.run(bridge.main())
+        assert calls == {"proposer": 0, "planner": 0, "executor": 0}
+        held_again = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+        assert held_again is not None and held_again.route_status == "closed"
+
+        # At the persisted deadline the same existing precheck permits normal
+        # cycle flow through proposer/planner; no timer or new scheduler is introduced.
+        clock["now"] += timedelta(minutes=1)
+        assert planner_rest.precheck(state_dir, state_dir.parent / "eeebot-self-evolving") == (True, "deadline_passed")
+        monkeypatch.setattr(bridge, "_prepare_repository_for_cycle", lambda *_args: {"restored": True})
+        asyncio.run(bridge.main())
+        assert calls == {"proposer": 1, "planner": 1, "executor": 0}
+        after_deadline = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+        assert after_deadline is not None and after_deadline.route_status == "closed"
+        assert after_deadline.no_execution_receipt is not None
+        assert after_deadline.no_execution_receipt[1] == "no_plan"
+
     def test_explicit_no_plan_receipt_closes_without_executor_or_phase(self, tmp_path, monkeypatch):
         base = tmp_path
         state_dir = base / "state"
