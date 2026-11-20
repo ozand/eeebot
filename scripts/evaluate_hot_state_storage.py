@@ -117,13 +117,35 @@ def child(mode: str) -> int:
     os._exit(83)
 
 
-def run_child(mode: str, root: Path) -> int:
-    process = subprocess.Popen(
+EXPECTED_CHILD_EXIT = {
+    "file-before": 71,
+    "file-between": 73,
+    "file-after": 72,
+    "ledger-before": 91,
+    "ledger-mid": 93,
+    "ledger-after": 92,
+    "sqlite-before": 81,
+    "sqlite-mid": 82,
+    "sqlite-after": 83,
+}
+
+
+def verify_child_exit(mode: str, actual_code: int, stderr: str = "") -> None:
+    expected_code = EXPECTED_CHILD_EXIT.get(mode)
+    diagnostic = stderr[-800:].strip() or "<empty>"
+    if expected_code is None or actual_code != expected_code:
+        raise RuntimeError(
+            f"failure injection {mode!r}: expected exit {expected_code}, "
+            f"got {actual_code}; stderr (last 800 chars): {diagnostic}",
+        )
+
+
+def run_child(mode: str, root: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), mode], cwd=ROOT,
         env={**os.environ, "EVAL_DIR": str(root)},
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=10, check=False,
     )
-    return process.wait(timeout=10)
 
 
 def file_state(root: Path) -> dict[str, object]:
@@ -298,10 +320,12 @@ def crash_matrix(root: Path) -> dict[str, object]:
                 create_sqlite(connection)
                 set_sqlite_running(connection, "crash-probe")
                 connection.close()
-            code = run_child(mode, case)
-            if code == 0:
-                raise RuntimeError(f"expected terminated child in {mode}")
-            results[mode] = {"exit_code": code, "reopened": reader(case)}
+            child_result = run_child(mode, case)
+            verify_child_exit(mode, child_result.returncode, child_result.stderr)
+            results[mode] = {
+                "exit_code": child_result.returncode,
+                "reopened": reader(case),
+            }
     return results
 
 
