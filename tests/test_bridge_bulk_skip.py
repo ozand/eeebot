@@ -80,3 +80,42 @@ class TestSingleCandidatePerCycle:
 
         results_dir = state_dir / "subagents" / "results"
         assert len(list(results_dir.glob("result-*.json"))) == 1
+
+    def test_proposer_journal_admission_failure_holds_before_planner(self, tmp_path, monkeypatch):
+        from nanobot.runtime import intent_journal, llm_proposer
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "target_workspace")
+        monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
+        monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        (state_dir / "goals").mkdir()
+        (state_dir / "goals" / "goal_text.json").write_text(
+            '{"schema_version":"goal-text-v1","goal_id":"goal-1","text":"test goal"}',
+            encoding="utf-8",
+        )
+        _init_selfevo_repo(tmp_path)
+        planner_calls = []
+        proposer_calls = []
+
+        async def _fake_planning_session(**kwargs):
+            planner_calls.append(kwargs)
+            return {'ran': True, 'plan': None, 'iterations_used': 0, 'iterations_planned': 0,
+                    'tampered_files': [], 'outcome': 'no_plan'}
+
+        def _fail_admission(*_args, **_kwargs):
+            raise intent_journal.JournalUnavailableError("injected proposer admission failure")
+
+        monkeypatch.setattr(bridge, "_run_planning_session", _fake_planning_session)
+        monkeypatch.setattr(llm_proposer, "maybe_propose", lambda *a, **k: proposer_calls.append((a, k)))
+        monkeypatch.setattr(intent_journal, "provision_route_parent", _fail_admission)
+
+        assert asyncio.run(bridge._main_impl()) == 0
+        assert proposer_calls == []
+        assert planner_calls == []
+        rows = _read_ledger(state_dir)
+        assert any(row.get("phase") == "proposer_intent_held" for row in rows)
+        assert not any(row.get("phase") == "outcome" and row.get("outcome") == "no_plan" for row in rows)
+        assert not (state_dir / "subagents" / "results").exists()
