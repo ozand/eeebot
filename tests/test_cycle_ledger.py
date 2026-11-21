@@ -1,8 +1,7 @@
-"""Tests for #720 and ADR-039: cycle ledger JSONL and exact-key start evidence.
+"""Tests for cycle-ledger evidence and bounded bridge lifecycle integration.
 
-Covers the standalone ``nanobot.runtime.cycle_ledger`` module (append/read
-round-trip, fail-open behavior, rotation, one-terminal-row-per-cycle
-semantics via the typed helpers, enum enforcement) plus bridge-integration checks for green cycles and pre-spawn skips, as well as process-restart recovery of selected phase receipts.
+Covers typed append/read helpers, bridge gate/outcome records, phase receipts,
+owner-scoped provider intent dispatch and restart hold behavior.
 """
 from __future__ import annotations
 
@@ -1265,6 +1264,102 @@ class TestBridgeIntegrationLedgerRows:
         assert checkpoint is not None and checkpoint.phase == "integration"
         assert checkpoint.status == "complete"
         assert len(bridge_owners) == 1
+
+    @pytest.mark.parametrize("transport_outcome", ["success", "lost"])
+    def test_executor_provider_attempt_uses_bridge_cycle_owner(
+        self, tmp_path, monkeypatch, transport_outcome,
+    ):
+        from nanobot.agent.subagent import SubagentManager as RealManager
+        from nanobot.config.schema import Config
+        from nanobot.providers.litellm_provider import LiteLLMProvider
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        self._enable_intent_journal_for_windows(monkeypatch)
+        self._enable_test_lock(monkeypatch)
+        _init_selfevo_repo(tmp_path)
+        config = Config()
+        config.agents.defaults.model = "gpt-4o-mini"
+        monkeypatch.setattr(bridge, "load_config", lambda *_args: config)
+        monkeypatch.setattr(
+            bridge, "_make_provider",
+            lambda _config: LiteLLMProvider(
+                api_key="fake", api_base="https://mock.invalid/v1", default_model="gpt-4o-mini",
+            ),
+        )
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "target_workspace")
+        _stub_planning_session(monkeypatch)
+        monkeypatch.setattr(bridge, "SubagentManager", RealManager)
+        _seed_bridge_request(state_dir, "req-intent", "cycle-intent")
+        owners = []
+        original_begin = bridge._begin_bridge_cycle_parent
+
+        def capture_owner(state_root):
+            owner = original_begin(state_root)
+            owners.append(owner)
+            return owner
+
+        monkeypatch.setattr(bridge, "_begin_bridge_cycle_parent", capture_owner)
+        import openai
+        import litellm
+        from openai import _base_client
+        sdk_httpx = getattr(_base_client, "httpx2", None) or _base_client.httpx
+        sent = []
+
+        def transport(request):
+            assert len(owners) == 1
+            records = intent_journal.read_owner_records(state_dir, owners[0])
+            pending = [row for row in records if row["event"] == "intent"]
+            assert pending and pending[-1]["target"] == "provider.chat"
+            assert records[-1]["event"] == "intent"
+            assert pending[-1]["component"] == "subagent"
+            parent_path = state_dir / "intent-journal" / f"{owners[0]}.parent.json"
+            parent = json.loads(parent_path.read_text(encoding="utf-8"))
+            assert parent["active_operation_id"] == pending[-1]["operation_id"]
+            sent.append(request.content)
+            if transport_outcome == "lost":
+                raise sdk_httpx.ConnectError("simulated lost response", request=request)
+            body = {
+                "id": "chatcmpl-test", "object": "chat.completion", "created": 0,
+                "model": "gpt-4o-mini",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "done"},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+            return sdk_httpx.Response(200, json=body, request=request)
+
+        default_client = openai.DefaultAsyncHttpxClient
+
+        class MockClient(default_client):
+            def __init__(self, **kwargs):
+                kwargs.pop("transport", None)
+                super().__init__(transport=sdk_httpx.MockTransport(transport), **kwargs)
+
+        monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", MockClient)
+        monkeypatch.setattr(litellm, "num_retries", None)
+        monkeypatch.setattr(litellm, "route_all_chat_openai_to_responses", False)
+        assert self._run_under_test_lock(monkeypatch) == 0
+        rows = intent_journal.read_owner_records(state_dir, owners[0])
+        if transport_outcome == "success":
+            assert [row["event"] for row in rows if row.get("target") == "provider.chat"] == [
+                "intent", "terminal", "consumed",
+            ]
+            assert len(sent) == 1
+            return
+
+        assert [row["event"] for row in rows if row.get("target") == "provider.chat"] == ["intent"]
+        assert len(sent) == 1
+        parent_path = state_dir / "intent-journal" / f"{owners[0]}.parent.json"
+        parent_before_restart = parent_path.read_bytes()
+        journal_path = state_dir / "intent-journal" / f"{owners[0]}.jsonl"
+        journal_before_restart = journal_path.read_bytes()
+        assert self._run_under_test_lock(monkeypatch) == 0
+        assert len(sent) == 1
+        assert parent_path.read_bytes() == parent_before_restart
+        assert journal_path.read_bytes() == journal_before_restart
+        assert intent_journal.read_route_parent_state(state_dir, "bridge.cycle").owner_id == owners[0]
 
     def test_exact_tag_skip_writes_started_then_skipped(self, tmp_path, monkeypatch):
         state_dir = tmp_path / "state"

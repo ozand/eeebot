@@ -5511,6 +5511,8 @@ async def _main_impl_body():
             # #939 Part E: suppress loop-irrelevant builtin skills.
             excluded_skill_names=_LOOP_EXCLUDED_SKILLS,
             telemetry_component="executor",
+            intent_state_root=STATE_DIR,
+            intent_owner_id=_bridge_cycle_owner_id,
             # ADR-035 keep-work (#1942 B2): commit checkpoints to the cycle
             # branch as the executor goes, so a kill loses minutes, not the
             # whole attempt.

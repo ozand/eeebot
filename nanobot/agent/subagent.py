@@ -313,10 +313,11 @@ class SubagentManager:
         self.web_tools_enabled = bool(web_tools_enabled)
         self._checkpoint_commits = bool(checkpoint_commits)
         self._expected_cycle_branch = (expected_cycle_branch or "").strip() or None
-        if intent_state_root is not None and self._telemetry_component != "planner":
-            raise ValueError("intent journal is supported only for the planner component")
-        if intent_state_root is not None and intent_owner_id is None:
-            raise ValueError("intent journal requires a bridge-provided planner owner token")
+        if intent_state_root is not None:
+            if intent_owner_id is None:
+                raise ValueError("intent journal requires a bridge-provided owner token")
+            if self._telemetry_component not in {"planner", "executor"}:
+                raise ValueError("intent journal is restricted to planner and executor components")
         self._intent_owner_id = intent_owner_id
         self._intent_state_root = Path(intent_state_root) if intent_owner_id else None
 
