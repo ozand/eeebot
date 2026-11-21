@@ -9,6 +9,7 @@ import asyncio
 import gzip
 import json
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -756,6 +757,105 @@ def _stub_planning_session(monkeypatch, plan_text: str = "a novel bounded increm
     monkeypatch.setattr(bridge, "_run_planning_session", _fake_planning_session)
 
 
+def _executor_provider_restart_worker(state_dir: Path, stage: str) -> None:
+    """Exercise one lost executor send, then verify a fresh process holds it."""
+    import pytest
+
+    from nanobot.agent.subagent import SubagentManager as RealManager
+    from nanobot.config.schema import Config
+    from nanobot.providers.litellm_provider import LiteLLMProvider
+
+    patch = pytest.MonkeyPatch()
+    TestBridgeIntegrationLedgerRows._enable_intent_journal_for_windows(patch)
+    TestBridgeIntegrationLedgerRows._enable_test_lock(patch)
+    base = state_dir.parent
+    patch.setattr(bridge, "STATE_DIR", state_dir)
+    patch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+    patch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+    bridge._CORE_SMOKE_TESTS = ("tests/test_smoke.py",)
+    release_root = base / "release"
+    release_root.mkdir(exist_ok=True)
+    (release_root / "goals.md").write_text("test charter", encoding="utf-8")
+    patch.setattr(bridge, "RELEASE_ROOT", release_root)
+    config = Config()
+    config.agents.defaults.model = "gpt-4o-mini"
+    patch.setattr(bridge, "load_config", lambda *_args: config)
+    patch.setattr(bridge, "_make_provider", lambda _config: LiteLLMProvider(
+        api_key="fake", api_base="https://mock.invalid/v1", default_model="gpt-4o-mini",
+    ))
+
+    if stage == "dispatch":
+        _init_selfevo_repo(base)
+        patch.setattr(bridge, "SubagentManager", RealManager)
+        _stub_planning_session(patch)
+        _seed_bridge_request(state_dir, "req-process-loss", "cycle-process-loss")
+        owners = []
+        original_begin = bridge._begin_bridge_cycle_parent
+
+        def capture_owner(state_root):
+            owner = original_begin(state_root)
+            owners.append(owner)
+            return owner
+
+        patch.setattr(bridge, "_begin_bridge_cycle_parent", capture_owner)
+        import litellm
+        import openai
+        from openai import _base_client
+        sdk_httpx = getattr(_base_client, "httpx2", None) or _base_client.httpx
+        sends = state_dir / "mock-transport-sends.txt"
+
+        def transport(request):
+            assert len(owners) == 1
+            rows = intent_journal.read_owner_records(state_dir, owners[0])
+            assert rows[-1]["event"] == "intent" and rows[-1]["target"] == "provider.chat"
+            parent = json.loads((state_dir / "intent-journal" / f"{owners[0]}.parent.json").read_text())
+            assert parent["active_operation_id"] == rows[-1]["operation_id"]
+            with sends.open("a", encoding="utf-8") as stream:
+                stream.write("send\n")
+            raise sdk_httpx.ConnectError("simulated lost response", request=request)
+
+        default_client = openai.DefaultAsyncHttpxClient
+
+        class MockClient(default_client):
+            def __init__(self, **kwargs):
+                kwargs.pop("transport", None)
+                super().__init__(transport=sdk_httpx.MockTransport(transport), **kwargs)
+
+        patch.setattr(openai, "DefaultAsyncHttpxClient", MockClient)
+        patch.setattr(litellm, "num_retries", None)
+        patch.setattr(litellm, "route_all_chat_openai_to_responses", False)
+        assert asyncio.run(bridge.main()) == 0
+        assert len(owners) == 1
+        assert [row["event"] for row in intent_journal.read_owner_records(
+            state_dir, owners[0],
+        ) if row.get("target") == "provider.chat"] == ["intent"]
+        (state_dir / "executor-owner-id.txt").write_text(owners[0], encoding="utf-8")
+        return
+
+    if stage == "restart":
+        entry = state_dir / "restart-entry.txt"
+        _original_begin = bridge._begin_bridge_cycle_parent
+
+        def capture_restart_owner(root):
+            entry.write_text("entered", encoding="utf-8")
+            return _original_begin(root)
+
+        patch.setattr(bridge, "_begin_bridge_cycle_parent", capture_restart_owner)
+        patch.setattr(bridge.llm_proposer, "maybe_propose", lambda *_a, **_k: (
+            state_dir / "restart-proposer.txt"
+        ).write_text("called", encoding="utf-8"))
+        async def unexpected_planner(**_kwargs):
+            (state_dir / "restart-planner.txt").write_text("called", encoding="utf-8")
+            raise AssertionError("held owner must block planner dispatch")
+        patch.setattr(bridge, "_run_planning_session", unexpected_planner)
+        patch.setattr(bridge, "_make_provider", lambda _config: (
+            (state_dir / "restart-provider.txt").write_text("called", encoding="utf-8"), object(),
+        )[1])
+        assert asyncio.run(bridge.main()) == 0
+        return
+    raise AssertionError(f"unknown executor restart worker stage: {stage}")
+
+
 def _checkpoint_restart_worker(state_dir: Path, stage: str) -> None:
     """Run real bridge integration, then recover its durable receipt in a fresh process."""
     import os
@@ -1275,6 +1375,50 @@ class TestBridgeIntegrationLedgerRows:
 
         state_dir = tmp_path / "state"
         state_dir.mkdir()
+        if transport_outcome == "lost":
+            self._enable_intent_journal_for_windows(monkeypatch)
+            script = (
+                "import runpy, sys; from pathlib import Path; "
+                "runpy.run_path('tests/test_cycle_ledger.py')['_executor_provider_restart_worker']("
+                "Path(sys.argv[1]), sys.argv[2])"
+            )
+            dispatch = subprocess.run(
+                [sys.executable, "-c", script, str(state_dir), "dispatch"],
+                cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
+            )
+            assert dispatch.returncode == 0, dispatch.stdout + dispatch.stderr
+            dispatch_output = dispatch.stdout + dispatch.stderr
+            assert "previous HTTP attempt has unknown settlement" in dispatch_output
+            owner = (state_dir / "executor-owner-id.txt").read_text(encoding="utf-8")
+            journal_path = state_dir / "intent-journal" / f"{owner}.jsonl"
+            parent_path = state_dir / "intent-journal" / f"{owner}.parent.json"
+            dispatched_rows = intent_journal.read_owner_records(state_dir, owner)
+            provider_rows = [row for row in dispatched_rows if row.get("target") == "provider.chat"]
+            assert len(provider_rows) == 1
+            assert provider_rows[0]["event"] == "intent" and provider_rows[0]["component"] == "subagent"
+            dispatched_parent = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+            assert dispatched_parent is not None and dispatched_parent.owner_id == owner
+            assert dispatched_parent.parent_started and dispatched_parent.has_unresolved_attempts
+            assert dispatched_parent.active_operation_id == provider_rows[0]["operation_id"]
+            journal_before_restart, parent_before_restart = journal_path.read_bytes(), parent_path.read_bytes()
+            restart = subprocess.run(
+                [sys.executable, "-c", script, str(state_dir), "restart"],
+                cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
+            )
+            assert restart.returncode == 0, restart.stdout + restart.stderr
+            assert "bridge: cycle owner held (JournalUnavailableError); aborting before proposer" in restart.stdout
+            assert (state_dir / "restart-entry.txt").read_text(encoding="utf-8") == "entered"
+            assert not (state_dir / "restart-proposer.txt").exists()
+            assert not (state_dir / "restart-planner.txt").exists()
+            assert not (state_dir / "restart-provider.txt").exists()
+            assert (state_dir / "mock-transport-sends.txt").read_text(encoding="utf-8").splitlines() == ["send"]
+            assert journal_path.read_bytes() == journal_before_restart
+            assert parent_path.read_bytes() == parent_before_restart
+            assert intent_journal.read_route_parent_state(state_dir, "bridge.cycle").owner_id == owner
+            held = [row for row in _read_ledger(state_dir) if row.get("phase") == "bridge_cycle_intent_held"]
+            assert held and held[-1]["reason"] == "JournalUnavailableError"
+            return
+
         self._enable_intent_journal_for_windows(monkeypatch)
         self._enable_test_lock(monkeypatch)
         _init_selfevo_repo(tmp_path)
@@ -1302,8 +1446,8 @@ class TestBridgeIntegrationLedgerRows:
             return owner
 
         monkeypatch.setattr(bridge, "_begin_bridge_cycle_parent", capture_owner)
-        import openai
         import litellm
+        import openai
         from openai import _base_client
         sdk_httpx = getattr(_base_client, "httpx2", None) or _base_client.httpx
         sent = []
