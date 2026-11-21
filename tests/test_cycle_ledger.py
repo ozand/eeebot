@@ -2,10 +2,7 @@
 
 Covers the standalone ``nanobot.runtime.cycle_ledger`` module (append/read
 round-trip, fail-open behavior, rotation, one-terminal-row-per-cycle
-semantics via the typed helpers, enum enforcement) plus a light
-bridge-integration check that a full green cycle and an ``already_done``
-pre-spawn skip each leave the expected started/dedup/gate/outcome rows in
-``<state_dir>/ledger/cycles.jsonl``.
+semantics via the typed helpers, enum enforcement) plus bridge-integration checks for green cycles and pre-spawn skips, as well as process-restart recovery of selected phase receipts.
 """
 from __future__ import annotations
 
@@ -18,8 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import bridge, cycle_ledger, state, state_access
-from nanobot.runtime import intent_journal
+from nanobot.runtime import bridge, cycle_ledger, intent_journal, state, state_access
 from nanobot.runtime.service_paths import is_delivered
 
 
@@ -761,7 +757,156 @@ def _stub_planning_session(monkeypatch, plan_text: str = "a novel bounded increm
     monkeypatch.setattr(bridge, "_run_planning_session", _fake_planning_session)
 
 
+def _checkpoint_restart_worker(state_dir: Path, stage: str) -> None:
+    """Run real bridge integration, then recover its durable receipt in a fresh process."""
+    import os
+
+    import pytest
+
+    from nanobot.runtime import phase_checkpoint
+
+    base = state_dir.parent
+    repo = base / "eeebot-self-evolving"
+    patch = pytest.MonkeyPatch()
+    TestBridgeIntegrationLedgerRows._enable_intent_journal_for_windows(patch)
+    TestBridgeIntegrationLedgerRows._enable_test_lock(patch)
+    patch.setattr(bridge, "STATE_DIR", state_dir)
+    patch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+    patch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+    patch.setattr(bridge, "_make_provider", lambda _config: object())
+    integrations = state_dir / "integration-calls.txt"
+    pushes = state_dir / "integration-pushes.txt"
+
+    def _count_actual_push(*args, **kwargs):
+        command = args[0] if args else kwargs.get("args", [])
+        if isinstance(command, (list, tuple)) and "push" in command and any(
+            str(part).startswith("--force-with-lease=main:") for part in command
+        ):
+            with pushes.open("a", encoding="utf-8") as handle:
+                handle.write("pushed\n")
+        return original_run(*args, **kwargs)
+
+    original_run = subprocess.run
+    patch.setattr(subprocess, "run", _count_actual_push)
+
+    if stage == "crash":
+        _init_selfevo_repo(base)
+        patch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
+        bridge._CORE_SMOKE_TESTS = ("tests/test_smoke.py",)
+        release_root = base / "release"
+        release_root.mkdir()
+        (release_root / "goals.md").write_text("test charter", encoding="utf-8")
+        patch.setattr(bridge, "RELEASE_ROOT", release_root)
+        _stub_planning_session(patch)
+        _seed_bridge_request(state_dir, "req-restart", "cycle-restart")
+        integrate = bridge._integrate_cycle_to_main
+
+        def _count_initial_integration(*args, **kwargs):
+            result = integrate(*args, **kwargs)
+            with integrations.open("a", encoding="utf-8") as handle:
+                handle.write("integrated\n")
+            return result
+
+        patch.setattr(bridge, "_integrate_cycle_to_main", _count_initial_integration)
+        complete = bridge._complete_bridge_checkpoint_phase
+
+        def _exit_after_integration(*args, **kwargs):
+            result = complete(*args, **kwargs)
+            if kwargs["phase"] == "integration":
+                os._exit(93)
+            return result
+
+        patch.setattr(bridge, "_complete_bridge_checkpoint_phase", _exit_after_integration)
+        asyncio.run(bridge.main())
+        raise AssertionError("expected process exit after durable integration receipt")
+
+    patch.undo()
+    if stage != "restart":
+        raise AssertionError(f"unknown worker stage: {stage}")
+    patch = pytest.MonkeyPatch()
+    TestBridgeIntegrationLedgerRows._enable_intent_journal_for_windows(patch)
+    TestBridgeIntegrationLedgerRows._enable_test_lock(patch)
+    patch.setattr(bridge, "STATE_DIR", state_dir)
+    patch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+    patch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+    patch.setattr(bridge, "_make_provider", lambda _config: object())
+    patch.setattr(bridge.llm_proposer, "maybe_propose", lambda *_a, **_k: None)
+    release_root = base / "release"
+    patch.setattr(bridge, "RELEASE_ROOT", release_root)
+    raw = json.loads((state_dir / "subagent_bridge" / "phase_checkpoint.json").read_text())
+    owner_id = raw["owner_id"]
+    integrate = bridge._integrate_cycle_to_main
+
+    def _count_integration(*args, **kwargs):
+        result = integrate(*args, **kwargs)
+        with integrations.open("a", encoding="utf-8") as handle:
+            handle.write("integrated\n")
+        return result
+
+    patch.setattr(bridge, "_integrate_cycle_to_main", _count_integration)
+    planner_calls = []
+
+    async def _no_plan(**_kwargs):
+        planner_calls.append("called")
+        return {"ran": True, "iterations_used": 1, "iterations_planned": None,
+                "tampered_files": [], "plan": None, "terminal_outcome": "no_plan"}
+
+    patch.setattr(bridge, "_run_planning_session", _no_plan)
+    assert asyncio.run(bridge.main()) == 0
+    assert integrations.read_text(encoding="utf-8").splitlines() == ["integrated"]
+    assert pushes.read_text(encoding="utf-8").splitlines() == ["pushed"]
+    assert planner_calls == ["called"]
+    checkpoint = phase_checkpoint.load_checkpoint(state_dir, owner_id=owner_id)
+    assert checkpoint is not None and checkpoint.phase == "integration" and checkpoint.status == "complete"
+    main_sha = _run(repo, "rev-parse", "refs/remotes/origin/main").stdout.strip()
+    assert checkpoint.memos["integration_main_sha"] == main_sha
+    assert phase_checkpoint.verify_completed_phase(
+        state_dir, owner_id=owner_id, cycle_id=checkpoint.cycle_id, repo_root=repo,
+    ) == checkpoint
+    assert bridge._prepare_repository_for_cycle(repo, state_dir)["restored"] is True
+    assert integrations.read_text(encoding="utf-8").splitlines() == ["integrated"]
+    assert pushes.read_text(encoding="utf-8").splitlines() == ["pushed"]
+    snapshot = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+    assert snapshot is not None and snapshot.route_status == "closed" and snapshot.owner_id != owner_id
+    assert snapshot.no_execution_receipt is not None and snapshot.no_execution_receipt[1] == "no_plan"
+    phases = [row["phase"] for row in intent_journal.read_owner_records(state_dir, owner_id)
+              if row["event"] == "phase_consumed"]
+    assert phases == ["post_execution", "smoke_gate", "integration"]
+
+
 class TestBridgeIntegrationLedgerRows:
+    def test_selected_integration_receipt_recovery_across_process_restart(self, tmp_path):
+        import sys
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        _seed_bridge_request(state_dir, "req-restart", "cycle-restart")
+        script = (
+            "import runpy, sys; from pathlib import Path; "
+            "runpy.run_path('tests/test_cycle_ledger.py')['_checkpoint_restart_worker']("
+            "Path(sys.argv[1]), sys.argv[2])"
+        )
+        crashed = subprocess.run(
+            [sys.executable, "-c", script, str(state_dir), "crash"],
+            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
+        )
+        assert crashed.returncode == 93, crashed.stderr
+        checkpoint = json.loads(
+            (state_dir / "subagent_bridge" / "phase_checkpoint.json").read_text(encoding="utf-8"),
+        )
+        assert checkpoint["phase"] == "integration" and checkpoint["status"] == "complete"
+        assert checkpoint["memos"]["smoke_gate_receipt"] == {
+            "passed": True, "tested_head": checkpoint["head_sha"],
+        }
+        assert checkpoint["memos"]["integration_main_sha"]
+        restarted = subprocess.run(
+            [sys.executable, "-c", script, str(state_dir), "restart"],
+            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
+        )
+        assert restarted.returncode == 0, restarted.stderr
+        assert "no plan produced this cycle" in restarted.stdout
+        assert "integrate:" not in restarted.stdout
+
     @staticmethod
     def _run_under_test_lock(monkeypatch):
         TestBridgeIntegrationLedgerRows._enable_test_lock(monkeypatch)
@@ -875,8 +1020,8 @@ class TestBridgeIntegrationLedgerRows:
         assert checkpoint is not None and checkpoint.status == "running"
 
     def test_persisted_rest_precheck_blocks_until_deadline_across_restart(self, tmp_path, monkeypatch):
-        from datetime import datetime, timedelta, timezone
         import sys
+        from datetime import datetime, timedelta, timezone
 
         from nanobot.runtime import planner_rest
 
