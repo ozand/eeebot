@@ -1187,7 +1187,10 @@ def _integrate_cycle_to_main(
         }
 
     main_sha_after = _sp_int.run(git + ['rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
-    return {'ok': True, 'main_sha_after': main_sha_after, 'reason': None, 'push_attempts': push_attempts}
+    return {
+        'ok': True, 'main_sha_after': main_sha_after, 'reason': None,
+        'push_attempts': push_attempts, 'push_confirmed': True,
+    }
 
 
 def _detect_out_of_band_main(repo_root: 'Path', main_sha_before: str) -> str:
@@ -3325,6 +3328,168 @@ def _parse_planner_final_response(raw_result: str) -> tuple[dict[str, Any] | Non
     return parsed, "fenced", "prose_prefix" if prefix.strip() else None, None
 
 
+def _begin_bridge_cycle_parent(state_dir: 'Path') -> str:
+    """Close only a reader- and checkpoint-verified prior owner, then open fresh."""
+    from nanobot.runtime import intent_journal
+
+    snapshot = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+    if snapshot is not None and snapshot.route_status == "active":
+        if snapshot.parent_status != "active" or snapshot.parent_consumed:
+            raise intent_journal.JournalCorruptError("active bridge-cycle route has inconsistent parent state")
+        if snapshot.active_operation_id is not None or snapshot.has_unresolved_attempts:
+            raise intent_journal.JournalUnavailableError(
+                "bridge-cycle owner has unresolved operation attempts; holding before dispatch",
+            )
+        if snapshot.has_attempt_evidence:
+            raise intent_journal.JournalUnavailableError(
+                "bridge-cycle operation history requires its owner-specific recovery contract",
+            )
+        if snapshot.no_execution_receipt is not None:
+            cycle_id, outcome = snapshot.no_execution_receipt
+            if not snapshot.parent_started:
+                raise intent_journal.JournalCorruptError("no-execution receipt belongs to an unstarted parent")
+            if not intent_journal.close_route_parent(
+                state_dir, "bridge.cycle", snapshot.owner_id,
+                no_execution_cycle_id=cycle_id, no_execution_outcome=outcome,
+            ):
+                raise intent_journal.JournalUnavailableError("no-execution parent close could not be verified")
+        elif snapshot.phase_receipts or snapshot.parent_started:
+            _recover_completed_bridge_phase_prefix(state_dir, snapshot)
+
+        closed = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+        if closed is None or closed.owner_id != snapshot.owner_id or closed.route_status != "closed":
+            raise intent_journal.JournalUnavailableError("prior bridge-cycle owner closure readback failed")
+
+    with intent_journal.bridge_cycle_parent_context(state_dir) as owner_id:
+        return owner_id
+
+
+def _recover_completed_bridge_phase_prefix(state_dir: 'Path', snapshot) -> None:
+    """Reconcile a completed checkpoint prefix; never infer task settlement or retry."""
+    from nanobot.runtime import intent_journal, phase_checkpoint
+
+    try:
+        if not snapshot.parent_started or snapshot.no_execution_receipt is not None:
+            raise intent_journal.JournalCorruptError("bridge-cycle phase recovery lifecycle is inconsistent")
+        if snapshot.active_operation_id is not None or snapshot.has_attempt_evidence or snapshot.has_unresolved_attempts:
+            raise intent_journal.JournalUnavailableError("bridge-cycle phase recovery has attempt evidence")
+        checkpoint = phase_checkpoint.verify_completed_phase(
+            state_dir, owner_id=snapshot.owner_id,
+            cycle_id=(snapshot.phase_receipts[-1][0] if snapshot.phase_receipts else _checkpoint_cycle_id(state_dir, snapshot.owner_id)),
+            repo_root=Path(state_dir).parent / 'eeebot-self-evolving',
+        )
+        phases = ("post_execution", "smoke_gate", "integration")
+        if checkpoint.phase != "integration":
+            raise intent_journal.JournalUnavailableError(
+                "selected bridge phase prefix is incomplete; hold same owner without new dispatch",
+            )
+        if checkpoint.phase not in phases:
+            raise intent_journal.JournalUnavailableError("reflection or unknown phase is not bridge-cycle recoverable")
+        cycle_receipts = [item for item in snapshot.phase_receipts if item[0] == checkpoint.cycle_id]
+        if len(cycle_receipts) != len(snapshot.phase_receipts):
+            raise intent_journal.JournalUnavailableError("bridge-cycle owner contains receipts for a different cycle")
+        observed_phases = [phase for _cycle, phase, _head in cycle_receipts]
+        expected_previous = list(phases[:phases.index(checkpoint.phase)])
+        if observed_phases not in (expected_previous, expected_previous + [checkpoint.phase]):
+            raise intent_journal.JournalUnavailableError("bridge-cycle receipts do not match a completed phase prefix")
+        phase_heads = {phase: head for _cycle, phase, head in cycle_receipts}
+        if checkpoint.phase in phase_heads:
+            if phase_heads[checkpoint.phase] != checkpoint.head_sha:
+                raise intent_journal.JournalUnavailableError("checkpoint head differs from its consumed phase receipt")
+        else:
+            intent_journal.consume_bridge_cycle_phase(
+                state_dir, snapshot.owner_id, cycle_id=checkpoint.cycle_id,
+                phase=checkpoint.phase, checkpoint_head_sha=checkpoint.head_sha,
+                checkpoint_status="complete",
+            )
+            phase_heads[checkpoint.phase] = checkpoint.head_sha
+        if not intent_journal.close_route_parent(
+            state_dir, "bridge.cycle", snapshot.owner_id, cycle_id=checkpoint.cycle_id,
+            required_phase_heads={phase: phase_heads[phase] for phase in phases if phase in phase_heads},
+        ):
+            raise intent_journal.JournalUnavailableError("verified bridge-cycle phase prefix close failed")
+    except phase_checkpoint.CheckpointError as exc:
+        raise intent_journal.JournalUnavailableError(
+            f"bridge-cycle checkpoint recovery remains held ({type(exc).__name__})",
+        ) from exc
+
+
+def _checkpoint_cycle_id(state_dir: 'Path', owner_id: str) -> str:
+    from nanobot.runtime import phase_checkpoint
+
+    checkpoint = phase_checkpoint.load_checkpoint(state_dir, owner_id=owner_id)
+    if checkpoint is None:
+        raise phase_checkpoint.CheckpointHeldError("bridge-cycle checkpoint is missing")
+    return checkpoint.cycle_id
+
+
+def _close_bridge_no_execution(
+    state_dir: 'Path', owner_id: str, cycle_id: str, outcome: str,
+) -> None:
+    """Record and close one explicit, normal bridge terminal with no execution."""
+    from nanobot.runtime import intent_journal
+
+    intent_journal.consume_bridge_cycle_no_execution(
+        state_dir, owner_id, cycle_id=cycle_id, outcome=outcome,
+    )
+    if not intent_journal.close_route_parent(
+        state_dir, "bridge.cycle", owner_id,
+        no_execution_cycle_id=cycle_id, no_execution_outcome=outcome,
+    ):
+        raise intent_journal.JournalUnavailableError(
+            "bridge no-execution parent close was not verified",
+        )
+
+
+def _begin_bridge_checkpoint_phase(
+    state_dir: 'Path', owner_id: str, *, cycle_id: str, branch: str,
+    base_sha: str, head_sha: str, phase: str, repo_root: 'Path',
+) -> None:
+    from nanobot.runtime import phase_checkpoint
+
+    phase_checkpoint.begin_phase(
+        state_dir, owner_id=owner_id, cycle_id=cycle_id, branch=branch,
+        base_sha=base_sha, head_sha=head_sha, phase=phase, repo_root=repo_root,
+    )
+
+
+def _complete_bridge_checkpoint_phase(
+    state_dir: 'Path', owner_id: str, *, cycle_id: str, branch: str,
+    base_sha: str, head_sha: str, phase: str, repo_root: 'Path',
+    smoke_gate_result: dict | None = None,
+    integration_receipt: dict | None = None,
+) -> str:
+    from nanobot.runtime import intent_journal, phase_checkpoint
+
+    completed = phase_checkpoint.complete_phase(
+        state_dir, owner_id=owner_id, cycle_id=cycle_id, branch=branch,
+        base_sha=base_sha, head_sha=head_sha, phase=phase, repo_root=repo_root,
+        smoke_gate_result=smoke_gate_result, integration_receipt=integration_receipt,
+    )
+    if completed.status != 'complete':
+        raise phase_checkpoint.CheckpointHeldError("phase completion readback is not complete")
+    intent_journal.consume_bridge_cycle_phase(
+        state_dir, owner_id, cycle_id=cycle_id, phase=phase,
+        checkpoint_head_sha=completed.head_sha, checkpoint_status='complete',
+    )
+    return completed.head_sha
+
+
+def _close_bridge_phase_prefix(
+    state_dir: 'Path', owner_id: str, cycle_id: str,
+    phase_heads: dict[str, str],
+) -> None:
+    from nanobot.runtime import intent_journal
+
+    if not intent_journal.close_route_parent(
+        state_dir, 'bridge.cycle', owner_id, cycle_id=cycle_id,
+        required_phase_heads=phase_heads,
+    ):
+        raise intent_journal.JournalUnavailableError(
+            "bridge-cycle selected phase prefix close was not verified",
+        )
+
+
 async def _run_planning_session(
     *, provider, bus, config, model: str, state_dir: 'Path', selfevo_repo: 'Path',
     denied_paths: set, cycle_id: str, wall_deadline: float | None = None,
@@ -3406,7 +3571,10 @@ async def _run_planning_session_inner(
         )
         planner_rest.record_held_tick(state_dir, cycle_id)
         print(f'planning-session: rest_unchanged ({_rest_reason})')
-        return {'ran': False, 'iterations_used': None, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
+        return {
+            'ran': False, 'iterations_used': None, 'iterations_planned': None,
+            'tampered_files': [], 'plan': None, 'terminal_outcome': 'rest_unchanged',
+        }
 
     _task_writing_read = False
     _task_writing_source = ""
@@ -3798,7 +3966,10 @@ async def _run_planning_session_inner(
         no_plan_recovery.record_outcome(state_dir, cycle_id, 'no_plan')
         planner_rest.record_non_rest_outcome(state_dir, cycle_id, 'no_plan')
         print(f'planning-session: no_plan ({reason})')
-        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
+        return {
+            'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None,
+            'tampered_files': [], 'plan': None, 'terminal_outcome': 'no_plan',
+        }
     # #1903/#1925: keep the role's no-wrapping instruction, but accept one
     # terminal fenced object as a recorded format violation (never extract a
     # JSON example from reasoning prose).
@@ -3900,7 +4071,10 @@ async def _run_planning_session_inner(
         # families -- only planner_rest.record_rest tracks its own streak.
         planner_rest.record_rest(state_dir, cycle_id, _wake_condition, _deadline, selfevo_repo)
         print(f'planning-session: rest (waiting for {_wake_condition.kind}:{_wake_condition.ref} until {_deadline})')
-        return {'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None, 'tampered_files': [], 'plan': None}
+        return {
+            'ran': True, 'iterations_used': iterations_used, 'iterations_planned': None,
+            'tampered_files': [], 'plan': None, 'terminal_outcome': 'rest',
+        }
 
     # D11 (#1903 planning-cost measurement, architect resolution
     # 2026-09-26): `keep` + `plan_action: confirm` (the default whenever
@@ -4439,6 +4613,20 @@ async def _main_impl_body():
             iterations_used=None, iterations_planned=None, reason=_precheck_reason,
         )
         _planner_rest_toplevel.record_held_tick(STATE_DIR, '')
+        from nanobot.runtime import intent_journal as _bridge_intent_journal
+        try:
+            _bridge_cycle_owner_id = _begin_bridge_cycle_parent(STATE_DIR)
+        except _bridge_intent_journal.JournalUnavailableError as exc:
+            append_event(STATE_DIR, {
+                'phase': 'bridge_cycle_intent_held', 'cycle_id': _planning_cycle_id,
+                'reason': type(exc).__name__,
+            })
+            print(f'bridge: rest terminal held ({type(exc).__name__})')
+            return 0
+        _close_bridge_no_execution(
+            STATE_DIR, _bridge_cycle_owner_id, _planning_cycle_id,
+            'rest_unchanged',
+        )
         print(f'bridge: rest pre-check held ({_precheck_reason}); no session, no repository preparation')
         return 0
 
@@ -4488,6 +4676,21 @@ async def _main_impl_body():
         })
         return 0
 
+    # Start the bridge-cycle parent after existing preflight holds but before
+    # proposer/planner activity. Started-empty owner recovery remains held until
+    # the reviewed lifecycle reader and exact-revision checks are available.
+    from nanobot.runtime import intent_journal as _bridge_intent_journal
+    try:
+        _bridge_cycle_owner_id = _begin_bridge_cycle_parent(STATE_DIR)
+    except _bridge_intent_journal.JournalUnavailableError as exc:
+        append_event(STATE_DIR, {
+            'phase': 'bridge_cycle_intent_held', 'cycle_id': _planning_cycle_id,
+            'reason': type(exc).__name__,
+        })
+        print(f'bridge: cycle owner held ({type(exc).__name__}); aborting before proposer')
+        return 0
+    _bridge_cycle_phase_heads: dict[str, str] = {}
+
     # ADR-035 rest amendment's drain rule (#1942): every queued proposer
     # request is marked superseded so the old rotation path below never
     # executes it -- its candidate keeps reaching the planner regardless,
@@ -4522,9 +4725,6 @@ async def _main_impl_body():
     # 2026-09-26): the stale-attempt recovery check (D2) that used to
     # live here has MOVED to before both pre-checks above -- see the
     # comment there for why. `_planning_cycle_id` moved with it.
-    provider = _make_provider(config)
-    bus = MessageBus()
-
     # D9 (ADR-035 Test Contract, external review finding #9): a `stopped`
     # no_plan_recovery state blocks session start until the operator
     # resumes manually (no_plan_recovery.resume) -- recording the state
@@ -4545,6 +4745,8 @@ async def _main_impl_body():
     except Exception:
         pass
 
+    provider = _make_provider(config)
+    bus = MessageBus()
     _planner_model = resolve_model('executor', config_fallback=config.tools.subagent.model)
     _planning_denied_paths = {(STATE_DIR / rel).resolve() for rel in _FITNESS_SIDECARS}
     try:
@@ -4564,6 +4766,12 @@ async def _main_impl_body():
 
     _plan = _planning_result.get('plan')
     if not _plan:
+        _terminal_outcome = _planning_result.get('terminal_outcome')
+        if _terminal_outcome in {'no_plan', 'rest', 'rest_unchanged'}:
+            _close_bridge_no_execution(
+                STATE_DIR, _bridge_cycle_owner_id, _planning_cycle_id,
+                _terminal_outcome,
+            )
         # Rule 1: "no plan is a recorded outcome, never an assignment" -- no
         # fallback lane, no rotation pickup. _run_planning_session already
         # journalled why (no_plan/malformed/refused/rest/rest_unchanged).
@@ -5172,6 +5380,19 @@ async def _main_impl_body():
         # #721: pre-cycle tag at main_sha_before, right after cycle-branch setup
         # succeeds — the pre half of the pre/post bracket (see _tag_cycle_pre).
         _tag_cycle_pre(_selfevo_repo, _cycle_id, main_sha_before)
+        from nanobot.runtime import phase_checkpoint as _phase_checkpoint
+        _bridge_checkpoint_enabled = bool(do_integration)
+        if _bridge_checkpoint_enabled:
+            try:
+                _begin_bridge_checkpoint_phase(
+                    STATE_DIR, _bridge_cycle_owner_id, cycle_id=_cycle_id,
+                    branch=cycle_branch, base_sha=main_sha_before,
+                    head_sha=main_sha_before, phase='post_execution',
+                    repo_root=_selfevo_repo,
+                )
+            except _phase_checkpoint.CheckpointError as exc:
+                print(f'bridge: post-execution checkpoint held ({type(exc).__name__}); no executor spawned')
+                return {'status': 0}
 
         # D2 (ADR-035 Test Contract, #1942 B2): register the in-flight
         # attempt BEFORE the executor can be killed -- cycle-branch setup
@@ -5930,6 +6151,19 @@ async def _main_impl_body():
                 _tag_cycle_post(_selfevo_repo, _cycle_id, 'failed', main_sha_before)
                 return {'status': 0}
 
+            if _bridge_checkpoint_enabled and _executor_status == 'ok':
+                _post_execution_head = _current_tip_sha(_selfevo_repo)
+                _bridge_cycle_phase_heads['post_execution'] = _complete_bridge_checkpoint_phase(
+                    STATE_DIR, _bridge_cycle_owner_id, cycle_id=_cycle_id,
+                    branch=cycle_branch, base_sha=main_sha_before,
+                    head_sha=main_sha_before, phase='post_execution',
+                    repo_root=_selfevo_repo,
+                )
+                if _bridge_cycle_phase_heads['post_execution'] != _post_execution_head:
+                    raise _phase_checkpoint.CheckpointHeldError(
+                        "post-execution receipt head differs from the current cycle branch",
+                    )
+
             # ── Closed-loop repair cycle (issue #526) ────────────────────────────
             # After the first commit, run smoke tests. If they fail, spawn a repair
             # subagent with the traceback injected, retrying up to the revision cap.
@@ -6357,6 +6591,22 @@ async def _main_impl_body():
                         },
                     )
 
+            if _bridge_checkpoint_enabled and _smoke_ran and _smoke_passed:
+                _smoke_head = _current_tip_sha(_selfevo_repo)
+                _begin_bridge_checkpoint_phase(
+                    STATE_DIR, _bridge_cycle_owner_id, cycle_id=_cycle_id,
+                    branch=cycle_branch, base_sha=main_sha_before,
+                    head_sha=_smoke_head, phase='smoke_gate',
+                    repo_root=_selfevo_repo,
+                )
+                _bridge_cycle_phase_heads['smoke_gate'] = _complete_bridge_checkpoint_phase(
+                    STATE_DIR, _bridge_cycle_owner_id, cycle_id=_cycle_id,
+                    branch=cycle_branch, base_sha=main_sha_before,
+                    head_sha=_smoke_head, phase='smoke_gate',
+                    repo_root=_selfevo_repo,
+                    smoke_gate_result={'passed': True, 'tested_head': _smoke_head},
+                )
+
             # ── #1456: in-flight prevented writes to fitness sidecars ───────────
             _prevented_attempts = list(getattr(mgr, "prevented_access_attempts", []))
             if "_repair_mgr" in locals():
@@ -6699,6 +6949,12 @@ async def _main_impl_body():
                             # switched line) — see _integrate_cycle_to_main's
                             # docstring for why this is the correct lease value.
                             if do_integration:
+                                _begin_bridge_checkpoint_phase(
+                                    STATE_DIR, _bridge_cycle_owner_id, cycle_id=_cycle_id,
+                                    branch=cycle_branch, base_sha=main_sha_before,
+                                    head_sha=_bridge_cycle_phase_heads['smoke_gate'],
+                                    phase='integration', repo_root=_selfevo_repo,
+                                )
                                 _integ = _integrate_cycle_to_main(
                                     _selfevo_repo, cycle_branch, main_sha_before,
                                     expected_origin_main=_origin_main_observed,
@@ -6719,6 +6975,18 @@ async def _main_impl_body():
                                             if _nums: cand_score = float(_nums[-1])
                                     except Exception: pass
                             if _integ['ok']:
+                                if _bridge_checkpoint_enabled:
+                                    _bridge_cycle_phase_heads['integration'] = _complete_bridge_checkpoint_phase(
+                                        STATE_DIR, _bridge_cycle_owner_id,
+                                        cycle_id=_cycle_id, branch=cycle_branch,
+                                        base_sha=main_sha_before,
+                                        head_sha=_bridge_cycle_phase_heads['smoke_gate'],
+                                        phase='integration', repo_root=_selfevo_repo,
+                                        integration_receipt={
+                                            key: _integ[key]
+                                            for key in ('ok', 'push_confirmed', 'main_sha_after')
+                                        },
+                                    )
                                 _integrated = True
                                 from nanobot.runtime.service_paths import is_delivered as _is_delivered
                                 _delivered = _is_delivered(True, files_changed)
@@ -7020,6 +7288,9 @@ async def _main_impl_body():
             'handled_disposition': _handled_disposition,
             'prompt_fit_rung': locals().get('_prompt_fit_rung'),
             'origin_main_observed': locals().get('_origin_main_observed', locals().get('main_sha_before', '')),
+            'bridge_checkpoint_enabled': locals().get('_bridge_checkpoint_enabled', False),
+            'bridge_cycle_owner_id': _bridge_cycle_owner_id,
+            'bridge_cycle_phase_heads': dict(_bridge_cycle_phase_heads),
         }
 
 
@@ -7172,6 +7443,9 @@ async def _main_impl_body():
     if _res.get('status') == 0:
         return 0
 
+    _bridge_checkpoint_enabled = bool(_res.get('bridge_checkpoint_enabled'))
+    _bridge_cycle_owner_id = _res.get('bridge_cycle_owner_id')
+    _bridge_cycle_phase_heads = dict(_res.get('bridge_cycle_phase_heads') or {})
     _selfevo_repo = STATE_DIR.parent / 'eeebot-self-evolving'
     cycle_branch = _res['cycle_branch']
     main_sha_before = _res['main_sha_before']
@@ -7691,6 +7965,44 @@ async def _main_impl_body():
             append_event(STATE_DIR, _rec_evt)
         except Exception:
             pass
+
+    if _bridge_checkpoint_enabled:
+        try:
+            from nanobot.runtime import phase_checkpoint as _phase_checkpoint
+            _final_checkpoint = _phase_checkpoint.load_checkpoint(
+                STATE_DIR, owner_id=_bridge_cycle_owner_id,
+            )
+            if (
+                _final_checkpoint is not None
+                and _final_checkpoint.status == 'complete'
+                and _final_checkpoint.cycle_id == _cycle_id
+                and _bridge_cycle_phase_heads
+            ):
+                _close_bridge_phase_prefix(
+                    STATE_DIR, _bridge_cycle_owner_id, _cycle_id,
+                    _bridge_cycle_phase_heads,
+                )
+        except Exception as _checkpoint_close_exc:
+            print(f'bridge: selected phase prefix remains held ({type(_checkpoint_close_exc).__name__})')
+    elif _bridge_cycle_phase_heads:
+        try:
+            from nanobot.runtime import phase_checkpoint as _phase_checkpoint
+            _final_checkpoint = _phase_checkpoint.load_checkpoint(
+                STATE_DIR, owner_id=_bridge_cycle_owner_id,
+            )
+            if (
+                _final_checkpoint is not None
+                and _final_checkpoint.status == 'complete'
+                and _final_checkpoint.cycle_id == _cycle_id
+                and _final_checkpoint.phase in _bridge_cycle_phase_heads
+                and _bridge_cycle_phase_heads[_final_checkpoint.phase] == _final_checkpoint.head_sha
+            ):
+                _close_bridge_phase_prefix(
+                    STATE_DIR, _bridge_cycle_owner_id, _cycle_id,
+                    _bridge_cycle_phase_heads,
+                )
+        except Exception as _checkpoint_close_exc:
+            print(f'bridge: selected phase prefix remains held ({type(_checkpoint_close_exc).__name__})')
 
     if _rollback_reason == 'system_prompt_overflow':
         # #1300: same mechanism as #1280 below — the exit status carries the

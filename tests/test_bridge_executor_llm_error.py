@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 import pytest
 
 from nanobot import crash_record
-from nanobot.runtime import bridge, cycle_ledger
+from nanobot.runtime import bridge, cycle_ledger, intent_journal
 from tests.test_cycle_ledger import (
     _FakeSubagentManager,
     _init_selfevo_repo,
@@ -144,9 +144,28 @@ def _core_smoke_set_matches_fixture_repo(monkeypatch, tmp_path):
 
 
 def _wire(tmp_path, monkeypatch, manager_cls):
+    import os
+    import threading
+    from contextlib import contextmanager
+
     base = tmp_path
     state_dir = base / "state"
     state_dir.mkdir(exist_ok=True)
+    if os.name == "nt":
+        locks = {}
+        guard = threading.Lock()
+
+        @contextmanager
+        def _test_owner_lock(path):
+            key = str(path.resolve())
+            path.touch(exist_ok=True)
+            with guard:
+                lock = locks.setdefault(key, threading.Lock())
+            with lock:
+                yield
+
+        monkeypatch.setattr(intent_journal, "_owner_lock", _test_owner_lock)
+        monkeypatch.setattr(intent_journal, "_fsync_directory", lambda _path: None)
     _init_selfevo_repo(base)
     monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
     monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")

@@ -337,6 +337,211 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _reflection_result_state(state_dir: Path, cycle_id: str) -> str:
+    """Classify retained rows without treating a cycle ID or incomplete row as success."""
+    needle = cycle_id.encode("utf-8")
+    complete = 0
+    terminal_complete = False
+    terminal_skipped = False
+    for path in reflection_files(state_dir):
+        opener = gzip.open if path.name.endswith(".gz") else open
+        try:
+            with opener(path, "rb") as handle:
+                for raw_line in handle:
+                    # Journal writers always terminate each append with LF.
+                    # An unframed tail may be too torn to identify as this cycle,
+                    # so never treat it as absent evidence and dispatch again.
+                    if not raw_line.endswith(b"\n"):
+                        return "ambiguous"
+                    try:
+                        row = json.loads(raw_line.decode("utf-8"), object_pairs_hook=_strict_json_object)
+                    except Exception:
+                        # A malformed full line could be a torn record whose
+                        # cycle identity was not fully written. Do not infer
+                        # that it belongs to a different cycle.
+                        return "ambiguous"
+                    if type(row) is not dict:
+                        return "ambiguous"
+                    if "cycle_id" not in row:
+                        continue
+                    if type(row["cycle_id"]) is not str:
+                        return "ambiguous"
+                    if row["cycle_id"] != cycle_id:
+                        continue
+                    status = row.get("status")
+                    if status == "error" and _is_error_reflection_row(row, cycle_id):
+                        # A skipped cycle can later regain its transcript and
+                        # produce retry errors; only a later error after an
+                        # exact completed result conflicts with completion.
+                        if terminal_complete:
+                            return "ambiguous"
+                        continue
+                    if status == "skipped_pruned" and _is_skipped_reflection_row(row, cycle_id):
+                        if terminal_complete or terminal_skipped:
+                            return "ambiguous"
+                        terminal_skipped = True
+                        continue
+                    if status not in (None, "consumed") or not _is_complete_reflection_row(row, cycle_id):
+                        return "ambiguous"
+                    complete += 1
+                    terminal_complete = True
+                    if complete > 1:
+                        return "ambiguous"
+        except Exception:
+            return "ambiguous"
+    if complete == 1:
+        return "complete"
+    return "skipped" if terminal_skipped else "absent"
+
+
+def _valid_reflection_timestamp(value: Any) -> bool:
+    if type(value) is not str:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
+
+
+def _valid_input_fit(value: Any) -> bool:
+    if type(value) is not dict or set(value) != {"status", "transcript", "ledger", "journal"}:
+        return False
+    if value["status"] not in {"complete", "truncated"}:
+        return False
+    allowed = {
+        "budget", "total", "kept", "dropped", "chars", "dropped_chars",
+        "fields_omitted", "recorder_truncated", "recorder_truncated_chars",
+    }
+    any_truncated = False
+    for name in ("transcript", "ledger", "journal"):
+        fit = value[name]
+        if type(fit) is not dict or not {"budget", "total", "kept", "dropped", "chars"}.issubset(fit):
+            return False
+        if not set(fit).issubset(allowed):
+            return False
+        for key in ("budget", "total", "kept", "dropped", "chars"):
+            if type(fit[key]) is not int or fit[key] < 0:
+                return False
+        if fit["kept"] + fit["dropped"] != fit["total"]:
+            return False
+        if "dropped_chars" in fit and (type(fit["dropped_chars"]) is not int or fit["dropped_chars"] < 0):
+            return False
+        omitted = fit.get("fields_omitted", [])
+        if type(omitted) is not list or any(type(item) is not str for item in omitted):
+            return False
+        recorder_truncated = fit.get("recorder_truncated", False)
+        if type(recorder_truncated) is not bool:
+            return False
+        if "recorder_truncated_chars" in fit and (
+            type(fit["recorder_truncated_chars"]) is not int or fit["recorder_truncated_chars"] < 0
+        ):
+            return False
+        any_truncated = any_truncated or bool(
+            fit["dropped"] or omitted or recorder_truncated
+        )
+    return value["status"] == ("truncated" if any_truncated else "complete")
+
+
+def _is_complete_reflection_row(row: dict[str, Any], cycle_id: str) -> bool:
+    required = {
+        "cycle_id", "summary", "findings", "recommendations", "followed_previous",
+        "timestamp", "input_fit", "partial_view",
+    }
+    optional = {"mermaid", "parse_reason", "transcript_coverage", "status", "consumed_at"}
+    if not required.issubset(row) or not set(row).issubset(required | optional):
+        return False
+    if row["cycle_id"] != cycle_id or not _valid_reflection_timestamp(row["timestamp"]):
+        return False
+    if type(row["partial_view"]) is not bool or not _valid_input_fit(row["input_fit"]):
+        return False
+    if row.get("status") not in (None, "consumed"):
+        return False
+    if ("status" in row) != ("consumed_at" in row):
+        return False
+    if "consumed_at" in row and not _valid_reflection_timestamp(row["consumed_at"]):
+        return False
+    if "parse_reason" in row and row["parse_reason"] != "fenced_json":
+        return False
+    if "transcript_coverage" in row:
+        coverage = row["transcript_coverage"]
+        if type(coverage) not in {int, float} or not 0 <= coverage <= 1:
+            return False
+        if row["partial_view"] != (coverage < 1):
+            return False
+    elif row["partial_view"]:
+        return False
+    model_fields = {key: row[key] for key in (
+        "cycle_id", "summary", "findings", "recommendations", "followed_previous",
+    )}
+    normalized_recommendations = []
+    for recommendation in model_fields["recommendations"]:
+        if type(recommendation) is not dict:
+            return False
+        normalized = dict(recommendation)
+        has_status = "status" in normalized
+        has_consumed_at = "consumed_at" in normalized
+        consumed = normalized.pop("status", None)
+        consumed_at = normalized.pop("consumed_at", None)
+        if consumed not in (None, "consumed"):
+            return False
+        if has_status != has_consumed_at:
+            return False
+        if (consumed == "consumed") != (consumed_at is not None):
+            return False
+        if consumed_at is not None and not _valid_reflection_timestamp(consumed_at):
+            return False
+        normalized_recommendations.append(normalized)
+    model_fields["recommendations"] = normalized_recommendations
+    if "mermaid" in row:
+        model_fields["mermaid"] = row["mermaid"]
+    parsed, _reason = _parse_output(model_fields, cycle_id)
+    if parsed is None:
+        return False
+    return all(parsed.get(key) == model_fields.get(key) for key in model_fields)
+
+
+def _is_error_reflection_row(row: dict[str, Any], cycle_id: str) -> bool:
+    required = {
+        "cycle_id", "timestamp", "summary", "findings", "recommendations",
+        "followed_previous", "status", "error", "response_head", "parse_reason",
+        "response_chars", "response_tail",
+    }
+    allowed = required | {"input_fit"}
+    return (
+        set(row).issubset(allowed) and required.issubset(row)
+        and row["cycle_id"] == cycle_id and row["status"] == "error"
+        and _valid_reflection_timestamp(row["timestamp"])
+        and all(type(row[key]) is str for key in ("summary", "error", "response_head", "parse_reason", "response_tail"))
+        and row["findings"] == [] and row["recommendations"] == []
+        and type(row["followed_previous"]) is list
+        and type(row["response_chars"]) is int and row["response_chars"] >= 0
+        and ("input_fit" not in row or _valid_input_fit(row["input_fit"]))
+    )
+
+
+def _is_skipped_reflection_row(row: dict[str, Any], cycle_id: str) -> bool:
+    return (
+        set(row) == {
+            "cycle_id", "timestamp", "summary", "findings", "recommendations",
+            "followed_previous", "status",
+        }
+        and row["cycle_id"] == cycle_id and row["status"] == "skipped_pruned"
+        and _valid_reflection_timestamp(row["timestamp"])
+        and type(row["summary"]) is str and row["findings"] == []
+        and row["recommendations"] == [] and row["followed_previous"] == []
+    )
+
+
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate reflection journal key")
+        result[key] = value
+    return result
+
+
 def _fit_rows(rows: list[Any], max_chars: int, *, protect_head: int = 0) -> tuple[list[Any], dict[str, Any]]:
     """Drop whole rows, oldest first after ``protect_head`` leading rows, until the list fits (#1314).
 
@@ -651,11 +856,28 @@ def run_reflector(
     if reanchor:
         candidates = _completed_cycles(active_rows, "")[:max(1, int(max_cycles))]
     else:
-        candidates = _completed_cycles(rows, watermark if watermark in known_watermarks else "")[:max(1, int(max_cycles))]
+        all_after_cursor = _completed_cycles(rows, watermark if watermark in known_watermarks else "")
+        candidates = all_after_cursor[:max(1, int(max_cycles))]
+        if watermark in known_watermarks:
+            # A retryable error or skip whose transcript has returned may be
+            # the cursor cycle itself: inspect it before selecting later work.
+            cursor_row = next((row for row in outcomes if str(row.get("cycle_id")) == watermark), None)
+            cursor_result = _reflection_result_state(state_dir, watermark)
+            if cursor_result == "ambiguous":
+                result = {
+                    "candidates": 0, "processed": 0, "skipped_pruned": 0,
+                    "errors": 1, "consecutive_errors": 0, "input_truncated": 0,
+                    "status": "held_ambiguous_result",
+                }
+                return result
+            if (
+                cursor_row is not None and cursor_result == "skipped"
+                and _prompt_records(state_dir, [cursor_row], deadline=deadline).get(watermark)
+            ):
+                candidates = [cursor_row, *candidates][:max(1, int(max_cycles))]
     if reanchor:
         reanchor["replacement"] = str(candidates[0].get("cycle_id") or "") if candidates else ""
         reanchor["cycles_covered"] = len(candidates)
-        _append_reanchor(state_dir, {"status": "cursor_aged_out", **reanchor})
     result = {
         "candidates": len(candidates),
         "processed": 0,
@@ -664,23 +886,10 @@ def run_reflector(
         "consecutive_errors": 0,
         "input_truncated": 0,
     }
-    skipped_ids = {
-        str(row.get("cycle_id") or "")
-        for row in iter_reflection_rows(state_dir, (b"skipped_pruned",))
-        if row.get("status") == "skipped_pruned"
-    }
-    # A previously skipped cycle is eligible again when its retained plain or
-    # gzip transcript is now discoverable; only keep the skip terminal when no
-    # transcript exists in either archive form.
     result["candidates"] = len(candidates)
     if reanchor:
         result["reanchor"] = reanchor
     prompts = _prompt_records(state_dir, candidates, deadline=deadline)
-    candidates = [
-        row for row in candidates
-        if str(row.get("cycle_id") or "") not in skipped_ids
-        or str(row.get("cycle_id") or "") in prompts
-    ]
     result["candidates"] = len(candidates)
     # One owner window spans the prompts dispatched during this job; the
     # telemetry cycle_id remains each reflected cycle, not this opaque owner.
@@ -688,15 +897,54 @@ def run_reflector(
 
     provenance_owner = f"reflector-job:{uuid4().hex}"
     proposed = {str(row.get("cycle_id")): row for row in rows if row.get("phase") == "proposed"}
+    reanchor_recorded = False
     consecutive_errs = 0
     for outcome in candidates:
         if time.monotonic() >= deadline and result["processed"] > 0:
             break
         cycle_id = str(outcome["cycle_id"])
+        prior_result = _reflection_result_state(state_dir, cycle_id)
+        if prior_result == "ambiguous":
+            result["errors"] += 1
+            result["consecutive_errors"] = consecutive_errs
+            result["status"] = "held_ambiguous_result"
+            break
+        if reanchor and not reanchor_recorded:
+            _append_reanchor(state_dir, {"status": "cursor_aged_out", **reanchor})
+            reanchor_recorded = True
         transcript = prompts.get(cycle_id)
+        if prior_result == "skipped" and transcript:
+            # Preserve the existing retry-if-transcript-returns behavior.
+            prior_result = "absent"
+        if prior_result in {"complete", "skipped"}:
+            try:
+                _save_watermark(state_dir, cycle_id)
+            except Exception:
+                result["errors"] += 1
+                result["consecutive_errors"] = consecutive_errs
+                result["status"] = "cursor_reconcile_failed"
+                break
+            if reanchor:
+                reanchor = None
+            if prior_result == "complete":
+                result["processed"] += 1
+            else:
+                result["skipped_pruned"] += 1
+            consecutive_errs = 0
+            continue
         if not transcript:
-            _append_journal(state_dir, {"cycle_id": cycle_id, "timestamp": _now(), "summary": "Transcript already pruned; cycle skipped.", "findings": [], "recommendations": [], "followed_previous": [], "status": "skipped_pruned"})
-            _save_watermark(state_dir, cycle_id)
+            if not _append_journal(state_dir, {"cycle_id": cycle_id, "timestamp": _now(), "summary": "Transcript already pruned; cycle skipped.", "findings": [], "recommendations": [], "followed_previous": [], "status": "skipped_pruned"}):
+                result["errors"] += 1
+                result["consecutive_errors"] = consecutive_errs
+                result["status"] = "skip_journal_append_failed"
+                break
+            try:
+                _save_watermark(state_dir, cycle_id)
+            except Exception:
+                result["errors"] += 1
+                result["consecutive_errors"] = consecutive_errs
+                result["status"] = "cursor_reconcile_failed"
+                break
             result["skipped_pruned"] += 1
             consecutive_errs = 0
             continue
@@ -737,15 +985,26 @@ def run_reflector(
                     transcript_coverage = round(kept_c / total_denom, 4)
             partial_view: bool = bool(transcript_coverage is not None and transcript_coverage < 1.0)
 
-            _append_journal(state_dir, {
+            result_row = {
                 **parsed,
                 "timestamp": _now(),
                 **({"parse_reason": parse_reason} if parse_reason != "ok" else {}),
                 "input_fit": input_fit,
                 **({"transcript_coverage": transcript_coverage} if transcript_coverage is not None else {}),
                 "partial_view": partial_view,
-            })
-            _save_watermark(state_dir, cycle_id)
+            }
+            if not _append_journal(state_dir, result_row):
+                result["errors"] += 1
+                result["consecutive_errors"] = consecutive_errs + 1
+                result["status"] = "result_journal_append_failed"
+                break
+            try:
+                _save_watermark(state_dir, cycle_id)
+            except Exception:
+                result["errors"] += 1
+                result["consecutive_errors"] = consecutive_errs
+                result["status"] = "cursor_reconcile_failed"
+                break
             if reanchor:
                 reanchor = None
             result["processed"] += 1

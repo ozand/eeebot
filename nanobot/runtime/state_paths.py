@@ -178,7 +178,10 @@ STATE_PATH_WRITERS: dict[str, tuple[str, ...]] = {
         "nanobot.runtime.strategist:save_watermark",
         "nanobot.runtime.strategist:_record_decision",
     ),
-    "subagent_bridge": ("nanobot.runtime.bridge:_main_impl_body",),  # handled_<id>.txt markers
+    "subagent_bridge": (
+        "nanobot.runtime.bridge:_main_impl_body",  # handled_<id>.txt markers
+        "nanobot.runtime.phase_checkpoint:_write_checkpoint",
+    ),
     "subagents": (
         "nanobot.runtime.llm_proposer:write_request",
         "nanobot.runtime.bridge:_write_bridge_completed_result",
