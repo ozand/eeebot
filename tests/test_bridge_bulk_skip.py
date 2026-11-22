@@ -44,6 +44,8 @@ class TestSingleCandidatePerCycle:
         monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
         monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
         monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        from tests.test_cycle_ledger import TestBridgeIntegrationLedgerRows
+        TestBridgeIntegrationLedgerRows._enable_intent_journal_for_windows(monkeypatch)
         (state_dir / "goals").mkdir(parents=True, exist_ok=True)
         (state_dir / "goals" / "goal_text.json").write_text(
             '{"schema_version": "goal-text-v1", "goal_id": "goal-1", "text": "test goal"}',
@@ -91,6 +93,12 @@ class TestSingleCandidatePerCycle:
         monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "target_workspace")
         monkeypatch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
         monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        import os
+
+        from tests.test_cycle_ledger import TestBridgeIntegrationLedgerRows
+        TestBridgeIntegrationLedgerRows._enable_intent_journal_for_windows(monkeypatch)
+        if os.name == "nt":
+            TestBridgeIntegrationLedgerRows._enable_test_lock(monkeypatch)
         (state_dir / "goals").mkdir()
         (state_dir / "goals" / "goal_text.json").write_text(
             '{"schema_version":"goal-text-v1","goal_id":"goal-1","text":"test goal"}',
@@ -105,14 +113,21 @@ class TestSingleCandidatePerCycle:
             return {'ran': True, 'plan': None, 'iterations_used': 0, 'iterations_planned': 0,
                     'tampered_files': [], 'outcome': 'no_plan'}
 
-        def _fail_admission(*_args, **_kwargs):
-            raise intent_journal.JournalUnavailableError("injected proposer admission failure")
+        provision_route_parent = intent_journal.provision_route_parent
+        admission_routes = []
+
+        def _fail_proposer_admission(state_root, route):
+            admission_routes.append(route)
+            if route == "proposer":
+                raise intent_journal.JournalUnavailableError("injected proposer admission failure")
+            return provision_route_parent(state_root, route)
 
         monkeypatch.setattr(bridge, "_run_planning_session", _fake_planning_session)
         monkeypatch.setattr(llm_proposer, "maybe_propose", lambda *a, **k: proposer_calls.append((a, k)))
-        monkeypatch.setattr(intent_journal, "provision_route_parent", _fail_admission)
+        monkeypatch.setattr(intent_journal, "provision_route_parent", _fail_proposer_admission)
 
-        assert asyncio.run(bridge._main_impl()) == 0
+        assert asyncio.run(bridge.main()) == 0
+        assert admission_routes == ["bridge.cycle", "proposer"]
         assert proposer_calls == []
         assert planner_calls == []
         rows = _read_ledger(state_dir)
