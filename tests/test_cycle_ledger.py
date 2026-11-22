@@ -1,5 +1,7 @@
 """Tests for cycle-ledger evidence and bounded bridge lifecycle integration.
 
+ADR-039: cycle-start rows persist a supplied exact retry key while preserving
+legacy row shape when callers omit it.
 Covers typed append/read helpers, bridge gate/outcome records, phase receipts,
 owner-scoped provider intent dispatch and restart hold behavior.
 """
