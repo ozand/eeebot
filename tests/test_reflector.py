@@ -278,6 +278,79 @@ print(json.dumps({"result": result, "watermark": reflector._load_watermark(state
     assert all(reflector._reflection_result_state(state, cycle) == "complete" for cycle in cycles)
 
 
+def test_reflector_consumed_parent_with_unconsumed_recommendation_holds(tmp_path: Path):
+    state = tmp_path / "state"
+    _seed(state, "c1")
+    assert reflector.run_reflector(state, llm=lambda *_: _answer("c1"))["processed"] == 1
+    journal = state / "reflector/reflections.jsonl"
+    row = json.loads(journal.read_text().splitlines()[0])
+    row["status"] = "consumed"
+    journal.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    _write(state / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+    ])
+    _write(state / "llm_calls/prompts/2026-08-26.jsonl", [
+        {"cycle_id": cycle, "seq": 1, "messages": [{"role": "assistant", "content": f"transcript {cycle}"}]}
+        for cycle in ("c1", "c2")
+    ])
+    calls = []
+    result = reflector.run_reflector(state, llm=lambda *_: calls.append("called"))
+    assert result["status"] == "held_ambiguous_result"
+    assert result["processed"] == 0
+    assert calls == []
+    assert reflector._load_watermark(state) == "c1"
+
+
+def test_reflector_consumed_last_recommendation_recovers_on_next_process(tmp_path: Path):
+    state = tmp_path / "state"
+    _seed(state, "c1")
+    first_calls = []
+    assert reflector.run_reflector(
+        state, llm=lambda *_: first_calls.append("c1") or _answer("c1"),
+    )["processed"] == 1
+    assert first_calls == ["c1"]
+    assert reflector.mark_reflection_consumed(
+        state, recommendation_detail="reuse helper", cycle_id="c1",
+    )
+    row = json.loads((state / "reflector/reflections.jsonl").read_text().splitlines()[0])
+    assert row["status"] == "consumed"
+    assert "consumed_at" not in row
+    assert row["recommendations"][0]["status"] == "consumed"
+    assert reflector._reflection_result_state(state, "c1") == "complete"
+
+    _write(state / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+    ])
+    _write(state / "llm_calls/prompts/2026-08-26.jsonl", [
+        {"cycle_id": cycle, "seq": 1, "messages": [{"role": "assistant", "content": f"transcript {cycle}"}]}
+        for cycle in ("c1", "c2")
+    ])
+    calls_path = tmp_path / "next-process-calls.jsonl"
+    code = '''
+import json, sys
+from pathlib import Path
+from nanobot.runtime import reflector
+state, calls_path = Path(sys.argv[1]), Path(sys.argv[2])
+def fake_llm(messages, model):
+    cycle = messages[1]["content"].split("CYCLE_ID: ", 1)[1].split("\\n", 1)[0]
+    with calls_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(cycle) + "\\n")
+    return {"cycle_id": cycle, "summary": "next", "findings": [], "recommendations": [], "followed_previous": []}
+result = reflector.run_reflector(state, llm=fake_llm)
+print(json.dumps({"result": result, "watermark": reflector._load_watermark(state)}))
+'''
+    resumed = subprocess.run(
+        [sys.executable, "-c", code, str(state), str(calls_path)],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=True,
+    )
+    summary = json.loads(resumed.stdout)
+    assert summary["result"]["processed"] == 1
+    assert summary["watermark"] == "c2"
+    assert [json.loads(line) for line in calls_path.read_text().splitlines()] == ["c2"]
+
+
 @pytest.mark.parametrize("evidence", ["truncated", "incomplete", "invalid_utf8", "bad_status", "torn_prefix"])
 def test_reflector_ambiguous_prior_result_holds_without_cursor_advance(tmp_path: Path, evidence: str):
     state = tmp_path / "state"
@@ -302,7 +375,7 @@ def test_reflector_ambiguous_prior_result_holds_without_cursor_advance(tmp_path:
     assert not (state / "reflector/watermark.json").exists()
 
 
-@pytest.mark.parametrize("evidence", ["duplicate", "conflicting", "truncated_after_complete", "complete_without_newline"])
+@pytest.mark.parametrize("evidence", ["duplicate", "conflicting", "truncated_after_complete", "complete_without_newline", "consumed_mixed"])
 def test_reflector_conflicting_complete_rows_hold_without_cursor_advance(tmp_path: Path, evidence: str):
     _seed(tmp_path)
     assert reflector.run_reflector(tmp_path, llm=lambda *_args: _answer())["processed"] == 1
@@ -318,6 +391,11 @@ def test_reflector_conflicting_complete_rows_hold_without_cursor_advance(tmp_pat
     elif evidence == "complete_without_newline":
         journal.write_bytes(json.dumps(complete).encode("utf-8"))
         extra = None
+    elif evidence == "consumed_mixed":
+        complete["recommendations"][0]["status"] = "consumed"
+        complete["recommendations"][0]["consumed_at"] = "2026-08-26T00:01:00Z"
+        complete["status"] = "consumed"
+        extra = json.dumps(complete)
     else:
         extra = '{"cycle_id":"c1","summary":'
     if extra is not None:

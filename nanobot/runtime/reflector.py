@@ -339,7 +339,6 @@ def _json(value: Any) -> str:
 
 def _reflection_result_state(state_dir: Path, cycle_id: str) -> str:
     """Classify retained rows without treating a cycle ID or incomplete row as success."""
-    needle = cycle_id.encode("utf-8")
     complete = 0
     terminal_complete = False
     terminal_skipped = False
@@ -457,7 +456,8 @@ def _is_complete_reflection_row(row: dict[str, Any], cycle_id: str) -> bool:
         return False
     if row.get("status") not in (None, "consumed"):
         return False
-    if ("status" in row) != ("consumed_at" in row):
+    consumed_without_timestamp = row.get("status") == "consumed" and "consumed_at" not in row
+    if ("status" in row) != ("consumed_at" in row) and not consumed_without_timestamp:
         return False
     if "consumed_at" in row and not _valid_reflection_timestamp(row["consumed_at"]):
         return False
@@ -475,6 +475,7 @@ def _is_complete_reflection_row(row: dict[str, Any], cycle_id: str) -> bool:
         "cycle_id", "summary", "findings", "recommendations", "followed_previous",
     )}
     normalized_recommendations = []
+    all_recommendations_consumed = bool(model_fields["recommendations"])
     for recommendation in model_fields["recommendations"]:
         if type(recommendation) is not dict:
             return False
@@ -491,7 +492,10 @@ def _is_complete_reflection_row(row: dict[str, Any], cycle_id: str) -> bool:
             return False
         if consumed_at is not None and not _valid_reflection_timestamp(consumed_at):
             return False
+        all_recommendations_consumed = all_recommendations_consumed and consumed == "consumed"
         normalized_recommendations.append(normalized)
+    if consumed_without_timestamp and not all_recommendations_consumed:
+        return False
     model_fields["recommendations"] = normalized_recommendations
     if "mermaid" in row:
         model_fields["mermaid"] = row["mermaid"]
