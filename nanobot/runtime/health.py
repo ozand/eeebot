@@ -62,6 +62,7 @@ def read_cycle_progress(
         state_root,
         since_ts=_format_ledger_timestamp(since_epoch) or "",
         phases=frozenset({"outcome"}),
+        now=datetime.fromtimestamp(reference, tz=timezone.utc),
     )
     is_capped = "cap_bytes" in window.notes or window.files_skipped > 0
     cycles_path = Path(state_root) / "ledger" / "cycles.jsonl"
