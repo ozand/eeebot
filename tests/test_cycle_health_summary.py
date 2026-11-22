@@ -313,7 +313,9 @@ def test_cycle_progress_no_success_is_distinct_and_interleaved_success_is_health
     _write_outcomes(no_success, [
         {"phase": "outcome", "cycle_id": "c1", "outcome": "failed", "reason": "x", "ts": "2026-09-06T10:00:00Z"},
     ])
-    fresh = read_cycle_progress(no_success, now=1788690000.0)
+    # The same reference instant must bound both progress and retention windows.
+    reference_now = 1788690000.0
+    fresh = read_cycle_progress(no_success, now=reference_now)
     assert fresh["state"] == "no_success_yet"
     assert fresh["alert"] is False
     assert fresh["hours_since_last_success"] is None
@@ -330,6 +332,55 @@ def test_cycle_progress_no_success_is_distinct_and_interleaved_success_is_health
     assert progress["alert"] is False
     assert progress["consecutive_non_integrating_cycles"] == 1
     assert progress["dominant_reason"] == "new"
+
+
+def test_cycle_progress_retention_uses_same_reference_time_and_preserves_partial_state(tmp_path: Path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from nanobot.runtime import state_access
+
+    state = tmp_path / "state"
+    _write_outcomes(state, [
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "failed", "reason": "x", "ts": "2026-09-06T10:00:00Z"},
+        {"phase": "outcome", "cycle_id": "c2", "outcome": "failed", "reason": "y", "ts": "2026-09-06T10:04:00Z"},
+    ])
+    reference_now = 1788690000.0
+    reference_dt = datetime.fromtimestamp(reference_now, tz=timezone.utc)
+    real_ledger_window = state_access.ledger_window
+    calls = []
+
+    def _recording_window(*args, **kwargs):
+        calls.append(kwargs.get("now"))
+        return real_ledger_window(*args, **kwargs)
+
+    monkeypatch.setattr("nanobot.runtime.health.ledger_window", _recording_window)
+    complete = read_cycle_progress(state, now=reference_now)
+    assert complete["state"] == "no_success_yet"
+    assert complete["window_status"] == "complete"
+    assert calls == [reference_dt]
+
+    first_line_bytes = len((json.dumps({
+        "phase": "outcome", "cycle_id": "c1", "outcome": "failed", "reason": "x",
+        "ts": "2026-09-06T10:00:00Z",
+    }) + "\n").encode("utf-8"))
+
+    def _capped_window(*args, **kwargs):
+        return real_ledger_window(*args, max_bytes=first_line_bytes, **kwargs)
+
+    monkeypatch.setattr("nanobot.runtime.health.ledger_window", _capped_window)
+    partial = read_cycle_progress(state, now=reference_now)
+    assert partial["state"] == "partial_no_success"
+    assert partial["window_status"] == "partial"
+    assert partial["notes"] == ["cap_bytes"]
+
+    expired_reference = datetime(2026, 12, 10, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr("nanobot.runtime.health.ledger_window", real_ledger_window)
+    expired = read_cycle_progress(
+        state, now=expired_reference, since_ts="2026-09-06T00:00:00Z",
+    )
+    assert expired["state"] == "partial_no_success"
+    assert expired["window_status"] == "partial"
+    assert expired["notes"] == ["beyond_retention"]
 
 
 def test_cycle_health_degrades_when_host_signal_crosses_threshold(tmp_path: Path, monkeypatch):
