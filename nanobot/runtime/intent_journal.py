@@ -622,6 +622,7 @@ def _settled_route_owners(state_root: Path, route: str) -> set[str]:
             owner_id = _uuid(record["owner_id"], "owner_id")
             if path != _settled_marker_path(state_root, route, owner_id):
                 raise JournalCorruptError("settled parent marker identity differs from path")
+            _verify_settled_route_parent(state_root, route, owner_id)
             owners.add(owner_id)
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             raise JournalUnavailableError("settled parent index is corrupt") from exc

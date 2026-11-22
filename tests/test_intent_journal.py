@@ -1381,6 +1381,50 @@ def test_route_capacity_refuses_new_parent_without_pruning_settled_records(
     assert (state_root / "intent-journal" / f"{owner}.parent.json").exists()
 
 
+def test_provision_route_parent_holds_malformed_settled_marker_before_new_owner(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    def _closed_planner_owner(root: Path) -> tuple[Path, str]:
+        root.mkdir()
+        owner_id = journal.provision_route_parent(root, "planner")
+        with journal.bridge_parent_context(root, owner_id):
+            pass
+        assert journal.close_route_parent(root, "planner", owner_id)
+        return root / "intent-journal", owner_id
+
+    valid_directory, valid_owner = _closed_planner_owner(tmp_path / "valid")
+    assert journal.read_route_parent_state(
+        tmp_path / "valid", "planner",
+    ).owner_id == valid_owner
+    assert journal.provision_route_parent(tmp_path / "valid", "planner") != valid_owner
+
+    state_root = tmp_path / "malformed"
+    directory, owner = _closed_planner_owner(state_root)
+    marker_path = journal._settled_marker_path(state_root, "planner", owner)
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    malformed = {**marker, "closed_at": "not-a-timestamp"}
+    marker_path.write_text(
+        json.dumps(malformed, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    protected = {
+        path: path.read_bytes()
+        for path in directory.iterdir()
+        if path.is_file()
+    }
+
+    with pytest.raises(JournalCorruptError, match="timestamp"):
+        journal.provision_route_parent(state_root, "planner")
+
+    assert {
+        path: path.read_bytes()
+        for path in directory.iterdir()
+        if path.is_file()
+    } == protected
+
+
 def test_proposer_fallback_sdk_budget_is_journaled_per_dispatch(tmp_path: Path, monkeypatch) -> None:
     import openai
     from nanobot.runtime import llm_proposer
