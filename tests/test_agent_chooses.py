@@ -4546,14 +4546,61 @@ def test_stopped_and_minimal_mode_are_enforced(tmp_path: Path, monkeypatch):
     """
     import asyncio
 
-    from tests.test_cycle_ledger import _FakeSubagentManager, _init_selfevo_repo
-    from nanobot.runtime import bridge, no_plan_recovery
+    from nanobot.runtime import bridge, no_plan_recovery, open_increment
+    from tests.test_cycle_ledger import (
+        TestBridgeIntegrationLedgerRows,
+        _FakeSubagentManager,
+        _init_selfevo_repo,
+        _run,
+    )
 
     # --- Scenario 1: stopped blocks session start ---------------------
     base = tmp_path / "base"
     base.mkdir()
     state_dir = _setup_planner_chooses_harness(base, monkeypatch)
-    _init_selfevo_repo(base)
+    _origin, work = _init_selfevo_repo(base)
+    TestBridgeIntegrationLedgerRows._enable_intent_journal_for_windows(monkeypatch)
+
+    recovery_cycle = "cycle-stopped-preserve-recovery"
+    recovery_branch = f"selfevo/cycle-{recovery_cycle}"
+    _run(work, "checkout", "-b", recovery_branch)
+    (work / "scripts").mkdir(exist_ok=True)
+    (work / "scripts" / "recovery-wip.py").write_text("def unfinished(): return True\n", encoding="utf-8")
+    _run(work, "add", "scripts/recovery-wip.py")
+    _run(work, "commit", "-m", "selfevo: preserve interrupted recovery")
+    _run(work, "checkout", "main")
+    # Also leave a stale in-flight registration: stopped-state handling must
+    # defer kill recovery rather than rewriting this saved recovery evidence.
+    assert open_increment.record_attempt_started(
+        state_dir, recovery_cycle, recovery_branch,
+        plan_text="finish the interrupted increment",
+    )
+    recovery_state = open_increment.load_state(state_dir)
+    recovery_state.pending = {
+        "retry_key": "stopped-recovery-test",
+        "cycle_id": recovery_cycle,
+        "plan_text": "finish the interrupted increment",
+        "plan_version": 1,
+        "candidate_id": None,
+        "reason": "interrupted_supply",
+        "interrupted_at": "2026-11-23T00:00:00Z",
+        "branch": recovery_branch,
+        "opening_entry_written": True,
+    }
+    recovery_state.hold = {"deadline": "2000-01-01T00:00:00Z"}
+    assert open_increment._save_state(state_dir, recovery_state)
+    pending_before_stop = open_increment.pending_open_increment(state_dir)
+    assert pending_before_stop is not None
+    open_increment_bytes_before_stop = open_increment._state_path(state_dir).read_bytes()
+    branch_tip_before_stop = _run(work, "rev-parse", f"refs/heads/{recovery_branch}").stdout.strip()
+    prepare_calls = []
+    real_prepare = bridge._prepare_repository_for_cycle
+
+    def _capture_prepare(*args, **kwargs):
+        prepare_calls.append(args[0])
+        return real_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(bridge, "_prepare_repository_for_cycle", _capture_prepare)
 
     _np_state = no_plan_recovery.load_state(state_dir)
     _np_state.stopped = True
@@ -4565,6 +4612,43 @@ def test_stopped_and_minimal_mode_are_enforced(tmp_path: Path, monkeypatch):
     rc = asyncio.run(bridge._main_impl())
     assert rc == 0
     assert planning_calls == [], "a stopped planner must never even start a session"
+
+    from nanobot.runtime import intent_journal
+
+    stopped_owner = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+    assert stopped_owner is None, "a stopped no-op must not admit or strand a bridge-cycle owner"
+    assert prepare_calls == [], "a stopped no-op must leave the self-evolving checkout untouched"
+    assert open_increment.pending_open_increment(state_dir) == pending_before_stop
+    assert open_increment._state_path(state_dir).read_bytes() == open_increment_bytes_before_stop
+    assert _run(work, "rev-parse", f"refs/heads/{recovery_branch}").stdout.strip() == branch_tip_before_stop
+
+    # The operator resume is the existing gate transition. A subsequent
+    # ordinary invocation must still admit a fresh cycle owner and reach planning.
+    assert no_plan_recovery.resume(state_dir, "cycle-operator-resume").stopped is False
+    resumed_calls = []
+
+    async def _resumed_no_plan(**kwargs):
+        resumed_calls.append(kwargs)
+        return {
+            "ran": True, "iterations_used": 1, "iterations_planned": None,
+            "tampered_files": [], "plan": None, "terminal_outcome": "no_plan",
+        }
+
+    monkeypatch.setattr(bridge, "_run_planning_session", _resumed_no_plan)
+    rc_after_resume = asyncio.run(bridge._main_impl())
+    assert rc_after_resume == 0
+    assert len(resumed_calls) == 1
+    resumed_owner = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+    assert resumed_owner is not None and resumed_owner.route_status == "closed"
+    assert resumed_owner.no_execution_receipt == (resumed_calls[0]["cycle_id"], "no_plan")
+    resumed_pending = open_increment.pending_open_increment(state_dir)
+    assert resumed_pending is not None and resumed_pending["cycle_id"] == recovery_cycle
+    assert resumed_pending["reason"] == "interrupted_kill", (
+        "stale-attempt recovery is deferred while stopped, then resumes after operator action"
+    )
+    assert open_increment.load_state(state_dir).running is None
+    assert _run(work, "rev-parse", f"refs/heads/{recovery_branch}").stdout.strip() == branch_tip_before_stop
+    assert len(prepare_calls) == 1, "normal execution resumes repository preparation after operator resume"
     monkeypatch.undo()
 
     # --- Scenario 2: minimal_mode selects a smaller context ------------
@@ -4572,6 +4656,7 @@ def test_stopped_and_minimal_mode_are_enforced(tmp_path: Path, monkeypatch):
     base2.mkdir()
     state_dir2 = _setup_planner_chooses_harness(base2, monkeypatch)
     _origin2, work2 = _init_selfevo_repo(base2)
+    TestBridgeIntegrationLedgerRows._enable_intent_journal_for_windows(monkeypatch)
 
     _task_writing_dir = bridge.RELEASE_ROOT / "nanobot" / "skills" / "task-writing"
     _task_writing_dir.mkdir(parents=True, exist_ok=True)

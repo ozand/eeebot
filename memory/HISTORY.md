@@ -1,3 +1,4 @@
+- [2026-11-23 19:51] #2180: move the stopped-planner guard before stale-attempt recovery, repository preparation, and bridge-owner admission; verify pending recovery evidence remains unchanged and operator resume restores normal invocation.
 - [2026-11-23 15:03] #2180 duplicate terminal: persist `duplicate_suppressed` only for an empty bridge owner after confirmed dedup, preventing a real duplicate from stranding the next invocation without settling unknown effects.
 - [2026-11-23 13:41] #2180 retained-tip increment: bind post_execution to the verified cycle-branch tip while preserving the integration base; reject wrong checkouts and non-descendant tip shifts.
 - [2026-10-28 04:40] #1996 test-only PID fixture correction: require newline-terminated positive child and shell PIDs, exercise empty and numeric-prefix child-file reads, and retain repeated cancellation and real-process cleanup checks.

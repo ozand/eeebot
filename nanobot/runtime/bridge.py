@@ -4529,6 +4529,22 @@ async def _main_impl_body():
 
     _planning_cycle_id = f'cycle-{uuid.uuid4().hex[:12]}'
 
+    # D9 (ADR-035 Test Contract): stopped state must return before stale-attempt
+    # recovery as well as rest bookkeeping, repository preparation, or owner
+    # admission. Kill recovery writes open-increment state; defer it until the
+    # operator resumes so a stopped no-op preserves recovery evidence exactly.
+    try:
+        from nanobot.runtime import no_plan_recovery as _no_plan_recovery_gate
+
+        if _no_plan_recovery_gate.load_state(STATE_DIR).stopped:
+            print(
+                'bridge: planner stopped (6 consecutive planner-family no_plan outcomes) -- '
+                'no session until the operator resumes manually'
+            )
+            return 0
+    except Exception:
+        pass
+
     # D2 (ADR-035 Test Contract, #1942 B2): a running-attempt registration
     # with no terminal outcome by the time THIS cycle starts means the
     # process that wrote it (record_attempt_started, in _evaluate_candidate
@@ -4752,26 +4768,8 @@ async def _main_impl_body():
     # 2026-09-26): the stale-attempt recovery check (D2) that used to
     # live here has MOVED to before both pre-checks above -- see the
     # comment there for why. `_planning_cycle_id` moved with it.
-    # D9 (ADR-035 Test Contract, external review finding #9): a `stopped`
-    # no_plan_recovery state blocks session start until the operator
-    # resumes manually (no_plan_recovery.resume) -- recording the state
-    # alone, as before, is the "unobservable guard" class; it must
-    # actually gate something. Placed here, not inside
-    # _run_planning_session, for the same reason as the kill-check above
-    # -- every _main_impl-level test in this file stubs that function
-    # wholesale, and this gate must still run.
-    try:
-        from nanobot.runtime import no_plan_recovery as _no_plan_recovery_gate
-
-        if _no_plan_recovery_gate.load_state(STATE_DIR).stopped:
-            print(
-                'bridge: planner stopped (6 consecutive planner-family no_plan outcomes) -- '
-                'no session until the operator resumes manually'
-            )
-            return 0
-    except Exception:
-        pass
-
+    # D9 (ADR-035 Test Contract, external review finding #9): stopped state
+    # was checked before stale recovery and all cycle-start bookkeeping above.
     provider = _make_provider(config)
     bus = MessageBus()
     _planner_model = resolve_model('executor', config_fallback=config.tools.subagent.model)
