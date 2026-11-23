@@ -1131,18 +1131,22 @@ def test_bridge_cycle_close_requires_exact_selected_phase_receipts(tmp_path: Pat
     ) is True
 
 
-def test_bridge_cycle_no_execution_receipt_closes_and_recovers_same_terminal(tmp_path: Path) -> None:
+@pytest.mark.parametrize("outcome", ["rest_unchanged", "duplicate_suppressed"])
+# @lat: [[architecture#Intent-before-effect evidence]]
+def test_bridge_cycle_no_execution_receipt_closes_and_recovers_same_terminal(
+    tmp_path: Path, outcome: str,
+) -> None:
     state_dir = tmp_path / "state"
     state_dir.mkdir()
-    cycle_id = "cycle-rest-opaque-1"
+    cycle_id = f"cycle-{outcome}-opaque-1"
     with journal.bridge_cycle_parent_context(state_dir) as owner:
         pass
     journal.consume_bridge_cycle_no_execution(
-        state_dir, owner, cycle_id=cycle_id, outcome="rest_unchanged",
+        state_dir, owner, cycle_id=cycle_id, outcome=outcome,
     )
     before = journal.read_owner_records(state_dir, owner)
     journal.consume_bridge_cycle_no_execution(
-        state_dir, owner, cycle_id=cycle_id, outcome="rest_unchanged",
+        state_dir, owner, cycle_id=cycle_id, outcome=outcome,
     )
     assert journal.read_owner_records(state_dir, owner) == before
     with pytest.raises(JournalUnavailableError, match="attempted work"):
@@ -1151,7 +1155,7 @@ def test_bridge_cycle_no_execution_receipt_closes_and_recovers_same_terminal(tmp
         )
     dispatches = []
     with journal.bridge_cycle_parent_context(
-        state_dir, no_execution_cycle_id=cycle_id, no_execution_outcome="rest_unchanged",
+        state_dir, no_execution_cycle_id=cycle_id, no_execution_outcome=outcome,
     ) as resumed_owner:
         assert resumed_owner == owner
         with pytest.raises(JournalUnavailableError, match="close-only"):
@@ -1166,7 +1170,7 @@ def test_bridge_cycle_no_execution_receipt_closes_and_recovers_same_terminal(tmp
     assert journal.read_owner_records(state_dir, owner) == before
     assert journal.close_route_parent(
         state_dir, "bridge.cycle", owner,
-        no_execution_cycle_id=cycle_id, no_execution_outcome="rest_unchanged",
+        no_execution_cycle_id=cycle_id, no_execution_outcome=outcome,
     ) is True
     assert journal.provision_route_parent(state_dir, "bridge.cycle") != owner
 
@@ -1220,6 +1224,33 @@ def test_bridge_cycle_no_execution_rejects_empty_wrong_and_attempted_close(tmp_p
         state_dir, "bridge.cycle", owner,
         no_execution_cycle_id=cycle_id, no_execution_outcome="no_plan",
     ) is False
+
+
+# @lat: [[architecture#Intent-before-effect evidence]]
+def test_duplicate_suppressed_receipt_cannot_settle_unknown_attempt_owner(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    cycle_id = "cycle-duplicate-attempted"
+    with journal.bridge_cycle_parent_context(state_dir) as owner:
+        with operation_context("bridge", "provider.chat") as operation:
+            assert operation is not None
+            operation.admit()
+    records_before = journal.read_owner_records(state_dir, owner)
+    parent_before = journal.read_route_parent_state(state_dir, "bridge.cycle")
+    journal_path = journal._owner_paths(state_dir, owner)[0]
+    bytes_before = journal_path.read_bytes()
+
+    with pytest.raises(JournalUnavailableError, match="unresolved operation"):
+        journal.consume_bridge_cycle_no_execution(
+            state_dir, owner, cycle_id=cycle_id, outcome="duplicate_suppressed",
+        )
+    assert journal.close_route_parent(
+        state_dir, "bridge.cycle", owner,
+        no_execution_cycle_id=cycle_id, no_execution_outcome="duplicate_suppressed",
+    ) is False
+    assert journal.read_owner_records(state_dir, owner) == records_before
+    assert journal._owner_paths(state_dir, owner)[0].read_bytes() == bytes_before
+    assert journal.read_route_parent_state(state_dir, "bridge.cycle") == parent_before
 
 
 def test_bridge_cycle_no_execution_cannot_follow_selected_phase_receipt(tmp_path: Path) -> None:

@@ -1531,3 +1531,72 @@ class TestBridgeIntegrationLedgerRows:
         assert rows[1]["decision"] == "skipped_duplicate"
         assert rows[2]["outcome"] == "skipped-duplicate"
         assert rows[2]["reason"] == "already_done_tag"
+
+    # @lat: [[architecture#Intent-before-effect evidence]]
+    def test_real_duplicate_closes_empty_owner_before_next_legitimate_invocation(
+        self, tmp_path, monkeypatch,
+    ):
+        """A real success tag suppresses spawn, but must not strand the next cycle.
+
+        The separate lost-provider-attempt case above asserts an unknown effect
+        remains held with its journal bytes unchanged; this case exercises the
+        no-effect duplicate lifecycle across two complete bridge invocations.
+        """
+        base = tmp_path
+        state_dir = base / "state"
+        state_dir.mkdir()
+        self._enable_intent_journal_for_windows(monkeypatch)
+        _origin, work = _init_selfevo_repo(base)
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+        monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        _seed_bridge_request(state_dir, "req-duplicate-owner", "cycle-duplicate-owner")
+
+        planning_cycles = []
+        async def planning_session(**kwargs):
+            cycle_id = kwargs["cycle_id"]
+            planning_cycles.append(cycle_id)
+            if len(planning_cycles) == 1:
+                # The first valid planner result is a genuine exact-tag duplicate.
+                _run(work, "tag", f"cycle-{cycle_id}-success", "HEAD")
+            return {
+                "ran": True, "iterations_used": 1, "iterations_planned": 1,
+                "tampered_files": [],
+                "plan": {"plan": "implement a novel bounded increment", "candidate_id": None},
+            }
+
+        monkeypatch.setattr(bridge, "_run_planning_session", planning_session)
+        executor_spawns = []
+
+        class _ObservedExecutor(_FakeSubagentManager):
+            async def spawn(self, **kwargs):
+                if self._telemetry_component != "planner":
+                    executor_spawns.append(kwargs)
+                return await super().spawn(**kwargs)
+
+        monkeypatch.setattr(bridge, "SubagentManager", _ObservedExecutor)
+        self._enable_test_lock(monkeypatch)
+
+        assert asyncio.run(bridge.main()) == 0
+        assert executor_spawns == []
+        first_owner = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+        assert first_owner is not None and first_owner.parent_started
+        assert first_owner.route_status == "closed"
+        assert first_owner.no_execution_receipt == (planning_cycles[0], "duplicate_suppressed")
+        assert [row["event"] for row in intent_journal.read_owner_records(
+            state_dir, first_owner.owner_id,
+        )] == ["no_execution_consumed"]
+        duplicate_outcomes = [
+            row for row in _read_ledger(state_dir)
+            if row.get("phase") == "outcome" and row.get("reason") == "already_done_tag"
+        ]
+        assert len(duplicate_outcomes) == 1
+        assert duplicate_outcomes[0]["outcome"] == "skipped-duplicate"
+
+        # The following planner result is novel (its cycle has no success tag).
+        # It must reach the executor rather than being blocked by the empty
+        # started owner left by the duplicate path.
+        assert asyncio.run(bridge.main()) == 0
+        assert len(planning_cycles) == 2
+        assert len(executor_spawns) == 1

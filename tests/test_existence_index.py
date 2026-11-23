@@ -1019,6 +1019,9 @@ class TestRefusedTitleIsNotExistence:
 
 class TestBridgeExistenceIndexIntegration:
     def test_semantic_duplicate_skips_before_spawn_with_existence_index_marker(self, tmp_path, monkeypatch):
+        from tests.test_cycle_ledger import TestBridgeIntegrationLedgerRows
+
+        TestBridgeIntegrationLedgerRows._enable_intent_journal_for_windows(monkeypatch)
         base = tmp_path
         state_dir = base / "state"
         state_dir.mkdir()
@@ -1071,6 +1074,9 @@ class TestBridgeExistenceIndexIntegration:
     def test_kill_switch_lets_semantic_duplicate_through_to_normal_path(self, tmp_path, monkeypatch):
         """With the gate disabled, the existence-index branch must not fire —
         proving it is a pure addition, not a replacement of the exact checks."""
+        from tests.test_cycle_ledger import TestBridgeIntegrationLedgerRows
+
+        TestBridgeIntegrationLedgerRows._enable_intent_journal_for_windows(monkeypatch)
         base = tmp_path
         state_dir = base / "state"
         state_dir.mkdir()

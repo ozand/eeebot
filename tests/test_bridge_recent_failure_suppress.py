@@ -395,6 +395,9 @@ def test_ledger_matched_against_is_historical_title(
     """#757 defect 3: the skipped_recent_failure ledger row used to record the
     proposal's OWN title as matched_against; it must be the historical title
     the suppression actually matched."""
+    from tests.test_cycle_ledger import TestBridgeIntegrationLedgerRows
+
+    TestBridgeIntegrationLedgerRows._enable_intent_journal_for_windows(monkeypatch)
     base = tmp_path
     state_dir = base / "state"
     state_dir.mkdir()

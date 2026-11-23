@@ -1,3 +1,4 @@
+- [2026-11-23 15:03] #2180 duplicate terminal: persist `duplicate_suppressed` only for an empty bridge owner after confirmed dedup, preventing a real duplicate from stranding the next invocation without settling unknown effects.
 - [2026-11-23 13:41] #2180 retained-tip increment: bind post_execution to the verified cycle-branch tip while preserving the integration base; reject wrong checkouts and non-descendant tip shifts.
 - [2026-10-28 04:40] #1996 test-only PID fixture correction: require newline-terminated positive child and shell PIDs, exercise empty and numeric-prefix child-file reads, and retain repeated cancellation and real-process cleanup checks.
 - [2026-10-27 04:40] #2036 capability slice: planner now selects an explicit read/list tool profile at the SubagentManager seam; search_memory/write/edit/exec/web/delegation are excluded, existing absolute/relative path behavior is explicit, executor default stays compatible, and ADR-044 remains Proposed.

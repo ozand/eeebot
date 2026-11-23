@@ -3426,7 +3426,7 @@ def _checkpoint_cycle_id(state_dir: 'Path', owner_id: str) -> str:
 def _close_bridge_no_execution(
     state_dir: 'Path', owner_id: str, cycle_id: str, outcome: str,
 ) -> None:
-    """Record and close one explicit, normal bridge terminal with no execution."""
+    """Record and close one explicit bridge terminal with no executor phase."""
     from nanobot.runtime import intent_journal
 
     intent_journal.consume_bridge_cycle_no_execution(
@@ -3439,6 +3439,15 @@ def _close_bridge_no_execution(
         raise intent_journal.JournalUnavailableError(
             "bridge no-execution parent close was not verified",
         )
+
+
+def _close_bridge_duplicate_suppressed(
+    state_dir: 'Path', owner_id: str, cycle_id: str,
+) -> None:
+    """Close an empty bridge owner after a conclusively detected duplicate."""
+    _close_bridge_no_execution(
+        state_dir, owner_id, cycle_id, "duplicate_suppressed",
+    )
 
 
 def _begin_bridge_checkpoint_phase(
@@ -5013,6 +5022,9 @@ async def _main_impl_body():
             and _tag_pending.get('resumed_by') == _tag_provenance.get('deciding_cycle_id')
         )
         if _cycle_tag_exists(_selfevo_repo_check, _cycle_success_tag):
+            _close_bridge_duplicate_suppressed(
+                STATE_DIR, _bridge_cycle_owner_id, _cycle_id,
+            )
             print(f'bridge: cycle {_cycle_id} already tagged {_cycle_success_tag}; skipping subagent spawn')
             if _tag_conflict_continuation:
                 from nanobot.runtime.cycle_ledger import append_event as _append_cycle_event
@@ -5095,6 +5107,9 @@ async def _main_impl_body():
                 _dup_check_title, STATE_DIR, target_path=_target_path,
             )
         if _recent_failure_title:
+            _close_bridge_duplicate_suppressed(
+                STATE_DIR, _bridge_cycle_owner_id, _cycle_id,
+            )
             print(
                 f'bridge: task "{_dup_check_title[:60]}" matches recent failure/rejection '
                 f'"{_recent_failure_title[:60]}" (within {FAILURE_SUPPRESS_HOURS}h); '
@@ -5195,6 +5210,9 @@ async def _main_impl_body():
         # so this branch is a pure ADDITION to the dedup gate, never a new
         # way to block a legitimately novel proposal.
         if _existence_match and not _is_verified_continuation:
+            _close_bridge_duplicate_suppressed(
+                STATE_DIR, _bridge_cycle_owner_id, _cycle_id,
+            )
             print(
                 f'bridge: task "{_dup_check_title[:60]}" is a semantic near-duplicate of '
                 f'existing {_existence_match} (existence index); skipping subagent spawn'

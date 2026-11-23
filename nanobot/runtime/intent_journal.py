@@ -39,7 +39,9 @@ _PARENT_SCHEMA = 3
 _ROUTES = frozenset({"planner", "proposer", "bridge.cycle"})
 _BRIDGE_CYCLE_PHASES = ("post_execution", "smoke_gate", "integration", "reflection")
 _BRIDGE_CYCLE_ID_RX = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-_BRIDGE_NO_EXECUTION_OUTCOMES = frozenset({"no_plan", "rest", "rest_unchanged"})
+_BRIDGE_NO_EXECUTION_OUTCOMES = frozenset({
+    "no_plan", "rest", "rest_unchanged", "duplicate_suppressed",
+})
 
 
 class JournalUnavailableError(RuntimeError):
