@@ -44,9 +44,12 @@ def _test_backend(monkeypatch):
         locks_guard = threading.Lock()
 
         @contextmanager
-        def fake_owner_lock(path: Path):
+        def fake_owner_lock(path: Path, *, create: bool = False):
             key = str(path.resolve())
-            path.touch(exist_ok=True)
+            if create:
+                path.touch(exist_ok=True)
+            elif not path.exists() and path.suffix == ".lock":
+                raise JournalUnavailableError("lock missing in fake backend")
             with locks_guard:
                 lock = locks.setdefault(key, threading.Lock())
             with lock:
@@ -143,6 +146,7 @@ def test_byte_limit_corruption_is_preserved_without_large_decode(tmp_path: Path)
     owner = str(uuid4())
     path = tmp_path / "intent-journal" / f"{owner}.jsonl"
     path.parent.mkdir()
+    (path.parent / f"{owner}.lock").touch()
     path.write_bytes(b"x" * (MAX_OWNER_BYTES + 1))
     with pytest.raises(JournalCorruptError, match="byte limit"):
         read_owner_records(tmp_path, owner)
@@ -160,7 +164,7 @@ def test_owner_lock_serializes_separate_processes(tmp_path: Path) -> None:
         "import sys,time; from pathlib import Path; "
         "from nanobot.runtime.intent_journal import _owner_lock; "
         "p=Path(sys.argv[1]); ready=Path(sys.argv[2]); release=Path(sys.argv[3]); "
-        "\nwith _owner_lock(p):\n ready.write_text('1')\n "
+        "\nwith _owner_lock(p, create=True):\n ready.write_text('1')\n "
         "\n while not release.exists(): time.sleep(0.01)\n"
     )
     env = dict(os.environ)
@@ -377,8 +381,10 @@ import nanobot.runtime.intent_journal as journal
 root = Path(sys.argv[1]); owner = sys.argv[2]
 locks = {}; guard = threading.Lock()
 @contextmanager
-def fake_lock(path):
-    path.touch(exist_ok=True)
+def fake_lock(path, *, create=False):
+    if create: path.touch(exist_ok=True)
+    elif not path.exists() and path.suffix == ".lock":
+        raise journal.JournalUnavailableError("lock missing in fake backend")
     with guard: lock = locks.setdefault(str(path.resolve()), threading.Lock())
     with lock: yield
 journal._owner_lock = fake_lock
@@ -460,6 +466,7 @@ def test_capacity_limits_fail_closed_without_eviction(tmp_path: Path) -> None:
     path = tmp_path / "intent-journal" / f"{owner}.jsonl"
     path.parent.mkdir()
     path.touch()
+    (path.parent / f"{owner}.lock").touch()
     records = []
     for _ in range(MAX_OWNER_RECORDS // 3):
         operation, attempt = str(uuid4()), str(uuid4())
@@ -499,8 +506,11 @@ async def test_real_planner_manager_journals_provider_retry_attempts(tmp_path: P
         guard = threading.Lock()
 
         @contextmanager
-        def fake_owner_lock(path: Path):
-            path.touch(exist_ok=True)
+        def fake_owner_lock(path: Path, *, create: bool = False):
+            if create:
+                path.touch(exist_ok=True)
+            elif not path.exists() and path.suffix == ".lock":
+                raise JournalUnavailableError("lock missing in fake backend")
             with guard:
                 lock = locks.setdefault(str(path.resolve()), threading.Lock())
             with lock:
@@ -679,8 +689,11 @@ async def test_planner_tool_cancellation_leaves_attempt_unknown_and_held(
         guard = threading.Lock()
 
         @contextmanager
-        def fake_owner_lock(path: Path):
-            path.touch(exist_ok=True)
+        def fake_owner_lock(path: Path, *, create: bool = False):
+            if create:
+                path.touch(exist_ok=True)
+            elif not path.exists() and path.suffix == ".lock":
+                raise JournalUnavailableError("lock missing in fake backend")
             with guard:
                 lock = locks.setdefault(str(path.resolve()), threading.Lock())
             with lock:
@@ -1021,6 +1034,39 @@ def test_read_route_parent_state_fails_closed_on_missing_route_and_route_temp(tm
     (directory / "route-bridge.cycle.lock").touch()
     with pytest.raises(JournalUnavailableError, match="initialized route record is missing"):
         journal.read_route_parent_state(state_root, "bridge.cycle")
+
+
+def test_provision_route_parent_does_not_recreate_missing_active_owner_lock(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    owner = journal.provision_route_parent(state_root, "planner")
+    route_path, route_lock = journal._route_paths(state_root, "planner")
+    owner_journal, owner_lock = journal._owner_paths(state_root, owner)
+    route_before = route_path.read_bytes()
+    parent_before = owner_journal.with_suffix(".parent.json").read_bytes()
+    journal_before = owner_journal.read_bytes()
+    owner_lock.unlink()
+
+    with pytest.raises(JournalUnavailableError):
+        journal.provision_route_parent(state_root, "planner")
+
+    assert route_path.read_bytes() == route_before
+    assert owner_journal.with_suffix(".parent.json").read_bytes() == parent_before
+    assert owner_journal.read_bytes() == journal_before
+    assert not owner_lock.exists()
+    assert route_lock.exists()
+
+
+def test_provision_route_parent_uses_existing_active_owner_lock(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    owner = journal.provision_route_parent(state_root, "planner")
+    _owner_journal, owner_lock = journal._owner_paths(state_root, owner)
+    lock_identity = owner_lock.stat().st_ino
+
+    assert journal.provision_route_parent(state_root, "planner") == owner
+    assert owner_lock.exists()
+    assert owner_lock.stat().st_ino == lock_identity
 
 
 def test_read_route_parent_state_fails_closed_on_missing_or_corrupt_owner_files(tmp_path: Path) -> None:
@@ -1670,8 +1716,10 @@ root = Path(sys.argv[1]); expected = sys.argv[2]; other = sys.argv[3]; out = Pat
 if os.name == "nt":
     locks = {}; guard = threading.Lock()
     @contextmanager
-    def fake_lock(path):
-        path.touch(exist_ok=True)
+    def fake_lock(path, *, create=False):
+        if create: path.touch(exist_ok=True)
+        elif not path.exists() and path.suffix == ".lock":
+            raise journal.JournalUnavailableError("lock missing in fake backend")
         with guard:
             lock = locks.setdefault(str(path.resolve()), threading.Lock())
         with lock:
@@ -1695,8 +1743,10 @@ out.write_text(json.dumps({"same_owner": actual == expected, "held": held, "othe
             "root = Path(sys.argv[1]); expected = sys.argv[2]; other = sys.argv[3]; out = Path(sys.argv[4])\n"
             "locks = {}; guard = threading.Lock()\n"
             "@contextmanager\n"
-            "def fake_lock(path):\n"
-            "    path.touch(exist_ok=True)\n"
+            "def fake_lock(path, *, create=False):\n"
+            "    if create: path.touch(exist_ok=True)\n"
+            "    elif not path.exists() and path.suffix == '.lock':\n"
+            "        raise journal.JournalUnavailableError('lock missing in fake backend')\n"
             "    with guard: lock = locks.setdefault(str(path.resolve()), threading.Lock())\n"
             "    with lock: yield\n"
             "journal._owner_lock = fake_lock\n"
@@ -1775,6 +1825,9 @@ def test_file_fsync_before_admission_and_directory_fsync_capability(tmp_path: Pa
 
     owner, operation, attempt = _ids()
     if os.name == "nt":
+        lock_path = journal._owner_paths(tmp_path, owner)[1]
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.touch()
         monkeypatch.setattr(journal, "_fsync_directory", _ORIGINAL_DIRECTORY_FSYNC)
         monkeypatch.setattr(journal, "fcntl", object())
         with pytest.raises(JournalUnavailableError, match="durably"):

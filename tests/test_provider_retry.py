@@ -16,8 +16,11 @@ def _enable_journal_logic_backend(monkeypatch) -> None:
     guard = threading.Lock()
 
     @contextmanager
-    def fake_owner_lock(path):
-        path.touch(exist_ok=True)
+    def fake_owner_lock(path, *, create=False):
+        if create:
+            path.touch(exist_ok=True)
+        elif not path.exists():
+            raise intent_journal.JournalUnavailableError("lock missing in fake backend")
         key = str(path.resolve())
         with guard:
             lock = locks.setdefault(key, threading.Lock())

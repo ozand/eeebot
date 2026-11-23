@@ -148,10 +148,12 @@ def _new_parent_record(owner_id: str) -> dict[str, Any]:
     }
 
 
-def _provision_route_owner(state_root: Path, owner_id: str) -> None:
+def _provision_route_owner(
+    state_root: Path, owner_id: str, *, create_lock: bool = False,
+) -> None:
     journal, lock = _owner_paths(state_root, owner_id)
     parent_path = journal.with_suffix(".parent.json")
-    with _owner_lock(lock):
+    with _owner_lock(lock, create=create_lock):
         if parent_path.exists():
             parent = _read_parent(parent_path, owner_id)
             if not journal.exists():
@@ -268,10 +270,13 @@ def read_route_parent_state(
 def provision_route_parent(state_root: Path, route: str) -> str:
     """Provision a new parent or reject an unconsumed persisted parent."""
     route_path, route_lock = _route_paths(state_root, route)
+    directory = route_path.parent
+    has_settled_markers = any(directory.glob(f"route-{route}-*.closed.json"))
+    route_was_initialized = route_path.exists() or route_lock.exists() or has_settled_markers
+    create_route_lock = not route_was_initialized
     legacy_id = _route_owner_id(route)
     legacy_journal, _legacy_lock = _owner_paths(state_root, legacy_id)
-    route_was_initialized = route_path.exists() or route_lock.exists()
-    with _owner_lock(route_lock):
+    with _owner_lock(route_lock, create=create_route_lock):
         current = _read_route(route_path, route) if route_path.exists() else None
         if current is None and route_was_initialized:
             raise JournalUnavailableError("planner route record is missing after initialization")
@@ -281,7 +286,7 @@ def provision_route_parent(state_root: Path, route: str) -> str:
             raise JournalUnavailableError("legacy planner parent lacks durable closure evidence")
         if current is not None and current["status"] == "active":
             journal, owner_lock = _owner_paths(state_root, current["owner_id"])
-            with _owner_lock(owner_lock):
+            with _owner_lock(owner_lock, create=False):
                 parent_path = journal.with_suffix(".parent.json")
                 parent = _read_parent(parent_path, current["owner_id"])
                 if not journal.exists():
@@ -302,7 +307,7 @@ def provision_route_parent(state_root: Path, route: str) -> str:
                     raise JournalUnavailableError("planner parent evidence is inconsistent")
         if current is not None and current["status"] == "provisioning":
             owner_id = current["owner_id"]
-            _provision_route_owner(state_root, owner_id)
+            _provision_route_owner(state_root, owner_id, create_lock=False)
             current["status"] = "active"
             _write_route(route_path, current)
             return owner_id
@@ -318,8 +323,11 @@ def provision_route_parent(state_root: Path, route: str) -> str:
             "version": 1, "route": route,
             "status": "provisioning", "owner_id": owner_id,
         }
+        _owner_journal, owner_lock = _owner_paths(state_root, owner_id)
+        with _owner_lock(owner_lock, create=True):
+            pass
         _write_route(route_path, provisioning)
-        _provision_route_owner(state_root, owner_id)
+        _provision_route_owner(state_root, owner_id, create_lock=False)
         active = {**provisioning, "status": "active"}
         _write_route(route_path, active)
         return owner_id
@@ -890,7 +898,8 @@ def create_parent(state_root: Path, owner_id: str) -> None:
     owner_id = _uuid(owner_id, "owner_id")
     journal, lock = _owner_paths(state_root, owner_id)
     path = journal.with_suffix(".parent.json")
-    with _owner_lock(lock):
+    create_lock = not journal.exists() and not path.exists()
+    with _owner_lock(lock, create=create_lock):
         if path.exists():
             raise JournalUnavailableError("parent identity already exists")
         _ensure_journal(journal)
@@ -1116,13 +1125,19 @@ def operation_context(
 
 
 @contextmanager
-def _owner_lock(path: Path) -> Iterator[None]:
+def _owner_lock(path: Path, *, create: bool = False) -> Iterator[None]:
     if fcntl is None:
         raise JournalUnavailableError("exclusive flock is unsupported")
     fd: int | None = None
     try:
-        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags, 0o600)
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        if create:
+            try:
+                fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                fd = os.open(path, flags, 0o600)
+        else:
+            fd = os.open(path, flags, 0o600)
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("owner lock is not a regular file")
         if os.name != "nt":
@@ -1402,7 +1417,7 @@ def admit_attempt(state_root: Path, *, owner_id: str, operation_id: str,
     """Durably record an intent before the caller permits the external effect."""
     row = _record(owner_id, operation_id, attempt_id, "intent", component, target, ts)
     journal, lock = _owner_paths(state_root, owner_id)
-    with _owner_lock(lock):
+    with _owner_lock(lock, create=_test_only):
         _ensure_journal(journal)
         records = _decode(journal, _uuid(owner_id, "owner_id"))
         _require_effect_admission_allowed(records)
