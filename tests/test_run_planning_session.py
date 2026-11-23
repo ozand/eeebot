@@ -146,8 +146,11 @@ def _stub_role_prompt(monkeypatch):
         guard = threading.Lock()
 
         @contextmanager
-        def fake_owner_lock(path: Path):
-            path.touch(exist_ok=True)
+        def fake_owner_lock(path: Path, *, create: bool = False):
+            if create:
+                path.touch(exist_ok=True)
+            elif not path.exists() and path.suffix == ".lock":
+                raise intent_journal.JournalUnavailableError("lock missing in fake backend")
             with guard:
                 lock = locks.setdefault(str(path.resolve()), threading.Lock())
             with lock:
@@ -284,8 +287,11 @@ def test_opted_in_planner_deadline_timeout_cancels_real_manager_before_diary(tmp
         _intent_guard = threading.Lock()
 
         @contextmanager
-        def _fake_intent_lock(path: Path):
-            path.touch(exist_ok=True)
+        def _fake_intent_lock(path: Path, *, create: bool = False):
+            if create:
+                path.touch(exist_ok=True)
+            elif not path.exists() and path.suffix == ".lock":
+                raise intent_journal.JournalUnavailableError("lock missing in fake backend")
             with _intent_guard:
                 _lock = _intent_locks.setdefault(str(path.resolve()), threading.Lock())
             with _lock:
