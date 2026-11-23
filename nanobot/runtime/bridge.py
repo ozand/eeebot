@@ -3453,6 +3453,24 @@ def _begin_bridge_checkpoint_phase(
     )
 
 
+def _begin_bridge_post_execution_checkpoint(
+    state_dir: 'Path', owner_id: str, *, cycle_id: str, branch: str,
+    integration_base_sha: str, repo_root: 'Path',
+) -> str:
+    """Admit post-execution work against the verified retained cycle tip."""
+    from nanobot.runtime import phase_checkpoint
+
+    retained_tip = phase_checkpoint.verified_local_branch_tip(
+        repo_root, branch=branch, expected_base=integration_base_sha,
+    )
+    _begin_bridge_checkpoint_phase(
+        state_dir, owner_id, cycle_id=cycle_id, branch=branch,
+        base_sha=integration_base_sha, head_sha=retained_tip,
+        phase='post_execution', repo_root=repo_root,
+    )
+    return retained_tip
+
+
 def _complete_bridge_checkpoint_phase(
     state_dir: 'Path', owner_id: str, *, cycle_id: str, branch: str,
     base_sha: str, head_sha: str, phase: str, repo_root: 'Path',
@@ -5384,10 +5402,12 @@ async def _main_impl_body():
         _bridge_checkpoint_enabled = bool(do_integration)
         if _bridge_checkpoint_enabled:
             try:
-                _begin_bridge_checkpoint_phase(
+                # Bind phase identity to this already-established retained ref,
+                # not to the integration base. Keep main_sha_before unchanged
+                # for later merge ancestry and integration evidence.
+                _post_execution_admitted_head = _begin_bridge_post_execution_checkpoint(
                     STATE_DIR, _bridge_cycle_owner_id, cycle_id=_cycle_id,
-                    branch=cycle_branch, base_sha=main_sha_before,
-                    head_sha=main_sha_before, phase='post_execution',
+                    branch=cycle_branch, integration_base_sha=main_sha_before,
                     repo_root=_selfevo_repo,
                 )
             except _phase_checkpoint.CheckpointError as exc:
@@ -6154,17 +6174,12 @@ async def _main_impl_body():
                 return {'status': 0}
 
             if _bridge_checkpoint_enabled and _executor_status == 'ok':
-                _post_execution_head = _current_tip_sha(_selfevo_repo)
                 _bridge_cycle_phase_heads['post_execution'] = _complete_bridge_checkpoint_phase(
                     STATE_DIR, _bridge_cycle_owner_id, cycle_id=_cycle_id,
                     branch=cycle_branch, base_sha=main_sha_before,
-                    head_sha=main_sha_before, phase='post_execution',
+                    head_sha=_post_execution_admitted_head, phase='post_execution',
                     repo_root=_selfevo_repo,
                 )
-                if _bridge_cycle_phase_heads['post_execution'] != _post_execution_head:
-                    raise _phase_checkpoint.CheckpointHeldError(
-                        "post-execution receipt head differs from the current cycle branch",
-                    )
 
             # ── Closed-loop repair cycle (issue #526) ────────────────────────────
             # After the first commit, run smoke tests. If they fail, spawn a repair

@@ -373,6 +373,19 @@ def verify_local_branch_head(
         raise CheckpointHeldError("checkout branch identity changed")
 
 
+def verified_local_branch_tip(repo_root: Path, *, branch: str, expected_base: str) -> str:
+    """Read and verify the retained cycle branch tip before phase admission."""
+    if type(branch) is not str or not _BRANCH_RX.fullmatch(branch) or ".." in branch.split("/"):
+        raise CheckpointError("invalid checkpoint branch")
+    if type(expected_base) is not str or not _SHA_RX.fullmatch(expected_base):
+        raise CheckpointError("invalid checkpoint revision")
+    tip = _git_sha(repo_root, f"refs/heads/{branch}")
+    verify_local_branch_head(
+        repo_root, branch=branch, expected_base=expected_base, expected_head=tip,
+    )
+    return tip
+
+
 def _verify_clean_phase_tree(repo_root: Path, *, allow_untracked_pytest_cache: bool = False) -> None:
     import subprocess
 

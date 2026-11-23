@@ -1354,10 +1354,13 @@ class TestIntegrationPhaseCheckpoint:
             _run(work, "commit", "-m", "disposable producer output")
             producer_runs += 1
             head = _run(work, "rev-parse", f"refs/heads/{branch}").stdout.strip()
-            checkpoint = phase_checkpoint.begin_phase(
-                state_dir, owner_id=owner.owner_id, cycle_id=cycle_id, branch=branch,
-                base_sha=setup["main_sha"], head_sha=head, phase="post_execution", repo_root=work,
+            admitted_tip = bridge._begin_bridge_post_execution_checkpoint(
+                state_dir, owner.owner_id, cycle_id=cycle_id, branch=branch,
+                integration_base_sha=setup["main_sha"], repo_root=work,
             )
+            assert admitted_tip == head
+            checkpoint = phase_checkpoint.load_checkpoint(state_dir, owner_id=owner.owner_id)
+            assert checkpoint is not None
             assert checkpoint.status == "running"
             recovery_effects = []
             try:

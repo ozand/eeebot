@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from nanobot.runtime import phase_checkpoint
+from nanobot.runtime import bridge, phase_checkpoint
 
 _OWNER = "planner-owner-opaque-001"
 _CYCLE = "cycle-opaque-001"
@@ -490,6 +490,101 @@ def test_checkpoint_requires_a_distinct_owner_for_a_new_cycle(tmp_path):
         phase="post_execution", repo_root=repo,
     )
     assert rotated.cycle_id == next_cycle
+
+
+def test_bridge_post_execution_admits_retained_tip_without_replacing_integration_base(tmp_path):
+    repo, base, retained_tip = _cycle_repo(tmp_path)
+    state_dir = tmp_path / "state"
+
+    admitted_tip = bridge._begin_bridge_post_execution_checkpoint(
+        state_dir, _OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+        integration_base_sha=base, repo_root=repo,
+    )
+
+    assert retained_tip != base
+    assert admitted_tip == retained_tip
+    checkpoint = phase_checkpoint.load_checkpoint(state_dir, owner_id=_OWNER)
+    assert checkpoint is not None
+    assert checkpoint.base_sha == base
+    assert checkpoint.head_sha == retained_tip
+    completed = phase_checkpoint.complete_phase(
+        state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+        base_sha=base, head_sha=admitted_tip, phase="post_execution", repo_root=repo,
+    )
+    assert completed.base_sha == base
+    assert completed.head_sha == retained_tip
+
+
+def test_bridge_post_execution_rejects_wrong_checkout_before_admission(tmp_path):
+    import subprocess
+
+    repo, base, _head = _cycle_repo(tmp_path)
+    state_dir = tmp_path / "state"
+    subprocess.run(["git", "-C", str(repo), "checkout", "main"], check=True, capture_output=True)
+
+    with pytest.raises(phase_checkpoint.CheckpointHeldError, match="checkout branch identity changed"):
+        bridge._begin_bridge_post_execution_checkpoint(
+            state_dir, _OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+            integration_base_sha=base, repo_root=repo,
+        )
+    assert phase_checkpoint.load_checkpoint(state_dir, owner_id=_OWNER) is None
+
+
+def test_post_execution_completion_rejects_wrong_checkout_without_advancing(tmp_path):
+    import subprocess
+
+    repo, base, admitted_tip = _cycle_repo(tmp_path)
+    state_dir = tmp_path / "state"
+    bridge._begin_bridge_post_execution_checkpoint(
+        state_dir, _OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+        integration_base_sha=base, repo_root=repo,
+    )
+    checkpoint_path = state_dir / "subagent_bridge" / "phase_checkpoint.json"
+    before = checkpoint_path.read_bytes()
+    subprocess.run(["git", "-C", str(repo), "checkout", "main"], check=True, capture_output=True)
+
+    with pytest.raises(phase_checkpoint.CheckpointHeldError, match="checkout branch identity changed"):
+        phase_checkpoint.complete_phase(
+            state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+            base_sha=base, head_sha=admitted_tip, phase="post_execution", repo_root=repo,
+        )
+    assert checkpoint_path.read_bytes() == before
+    held = phase_checkpoint.load_checkpoint(state_dir, owner_id=_OWNER)
+    assert held is not None and held.status == "running" and held.head_sha == admitted_tip
+
+
+def test_post_execution_completion_rejects_non_descendant_retained_tip_shift(tmp_path):
+    import subprocess
+
+    repo, base, admitted_tip = _cycle_repo(tmp_path)
+    state_dir = tmp_path / "state"
+    bridge._begin_bridge_post_execution_checkpoint(
+        state_dir, _OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+        integration_base_sha=base, repo_root=repo,
+    )
+    tree = subprocess.run(
+        ["git", "-C", str(repo), "show", "-s", "--format=%T", admitted_tip],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    shifted_tip = subprocess.run(
+        ["git", "-C", str(repo), "commit-tree", tree, "-p", base, "-m", "unrelated retained-tip shift"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(repo), "update-ref", f"refs/heads/{_BRANCH}", shifted_tip],
+        check=True, capture_output=True, text=True,
+    )
+    checkpoint_path = state_dir / "subagent_bridge" / "phase_checkpoint.json"
+    before = checkpoint_path.read_bytes()
+
+    with pytest.raises(phase_checkpoint.CheckpointHeldError, match="does not descend from admitted head"):
+        phase_checkpoint.complete_phase(
+            state_dir, owner_id=_OWNER, cycle_id=_CYCLE, branch=_BRANCH,
+            base_sha=base, head_sha=admitted_tip, phase="post_execution", repo_root=repo,
+        )
+    assert checkpoint_path.read_bytes() == before
+    held = phase_checkpoint.load_checkpoint(state_dir, owner_id=_OWNER)
+    assert held is not None and held.status == "running" and held.head_sha == admitted_tip
 
 
 def test_post_execution_completion_records_clean_committed_descendant(tmp_path):
