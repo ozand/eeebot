@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import gzip
 import json
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from nanobot.runtime import demand, model_registry, reflector
 
@@ -207,6 +211,361 @@ def test_reflector_job_baseline_spans_cycles_but_resets_for_next_invocation(tmp_
     assert provenance[2]["previous_call_id"] is None
     assert provenance[0]["baseline_id"] == provenance[1]["baseline_id"]
     assert provenance[0]["baseline_id"] != provenance[2]["baseline_id"]
+
+
+def test_reflector_recovers_result_appended_before_watermark_after_process_exit(tmp_path: Path):
+    state = tmp_path / "state"
+    cycles = ["cycle-a", "cycle-b"]
+    _write(state / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": cycle, "outcome": "success", "ts": f"2026-11-19T00:0{index}:00Z"}
+        for index, cycle in enumerate(cycles, start=1)
+    ])
+    _write(state / "llm_calls/prompts/2026-11-19.jsonl", [
+        {"cycle_id": cycle, "seq": 1, "messages": [{"role": "assistant", "content": f"transcript {cycle}"}]}
+        for cycle in cycles
+    ])
+    calls_path = tmp_path / "fake-model-calls.jsonl"
+    child_cwd = Path(__file__).resolve().parents[1]
+    shared_code = '''
+import json, os, sys
+from pathlib import Path
+from nanobot.runtime import reflector
+state = Path(sys.argv[1])
+calls_path = Path(sys.argv[2])
+def fake_llm(messages, model):
+    cycle_id = messages[1]["content"].split("CYCLE_ID: ", 1)[1].split("\\n", 1)[0]
+    with calls_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"cycle_id": cycle_id}) + "\\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    return {"cycle_id": cycle_id, "summary": "local fake reflection", "findings": [], "recommendations": [], "followed_previous": []}
+'''
+    crash_code = shared_code + '''
+def stop_before_cursor(*_args, **_kwargs):
+    os._exit(77)
+reflector._save_watermark = stop_before_cursor
+reflector.run_reflector(state, llm=fake_llm, max_cycles=1)
+os._exit(99)
+'''
+    crashed = subprocess.run(
+        [sys.executable, "-c", crash_code, str(state), str(calls_path)],
+        cwd=child_cwd, capture_output=True, text=True,
+    )
+    assert crashed.returncode == 77
+    rows_after_crash = [
+        json.loads(line) for line in (state / "reflector/reflections.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["cycle_id"] for row in rows_after_crash] == ["cycle-a"]
+    assert not (state / "reflector/watermark.json").exists()
+
+    resume_code = shared_code + '''
+result = reflector.run_reflector(state, llm=fake_llm, max_cycles=2)
+print(json.dumps({"result": result, "watermark": reflector._load_watermark(state)}))
+'''
+    resumed = subprocess.run(
+        [sys.executable, "-c", resume_code, str(state), str(calls_path)],
+        cwd=child_cwd, capture_output=True, text=True, check=True,
+    )
+    summary = json.loads(resumed.stdout)
+    calls = [json.loads(line)["cycle_id"] for line in calls_path.read_text(encoding="utf-8").splitlines()]
+    rows = [
+        json.loads(line) for line in (state / "reflector/reflections.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert summary["result"]["processed"] == 2
+    assert summary["watermark"] == "cycle-b"
+    assert calls == ["cycle-a", "cycle-b"]
+    assert [row["cycle_id"] for row in rows] == ["cycle-a", "cycle-b"]
+    assert all(reflector._reflection_result_state(state, cycle) == "complete" for cycle in cycles)
+
+
+def test_reflector_consumed_parent_with_unconsumed_recommendation_holds(tmp_path: Path):
+    state = tmp_path / "state"
+    _seed(state, "c1")
+    assert reflector.run_reflector(state, llm=lambda *_: _answer("c1"))["processed"] == 1
+    journal = state / "reflector/reflections.jsonl"
+    row = json.loads(journal.read_text().splitlines()[0])
+    row["status"] = "consumed"
+    journal.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    _write(state / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+    ])
+    _write(state / "llm_calls/prompts/2026-08-26.jsonl", [
+        {"cycle_id": cycle, "seq": 1, "messages": [{"role": "assistant", "content": f"transcript {cycle}"}]}
+        for cycle in ("c1", "c2")
+    ])
+    calls = []
+    result = reflector.run_reflector(state, llm=lambda *_: calls.append("called"))
+    assert result["status"] == "held_ambiguous_result"
+    assert result["processed"] == 0
+    assert calls == []
+    assert reflector._load_watermark(state) == "c1"
+
+
+def test_reflector_consumed_last_recommendation_recovers_on_next_process(tmp_path: Path):
+    state = tmp_path / "state"
+    _seed(state, "c1")
+    first_calls = []
+    assert reflector.run_reflector(
+        state, llm=lambda *_: first_calls.append("c1") or _answer("c1"),
+    )["processed"] == 1
+    assert first_calls == ["c1"]
+    assert reflector.mark_reflection_consumed(
+        state, recommendation_detail="reuse helper", cycle_id="c1",
+    )
+    row = json.loads((state / "reflector/reflections.jsonl").read_text().splitlines()[0])
+    assert row["status"] == "consumed"
+    assert "consumed_at" not in row
+    assert row["recommendations"][0]["status"] == "consumed"
+    assert reflector._reflection_result_state(state, "c1") == "complete"
+
+    _write(state / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+    ])
+    _write(state / "llm_calls/prompts/2026-08-26.jsonl", [
+        {"cycle_id": cycle, "seq": 1, "messages": [{"role": "assistant", "content": f"transcript {cycle}"}]}
+        for cycle in ("c1", "c2")
+    ])
+    calls_path = tmp_path / "next-process-calls.jsonl"
+    code = '''
+import json, sys
+from pathlib import Path
+from nanobot.runtime import reflector
+state, calls_path = Path(sys.argv[1]), Path(sys.argv[2])
+def fake_llm(messages, model):
+    cycle = messages[1]["content"].split("CYCLE_ID: ", 1)[1].split("\\n", 1)[0]
+    with calls_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(cycle) + "\\n")
+    return {"cycle_id": cycle, "summary": "next", "findings": [], "recommendations": [], "followed_previous": []}
+result = reflector.run_reflector(state, llm=fake_llm)
+print(json.dumps({"result": result, "watermark": reflector._load_watermark(state)}))
+'''
+    resumed = subprocess.run(
+        [sys.executable, "-c", code, str(state), str(calls_path)],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=True,
+    )
+    summary = json.loads(resumed.stdout)
+    assert summary["result"]["processed"] == 1
+    assert summary["watermark"] == "c2"
+    assert [json.loads(line) for line in calls_path.read_text().splitlines()] == ["c2"]
+
+
+@pytest.mark.parametrize("evidence", ["truncated", "incomplete", "invalid_utf8", "bad_status", "torn_prefix"])
+def test_reflector_ambiguous_prior_result_holds_without_cursor_advance(tmp_path: Path, evidence: str):
+    state = tmp_path / "state"
+    _seed(state)
+    journal = state / "reflector/reflections.jsonl"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    if evidence == "truncated":
+        journal.write_bytes(b'{"cycle_id":"c1","summary":\n')
+    elif evidence == "torn_prefix":
+        journal.write_bytes(b'{"cycle_i')
+    elif evidence == "invalid_utf8":
+        journal.write_bytes(b'{"cycle_id":"c1","summary":"' + bytes([0xFF]) + b'"}\n')
+    elif evidence == "bad_status":
+        journal.write_text(json.dumps({"cycle_id": "c1", "status": "completed"}) + "\n", encoding="utf-8")
+    else:
+        journal.write_text(json.dumps({"cycle_id": "c1", "summary": "not a completion"}) + "\n", encoding="utf-8")
+    calls = []
+    result = reflector.run_reflector(state, llm=lambda *_args: calls.append("called"), max_cycles=1)
+    assert result["status"] == "held_ambiguous_result"
+    assert result["processed"] == 0
+    assert calls == []
+    assert not (state / "reflector/watermark.json").exists()
+
+
+@pytest.mark.parametrize("evidence", ["duplicate", "conflicting", "truncated_after_complete", "complete_without_newline", "consumed_mixed"])
+def test_reflector_conflicting_complete_rows_hold_without_cursor_advance(tmp_path: Path, evidence: str):
+    _seed(tmp_path)
+    assert reflector.run_reflector(tmp_path, llm=lambda *_args: _answer())["processed"] == 1
+    journal = tmp_path / "reflector/reflections.jsonl"
+    complete = json.loads(journal.read_text(encoding="utf-8").splitlines()[0])
+    watermark = tmp_path / "reflector/watermark.json"
+    watermark.unlink()
+    if evidence == "duplicate":
+        extra = json.dumps(complete)
+    elif evidence == "conflicting":
+        complete["summary"] = "different complete result"
+        extra = json.dumps(complete)
+    elif evidence == "complete_without_newline":
+        journal.write_bytes(json.dumps(complete).encode("utf-8"))
+        extra = None
+    elif evidence == "consumed_mixed":
+        complete["recommendations"][0]["status"] = "consumed"
+        complete["recommendations"][0]["consumed_at"] = "2026-08-26T00:01:00Z"
+        complete["status"] = "consumed"
+        extra = json.dumps(complete)
+    else:
+        extra = '{"cycle_id":"c1","summary":'
+    if extra is not None:
+        with journal.open("a", encoding="utf-8") as handle:
+            handle.write(extra + "\n")
+
+    calls = []
+    result = reflector.run_reflector(tmp_path, llm=lambda *_args: calls.append("called"))
+    assert result["status"] == "held_ambiguous_result"
+    assert result["processed"] == 0
+    assert calls == []
+    assert not watermark.exists()
+
+
+def test_reflector_result_append_failure_does_not_advance_cursor(tmp_path: Path, monkeypatch):
+    _seed(tmp_path)
+    original_append = reflector._append_journal
+
+    def fail_complete_row(state_dir, row):
+        if row.get("status") is None:
+            return False
+        return original_append(state_dir, row)
+
+    monkeypatch.setattr(reflector, "_append_journal", fail_complete_row)
+    calls = []
+    result = reflector.run_reflector(tmp_path, llm=lambda *_args: calls.append("called") or _answer())
+    assert result["status"] == "result_journal_append_failed"
+    assert result["errors"] == 1
+    assert result["processed"] == 0
+    assert calls == ["called"]
+    assert not (tmp_path / "reflector/watermark.json").exists()
+    assert not (tmp_path / "reflector/reflections.jsonl").exists()
+
+
+def test_reflector_known_cursor_without_result_does_not_replay_from_prompt_alone(tmp_path: Path):
+    state = tmp_path / "state"
+    _write(state / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "c0", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+    ])
+    _write(state / "llm_calls/prompts/2026-08-26.jsonl", [
+        {"cycle_id": cycle, "seq": 1, "messages": [{"role": "assistant", "content": f"transcript {cycle}"}]}
+        for cycle in ("c0", "c1")
+    ])
+    (state / "reflector").mkdir(parents=True)
+    (state / "reflector/watermark.json").write_text(json.dumps({"last_processed": "c1"}), encoding="utf-8")
+    calls = []
+    result = reflector.run_reflector(state, llm=lambda *_args: calls.append("called"))
+    assert result["processed"] == 0
+    assert calls == []
+    assert reflector._load_watermark(state) == "c1"
+    assert not (state / "reflector/reflections.jsonl").exists()
+
+
+def test_reflector_holds_ambiguous_watermark_before_later_cycle_max_limit(tmp_path: Path):
+    state = tmp_path / "state"
+    _write(state / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+        {"phase": "outcome", "cycle_id": "c2", "outcome": "success", "ts": "2026-08-26T00:02:00Z"},
+    ])
+    _write(state / "llm_calls/prompts/2026-08-26.jsonl", [
+        {"cycle_id": cycle, "seq": 1, "messages": [{"role": "assistant", "content": f"transcript {cycle}"}]}
+        for cycle in ("c1", "c2")
+    ])
+    (state / "reflector").mkdir(parents=True)
+    (state / "reflector/watermark.json").write_text(json.dumps({"last_processed": "c1"}), encoding="utf-8")
+    journal = state / "reflector/reflections.jsonl"
+    journal.write_text(json.dumps({"cycle_id": "c1", "summary": "incomplete"}) + "\n", encoding="utf-8")
+    before_journal = journal.read_bytes()
+    before_watermark = (state / "reflector/watermark.json").read_bytes()
+    calls = []
+
+    result = reflector.run_reflector(
+        state, llm=lambda *_args: calls.append("called"), max_cycles=1,
+    )
+
+    assert result["status"] == "held_ambiguous_result"
+    assert result["processed"] == 0
+    assert calls == []
+    assert journal.read_bytes() == before_journal
+    assert (state / "reflector/watermark.json").read_bytes() == before_watermark
+    assert not (state / "reflector/reanchors.jsonl").exists()
+
+
+def test_reflector_skipped_then_error_then_retry_can_recover(tmp_path: Path, monkeypatch):
+    state = tmp_path / "state"
+    _write(state / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "c0", "outcome": "success", "ts": "2026-08-26T00:00:00Z"},
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+    ])
+    (state / "reflector").mkdir(parents=True)
+    (state / "reflector/watermark.json").write_text(json.dumps({"last_processed": "c0"}), encoding="utf-8")
+    original_save = reflector._save_watermark
+
+    def fail_after_skip(state_dir, cycle_id):
+        if cycle_id == "c1":
+            raise OSError("injected stop after skip append")
+        original_save(state_dir, cycle_id)
+
+    monkeypatch.setattr(reflector, "_save_watermark", fail_after_skip)
+    held = reflector.run_reflector(state, llm=lambda *_args: pytest.fail("no transcript available"))
+    assert held["status"] == "cursor_reconcile_failed"
+    assert reflector._load_watermark(state) == "c0"
+    rows = [json.loads(line) for line in (state / "reflector/reflections.jsonl").read_text().splitlines()]
+    assert [row.get("status") for row in rows] == ["skipped_pruned"]
+
+    # The transcript later returns and the model fails; the retry error is
+    # legitimate after the prior skip and leaves the old cursor in place.
+    monkeypatch.setattr(reflector, "_save_watermark", original_save)
+    _write(state / "llm_calls/prompts/2026-08-26.jsonl", [
+        {"cycle_id": "c1", "seq": 1, "messages": [{"role": "assistant", "content": "returned transcript"}]},
+    ])
+    calls = []
+    failed = reflector.run_reflector(state, llm=lambda *_args: calls.append("failed") or "bad")
+    assert failed["errors"] == 1 and reflector._load_watermark(state) == "c0"
+    assert reflector._reflection_result_state(state, "c1") == "skipped"
+
+    # A fresh invocation sees skip+error as retryable, calls the model again,
+    # writes one complete result, and advances c1 only after that result.
+    succeeded = reflector.run_reflector(state, llm=lambda *_args: calls.append("ok") or _answer("c1"))
+    assert succeeded["processed"] == 1
+    assert reflector._load_watermark(state) == "c1"
+    assert calls == ["failed", "ok"]
+    assert reflector._reflection_result_state(state, "c1") == "complete"
+
+
+def test_reflector_error_row_does_not_suppress_retry_or_advance_cursor(tmp_path: Path):
+    _seed(tmp_path)
+    error = {
+        "cycle_id": "c1", "timestamp": "2026-08-26T00:01:00Z",
+        "summary": "Reflector error; cycle will be retried.", "findings": [],
+        "recommendations": [], "followed_previous": [], "status": "error",
+        "error": "RuntimeError: lost response", "response_head": "", "parse_reason": "not_attempted",
+        "response_chars": 0, "response_tail": "",
+    }
+    _write(tmp_path / "reflector/reflections.jsonl", [error])
+    calls = []
+    result = reflector.run_reflector(tmp_path, llm=lambda *_args: calls.append("called") or _answer())
+    assert result["processed"] == 1
+    assert calls == ["called"]
+    rows = [json.loads(line) for line in (tmp_path / "reflector/reflections.jsonl").read_text().splitlines()]
+    assert [row.get("status") for row in rows] == ["error", None]
+    assert json.loads((tmp_path / "reflector/watermark.json").read_text())["last_processed"] == "c1"
+
+
+def test_reflector_aged_out_cursor_does_not_record_reanchor_before_ambiguous_hold(tmp_path: Path):
+    state = tmp_path / "state"
+    _write(state / "ledger/cycles.jsonl", [
+        {"phase": "outcome", "cycle_id": "c1", "outcome": "success", "ts": "2026-08-26T00:01:00Z"},
+    ])
+    archive = state / "ledger/cycles-2026-08-25.jsonl.gz"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(archive, "wt", encoding="utf-8") as handle:
+        handle.write(json.dumps({"phase": "outcome", "cycle_id": "lost", "outcome": "success"}) + "\n")
+    (state / "reflector").mkdir(parents=True)
+    (state / "reflector/watermark.json").write_text(json.dumps({"last_processed": "lost"}), encoding="utf-8")
+    journal = state / "reflector/reflections.jsonl"
+    journal.write_text(json.dumps({"cycle_id": "c1", "summary": "incomplete"}) + "\n", encoding="utf-8")
+    before_result = journal.read_bytes()
+    before_watermark = (state / "reflector/watermark.json").read_bytes()
+
+    for _ in range(2):
+        calls = []
+        result = reflector.run_reflector(state, llm=lambda *_args: calls.append("called"))
+        assert result["status"] == "held_ambiguous_result"
+        assert calls == []
+        assert journal.read_bytes() == before_result
+        assert (state / "reflector/watermark.json").read_bytes() == before_watermark
+        assert not (state / "reflector/reanchors.jsonl").exists()
+
 
 
 def test_reflector_journal_watermark_and_prior_tail(tmp_path: Path):

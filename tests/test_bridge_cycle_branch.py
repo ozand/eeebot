@@ -12,13 +12,15 @@ clean and usable.
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import bridge
+from nanobot.runtime import bridge, phase_checkpoint
 from nanobot.runtime import evolution_tree as evo
 
 
@@ -1320,6 +1322,197 @@ class TestLineSwitchRetired:
                 offenders.append(path.relative_to(package.parent).as_posix())
                 break
         assert offenders == [], offenders
+
+
+@dataclass(frozen=True)
+class _DisposableCheckpointOwner:
+    """Test-only identity for a disposable producer path; never trusted in production."""
+
+    owner_id: str
+
+
+class TestIntegrationPhaseCheckpoint:
+    def test_disposable_producer_checkpoint_holds_after_cancel_before_receipt(self, tmp_path):
+        origin, work = _init_repo(tmp_path)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        lock = bridge._acquire_bridge_lock(state_dir)
+        assert lock is not None
+        try:
+            cycle_id = "disposable-producer-checkpoint"
+            setup = bridge._setup_cycle_branch(work, cycle_id)
+            assert setup["ok"]
+            branch = setup["branch"]
+            owner = _DisposableCheckpointOwner("disposable-owner-not-authoritative")
+            producer_runs = 0
+
+            # The fake producer changes only this temporary cycle branch. This
+            # deliberately exercises phase_checkpoint directly; production has
+            # no executor owner token in the current #2178 planner-only API.
+            (work / "producer.py").write_text("produced = True\\n", encoding="utf-8")
+            _run(work, "add", ".")
+            _run(work, "commit", "-m", "disposable producer output")
+            producer_runs += 1
+            head = _run(work, "rev-parse", f"refs/heads/{branch}").stdout.strip()
+            admitted_tip = bridge._begin_bridge_post_execution_checkpoint(
+                state_dir, owner.owner_id, cycle_id=cycle_id, branch=branch,
+                integration_base_sha=setup["main_sha"], repo_root=work,
+            )
+            assert admitted_tip == head
+            checkpoint = phase_checkpoint.load_checkpoint(state_dir, owner_id=owner.owner_id)
+            assert checkpoint is not None
+            assert checkpoint.status == "running"
+            recovery_effects = []
+            try:
+                # Represents one local post-execution recovery action after
+                # durable admission but before its completion receipt.
+                (work / "recovery.txt").write_text("reconciled once\\n", encoding="utf-8")
+                recovery_effects.append("reconciled")
+                raise asyncio.CancelledError()
+            except asyncio.CancelledError:
+                pass
+            with pytest.raises(phase_checkpoint.CheckpointHeldError, match="uncertain settlement"):
+                phase_checkpoint.begin_phase(
+                    state_dir, owner_id=owner.owner_id, cycle_id=cycle_id, branch=branch,
+                    base_sha=setup["main_sha"], head_sha=head, phase="post_execution", repo_root=work,
+                )
+            retained = phase_checkpoint.load_checkpoint(state_dir, owner_id=owner.owner_id)
+            assert retained is not None and retained.phase == "post_execution" and retained.status == "running"
+            assert producer_runs == 1
+            assert recovery_effects == ["reconciled"]
+            assert _origin_main_sha(origin) == setup["main_sha"]
+        finally:
+            lock.close()
+    @staticmethod
+    def _prepared_cycle(tmp_path, cycle_id="checkpoint-integration", owner_id="owner-checkpoint-1"):
+        origin, work = _init_repo(tmp_path)
+        setup = bridge._setup_cycle_branch(work, cycle_id)
+        assert setup["ok"]
+        branch = setup["branch"]
+        _commit_file(work, "feature.py", "def feature():\n    return 42\n", "feat: add feature")
+        cycle_head = _run(work, "rev-parse", f"refs/heads/{branch}").stdout.strip()
+        state_dir = tmp_path / "state"
+        for phase, next_phase in (("post_execution", "smoke_gate"), ("smoke_gate", "integration")):
+            phase_checkpoint.begin_phase(
+                state_dir, owner_id=owner_id, cycle_id=cycle_id, branch=branch,
+                base_sha=setup["main_sha"], head_sha=cycle_head, phase=phase, repo_root=work,
+            )
+            phase_checkpoint.complete_phase(
+                state_dir, owner_id=owner_id, cycle_id=cycle_id, branch=branch,
+                base_sha=setup["main_sha"], head_sha=cycle_head, phase=phase, repo_root=work,
+                **({"smoke_gate_result": {"passed": True, "tested_head": cycle_head}} if phase == "smoke_gate" else {}),
+            )
+        phase_checkpoint.begin_phase(
+            state_dir, owner_id=owner_id, cycle_id=cycle_id, branch=branch,
+            base_sha=setup["main_sha"], head_sha=cycle_head, phase="integration", repo_root=work,
+        )
+        return origin, work, state_dir, setup["main_sha"], branch, cycle_id, cycle_head, owner_id
+
+    def test_existing_helper_success_completes_integration_and_allows_next_cycle(self, tmp_path):
+        origin, work, state, base, branch, cycle_id, cycle_head, owner = self._prepared_cycle(tmp_path)
+        result = bridge._integrate_cycle_to_main(work, branch, base, cycle_id=cycle_id)
+        assert result["ok"] is True and result["push_confirmed"] is True
+        assert _run(work, "symbolic-ref", "--short", "HEAD").stdout.strip() == "main"
+        receipt = {key: result[key] for key in ("ok", "push_confirmed", "main_sha_after")}
+        completed = phase_checkpoint.complete_phase(
+            state, owner_id=owner, cycle_id=cycle_id, branch=branch, base_sha=base,
+            head_sha=cycle_head, phase="integration", repo_root=work,
+            integration_receipt=receipt,
+        )
+        assert completed.status == "complete"
+        assert _origin_main_sha(origin) == result["main_sha_after"]
+        next_cycle = "checkpoint-next-cycle"
+        next_branch = f"selfevo/cycle-{next_cycle}"
+        _run(work, "checkout", "-b", next_branch, "main")
+        next_base = _origin_main_sha(origin)
+        next_head = _run(work, "rev-parse", next_branch).stdout.strip()
+        next_checkpoint = phase_checkpoint.begin_phase(
+            state, owner_id="owner-checkpoint-2", cycle_id=next_cycle, branch=next_branch,
+            base_sha=next_base, head_sha=next_head, phase="post_execution", repo_root=work,
+        )
+        assert next_checkpoint.owner_id == "owner-checkpoint-2"
+        assert next_checkpoint.cycle_id == next_cycle
+        assert next_checkpoint.memos == {}
+
+    def test_rejected_push_cannot_complete_integration_phase(self, tmp_path):
+        origin, work, state, base, branch, cycle_id, cycle_head, owner = self._prepared_cycle(tmp_path)
+        competing = tmp_path / "competing"
+        subprocess.run(["git", "clone", str(origin), str(competing)], check=True, capture_output=True)
+        _run(competing, "config", "user.email", "racer@test.local")
+        _run(competing, "config", "user.name", "racer")
+        _commit_file(competing, "raced.txt", "raced = True\\n", "chore: concurrent main advance")
+        _run(competing, "push", "origin", "main")
+
+        result = bridge._integrate_cycle_to_main(work, branch, base, cycle_id=cycle_id)
+        assert result["ok"] is False and result["reason"] == "push_rejected"
+        assert "push_confirmed" not in result
+        with pytest.raises(phase_checkpoint.CheckpointHeldError, match="receipt"):
+            phase_checkpoint.complete_phase(
+                state, owner_id=owner, cycle_id=cycle_id, branch=branch, base_sha=base,
+                head_sha=cycle_head, phase="integration", repo_root=work,
+                integration_receipt=None,
+            )
+        checkpoint = phase_checkpoint.load_checkpoint(state, owner_id=owner)
+        assert checkpoint is not None and checkpoint.phase == "integration" and checkpoint.status == "running"
+
+    def test_changed_integration_refs_hold_reflection_without_checkpoint_mutation(self, tmp_path):
+        _, work, state, base, branch, cycle_id, cycle_head, owner = self._prepared_cycle(tmp_path)
+        result = bridge._integrate_cycle_to_main(work, branch, base, cycle_id=cycle_id)
+        receipt = {key: result[key] for key in ("ok", "push_confirmed", "main_sha_after")}
+        phase_checkpoint.complete_phase(
+            state, owner_id=owner, cycle_id=cycle_id, branch=branch, base_sha=base,
+            head_sha=cycle_head, phase="integration", repo_root=work,
+            integration_receipt=receipt,
+        )
+        checkpoint_path = state / "subagent_bridge" / "phase_checkpoint.json"
+        before = checkpoint_path.read_bytes()
+        _run(work, "update-ref", "refs/remotes/origin/main", base)
+        with pytest.raises(phase_checkpoint.CheckpointHeldError, match="receipt does not match"):
+            phase_checkpoint.begin_phase(
+                state, owner_id=owner, cycle_id=cycle_id, branch=branch, base_sha=base,
+                head_sha=cycle_head, phase="reflection", repo_root=work,
+            )
+        assert checkpoint_path.read_bytes() == before
+
+    @pytest.mark.parametrize(
+        "tamper",
+        ["main_ref", "cycle_ref", "missing_receipt", "unconfirmed", "wrong_receipt", "wrong_parents", "wrong_cycle_id"],
+    )
+    def test_integration_requires_unchanged_refs_and_confirmed_exact_receipt(self, tmp_path, tamper):
+        _, work, state, base, branch, cycle_id, cycle_head, owner = self._prepared_cycle(tmp_path)
+        result = bridge._integrate_cycle_to_main(work, branch, base, cycle_id=cycle_id)
+        assert result["ok"] and result["push_confirmed"]
+        receipt = {key: result[key] for key in ("ok", "push_confirmed", "main_sha_after")}
+        if tamper == "main_ref":
+            _run(work, "update-ref", "refs/heads/main", base)
+        elif tamper == "cycle_ref":
+            _run(work, "update-ref", f"refs/heads/{branch}", base)
+        elif tamper == "missing_receipt":
+            receipt = None
+        elif tamper == "unconfirmed":
+            receipt["push_confirmed"] = False
+        elif tamper == "wrong_receipt":
+            receipt["main_sha_after"] = base
+        elif tamper in {"wrong_parents", "wrong_cycle_id"}:
+            actual_main = result["main_sha_after"]
+            tree = _run(work, "show", "-s", "--format=%T", actual_main).stdout.strip()
+            parents = (cycle_head, base) if tamper == "wrong_parents" else (base, cycle_head)
+            trailer = cycle_id if tamper == "wrong_parents" else "wrong-cycle"
+            wrong_main = _run(
+                work, "commit-tree", tree, "-p", parents[0], "-p", parents[1],
+                "-m", f"merge: integrate {branch}", "-m", f"Selfevo-Cycle: {trailer}",
+            ).stdout.strip()
+            _run(work, "update-ref", "refs/heads/main", wrong_main)
+            _run(work, "update-ref", "refs/remotes/origin/main", wrong_main)
+            receipt["main_sha_after"] = wrong_main
+        with pytest.raises(phase_checkpoint.CheckpointHeldError):
+            phase_checkpoint.complete_phase(
+                state, owner_id=owner, cycle_id=cycle_id, branch=branch, base_sha=base,
+                head_sha=cycle_head, phase="integration", repo_root=work,
+                integration_receipt=receipt,
+            )
+        checkpoint = phase_checkpoint.load_checkpoint(state, owner_id=owner)
+        assert checkpoint is not None and checkpoint.phase == "integration" and checkpoint.status == "running"
 
 
 class TestIntegratePushAfterLineSwitch:

@@ -1,11 +1,9 @@
-"""Tests for #720 and ADR-039: cycle ledger JSONL and exact-key start evidence.
+"""Tests for cycle-ledger evidence and bounded bridge lifecycle integration.
 
-Covers the standalone ``nanobot.runtime.cycle_ledger`` module (append/read
-round-trip, fail-open behavior, rotation, one-terminal-row-per-cycle
-semantics via the typed helpers, enum enforcement) plus a light
-bridge-integration check that a full green cycle and an ``already_done``
-pre-spawn skip each leave the expected started/dedup/gate/outcome rows in
-``<state_dir>/ledger/cycles.jsonl``.
+ADR-039: cycle-start rows persist a supplied exact retry key while preserving
+legacy row shape when callers omit it.
+Covers typed append/read helpers, bridge gate/outcome records, phase receipts,
+owner-scoped provider intent dispatch and restart hold behavior.
 """
 from __future__ import annotations
 
@@ -13,12 +11,13 @@ import asyncio
 import gzip
 import json
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from nanobot.runtime import bridge, cycle_ledger, state, state_access
+from nanobot.runtime import bridge, cycle_ledger, intent_journal, state, state_access
 from nanobot.runtime.service_paths import is_delivered
 
 
@@ -620,7 +619,9 @@ def _init_selfevo_repo(base: Path) -> tuple[Path, Path]:
     # pyproject.toml with coverage addopts) when this synthetic clone lives
     # under tmp_path. Keep the bridge's real smoke subprocess rooted in this
     # disposable repo without inheriting unrelated host/test-runner settings.
-    (work / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (work / "pytest.ini").write_text(
+        "[pytest]\naddopts = -p no:cacheprovider\n", encoding="utf-8",
+    )
     (work / "mod.py").write_text("def ok():\n    return True\n")
     _run(work, "add", ".")
     _run(work, "commit", "-m", "init")
@@ -758,11 +759,297 @@ def _stub_planning_session(monkeypatch, plan_text: str = "a novel bounded increm
     monkeypatch.setattr(bridge, "_run_planning_session", _fake_planning_session)
 
 
+def _executor_provider_restart_worker(state_dir: Path, stage: str) -> None:
+    """Exercise one lost executor send, then verify a fresh process holds it."""
+    import pytest
+
+    from nanobot.agent.subagent import SubagentManager as RealManager
+    from nanobot.config.schema import Config
+    from nanobot.providers.litellm_provider import LiteLLMProvider
+
+    patch = pytest.MonkeyPatch()
+    TestBridgeIntegrationLedgerRows._enable_intent_journal_for_windows(patch)
+    TestBridgeIntegrationLedgerRows._enable_test_lock(patch)
+    base = state_dir.parent
+    patch.setattr(bridge, "STATE_DIR", state_dir)
+    patch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+    patch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+    bridge._CORE_SMOKE_TESTS = ("tests/test_smoke.py",)
+    release_root = base / "release"
+    release_root.mkdir(exist_ok=True)
+    (release_root / "goals.md").write_text("test charter", encoding="utf-8")
+    patch.setattr(bridge, "RELEASE_ROOT", release_root)
+    config = Config()
+    config.agents.defaults.model = "gpt-4o-mini"
+    patch.setattr(bridge, "load_config", lambda *_args: config)
+    patch.setattr(bridge, "_make_provider", lambda _config: LiteLLMProvider(
+        api_key="fake", api_base="https://mock.invalid/v1", default_model="gpt-4o-mini",
+    ))
+
+    if stage == "dispatch":
+        _init_selfevo_repo(base)
+        patch.setattr(bridge, "SubagentManager", RealManager)
+        _stub_planning_session(patch)
+        _seed_bridge_request(state_dir, "req-process-loss", "cycle-process-loss")
+        owners = []
+        original_begin = bridge._begin_bridge_cycle_parent
+
+        def capture_owner(state_root):
+            owner = original_begin(state_root)
+            owners.append(owner)
+            return owner
+
+        patch.setattr(bridge, "_begin_bridge_cycle_parent", capture_owner)
+        import litellm
+        import openai
+        from openai import _base_client
+        sdk_httpx = getattr(_base_client, "httpx2", None) or _base_client.httpx
+        sends = state_dir / "mock-transport-sends.txt"
+
+        def transport(request):
+            assert len(owners) == 1
+            rows = intent_journal.read_owner_records(state_dir, owners[0])
+            assert rows[-1]["event"] == "intent" and rows[-1]["target"] == "provider.chat"
+            parent = json.loads((state_dir / "intent-journal" / f"{owners[0]}.parent.json").read_text())
+            assert parent["active_operation_id"] == rows[-1]["operation_id"]
+            with sends.open("a", encoding="utf-8") as stream:
+                stream.write("send\n")
+            raise sdk_httpx.ConnectError("simulated lost response", request=request)
+
+        default_client = openai.DefaultAsyncHttpxClient
+
+        class MockClient(default_client):
+            def __init__(self, **kwargs):
+                kwargs.pop("transport", None)
+                super().__init__(transport=sdk_httpx.MockTransport(transport), **kwargs)
+
+        patch.setattr(openai, "DefaultAsyncHttpxClient", MockClient)
+        patch.setattr(litellm, "num_retries", None)
+        patch.setattr(litellm, "route_all_chat_openai_to_responses", False)
+        assert asyncio.run(bridge.main()) == 0
+        assert len(owners) == 1
+        assert [row["event"] for row in intent_journal.read_owner_records(
+            state_dir, owners[0],
+        ) if row.get("target") == "provider.chat"] == ["intent"]
+        (state_dir / "executor-owner-id.txt").write_text(owners[0], encoding="utf-8")
+        return
+
+    if stage == "restart":
+        entry = state_dir / "restart-entry.txt"
+        _original_begin = bridge._begin_bridge_cycle_parent
+
+        def capture_restart_owner(root):
+            entry.write_text("entered", encoding="utf-8")
+            return _original_begin(root)
+
+        patch.setattr(bridge, "_begin_bridge_cycle_parent", capture_restart_owner)
+        patch.setattr(bridge.llm_proposer, "maybe_propose", lambda *_a, **_k: (
+            state_dir / "restart-proposer.txt"
+        ).write_text("called", encoding="utf-8"))
+        async def unexpected_planner(**_kwargs):
+            (state_dir / "restart-planner.txt").write_text("called", encoding="utf-8")
+            raise AssertionError("held owner must block planner dispatch")
+        patch.setattr(bridge, "_run_planning_session", unexpected_planner)
+        patch.setattr(bridge, "_make_provider", lambda _config: (
+            (state_dir / "restart-provider.txt").write_text("called", encoding="utf-8"), object(),
+        )[1])
+        assert asyncio.run(bridge.main()) == 0
+        return
+    raise AssertionError(f"unknown executor restart worker stage: {stage}")
+
+
+def _checkpoint_restart_worker(state_dir: Path, stage: str) -> None:
+    """Run real bridge integration, then recover its durable receipt in a fresh process."""
+    import os
+
+    import pytest
+
+    from nanobot.runtime import phase_checkpoint
+
+    base = state_dir.parent
+    repo = base / "eeebot-self-evolving"
+    patch = pytest.MonkeyPatch()
+    TestBridgeIntegrationLedgerRows._enable_intent_journal_for_windows(patch)
+    TestBridgeIntegrationLedgerRows._enable_test_lock(patch)
+    patch.setattr(bridge, "STATE_DIR", state_dir)
+    patch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+    patch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+    patch.setattr(bridge, "_make_provider", lambda _config: object())
+    integrations = state_dir / "integration-calls.txt"
+    pushes = state_dir / "integration-pushes.txt"
+
+    def _count_actual_push(*args, **kwargs):
+        command = args[0] if args else kwargs.get("args", [])
+        if isinstance(command, (list, tuple)) and "push" in command and any(
+            str(part).startswith("--force-with-lease=main:") for part in command
+        ):
+            with pushes.open("a", encoding="utf-8") as handle:
+                handle.write("pushed\n")
+        return original_run(*args, **kwargs)
+
+    original_run = subprocess.run
+    patch.setattr(subprocess, "run", _count_actual_push)
+
+    if stage == "crash":
+        _init_selfevo_repo(base)
+        patch.setattr(bridge, "SubagentManager", _FakeSubagentManager)
+        bridge._CORE_SMOKE_TESTS = ("tests/test_smoke.py",)
+        release_root = base / "release"
+        release_root.mkdir()
+        (release_root / "goals.md").write_text("test charter", encoding="utf-8")
+        patch.setattr(bridge, "RELEASE_ROOT", release_root)
+        _stub_planning_session(patch)
+        _seed_bridge_request(state_dir, "req-restart", "cycle-restart")
+        integrate = bridge._integrate_cycle_to_main
+
+        def _count_initial_integration(*args, **kwargs):
+            result = integrate(*args, **kwargs)
+            with integrations.open("a", encoding="utf-8") as handle:
+                handle.write("integrated\n")
+            return result
+
+        patch.setattr(bridge, "_integrate_cycle_to_main", _count_initial_integration)
+        complete = bridge._complete_bridge_checkpoint_phase
+
+        def _exit_after_integration(*args, **kwargs):
+            result = complete(*args, **kwargs)
+            if kwargs["phase"] == "integration":
+                os._exit(93)
+            return result
+
+        patch.setattr(bridge, "_complete_bridge_checkpoint_phase", _exit_after_integration)
+        asyncio.run(bridge.main())
+        raise AssertionError("expected process exit after durable integration receipt")
+
+    patch.undo()
+    if stage != "restart":
+        raise AssertionError(f"unknown worker stage: {stage}")
+    patch = pytest.MonkeyPatch()
+    TestBridgeIntegrationLedgerRows._enable_intent_journal_for_windows(patch)
+    TestBridgeIntegrationLedgerRows._enable_test_lock(patch)
+    patch.setattr(bridge, "STATE_DIR", state_dir)
+    patch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+    patch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+    patch.setattr(bridge, "_make_provider", lambda _config: object())
+    patch.setattr(bridge.llm_proposer, "maybe_propose", lambda *_a, **_k: None)
+    release_root = base / "release"
+    patch.setattr(bridge, "RELEASE_ROOT", release_root)
+    raw = json.loads((state_dir / "subagent_bridge" / "phase_checkpoint.json").read_text())
+    owner_id = raw["owner_id"]
+    integrate = bridge._integrate_cycle_to_main
+
+    def _count_integration(*args, **kwargs):
+        result = integrate(*args, **kwargs)
+        with integrations.open("a", encoding="utf-8") as handle:
+            handle.write("integrated\n")
+        return result
+
+    patch.setattr(bridge, "_integrate_cycle_to_main", _count_integration)
+    planner_calls = []
+
+    async def _no_plan(**_kwargs):
+        planner_calls.append("called")
+        return {"ran": True, "iterations_used": 1, "iterations_planned": None,
+                "tampered_files": [], "plan": None, "terminal_outcome": "no_plan"}
+
+    patch.setattr(bridge, "_run_planning_session", _no_plan)
+    assert asyncio.run(bridge.main()) == 0
+    assert integrations.read_text(encoding="utf-8").splitlines() == ["integrated"]
+    assert pushes.read_text(encoding="utf-8").splitlines() == ["pushed"]
+    assert planner_calls == ["called"]
+    checkpoint = phase_checkpoint.load_checkpoint(state_dir, owner_id=owner_id)
+    assert checkpoint is not None and checkpoint.phase == "integration" and checkpoint.status == "complete"
+    main_sha = _run(repo, "rev-parse", "refs/remotes/origin/main").stdout.strip()
+    assert checkpoint.memos["integration_main_sha"] == main_sha
+    assert phase_checkpoint.verify_completed_phase(
+        state_dir, owner_id=owner_id, cycle_id=checkpoint.cycle_id, repo_root=repo,
+    ) == checkpoint
+    assert bridge._prepare_repository_for_cycle(repo, state_dir)["restored"] is True
+    assert integrations.read_text(encoding="utf-8").splitlines() == ["integrated"]
+    assert pushes.read_text(encoding="utf-8").splitlines() == ["pushed"]
+    snapshot = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+    assert snapshot is not None and snapshot.route_status == "closed" and snapshot.owner_id != owner_id
+    assert snapshot.no_execution_receipt is not None and snapshot.no_execution_receipt[1] == "no_plan"
+    phases = [row["phase"] for row in intent_journal.read_owner_records(state_dir, owner_id)
+              if row["event"] == "phase_consumed"]
+    assert phases == ["post_execution", "smoke_gate", "integration"]
+
+
 class TestBridgeIntegrationLedgerRows:
+    def test_selected_integration_receipt_recovery_across_process_restart(self, tmp_path):
+        import sys
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        _seed_bridge_request(state_dir, "req-restart", "cycle-restart")
+        script = (
+            "import runpy, sys; from pathlib import Path; "
+            "runpy.run_path('tests/test_cycle_ledger.py')['_checkpoint_restart_worker']("
+            "Path(sys.argv[1]), sys.argv[2])"
+        )
+        crashed = subprocess.run(
+            [sys.executable, "-c", script, str(state_dir), "crash"],
+            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
+        )
+        assert crashed.returncode == 93, crashed.stderr
+        checkpoint = json.loads(
+            (state_dir / "subagent_bridge" / "phase_checkpoint.json").read_text(encoding="utf-8"),
+        )
+        assert checkpoint["phase"] == "integration" and checkpoint["status"] == "complete"
+        assert checkpoint["memos"]["smoke_gate_receipt"] == {
+            "passed": True, "tested_head": checkpoint["head_sha"],
+        }
+        assert checkpoint["memos"]["integration_main_sha"]
+        restarted = subprocess.run(
+            [sys.executable, "-c", script, str(state_dir), "restart"],
+            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
+        )
+        assert restarted.returncode == 0, restarted.stderr
+        assert "no plan produced this cycle" in restarted.stdout
+        assert "integrate:" not in restarted.stdout
+
+    @staticmethod
+    def _run_under_test_lock(monkeypatch):
+        TestBridgeIntegrationLedgerRows._enable_test_lock(monkeypatch)
+        return asyncio.run(bridge.main())
+
+    @staticmethod
+    def _enable_test_lock(monkeypatch):
+        class _LockHandle:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(bridge, "_acquire_bridge_lock", lambda _state_dir: _LockHandle())
+
+    @staticmethod
+    def _enable_intent_journal_for_windows(monkeypatch):
+        """Supply only process-local lock/fsync primitives for logic tests on Windows."""
+        import os
+        import threading
+        from contextlib import contextmanager
+
+        if os.name != "nt":
+            return
+        locks = {}
+        guard = threading.Lock()
+
+        @contextmanager
+        def _lock(path):
+            key = str(path.resolve())
+            path.touch(exist_ok=True)
+            with guard:
+                lock = locks.setdefault(key, threading.Lock())
+            with lock:
+                yield
+
+        monkeypatch.setattr(intent_journal, "_owner_lock", _lock)
+        monkeypatch.setattr(intent_journal, "_fsync_directory", lambda _path: None)
+
     def test_skill_hygiene_violation_reaches_production_gate_journal(self, tmp_path, monkeypatch):
         base = tmp_path
         state_dir = base / "state"
         state_dir.mkdir()
+        self._enable_intent_journal_for_windows(monkeypatch)
         _init_selfevo_repo(base)
 
         monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
@@ -784,10 +1071,248 @@ class TestBridgeIntegrationLedgerRows:
             for violation in gate_rows[-1]["violations"]
         )
 
+    def test_started_bridge_owner_holds_before_proposer_and_keeps_same_owner(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        self._enable_intent_journal_for_windows(monkeypatch)
+        _init_selfevo_repo(tmp_path)
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "target_workspace")
+        monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        proposer_calls = []
+        planning_calls = []
+        executor_spawns = []
+        monkeypatch.setattr(
+            bridge.llm_proposer, "maybe_propose",
+            lambda *_a, **_k: proposer_calls.append("called"),
+        )
+        monkeypatch.setattr(bridge, "SubagentManager", lambda **_kwargs: executor_spawns.append("spawn"))
+        _seed_bridge_request(state_dir, "req-started-owner", "cycle-started-owner")
+        self._enable_test_lock(monkeypatch)
+
+        from nanobot.runtime import phase_checkpoint
+        from tests.test_cycle_phase_machine import _cycle_repo
+        repo, base, head = _cycle_repo(tmp_path)
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        owner = bridge._begin_bridge_cycle_parent(state_dir)
+        bridge._begin_bridge_checkpoint_phase(
+            state_dir, owner, cycle_id="cycle-started-owner", branch="selfevo/cycle-cycle-opaque-001",
+            base_sha=base, head_sha=head, phase="post_execution", repo_root=repo,
+        )
+        # The checkpoint is running, the journal lifecycle is started-empty,
+        # and the reader must hold before proposer/planner/executor dispatch.
+        owner_rows_before = intent_journal.read_owner_records(state_dir, owner)
+        route_before = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+        assert route_before is not None and route_before.owner_id == owner and route_before.parent_started
+
+        async def unexpected_planner(**kwargs):
+            planning_calls.append(kwargs.get("cycle_id"))
+            raise AssertionError("started owner must hold before planner dispatch")
+
+        monkeypatch.setattr(bridge, "_run_planning_session", unexpected_planner)
+        assert self._run_under_test_lock(monkeypatch) == 0
+        route_after = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+        assert route_after is not None and route_after.owner_id == owner and route_after.parent_started
+        assert intent_journal.provision_route_parent(state_dir, "bridge.cycle") == owner
+        assert intent_journal.read_owner_records(state_dir, owner) == owner_rows_before
+        assert proposer_calls == [] and planning_calls == [] and executor_spawns == []
+        checkpoint = phase_checkpoint.load_checkpoint(state_dir, owner_id=owner)
+        assert checkpoint is not None and checkpoint.status == "running"
+
+    def test_persisted_rest_precheck_blocks_until_deadline_across_restart(self, tmp_path, monkeypatch):
+        import sys
+        from datetime import datetime, timedelta, timezone
+
+        from nanobot.runtime import planner_rest
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        self._enable_intent_journal_for_windows(monkeypatch)
+        _init_selfevo_repo(tmp_path)
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "target_workspace")
+        monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        self._enable_test_lock(monkeypatch)
+        clock = {"now": datetime(2026, 11, 19, tzinfo=timezone.utc)}
+        monkeypatch.setattr(planner_rest, "datetime", type("Clock", (), {
+            "now": staticmethod(lambda _tz=None: clock["now"]),
+            "fromisoformat": datetime.fromisoformat,
+        }))
+        calls = {"proposer": 0, "planner": 0, "executor": 0}
+        monkeypatch.setattr(bridge.llm_proposer, "maybe_propose", lambda *_a, **_k: calls.__setitem__("proposer", calls["proposer"] + 1))
+        monkeypatch.setattr(bridge, "SubagentManager", lambda **_kwargs: calls.__setitem__("executor", calls["executor"] + 1))
+
+        def _no_plan_session(**_kwargs):
+            async def _result():
+                calls["planner"] += 1
+                return {
+                    "ran": True, "iterations_used": 1, "iterations_planned": None,
+                    "tampered_files": [], "plan": None, "terminal_outcome": "no_plan",
+                }
+            return _result()
+
+        monkeypatch.setattr(bridge, "_run_planning_session", lambda **kwargs: _no_plan_session(**kwargs))
+        _seed_bridge_request(state_dir, "req-rest-deadline", "cycle-rest-deadline")
+        # Persist the existing rest decision before bridge entry, exactly as a
+        # prior normal planner cycle does.
+        wake_file = tmp_path / "wake-input.txt"
+        wake_file.write_text("unchanged", encoding="utf-8")
+        deadline = (clock["now"] + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+        writer = (
+            "import sys; from nanobot.runtime import planner_rest; "
+            "planner_rest.record_rest(sys.argv[1], 'cycle-prior-rest', "
+            "planner_rest.WakeCondition(kind='file', ref=sys.argv[3]), "
+            "sys.argv[4], sys.argv[2])"
+        )
+        subprocess.run(
+            [sys.executable, "-c", writer, str(state_dir), str(state_dir.parent / "eeebot-self-evolving"), str(wake_file), deadline],
+            cwd=Path(__file__).resolve().parents[1], check=True,
+        )
+
+        def _fresh_process_precheck(now):
+            script = (
+                "import json, sys; from datetime import datetime, timezone; "
+                "from nanobot.runtime import planner_rest; "
+                "now = datetime.fromisoformat(sys.argv[3]); "
+                "planner_rest.datetime = type('Clock', (), {"
+                "'now': staticmethod(lambda _tz=None: now), "
+                "'fromisoformat': datetime.fromisoformat}); "
+                "print(json.dumps(planner_rest.precheck(sys.argv[1], sys.argv[2])))"
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", script, str(state_dir), str(state_dir.parent / "eeebot-self-evolving"), now.isoformat()],
+                cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=True,
+            )
+            return tuple(json.loads(result.stdout.strip()))
+
+        # Existing bridge entry honors persisted state before proposer/planner.
+        asyncio.run(bridge.main())
+        assert calls == {"proposer": 0, "planner": 0, "executor": 0}
+        held_owner = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+        assert held_owner is not None and held_owner.route_status == "closed"
+        assert held_owner.no_execution_receipt is not None
+        assert held_owner.no_execution_receipt[1] == "rest_unchanged"
+
+        # A fresh interpreter sees the persisted state and remains held before
+        # deadline; the bridge does not dispatch proposer, planner, or executor.
+        clock["now"] += timedelta(minutes=4)
+        assert _fresh_process_precheck(clock["now"]) == (False, "unchanged")
+        asyncio.run(bridge.main())
+        assert calls == {"proposer": 0, "planner": 0, "executor": 0}
+        held_again = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+        assert held_again is not None and held_again.route_status == "closed"
+
+        # At the persisted deadline the same existing precheck permits normal
+        # cycle flow through proposer/planner; no timer or new scheduler is introduced.
+        clock["now"] += timedelta(minutes=1)
+        assert _fresh_process_precheck(clock["now"]) == (True, "deadline_passed")
+        monkeypatch.setattr(bridge, "_prepare_repository_for_cycle", lambda *_args: {"restored": True})
+        asyncio.run(bridge.main())
+        assert calls == {"proposer": 1, "planner": 1, "executor": 0}
+        after_deadline = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+        assert after_deadline is not None and after_deadline.route_status == "closed"
+        assert after_deadline.no_execution_receipt is not None
+        assert after_deadline.no_execution_receipt[1] == "no_plan"
+
+    def test_explicit_no_plan_receipt_closes_without_executor_or_phase(self, tmp_path, monkeypatch):
+        base = tmp_path
+        state_dir = base / "state"
+        state_dir.mkdir()
+        self._enable_intent_journal_for_windows(monkeypatch)
+        _init_selfevo_repo(base)
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+        monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        monkeypatch.setattr(bridge.llm_proposer, "maybe_propose", lambda *_a, **_k: None)
+        self._enable_test_lock(monkeypatch)
+        _seed_bridge_request(state_dir, "req-no-plan", "cycle-no-plan")
+        owners = []
+        original_begin = bridge._begin_bridge_cycle_parent
+
+        def _capture_owner(state_root):
+            owner_id = original_begin(state_root)
+            owners.append(owner_id)
+            return owner_id
+
+        planning_calls = []
+
+        async def _no_plan(**kwargs):
+            planning_calls.append(kwargs.get("cycle_id"))
+            return {
+                "ran": True, "iterations_used": 1, "iterations_planned": None,
+                "tampered_files": [], "plan": None, "terminal_outcome": "no_plan",
+            }
+
+        monkeypatch.setattr(bridge, "_begin_bridge_cycle_parent", _capture_owner)
+        monkeypatch.setattr(bridge, "_run_planning_session", _no_plan)
+        assert self._run_under_test_lock(monkeypatch) == 0
+        assert len(owners) == 1
+        rows = intent_journal.read_owner_records(state_dir, owners[0])
+        assert [row["event"] for row in rows] == ["no_execution_consumed"]
+        assert rows[0]["cycle_id"].startswith("cycle-")
+        assert rows[0]["outcome"] == "no_plan"
+        # The no-plan receipt is terminal and cannot be amended as execution.
+        with pytest.raises(intent_journal.JournalUnavailableError):
+            intent_journal.consume_bridge_cycle_phase(
+                state_dir, owners[0], cycle_id=rows[0]["cycle_id"],
+                phase="post_execution", checkpoint_head_sha="a" * 40,
+                checkpoint_status="complete",
+            )
+
+        assert self._run_under_test_lock(monkeypatch) == 0
+        assert len(planning_calls) == 2 and planning_calls[1] != planning_calls[0]
+        assert len(owners) == 2 and owners[1] != owners[0]
+        next_rows = intent_journal.read_owner_records(state_dir, owners[1])
+        assert len(next_rows) == 1 and next_rows[0]["event"] == "no_execution_consumed"
+
+    def test_planner_exception_is_not_no_execution_and_restart_holds_before_planner(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        self._enable_intent_journal_for_windows(monkeypatch)
+        _init_selfevo_repo(tmp_path)
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "target_workspace")
+        monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        monkeypatch.setattr(bridge.llm_proposer, "maybe_propose", lambda *_a, **_k: None)
+        _seed_bridge_request(state_dir, "req-planner-error", "cycle-planner-error")
+        owners = []
+        planning_calls = []
+        original_begin = bridge._begin_bridge_cycle_parent
+
+        def _capture_owner(state_root):
+            owner_id = original_begin(state_root)
+            owners.append(owner_id)
+            return owner_id
+
+        async def _planner_error(**kwargs):
+            planning_calls.append(kwargs.get("cycle_id"))
+            raise RuntimeError("planner failed before terminal result")
+
+        monkeypatch.setattr(bridge, "_begin_bridge_cycle_parent", _capture_owner)
+        monkeypatch.setattr(bridge, "_run_planning_session", _planner_error)
+        assert self._run_under_test_lock(monkeypatch) == 0
+        assert len(owners) == 1
+        assert intent_journal.read_owner_records(state_dir, owners[0]) == []
+
+        async def _planner_unexpected(**kwargs):
+            planning_calls.append(kwargs.get("cycle_id"))
+            raise AssertionError("started-empty owner must hold before planner")
+
+        monkeypatch.setattr(bridge, "_run_planning_session", _planner_unexpected)
+        assert self._run_under_test_lock(monkeypatch) == 0
+        assert len(planning_calls) == 1
+        assert owners == [owners[0]]
+        assert intent_journal.read_owner_records(state_dir, owners[0]) == []
+
     def test_full_green_cycle_writes_started_gate_success(self, tmp_path, monkeypatch):
         base = tmp_path
         state_dir = base / "state"
         state_dir.mkdir()
+        self._enable_intent_journal_for_windows(monkeypatch)
         _init_selfevo_repo(base)
 
         monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
@@ -800,8 +1325,17 @@ class TestBridgeIntegrationLedgerRows:
         _stub_planning_session(monkeypatch)
 
         _seed_bridge_request(state_dir, "req-green", "cycle-green")
+        bridge_owners = []
+        original_begin = bridge._begin_bridge_cycle_parent
 
-        result = asyncio.run(bridge._main_impl())
+        def _capture_owner(state_root):
+            owner_id = original_begin(state_root)
+            bridge_owners.append(owner_id)
+            return owner_id
+
+        monkeypatch.setattr(bridge, "_begin_bridge_cycle_parent", _capture_owner)
+
+        result = self._run_under_test_lock(monkeypatch)
         assert result == 0
 
         rows = _read_ledger(state_dir)
@@ -809,7 +1343,8 @@ class TestBridgeIntegrationLedgerRows:
         assert phases[0] == "started"
         assert "dedup" in phases
         assert "gate" in phases
-        assert phases[-1] == "outcome"
+        assert phases[-2] == "outcome"
+        assert phases[-1] == "cycle_cost"
 
         gate_rows = [r for r in rows if r["phase"] == "gate"]
         assert gate_rows[-1]["allowed"] is True
@@ -818,6 +1353,159 @@ class TestBridgeIntegrationLedgerRows:
         assert outcome_rows[-1]["outcome"] == "success"
         assert outcome_rows[-1]["change_tier"] == "code-bearing"
         assert "scripts/feature.py" in outcome_rows[-1]["files_changed"]
+
+        phase_rows = intent_journal.read_owner_records(state_dir, bridge_owners[0])
+        assert [row["phase"] for row in phase_rows if row["event"] == "phase_consumed"] == [
+            "post_execution", "smoke_gate", "integration",
+        ]
+        from nanobot.runtime import phase_checkpoint
+
+        checkpoint = phase_checkpoint.load_checkpoint(
+            state_dir, owner_id=bridge_owners[0],
+        )
+        assert checkpoint is not None and checkpoint.phase == "integration"
+        assert checkpoint.status == "complete"
+        assert len(bridge_owners) == 1
+
+    @pytest.mark.parametrize("transport_outcome", ["success", "lost"])
+    def test_executor_provider_attempt_uses_bridge_cycle_owner(
+        self, tmp_path, monkeypatch, transport_outcome,
+    ):
+        from nanobot.agent.subagent import SubagentManager as RealManager
+        from nanobot.config.schema import Config
+        from nanobot.providers.litellm_provider import LiteLLMProvider
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        if transport_outcome == "lost":
+            self._enable_intent_journal_for_windows(monkeypatch)
+            script = (
+                "import runpy, sys; from pathlib import Path; "
+                "runpy.run_path('tests/test_cycle_ledger.py')['_executor_provider_restart_worker']("
+                "Path(sys.argv[1]), sys.argv[2])"
+            )
+            dispatch = subprocess.run(
+                [sys.executable, "-c", script, str(state_dir), "dispatch"],
+                cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
+            )
+            assert dispatch.returncode == 0, dispatch.stdout + dispatch.stderr
+            dispatch_output = dispatch.stdout + dispatch.stderr
+            assert "previous HTTP attempt has unknown settlement" in dispatch_output
+            owner = (state_dir / "executor-owner-id.txt").read_text(encoding="utf-8")
+            journal_path = state_dir / "intent-journal" / f"{owner}.jsonl"
+            parent_path = state_dir / "intent-journal" / f"{owner}.parent.json"
+            dispatched_rows = intent_journal.read_owner_records(state_dir, owner)
+            provider_rows = [row for row in dispatched_rows if row.get("target") == "provider.chat"]
+            assert len(provider_rows) == 1
+            assert provider_rows[0]["event"] == "intent" and provider_rows[0]["component"] == "subagent"
+            dispatched_parent = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+            assert dispatched_parent is not None and dispatched_parent.owner_id == owner
+            assert dispatched_parent.parent_started and dispatched_parent.has_unresolved_attempts
+            assert dispatched_parent.active_operation_id == provider_rows[0]["operation_id"]
+            journal_before_restart, parent_before_restart = journal_path.read_bytes(), parent_path.read_bytes()
+            restart = subprocess.run(
+                [sys.executable, "-c", script, str(state_dir), "restart"],
+                cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True,
+            )
+            assert restart.returncode == 0, restart.stdout + restart.stderr
+            assert "bridge: cycle owner held (JournalUnavailableError); aborting before proposer" in restart.stdout
+            assert (state_dir / "restart-entry.txt").read_text(encoding="utf-8") == "entered"
+            assert not (state_dir / "restart-proposer.txt").exists()
+            assert not (state_dir / "restart-planner.txt").exists()
+            assert not (state_dir / "restart-provider.txt").exists()
+            assert (state_dir / "mock-transport-sends.txt").read_text(encoding="utf-8").splitlines() == ["send"]
+            assert journal_path.read_bytes() == journal_before_restart
+            assert parent_path.read_bytes() == parent_before_restart
+            assert intent_journal.read_route_parent_state(state_dir, "bridge.cycle").owner_id == owner
+            held = [row for row in _read_ledger(state_dir) if row.get("phase") == "bridge_cycle_intent_held"]
+            assert held and held[-1]["reason"] == "JournalUnavailableError"
+            return
+
+        self._enable_intent_journal_for_windows(monkeypatch)
+        self._enable_test_lock(monkeypatch)
+        _init_selfevo_repo(tmp_path)
+        config = Config()
+        config.agents.defaults.model = "gpt-4o-mini"
+        monkeypatch.setattr(bridge, "load_config", lambda *_args: config)
+        monkeypatch.setattr(
+            bridge, "_make_provider",
+            lambda _config: LiteLLMProvider(
+                api_key="fake", api_base="https://mock.invalid/v1", default_model="gpt-4o-mini",
+            ),
+        )
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", tmp_path / "target_workspace")
+        _stub_planning_session(monkeypatch)
+        monkeypatch.setattr(bridge, "SubagentManager", RealManager)
+        _seed_bridge_request(state_dir, "req-intent", "cycle-intent")
+        owners = []
+        original_begin = bridge._begin_bridge_cycle_parent
+
+        def capture_owner(state_root):
+            owner = original_begin(state_root)
+            owners.append(owner)
+            return owner
+
+        monkeypatch.setattr(bridge, "_begin_bridge_cycle_parent", capture_owner)
+        import litellm
+        import openai
+        from openai import _base_client
+        sdk_httpx = getattr(_base_client, "httpx2", None) or _base_client.httpx
+        sent = []
+
+        def transport(request):
+            assert len(owners) == 1
+            records = intent_journal.read_owner_records(state_dir, owners[0])
+            pending = [row for row in records if row["event"] == "intent"]
+            assert pending and pending[-1]["target"] == "provider.chat"
+            assert records[-1]["event"] == "intent"
+            assert pending[-1]["component"] == "subagent"
+            parent_path = state_dir / "intent-journal" / f"{owners[0]}.parent.json"
+            parent = json.loads(parent_path.read_text(encoding="utf-8"))
+            assert parent["active_operation_id"] == pending[-1]["operation_id"]
+            sent.append(request.content)
+            if transport_outcome == "lost":
+                raise sdk_httpx.ConnectError("simulated lost response", request=request)
+            body = {
+                "id": "chatcmpl-test", "object": "chat.completion", "created": 0,
+                "model": "gpt-4o-mini",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "done"},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+            return sdk_httpx.Response(200, json=body, request=request)
+
+        default_client = openai.DefaultAsyncHttpxClient
+
+        class MockClient(default_client):
+            def __init__(self, **kwargs):
+                kwargs.pop("transport", None)
+                super().__init__(transport=sdk_httpx.MockTransport(transport), **kwargs)
+
+        monkeypatch.setattr(openai, "DefaultAsyncHttpxClient", MockClient)
+        monkeypatch.setattr(litellm, "num_retries", None)
+        monkeypatch.setattr(litellm, "route_all_chat_openai_to_responses", False)
+        assert self._run_under_test_lock(monkeypatch) == 0
+        rows = intent_journal.read_owner_records(state_dir, owners[0])
+        if transport_outcome == "success":
+            assert [row["event"] for row in rows if row.get("target") == "provider.chat"] == [
+                "intent", "terminal", "consumed",
+            ]
+            assert len(sent) == 1
+            return
+
+        assert [row["event"] for row in rows if row.get("target") == "provider.chat"] == ["intent"]
+        assert len(sent) == 1
+        parent_path = state_dir / "intent-journal" / f"{owners[0]}.parent.json"
+        parent_before_restart = parent_path.read_bytes()
+        journal_path = state_dir / "intent-journal" / f"{owners[0]}.jsonl"
+        journal_before_restart = journal_path.read_bytes()
+        assert self._run_under_test_lock(monkeypatch) == 0
+        assert len(sent) == 1
+        assert parent_path.read_bytes() == parent_before_restart
+        assert journal_path.read_bytes() == journal_before_restart
+        assert intent_journal.read_route_parent_state(state_dir, "bridge.cycle").owner_id == owners[0]
 
     def test_exact_tag_skip_writes_started_then_skipped(self, tmp_path, monkeypatch):
         state_dir = tmp_path / "state"
@@ -830,13 +1518,85 @@ class TestBridgeIntegrationLedgerRows:
         _stub_planning_session(monkeypatch)
 
         _seed_bridge_request(state_dir, "req-tagged", "cycle-tagged")
-        assert asyncio.run(bridge._main_impl()) == 0
+        self._enable_intent_journal_for_windows(monkeypatch)
+        assert self._run_under_test_lock(monkeypatch) == 0
 
         rows = _read_ledger(state_dir)
         # ADR-035 rest amendment (#1964): a dedup match now also feeds
         # planner_dedup_evidence.record_rejected_duplicate, so the next
         # planning session sees why -- an extra trailing ledger row.
-        assert [row["phase"] for row in rows] == ["started", "dedup", "outcome", "rejected_duplicate"]
+        assert [row["phase"] for row in rows] == [
+            "started", "dedup", "outcome", "rejected_duplicate", "cycle_cost",
+        ]
         assert rows[1]["decision"] == "skipped_duplicate"
         assert rows[2]["outcome"] == "skipped-duplicate"
         assert rows[2]["reason"] == "already_done_tag"
+
+    # @lat: [[architecture#Intent-before-effect evidence]]
+    def test_real_duplicate_closes_empty_owner_before_next_legitimate_invocation(
+        self, tmp_path, monkeypatch,
+    ):
+        """A real success tag suppresses spawn, but must not strand the next cycle.
+
+        The separate lost-provider-attempt case above asserts an unknown effect
+        remains held with its journal bytes unchanged; this case exercises the
+        no-effect duplicate lifecycle across two complete bridge invocations.
+        """
+        base = tmp_path
+        state_dir = base / "state"
+        state_dir.mkdir()
+        self._enable_intent_journal_for_windows(monkeypatch)
+        _origin, work = _init_selfevo_repo(base)
+        monkeypatch.setattr(bridge, "STATE_DIR", state_dir)
+        monkeypatch.setattr(bridge, "BRIDGE_STATE_DIR", state_dir / "subagent_bridge")
+        monkeypatch.setattr(bridge, "TARGET_WORKSPACE", base / "target_workspace")
+        monkeypatch.setattr(bridge, "_make_provider", lambda _config: object())
+        _seed_bridge_request(state_dir, "req-duplicate-owner", "cycle-duplicate-owner")
+
+        planning_cycles = []
+        async def planning_session(**kwargs):
+            cycle_id = kwargs["cycle_id"]
+            planning_cycles.append(cycle_id)
+            if len(planning_cycles) == 1:
+                # The first valid planner result is a genuine exact-tag duplicate.
+                _run(work, "tag", f"cycle-{cycle_id}-success", "HEAD")
+            return {
+                "ran": True, "iterations_used": 1, "iterations_planned": 1,
+                "tampered_files": [],
+                "plan": {"plan": "implement a novel bounded increment", "candidate_id": None},
+            }
+
+        monkeypatch.setattr(bridge, "_run_planning_session", planning_session)
+        executor_spawns = []
+
+        class _ObservedExecutor(_FakeSubagentManager):
+            async def spawn(self, **kwargs):
+                if self._telemetry_component != "planner":
+                    executor_spawns.append(kwargs)
+                return await super().spawn(**kwargs)
+
+        monkeypatch.setattr(bridge, "SubagentManager", _ObservedExecutor)
+        self._enable_test_lock(monkeypatch)
+
+        assert asyncio.run(bridge.main()) == 0
+        assert executor_spawns == []
+        first_owner = intent_journal.read_route_parent_state(state_dir, "bridge.cycle")
+        assert first_owner is not None and first_owner.parent_started
+        assert first_owner.route_status == "closed"
+        assert first_owner.no_execution_receipt == (planning_cycles[0], "duplicate_suppressed")
+        assert [row["event"] for row in intent_journal.read_owner_records(
+            state_dir, first_owner.owner_id,
+        )] == ["no_execution_consumed"]
+        duplicate_outcomes = [
+            row for row in _read_ledger(state_dir)
+            if row.get("phase") == "outcome" and row.get("reason") == "already_done_tag"
+        ]
+        assert len(duplicate_outcomes) == 1
+        assert duplicate_outcomes[0]["outcome"] == "skipped-duplicate"
+
+        # The following planner result is novel (its cycle has no success tag).
+        # It must reach the executor rather than being blocked by the empty
+        # started owner left by the duplicate path.
+        assert asyncio.run(bridge.main()) == 0
+        assert len(planning_cycles) == 2
+        assert len(executor_spawns) == 1
