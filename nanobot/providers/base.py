@@ -100,6 +100,10 @@ class LLMProvider(ABC):
     while maintaining a consistent interface.
     """
 
+    def journal_manages_physical_attempts(self, model: str | None = None) -> bool:
+        """Whether the provider journals each physical send via a transport hook."""
+        return False
+
     _CHAT_RETRY_DELAYS = (1, 2, 4)
     _TRANSIENT_ERROR_MARKERS = (
         "429",
@@ -247,6 +251,10 @@ class LLMProvider(ABC):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            from nanobot.runtime.intent_journal import JournalUnavailableError
+
+            if isinstance(exc, JournalUnavailableError):
+                raise
             return LLMResponse(content=f"Error calling LLM: {exc}", finish_reason="error")
 
     async def chat_with_retry(
@@ -369,18 +377,36 @@ class LLMProvider(ABC):
         from nanobot.observability.prompt_provenance import (
             consume_request_for_system,
             current_owner,
+            current_provenance,
         )
+        from nanobot.runtime import intent_journal
+
         actual_system = next((str(message.get("content") or "") for message in messages if message.get("role") == "system"), "")
         request = consume_request_for_system(actual_system, current_owner())
         if not isinstance(request, PromptRequest):
             request = None
         request_context = prompt_request_context(request) if request is not None else contextlib.nullcontext()
+
+        async def _attempt(**attempt_kwargs: Any) -> tuple[LLMResponse, Any, Any]:
+            operation = intent_journal.current_operation()
+            if operation is None:
+                return await self._safe_chat(**attempt_kwargs), None, None
+            if self.journal_manages_physical_attempts(attempt_kwargs.get("model")):
+                return await self._safe_chat(**attempt_kwargs), operation, None
+            evidence = operation.admit()
+            response = await self._safe_chat(**attempt_kwargs)
+            operation.returned(evidence)
+            return response, operation, evidence
+
+        def _consume(operation: Any, evidence: Any) -> None:
+            if operation is not None and evidence is not None:
+                operation.consume(evidence)
+
         with request_context:
             with provider_call_context(messages) as prompt_call:
                 _active_prompt_provenance = prompt_call.provenance if prompt_call is not None else None
                 for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
-                    response = await self._safe_chat(**kw)
-                    from nanobot.observability.prompt_provenance import current_provenance
+                    response, operation, evidence = await _attempt(**kw)
                     _active_prompt_provenance = current_provenance() or _active_prompt_provenance
 
                     if response.finish_reason == "error":
@@ -392,8 +418,8 @@ class LLMProvider(ABC):
                         stripped = self._strip_image_content(messages)
                         if stripped is not None:
                             logger.warning("Non-transient LLM error with image content, retrying without images")
-                            response = await self._safe_chat(**{**kw, "messages": stripped})
-                            from nanobot.observability.prompt_provenance import current_provenance
+                            _consume(operation, evidence)
+                            response, operation, evidence = await _attempt(**{**kw, "messages": stripped})
                             _active_prompt_provenance = current_provenance() or _active_prompt_provenance
                             if response.finish_reason == "error":
                                 _record_failure(response)
@@ -405,10 +431,10 @@ class LLMProvider(ABC):
                         attempt, len(self._CHAT_RETRY_DELAYS), delay,
                         (response.content or "")[:120].lower(),
                     )
+                    _consume(operation, evidence)
                     await asyncio.sleep(delay)
 
-                response = await self._safe_chat(**kw)
-                from nanobot.observability.prompt_provenance import current_provenance
+                response, operation, evidence = await _attempt(**kw)
                 _active_prompt_provenance = current_provenance() or _active_prompt_provenance
                 if response.finish_reason == "error":
                     _record_failure(response)

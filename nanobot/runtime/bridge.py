@@ -3330,6 +3330,34 @@ async def _run_planning_session(
     denied_paths: set, cycle_id: str, wall_deadline: float | None = None,
     planner_phase_budget: bool = False,
 ) -> dict:
+    """Run the planner with its durable bridge-owned parent token."""
+    from nanobot.runtime import intent_journal
+
+    owner_id = intent_journal.provision_route_parent(state_dir, "planner")
+    with intent_journal.bridge_parent_context(state_dir, owner_id):
+        result = await _run_planning_session_inner(
+            provider=provider, bus=bus, config=config, model=model,
+            state_dir=state_dir, selfevo_repo=selfevo_repo,
+            denied_paths=denied_paths, cycle_id=cycle_id,
+            wall_deadline=wall_deadline, planner_phase_budget=planner_phase_budget,
+            intent_owner_id=owner_id,
+        )
+        if not intent_journal.close_route_parent(state_dir, "planner", owner_id):
+            if result.get("plan") is None:
+                # A no-plan result cannot release a planner result to the executor;
+                # the durable parent remains active and blocks the next invocation.
+                return result
+            raise intent_journal.JournalUnavailableError(
+                "planner parent consumption was not verified; result remains held",
+            )
+        return result
+
+
+async def _run_planning_session_inner(
+    *, provider, bus, config, model: str, state_dir: 'Path', selfevo_repo: 'Path',
+    denied_paths: set, cycle_id: str, wall_deadline: float | None = None,
+    planner_phase_budget: bool = False, intent_owner_id: str,
+) -> dict:
     """#1852 (ADR-031 rule 5, ADR-032 rule 2): the planning session. Between
     cycles, on the executor's own model, in a clean context, bounded at 20
     tool iterations, separate from the cycle's own 80: read what was done,
@@ -3615,6 +3643,8 @@ async def _run_planning_session(
             role_system_prompt=role_text,
             role_prompt_sections=_planner_role_sections,
             role_prompt_release_id=_planner_role_release_id,
+            intent_state_root=state_dir,
+            intent_owner_id=intent_owner_id,
             telemetry_component='planner',
             telemetry_cycle_id=cycle_id,
             wall_deadline=_effective_wall_deadline,
@@ -4470,7 +4500,17 @@ async def _main_impl_body():
     # so a freshly-authored proposal is visible to THIS SAME planning session
     # via llm_proposer.proposer_candidate_items below.
     _selfevo_repo_for_proposer = STATE_DIR.parent / 'eeebot-self-evolving'
-    _proposer_title = llm_proposer.maybe_propose(STATE_DIR, _selfevo_repo_for_proposer)
+    from nanobot.runtime import intent_journal
+    try:
+        with intent_journal.route_parent_context(STATE_DIR, "proposer"):
+            _proposer_title = llm_proposer.maybe_propose(STATE_DIR, _selfevo_repo_for_proposer)
+    except intent_journal.JournalUnavailableError as exc:
+        append_event(STATE_DIR, {
+            'phase': 'proposer_intent_held', 'cycle_id': '',
+            'reason': type(exc).__name__,
+        })
+        print(f'llm-proposer: intent journal held ({type(exc).__name__}); aborting cycle')
+        return 0
     if _proposer_title:
         print(f'llm-proposer: queued {_proposer_title}')
 

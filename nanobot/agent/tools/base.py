@@ -1,7 +1,7 @@
 """Base class for agent tools."""
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, ClassVar, Literal
 
 
 class Tool(ABC):
@@ -11,6 +11,10 @@ class Tool(ABC):
     Tools are capabilities that the agent can use to interact with
     the environment, such as reading files, executing commands, etc.
     """
+
+    # Replay classification is operator/runtime metadata, not part of the
+    # model-visible tool schema. No replay executor is provided by this field.
+    replay_policy: ClassVar[Literal["unsafe", "safe"]] = "unsafe"
 
     # External tool outputs are framed by ToolRegistry before they enter a
     # model tool-result message. Internal tools retain the default false.
