@@ -1494,6 +1494,8 @@ def _record_consumed(state_root: Path, *, owner_id: str, operation_id: str,
 def read_owner_records(state_root: Path, owner_id: str) -> list[dict[str, Any]]:
     """Read validated metadata. Missing journal is distinct from an empty one."""
     journal, lock = _owner_paths(state_root, owner_id)
+    if not journal.exists() and not lock.exists():
+        raise JournalUnavailableError("owner journal is missing")
     with _owner_lock(lock):
         if not journal.exists():
             raise JournalUnavailableError("owner journal is missing")

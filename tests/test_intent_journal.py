@@ -132,6 +132,7 @@ def test_corrupt_truncated_and_missing_records_never_mean_empty(tmp_path: Path) 
     owner, operation, attempt = _ids()
     with pytest.raises(JournalUnavailableError, match="missing"):
         read_owner_records(tmp_path, owner)
+    assert not (tmp_path / "intent-journal" / f"{owner}.lock").exists()
     _intent(tmp_path, owner, operation, attempt)
     journal = tmp_path / "intent-journal" / f"{owner}.jsonl"
     with journal.open("ab") as stream:
@@ -139,6 +140,22 @@ def test_corrupt_truncated_and_missing_records_never_mean_empty(tmp_path: Path) 
     with pytest.raises(JournalCorruptError, match="truncated"):
         read_owner_records(tmp_path, owner)
     assert journal.read_bytes().endswith(b'{"partial":')
+
+
+def test_existing_owner_lock_failure_is_not_reported_as_missing_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner, operation, attempt = _ids()
+    _intent(tmp_path, owner, operation, attempt)
+
+    @contextmanager
+    def unavailable_lock(path: Path, *, create: bool = False):
+        raise JournalUnavailableError("cannot acquire or sync supported owner lock")
+        yield
+
+    monkeypatch.setattr(journal, "_owner_lock", unavailable_lock)
+    with pytest.raises(JournalUnavailableError, match="cannot acquire or sync supported owner lock"):
+        read_owner_records(tmp_path, owner)
 
 
 # @lat: [[architecture#Intent-before-effect evidence]]
